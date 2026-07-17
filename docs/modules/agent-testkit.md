@@ -1,0 +1,20 @@
+# agent-testkit 模块约束
+
+## 模块定位
+
+`crates/agent-testkit` 提供 Agent crate 共用的确定性测试能力。修改前必须阅读 [`Agent 系统技术架构`](agent-system.md)、[`agent-model`](agent-model.md) 和 [`Rust 编程规范`](../specs/Rust编程规范.md)。
+
+## 核心约束
+
+- 提供 scripted model、recorded transport、事件断言、取消 gate 和错误注入。
+- 不访问真实 Provider、用户目录、应用数据库和 Tauri。
+- 时序测试使用 channel/barrier/gate，不用不稳定 sleep 判断顺序。
+- fixture 必须可审阅、可重放并移除 credential 和用户敏感内容。
+- 不进入应用或生产 Adapter 的依赖闭包。
+
+## 验证
+
+```bash
+cargo test -p agent-testkit
+cargo clippy -p agent-testkit --all-targets --all-features -- -D warnings
+```

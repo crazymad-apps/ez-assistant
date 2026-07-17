@@ -1,0 +1,19 @@
+[package]
+name = "ez-assistant-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ez_assistant_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+assistant-runtime = { path = "../../../crates/assistant-runtime" }
+tauri = { version = "2.11.5", features = [] }

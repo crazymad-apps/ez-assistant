@@ -1,0 +1,9 @@
+/target
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+dist/
+*.log
+.env
+docs/开发进度.md

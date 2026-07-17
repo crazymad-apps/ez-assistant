@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ez-assistant debug viewer</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <div id="toolbar-top">
+          <h1>ez-assistant · debug viewer</h1>
+          <span id="conn" class="conn conn-closed">未连接</span>
+          <button id="clear-btn">清空</button>
+        </div>
+        <div id="session-tabs">
+          <span class="session-tab active" data-session="all">全部</span>
+        </div>
+      </div>
+      <div id="main">
+        <div id="turns-panel">
+          <h2>输出</h2>
+          <div id="turns" class="panel-list"></div>
+        </div>
+        <div id="raw-panel">
+          <h2>原始事件</h2>
+          <div id="raw" class="panel-list"></div>
+        </div>
+      </div>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

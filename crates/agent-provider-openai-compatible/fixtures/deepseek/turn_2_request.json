@@ -1,0 +1,55 @@
+{
+  "model": "deepseek-v4-pro",
+  "messages": [
+    {
+      "role": "user",
+      "content": "How is the weather in Paris today?"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check the weather.",
+      "tool_calls": [
+        {
+          "id": "call_get_weather_1",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Paris\"}"
+          }
+        }
+      ],
+      "reasoning_content": "The user asks for the weather in Paris. I should call get_weather first."
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_get_weather_1",
+      "content": "Cloudy, 7 to 13 degrees Celsius."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather of a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string",
+              "description": "The city name."
+            }
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "thinking": {
+    "type": "enabled"
+  }
+}

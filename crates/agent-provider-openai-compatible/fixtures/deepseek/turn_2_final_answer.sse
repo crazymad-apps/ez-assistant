@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-contract-2","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The weather result is in. I can answer now."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-contract-2","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"It is cloudy in Paris, "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-contract-2","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"7 to 13 degrees Celsius."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-contract-2","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-contract-2","model":"deepseek-v4-pro","choices":[],"usage":{"prompt_tokens":176,"completion_tokens":30,"total_tokens":206,"prompt_cache_hit_tokens":128,"prompt_cache_miss_tokens":48,"completion_tokens_details":{"reasoning_tokens":8}}}
+
+data: [DONE]
+

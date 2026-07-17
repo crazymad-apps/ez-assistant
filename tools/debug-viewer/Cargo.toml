@@ -1,0 +1,20 @@
+[package]
+name = "debug-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-model = { path = "../../crates/agent-model" }
+agent-types = { path = "../../crates/agent-types" }
+async-stream.workspace = true
+axum.workspace = true
+futures-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-http.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "agent-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-model = { path = "../agent-model" }
+agent-types = { path = "../agent-types" }
+futures-util.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
