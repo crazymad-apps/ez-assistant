@@ -23,7 +23,7 @@
 - UI 组件状态、窗口对象和展示文案。
 - `Arc<Mutex<_>>`、trait object 或无法稳定序列化的运行时对象。
 - 为单个模块内部实现服务的私有类型。
-- Agent Core 的 `AgentExecution`、`ExecutionPlan`、`ModelEvent`、Provider 状态和 trait。
+- Agent Core 的 `AgentExecution`、`ExecutionSpec`、`ModelEvent`、Provider 状态和 trait。
 
 ## 协议演进
 

@@ -14,7 +14,7 @@
 - Session、Message、Run 的生命周期和查询。
 - 多会话并发、同会话串行、全局模型/工具限流。
 - Agent Core 实例管理和事件持久化/广播。
-- 将配置、Agent 模板、用户偏好和会话覆盖编译成唯一不可变的 `ExecutionPlan`。
+- 将配置、Agent 模板、用户偏好和会话覆盖编译成唯一不可变的 `ExecutionSpec`。
 - 为每个 Runtime Run 创建绑定 `RunId`/`SessionId` 的 Recorder、Memory、Approval 和 Event Adapter。
 - 定时任务、配置加载、后台任务与恢复。
 - 文件、Shell 等工具的真实实现、授权、确认与审计。
@@ -58,7 +58,7 @@ Tauri 进程
 ## 配置与持久化
 
 - 配置来源、默认值、覆盖顺序和校验必须显式。
-- 配置合并结果只生成一份 `ExecutionPlan`；Core 不再二次解释 Profile、默认值或覆盖关系。
+- 配置合并结果只生成一份 `ExecutionSpec`；Core 不再二次解释 Profile、默认值或覆盖关系。
 - 会话、消息、Run、定时任务和审计记录由 Repository trait 隔离具体存储。
 - Conversation Journal 是规范对话的权威状态；流式 `AgentEvent` 不是消息恢复来源。
 - Runtime 提供绑定当前 Run 的 `ExecutionRecorder`，但其接口不向 Core 暴露 `RunId`、事务或数据库实体。

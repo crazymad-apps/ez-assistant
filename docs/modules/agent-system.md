@@ -13,7 +13,7 @@
 - 模型、工具、记忆、安全、上下文和记录能力均通过稳定边界组合，不形成巨型 Agent 对象。
 - Provider 特殊协议限制在适配层，不污染 Agent Loop。
 - Runtime 持有业务 Run、会话和持久化权威状态；Core 只执行一次 `AgentExecution`。
-- 所有策略来源在进入 Core 前解析为一份不可变执行计划，不在 Core 内重复维护 Profile、默认值和覆盖关系。
+- 所有策略来源在进入 Core 前解析为一份不可变执行规格，不在 Core 内重复维护 Profile、默认值和覆盖关系。
 
 ## 三、总体分层
 
@@ -27,7 +27,7 @@ Assistant Runtime
 ├── Conversation Journal
 ├── 权限记录与审计
 └── 本地或远程能力适配器装配
-          │ ExecutionPlan + ExecutionInput + bound services
+          │ ExecutionSpec + ExecutionInput + bound services
           ▼
 Agent Engine
 ├── Context Assembly
@@ -75,12 +75,12 @@ Core 仍然必须持有模型协议正确性所需的标识，例如 `MessageId`
 
 ## 五、执行契约
 
-### 5.1 不可变执行计划
+### 5.1 不可变执行规格
 
-Core 只接收一份已经合并、校验并解析完成的 `ExecutionPlan`：
+Core 只接收一份已经合并、校验并解析完成的 `ExecutionSpec`：
 
 ```rust
-pub struct ExecutionPlan {
+pub struct ExecutionSpec {
     pub instructions: InstructionSet,
     pub model: ResolvedModel,
     pub tools: ToolSetSnapshot,
@@ -91,7 +91,7 @@ pub struct ExecutionPlan {
 }
 ```
 
-Core 不定义 `AgentProfile`。配置文件、用户偏好、Agent 模板、会话覆盖和临时参数均由 Runtime 合并；`ExecutionPlan` 是执行时唯一事实源。
+Core 不定义 `AgentProfile`。配置文件、用户偏好、Agent 模板、会话覆盖和临时参数均由 Runtime 合并；`ExecutionSpec` 是执行时唯一事实源。
 
 ### 5.2 执行输入与控制
 
@@ -148,23 +148,19 @@ StreamingModel
             │
             ▼
         Authorizing
-        │    │    │
-      Allow  Ask  Deny
-        │    │    └──────────────────────► Controlled Failure
-        │    ▼
-        │  AwaitingApproval
-        │    │
-        └────┘
-            ▼
+        │         │
+      Allow      Deny：产生错误 ToolResult，对应工具不执行
+        │         │
+        ▼         │
        ExecutingTools
-            │
-            ▼
+            │     │
+            ▼     ▼
       RecordingToolResults
             │
             └────────────────────────────► BuildingContext
 ```
 
-模型服务一次只执行一个 Provider Turn。工具调用后的继续、预算、取消和终止全部由 Agent Engine 显式控制，Provider 不得隐藏 Agent Loop。
+模型服务一次只执行一个 Provider Turn。工具调用后的继续、预算、取消和终止全部由 Agent Engine 显式控制，Provider 不得隐藏 Agent Loop。`Ask` 不在 Core 状态机内：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成。
 
 ## 七、规范对话与 Provider 隔离
 
@@ -246,7 +242,6 @@ ExecutionStarted
 StepStarted
 TextDelta
 ToolProposed
-ApprovalRequested
 ToolStarted
 ToolOutput
 ToolCompleted
@@ -254,6 +249,8 @@ GuardrailTriggered
 ContextCompacted
 ExecutionCompleted / Failed / Cancelled
 ```
+
+审批事件由 Runtime 自行产生，不属于 `AgentEvent`。
 
 - Runtime 可以给事件附加 `RunId`、`SessionId` 和序号后持久化或广播。
 - UI 断线后以 Runtime 快照恢复，不能依赖重放所有 token delta。
@@ -356,15 +353,15 @@ pub enum EnforcementMode {
 
 ### 10.4 权限与审批
 
-安全决策使用 `Allow`、`Deny`、`Ask`，审批交互通过独立 `ApprovalService` 注入。规则保存、UI 交互、无人值守策略和审计属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
+Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 ToolResult（回喂模型、驱动循环继续的唯一载体是 error ToolResult），对应工具不执行，循环继续。Core 只保证逐 Tool Call 独立过闸；审批编排（串行询问、攒批询问、规则自动放行）归 Runtime 的 authorizer 实现，Core 在 authorize 时提供本轮批次上下文（同轮全部 tool call）供其实现批次审批交互。`Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成；`ApprovalService` 归 Runtime/Adapter。规则保存、UI 交互、无人值守策略和审计属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
 
 ## 十一、工具边界
 
 - Tool 使用结构化定义、输入 schema、输出 schema 和稳定错误。
-- Tool Registry 在 `ExecutionPlan` 编译阶段生成不可变快照；执行期间不修改模型可见工具集合。
+- Tool Registry 在 `ExecutionSpec` 编译阶段生成不可变快照；执行期间不修改模型可见工具集合。
 - Dispatcher 一次只负责一个规范 Tool Call，不负责模型请求和 Agent 继续循环。
 - 同批工具是否并行由显式执行策略决定；有副作用的工具默认不推断为可安全并行。
-- 文件 read/list/search/write/delete 共享文件能力实现；`grep`/`rg` 是 `search` 的内部后端。
+- 文件 read/list/search/write/delete/edit 共享文件能力实现；`grep`/`rg` 是 `search` 的内部后端。
 - Shell 是独立通用工具，其当前用户权限能力不能被描述为文件沙盒。
 - 真实文件、Shell、网络和桌面工具实现位于 Runtime/Adapter，不进入 Agent Engine。
 

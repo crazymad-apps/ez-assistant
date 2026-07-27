@@ -1,5 +1,5 @@
 [package]
-name = "agent-core"
+name = "agent-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,13 +8,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-agent-model.path = "../agent-model"
-agent-tools.path = "../agent-tools"
 agent-types.path = "../agent-types"
 futures-core.workspace = true
-futures-util.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true

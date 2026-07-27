@@ -10,6 +10,8 @@
 //! - [`EventCollector`] / [`CollectedEvents`]：收集事件流并断言唯一终态与
 //!   最终 AssistantMessage。
 //! - [`CancelGate`]：在指定事件序号处精确触发取消。
+//! - [`FakeFileSystemTool`] / [`FakeShellTool`]：文件与 Shell 能力的确定性 Fake，
+//!   完整执行 `agent-tools` 能力契约语义（供引擎 Harness 复用）。
 //! - [`validate_request`] / [`validate_response`]：fixture 入库前的敏感信息把关。
 //!
 //! Fixture 约定：可审阅文本格式；不包含真实 credential、用户内容或不可再现
@@ -24,13 +26,17 @@
 mod cancel;
 mod collect;
 mod fixture;
+mod fs;
 mod record;
 mod script;
+mod shell;
 
 pub use cancel::CancelGate;
 pub use collect::{CollectedEvents, EventCollector};
 pub use fixture::{FixtureViolation, validate_request, validate_response};
+pub use fs::FakeFileSystemTool;
 pub use record::{
     BodyStep, RecordedRequest, RecordedResponse, RecordedTransport, RecordedTransportError,
 };
 pub use script::{ModelScript, ScriptedModelService, message_events};
+pub use shell::{FakeShellScript, FakeShellTool};

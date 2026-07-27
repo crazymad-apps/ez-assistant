@@ -13,6 +13,7 @@
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
 │   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
 │   ├── agent-testkit/           # Agent 确定性测试支持
+│   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与内置工具
 │   ├── agent-types/             # Provider-neutral 规范类型
 │   ├── assistant-protocol/      # 跨层共享 DTO、事件与标识类型
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
@@ -49,6 +50,7 @@
 | `crates/agent-model/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-model.md`](docs/modules/agent-model.md) |
 | `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
 | `crates/agent-testkit/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-testkit.md`](docs/modules/agent-testkit.md) |
+| `crates/agent-tools/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools.md`](docs/modules/agent-tools.md) |
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
@@ -64,11 +66,11 @@
 - `assistant-runtime` 持有会话、Run、定时任务、配置、持久化和并发调度；`agent-core` 只负责单次 Agent 执行能力。
 - 不同会话可以并发；同一会话中会改变上下文的 Run 默认串行。使用 Tokio 异步任务，不为历史会话绑定操作系统线程。
 - `assistant-protocol` 必须保持轻量，只承载跨层契约；不得依赖 Tauri、具体模型、数据库或 Runtime 实现。
-- 执行依赖方向保持为：`desktop -> assistant-runtime -> agent-core`；应用协议由 `desktop` 和 `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行类型不依赖应用协议，所有依赖禁止反向。
+- 执行依赖方向保持为：`desktop -> assistant-runtime -> agent-core -> agent-tools -> agent-types`；应用协议由 `desktop` 和 `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行类型不依赖应用协议，所有依赖禁止反向。
 
 ## 四、Agent 工具边界
 
-- 文件读取、列目录、内容搜索、写入和删除统一归入文件能力；`grep`/`rg` 的语义由 `FileSystemTool::search` 承载，`rg` 仅可作为内部实现。
+- 文件读取、列目录、内容搜索、写入、删除和局部编辑（edit）统一归入文件能力；`grep`/`rg` 的语义由 `FileSystemTool::search` 承载，`rg` 仅可作为内部实现。
 - Agent Core 不直接访问 `std::fs`、`tokio::fs` 或启动 `rg`；它只能依赖工具 trait。真实路径解析、权限、确认、审计和执行属于 Runtime/基础设施实现。
 - Shell 是独立的一等工具，不按每条系统命令枚举专用工具。结构化文件工具与 Shell 并存，不能用 Shell 取代所有文件能力。
 - Shell 子进程以当前用户权限运行，可以绕过应用层文件授权。任何 UI 和文档都不得把“工作目录”表述为强沙盒。
@@ -101,9 +103,9 @@ npm run tauri -- build --no-bundle
 
 ## 六、开发流程与 Git
 
-- 项目以版本为开发主线，保持“版本设计 → 版本开发计划 → 分阶段实现与验证 → 版本归档”流程；单个事项先归入当前版本，不机械创建独立需求流程。具体遵循 [`开发流程规范.md`](docs/specs/开发流程规范.md)。
+- 项目以版本为开发主线，遵循“功能设计 → 技术方案与界面交互设计指导（按需）→ 开发计划 → 分里程碑实现与验证 → 版本验收 → 版本归档”主流程；单个事项先归入当前版本，不机械创建独立需求流程。具体遵循 [`开发流程规范.md`](docs/specs/开发流程规范.md)。
 - 每个版本里程碑完成实现与验证后必须停止并向用户汇报；只有获得用户明确确认，才能进入下一里程碑。版本计划确认不等于后续里程碑自动获批。
-- `docs/开发进度.md` 是按当前版本和里程碑组织的本地恢复文件，已被 Git 忽略；共享事实写入版本设计、开发计划、版本台账、归档或重要决策记录。
+- `docs/开发进度.md` 是按当前版本和里程碑组织的本地恢复文件与过程记录，已被 Git 忽略；版本归档时随版本移入归档目录一并提交；共享事实写入功能设计、开发计划、版本台账、归档或重要决策记录。
 - 不主动执行 `git commit` 或 `git push`。用户明确要求提交准备时，只检查改动、暂存指定文件并草拟 commit message。
 - 保留用户已有改动；不要重置、覆盖或顺手清理与当前任务无关的工作树内容。
 
