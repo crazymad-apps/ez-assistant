@@ -18,7 +18,8 @@
 │   ├── assistant-protocol/      # 跨层共享 DTO、事件与标识类型
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
 ├── tools/
-│   └── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
+│   ├── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
+│   └── runtime-harness/         # 版本验证宿主（独立按需运行的临时 Runtime）
 ├── docs/
 │   ├── specs/                   # 开发流程、Rust/前端规范、进度模板
 │   ├── modules/                 # 各应用/crate 专属约束
@@ -54,6 +55,7 @@
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
+| `tools/runtime-harness/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-harness.md`](docs/modules/runtime-harness.md) |
 
 根 `AGENTS.md`、`docs/specs/` 与 `docs/modules/` 是本仓库开发约束的唯一来源。不要在源码目录重复创建相互冲突的约束文件。
 
@@ -61,6 +63,7 @@
 
 - 当前采用**单进程模块化架构**。Tauri、Assistant Runtime 和 Agent Core 共同运行于 Tauri Rust 进程；未经明确架构决策，不引入 sidecar、daemon、本地 HTTP 服务或常驻 Worker 进程。
 - `tools/debug-viewer` 是独立开发工具，不属于产品进程；产品进程只向它建立出向连接（POST 推送调试事件），自身不监听调试端口（决策见 `docs/重要决策与变更记录.md`）。
+- `tools/runtime-harness` 是开发者显式启动的版本验证宿主，不属于产品进程或正式 `assistant-runtime`，不得把其临时 Session、Run、Journal 或 CLI 语义视为产品契约。
 - 关闭窗口与退出进程是两个动作；后台任务的生命周期属于 Assistant Runtime，不得绑定 WebView 页面生命周期。
 - UI 只发送用户意图和展示事件，不持有会话、Run、调度或 Agent Loop 的权威业务状态。
 - `assistant-runtime` 持有会话、Run、定时任务、配置、持久化和并发调度；`agent-core` 只负责单次 Agent 执行能力。

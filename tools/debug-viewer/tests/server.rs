@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use debug_viewer::{DebugClient, DebugEnvelope, DebugPayload, router};
+use agent_core::AgentEvent;
+use debug_viewer::{DebugChannel, DebugClient, DebugEnvelope, DebugPayload, router};
 
 /// 在随机端口启动 server，返回 base URL 与后台任务句柄。
 async fn spawn_server() -> String {
@@ -85,17 +86,44 @@ async fn static_page_and_malformed_ingest_behave() {
         .await
         .expect("index body");
     assert!(html.contains("debug viewer"));
+    assert!(html.contains("id=\"session-tabs\""));
+    assert!(html.contains("id=\"channel-tabs\""));
+    assert!(html.contains("data-channel=\"llm\""));
+    assert!(html.contains("data-channel=\"agent\""));
+    assert!(html.contains("data-channel=\"runtime\""));
+    assert!(!html.contains("type=\"checkbox\""));
+    assert!(html.contains("app.css?v=v0.2.1-session-tabs"));
+    assert!(html.contains("app.js?v=v0.2.1-session-tabs"));
 
-    let js = client
+    let js_response = client
         .get(format!("{base}/app.js"))
         .send()
         .await
         .expect("get app.js");
+    assert_eq!(
+        js_response
+            .headers()
+            .get("cache-control")
+            .expect("cache-control"),
+        "no-store"
+    );
     // ServeDir 按扩展名推断 MIME，.js → text/javascript（无 charset 参数）。
     assert_eq!(
-        js.headers().get("content-type").expect("content-type"),
+        js_response
+            .headers()
+            .get("content-type")
+            .expect("content-type"),
         "text/javascript"
     );
+    let js = js_response.text().await.expect("app.js body");
+    assert!(js.contains("let activeChannel = \"agent\""));
+    assert!(js.contains("function switchChannel"));
+    assert!(js.contains("function sessionIdOfCorrelation"));
+    assert!(js.contains("correlation.lastIndexOf(\"/\")"));
+    assert!(js.contains("function addUserMessage"));
+    assert!(!js.contains("function lastUserText"));
+    assert!(js.contains("function onAgentEvent"));
+    assert!(js.contains("function addTimeline"));
 
     // 畸形 payload：缺 payload 字段，反序列化失败 → 4xx，不影响后续请求。
     let status = client
@@ -110,8 +138,8 @@ async fn static_page_and_malformed_ingest_behave() {
 }
 
 #[tokio::test]
-async fn debug_client_posts_reach_sse_subscribers() {
-    // `DebugClient` 成功路径：后台任务消费队列并 POST，SSE 订阅者收到该帧。
+async fn debug_client_preserves_channels_shared_sequence_and_correlation() {
+    // `DebugClient` 成功路径：默认 LLM 与显式通道共用队列、序号和关联 ID。
     let base = spawn_server().await;
     let http = reqwest::Client::new();
     let mut sse = http
@@ -129,14 +157,31 @@ async fn debug_client_posts_reach_sse_subscribers() {
         tool_count: 0,
         elapsed_ms: 7,
     });
+    client.post_on(
+        DebugChannel::Agent,
+        DebugPayload::AgentEvent {
+            event: AgentEvent::ExecutionStarted,
+        },
+    );
+    client.post_on(
+        DebugChannel::Runtime,
+        DebugPayload::RuntimeEvent {
+            name: "run_started".to_owned(),
+            data: serde_json::json!({"run_id": "run-1"}),
+        },
+    );
 
-    let frame = tokio::time::timeout(Duration::from_secs(5), async {
+    let frames = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut frames = String::new();
         loop {
             match sse.chunk().await {
                 Ok(Some(bytes)) => {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
-                    if text.contains("turn_established") {
-                        break text;
+                    frames.push_str(&String::from_utf8_lossy(&bytes));
+                    if frames.contains("turn_established")
+                        && frames.contains("agent_event")
+                        && frames.contains("runtime_event")
+                    {
+                        break frames;
                     }
                 }
                 other => panic!("SSE stream ended unexpectedly: {other:?}"),
@@ -144,7 +189,13 @@ async fn debug_client_posts_reach_sse_subscribers() {
         }
     })
     .await
-    .expect("client frame within timeout");
-    assert!(frame.contains("\"correlation_id\":\"client-e2e\""));
+    .expect("all client frames within timeout");
+    assert!(frames.contains("\"ch\":\"llm\",\"seq\":0"));
+    assert!(frames.contains("\"ch\":\"agent\",\"seq\":1"));
+    assert!(frames.contains("\"ch\":\"runtime\",\"seq\":2"));
+    assert_eq!(
+        frames.matches("\"correlation_id\":\"client-e2e\"").count(),
+        3
+    );
     assert!(!client.is_muted());
 }

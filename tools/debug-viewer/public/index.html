@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ez-assistant debug viewer</title>
-    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/app.css?v=v0.2.1-session-tabs" />
   </head>
   <body>
     <div id="app">
@@ -14,21 +14,59 @@
           <span id="conn" class="conn conn-closed">未连接</span>
           <button id="clear-btn">清空</button>
         </div>
-        <div id="session-tabs">
-          <span class="session-tab active" data-session="all">全部</span>
+        <div id="filter-bar">
+          <section class="session-filter" aria-labelledby="session-filter-label">
+            <span id="session-filter-label" class="filter-label">Session</span>
+            <div id="session-tabs">
+              <button class="session-tab active" type="button" data-session="all">
+                全部
+              </button>
+            </div>
+          </section>
         </div>
       </div>
       <div id="main">
         <div id="turns-panel">
-          <h2>输出</h2>
+          <h2>模型输出</h2>
           <div id="turns" class="panel-list"></div>
         </div>
-        <div id="raw-panel">
-          <h2>原始事件</h2>
-          <div id="raw" class="panel-list"></div>
-        </div>
+        <aside id="events-panel">
+          <div class="panel-header">
+            <h2>事件</h2>
+            <div id="channel-tabs" role="tablist" aria-label="事件通道">
+              <button
+                class="channel-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                data-channel="llm"
+              >
+                LLM
+              </button>
+              <button
+                class="channel-tab active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                data-channel="agent"
+              >
+                Agent
+              </button>
+              <button
+                class="channel-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                data-channel="runtime"
+              >
+                Runtime
+              </button>
+            </div>
+          </div>
+          <div id="events" class="panel-list"></div>
+        </aside>
       </div>
     </div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=v0.2.1-session-tabs"></script>
   </body>
 </html>

@@ -11,9 +11,10 @@ use std::{convert::Infallible, net::Ipv4Addr, time::Duration};
 use async_stream::stream;
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::{Sse, sse::Event, sse::KeepAlive},
+    extract::{Request, State},
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
+    middleware::{self, Next},
+    response::{Response, Sse, sse::Event, sse::KeepAlive},
     routing::{get, post},
 };
 use futures_core::Stream;
@@ -42,6 +43,8 @@ pub fn router() -> Router {
             env!("CARGO_MANIFEST_DIR"),
             "/public"
         )))
+        // 开发查看器必须在普通刷新后立即读取源码树中的最新静态资源。
+        .layer(middleware::from_fn(disable_cache))
         .with_state(AppState { tx })
 }
 
@@ -71,6 +74,14 @@ async fn ingest(State(state): State<AppState>, Json(envelope): Json<DebugEnvelop
         let _ = state.tx.send(json);
     }
     StatusCode::NO_CONTENT
+}
+
+async fn disable_cache(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn events(

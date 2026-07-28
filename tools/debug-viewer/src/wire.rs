@@ -6,6 +6,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agent_core::AgentEvent;
 use agent_model::{ModelEvent, ModelRequest};
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +16,7 @@ pub const DEFAULT_PORT: u16 = 7331;
 /// 推送给 viewer 的调试信封。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DebugEnvelope {
-    /// 数据通道：`llm` 为模型数据流；`sched` 预留给 Runtime 调度事件（v0.2.0）。
+    /// 数据通道：模型、Agent 执行或 Runtime 编排。
     pub ch: DebugChannel,
     /// 推送端侧单调递增序号，用于发现丢消息。
     pub seq: u64,
@@ -34,8 +35,10 @@ pub struct DebugEnvelope {
 pub enum DebugChannel {
     /// 模型数据流（模型事件、建立/失败元信息）。
     Llm,
-    /// Runtime 调度事件；v0.2.0 接入。
-    Sched,
+    /// Agent Core 单次执行事件。
+    Agent,
+    /// Runtime 的 Run、Session 与 Journal 编排事件。
+    Runtime,
 }
 
 /// 调试内容。
@@ -70,6 +73,18 @@ pub enum DebugPayload {
         /// 已脱敏的错误文本。
         error: String,
     },
+    /// Agent Core 发出的强类型执行事件。
+    AgentEvent {
+        /// 原始 Agent 执行事件。
+        event: AgentEvent,
+    },
+    /// Runtime 编排事件。
+    RuntimeEvent {
+        /// 稳定事件名称。
+        name: String,
+        /// 事件的结构化数据；不得包含 credential。
+        data: serde_json::Value,
+    },
 }
 
 /// server 广播给浏览器的消息：信封 + server 接收时刻。
@@ -83,7 +98,7 @@ pub struct BroadcastMessage {
 }
 
 /// 当前 Unix 毫秒；系统时钟异常时返回 0。
-pub fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -154,6 +169,53 @@ mod tests {
         assert_eq!(message["turn"]["parts"][0]["data"]["text"], json!("你好"));
         let decoded: DebugPayload = serde_json::from_value(json).expect("deserialize payload");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn all_channels_and_layer_payloads_round_trip() {
+        for (channel, payload, expected_kind) in [
+            (
+                DebugChannel::Agent,
+                DebugPayload::AgentEvent {
+                    event: AgentEvent::ExecutionStarted,
+                },
+                "agent_event",
+            ),
+            (
+                DebugChannel::Runtime,
+                DebugPayload::RuntimeEvent {
+                    name: "run_started".to_owned(),
+                    data: json!({"session_id": "session-1", "run_id": "run-1"}),
+                },
+                "runtime_event",
+            ),
+        ] {
+            let envelope = DebugEnvelope {
+                ch: channel,
+                seq: 9,
+                sent_at_ms: 1_752_000_000_000,
+                correlation_id: Some("session-1/run-1".to_owned()),
+                payload,
+            };
+            let json = serde_json::to_value(&envelope).expect("serialize envelope");
+            assert_eq!(json["payload"]["kind"], expected_kind);
+            assert_eq!(
+                serde_json::from_value::<DebugEnvelope>(json).expect("deserialize envelope"),
+                envelope
+            );
+        }
+
+        let channels = [
+            (DebugChannel::Llm, "llm"),
+            (DebugChannel::Agent, "agent"),
+            (DebugChannel::Runtime, "runtime"),
+        ];
+        for (channel, expected) in channels {
+            assert_eq!(
+                serde_json::to_value(channel).expect("serialize channel"),
+                expected
+            );
+        }
     }
 
     #[test]

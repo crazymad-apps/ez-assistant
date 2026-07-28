@@ -62,13 +62,18 @@ impl DebugClient {
         self
     }
 
-    /// 推送一条 `llm` 通道 payload；非阻塞入队，队列满或已静音时直接丢弃。
+    /// 推送一条 `llm` 通道 payload；兼容既有模型调试调用方。
     pub fn post(&self, payload: DebugPayload) {
+        self.post_on(DebugChannel::Llm, payload);
+    }
+
+    /// 在指定通道推送 payload；非阻塞入队，队列满或已静音时直接丢弃。
+    pub fn post_on(&self, channel: DebugChannel, payload: DebugPayload) {
         if self.disabled.load(Ordering::Relaxed) {
             return;
         }
         let envelope = DebugEnvelope {
-            ch: DebugChannel::Llm,
+            ch: channel,
             seq: self.seq.fetch_add(1, Ordering::Relaxed),
             sent_at_ms: now_ms(),
             correlation_id: self.correlation_id.clone(),

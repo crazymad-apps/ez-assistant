@@ -1,15 +1,19 @@
 "use strict";
 
 const turnsEl = document.getElementById("turns");
-const rawEl = document.getElementById("raw");
+const eventsEl = document.getElementById("events");
 const connEl = document.getElementById("conn");
 const tabsEl = document.getElementById("session-tabs");
+const channelTabsEl = document.getElementById("channel-tabs");
 const mainEl = document.getElementById("main");
 
-// 会话 = correlation_id；每条调试消息按会话归入 tab，「全部」展示混合流。
-const sessions = new Map(); // id -> { openCard }
+// Harness correlation 为 <session>/<run>：Tab 按 session 聚合，流卡片仍按完整
+// correlation 隔离，避免相邻 Run 的模型事件串卡。
+const sessions = new Set();
+const runs = new Map(); // correlation -> { openCard }
 let activeSession = "all";
-const RAW_CAP = 300;
+let activeChannel = "agent";
+const EVENT_CAP = 300;
 
 const es = new EventSource("/events");
 es.onopen = () => setConn(true);
@@ -21,11 +25,16 @@ document
   .querySelector('.session-tab[data-session="all"]')
   .addEventListener("click", () => switchSession("all"));
 
+for (const tab of channelTabsEl.querySelectorAll(".channel-tab")) {
+  tab.addEventListener("click", () => switchChannel(tab.dataset.channel));
+}
+
 document.getElementById("clear-btn").addEventListener("click", () => {
   if (activeSession === "all") {
     turnsEl.innerHTML = "";
-    rawEl.innerHTML = "";
+    eventsEl.innerHTML = "";
     sessions.clear();
+    runs.clear();
     tabsEl
       .querySelectorAll('.session-tab:not([data-session="all"])')
       .forEach((tab) => tab.remove());
@@ -33,6 +42,11 @@ document.getElementById("clear-btn").addEventListener("click", () => {
     const selector = `.entry[data-session="${CSS.escape(activeSession)}"]`;
     mainEl.querySelectorAll(selector).forEach((el) => el.remove());
     sessions.delete(activeSession);
+    for (const correlation of runs.keys()) {
+      if (sessionIdOfCorrelation(correlation) === activeSession) {
+        runs.delete(correlation);
+      }
+    }
     tabsEl
       .querySelector(`.session-tab[data-session="${CSS.escape(activeSession)}"]`)
       ?.remove();
@@ -45,20 +59,38 @@ function setConn(open) {
   connEl.className = "conn " + (open ? "conn-open" : "conn-closed");
 }
 
-function sessionOf(msg) {
+function correlationOf(msg) {
   return msg.correlation_id ?? "未关联";
 }
 
-function getSession(id) {
+function sessionIdOfCorrelation(correlation) {
+  const separator = correlation.lastIndexOf("/");
+  return separator > 0 ? correlation.slice(0, separator) : correlation;
+}
+
+function sessionOf(msg) {
+  return sessionIdOfCorrelation(correlationOf(msg));
+}
+
+function ensureSession(id) {
   if (!sessions.has(id)) {
-    sessions.set(id, { openCard: null });
+    sessions.add(id);
     addTab(id);
   }
-  return sessions.get(id);
+}
+
+function getRun(msg) {
+  const correlation = correlationOf(msg);
+  ensureSession(sessionOf(msg));
+  if (!runs.has(correlation)) {
+    runs.set(correlation, { openCard: null });
+  }
+  return runs.get(correlation);
 }
 
 function addTab(id) {
-  const tab = document.createElement("span");
+  const tab = document.createElement("button");
+  tab.type = "button";
   tab.className = "session-tab";
   tab.dataset.session = id;
   tab.textContent = id;
@@ -74,9 +106,24 @@ function switchSession(id) {
   applyFilter();
 }
 
+function switchChannel(channel) {
+  activeChannel = channel;
+  for (const tab of channelTabsEl.children) {
+    const isActive = tab.dataset.channel === channel;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", String(isActive));
+  }
+  applyFilter();
+}
+
 function applyFilter() {
-  for (const el of mainEl.querySelectorAll(".entry")) {
+  for (const el of turnsEl.querySelectorAll(".entry")) {
     el.hidden = activeSession !== "all" && el.dataset.session !== activeSession;
+  }
+  for (const el of eventsEl.querySelectorAll(".entry")) {
+    const isAnotherSession =
+      activeSession !== "all" && el.dataset.session !== activeSession;
+    el.hidden = isAnotherSession || el.dataset.channel !== activeChannel;
   }
 }
 
@@ -97,6 +144,7 @@ function fmtUsage(u) {
 }
 
 function fmtError(err) {
+  if (typeof err === "string") return err;
   const [kind, data] = Object.entries(err)[0];
   if (typeof data === "string") return `${kind}: ${data}`;
   return `${kind}: ${JSON.stringify(data)}`;
@@ -110,18 +158,25 @@ function fmtFinishReason(fr) {
 }
 
 function handle(msg) {
-  appendRaw(msg);
+  ensureSession(sessionOf(msg));
   const p = msg.payload;
+  if (msg.ch === "agent" && p.kind === "agent_event") {
+    onAgentEvent(msg, p.event);
+    return;
+  }
+  if (msg.ch === "runtime" && p.kind === "runtime_event") {
+    if (p.name === "user_message_appended") {
+      addUserMessage(msg, p.data);
+    }
+    addTimeline(msg, "runtime", p.name, p.data);
+    return;
+  }
+  if (msg.ch !== "llm") return;
+  appendRaw(msg);
+
   if (p.kind === "turn_requested") {
     const card = newCard(msg, "live", "sending");
     card.head.main.textContent = "请求已发送，等待建立…";
-    const userText = lastUserText(p.request);
-    if (userText) {
-      const el = document.createElement("div");
-      el.className = "part part-user";
-      el.textContent = userText;
-      card.body.appendChild(el);
-    }
     const details = document.createElement("details");
     const summary = document.createElement("summary");
     const count = p.request.conversation?.messages?.length ?? 0;
@@ -131,7 +186,7 @@ function handle(msg) {
     pre.textContent = JSON.stringify(p.request, null, 2);
     details.append(summary, pre);
     card.body.appendChild(details);
-    getSession(sessionOf(msg)).openCard = card;
+    getRun(msg).openCard = card;
   } else if (p.kind === "turn_established") {
     const card = ensureCard(msg);
     card.badge.textContent = "streaming";
@@ -144,6 +199,89 @@ function handle(msg) {
     const [type, data] = Object.entries(p.event)[0];
     onModelEvent(msg, type, data);
   }
+}
+
+function addUserMessage(msg, data) {
+  const message = data?.message;
+  const text = (message?.parts ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.data?.text ?? "")
+    .filter(Boolean)
+    .join("\n");
+  if (!text) return;
+
+  const el = document.createElement("div");
+  el.className = "user-message entry";
+  el.dataset.session = sessionOf(msg);
+  el.dataset.channel = "runtime";
+
+  const head = document.createElement("div");
+  head.className = "user-message-head";
+  const label = document.createElement("span");
+  label.className = "user-message-label";
+  label.textContent = "用户输入";
+  const meta = document.createElement("span");
+  meta.className = "user-message-meta";
+  meta.textContent = [data.run_id, message.id, fmtTime(msg.sent_at_ms)]
+    .filter(Boolean)
+    .join(" · ");
+  head.append(label, meta);
+
+  const body = document.createElement("div");
+  body.className = "user-message-text";
+  body.textContent = text;
+  el.append(head, body);
+  appendEntry(turnsEl, el);
+}
+
+function onAgentEvent(msg, event) {
+  const type = event.type ?? "unknown";
+  const detail = { ...event };
+  delete detail.type;
+  let title = type;
+  if (type === "step_started") title = `${type} · step ${event.step}`;
+  if (type === "tool_started" || type === "tool_completed") {
+    title = `${type} · ${event.call_id}`;
+  }
+  addTimeline(msg, "agent", title, detail);
+}
+
+function addTimeline(msg, channel, title, data) {
+  const el = document.createElement("div");
+  el.className = `timeline entry timeline-${channel}`;
+  el.dataset.session = sessionOf(msg);
+  el.dataset.channel = channel;
+
+  const head = document.createElement("div");
+  head.className = "timeline-head";
+  const badge = document.createElement("span");
+  badge.className = `layer-badge layer-${channel}`;
+  badge.textContent = channel;
+  const name = document.createElement("span");
+  name.className = "timeline-name";
+  name.textContent = title;
+  const time = document.createElement("span");
+  time.className = "timeline-time";
+  time.textContent = fmtTime(msg.sent_at_ms);
+  head.append(badge, name, time);
+  el.appendChild(head);
+
+  if (data != null && (typeof data !== "object" || Object.keys(data).length > 0)) {
+    const detail = document.createElement("pre");
+    detail.className = "timeline-data";
+    detail.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    el.appendChild(detail);
+  }
+  const raw = document.createElement("details");
+  raw.className = "timeline-raw";
+  const summary = document.createElement("summary");
+  summary.textContent = "原始事件";
+  const snapshot = document.createElement("pre");
+  snapshot.className = "snapshot";
+  snapshot.textContent = JSON.stringify(msg, null, 2);
+  raw.append(summary, snapshot);
+  el.appendChild(raw);
+  appendEntry(eventsEl, el);
 }
 
 function onModelEvent(msg, type, d) {
@@ -185,7 +323,7 @@ function onModelEvent(msg, type, d) {
       card.badge.textContent = `完成 · ${fmtFinishReason(d.message.finish_reason)}`;
       card.badge.className = "badge ok";
       if (d.message.usage) card.usage.textContent = fmtUsage(d.message.usage);
-      getSession(sessionOf(msg)).openCard = null;
+      getRun(msg).openCard = null;
       break;
     }
     case "TurnFailed": {
@@ -194,27 +332,17 @@ function onModelEvent(msg, type, d) {
       card.badge.textContent = "失败";
       card.badge.className = "badge err";
       card.usage.textContent = fmtError(d.error);
-      getSession(sessionOf(msg)).openCard = null;
+      getRun(msg).openCard = null;
       break;
     }
   }
-}
-
-function lastUserText(request) {
-  const messages = request.conversation?.messages ?? [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === "user") {
-      return message.turn.parts.map((part) => part.data?.text ?? "").join("\n");
-    }
-  }
-  return "";
 }
 
 function newCard(msg, badgeClass, badgeText) {
   const el = document.createElement("div");
   el.className = "turn entry";
   el.dataset.session = sessionOf(msg);
+  el.dataset.channel = "llm";
   const head = document.createElement("div");
   head.className = "turn-head";
   const badge = document.createElement("span");
@@ -234,9 +362,9 @@ function newCard(msg, badgeClass, badgeText) {
 }
 
 function ensureCard(msg) {
-  const session = getSession(sessionOf(msg));
-  if (!session.openCard) session.openCard = newCard(msg, "live", "streaming");
-  return session.openCard;
+  const run = getRun(msg);
+  if (!run.openCard) run.openCard = newCard(msg, "live", "streaming");
+  return run.openCard;
 }
 
 function addPart(msg, id, kind) {
@@ -267,7 +395,7 @@ function appendDelta(msg, id, delta) {
 }
 
 function findPart(msg, id) {
-  const card = getSession(sessionOf(msg)).openCard;
+  const card = getRun(msg).openCard;
   return card ? card.parts.get(String(id)) : null;
 }
 
@@ -282,14 +410,19 @@ function appendRaw(msg) {
   const el = document.createElement("div");
   el.className = "raw-entry entry";
   el.dataset.session = sessionOf(msg);
+  el.dataset.channel = msg.ch ?? "unknown";
   el.textContent = JSON.stringify(msg);
-  appendEntry(rawEl, el);
-  while (rawEl.childElementCount > RAW_CAP) rawEl.firstChild.remove();
+  appendEntry(eventsEl, el);
 }
 
 function appendEntry(panel, el) {
-  el.hidden = activeSession !== "all" && el.dataset.session !== activeSession;
+  const sessionHidden = activeSession !== "all" && el.dataset.session !== activeSession;
+  const channelHidden = panel === eventsEl && el.dataset.channel !== activeChannel;
+  el.hidden = sessionHidden || channelHidden;
   panel.appendChild(el);
+  if (panel === eventsEl) {
+    while (panel.childElementCount > EVENT_CAP) panel.firstChild.remove();
+  }
   if (!el.hidden && panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120) {
     panel.scrollTop = panel.scrollHeight;
   }

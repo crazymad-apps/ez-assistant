@@ -82,15 +82,37 @@ body {
   color: var(--text);
 }
 
+#filter-bar {
+  border-top: 1px solid var(--border);
+}
+
+.session-filter {
+  min-width: 0;
+  padding: 8px 14px 10px;
+}
+
+.filter-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
 #session-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 14px 8px;
+  gap: 6px;
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .session-tab {
+  appearance: none;
+  font: inherit;
   font-size: 11px;
   padding: 2px 10px;
   border-radius: 10px;
@@ -125,12 +147,12 @@ body {
   border-right: 1px solid var(--border);
 }
 
-#raw-panel {
+#events-panel {
   flex: 1;
 }
 
 #turns-panel,
-#raw-panel {
+#events-panel {
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -138,14 +160,67 @@ body {
 }
 
 #turns-panel h2,
-#raw-panel h2 {
+.panel-header h2 {
   font-size: 11px;
   color: var(--dim);
-  padding: 6px 10px;
+  letter-spacing: 0.05em;
+}
+
+#turns-panel > h2 {
+  min-height: 33px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   flex-shrink: 0;
-  letter-spacing: 0.05em;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  min-height: 33px;
+  gap: 14px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+
+#channel-tabs {
+  display: flex;
+  align-self: stretch;
+  gap: 2px;
+}
+
+.channel-tab {
+  appearance: none;
+  position: relative;
+  min-width: 68px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.channel-tab:hover {
+  color: var(--text);
+}
+
+.channel-tab.active {
+  color: var(--accent);
+}
+
+.channel-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
 }
 
 .panel-list {
@@ -159,6 +234,39 @@ body {
 }
 
 /* ── Turn cards (left) ── */
+.user-message {
+  background: rgba(79, 156, 249, 0.08);
+  border: 1px solid rgba(79, 156, 249, 0.35);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 9px 14px 11px;
+}
+
+.user-message-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.user-message-label {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.user-message-meta {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.user-message-text {
+  color: var(--text);
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .turn {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -215,11 +323,6 @@ body {
   padding-left: 10px;
 }
 
-.part-user {
-  border-left: 2px solid var(--accent);
-  padding-left: 10px;
-}
-
 .part-tool {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12.5px;
@@ -271,7 +374,71 @@ details summary {
   font-size: 12px;
 }
 
-/* ── Raw events (right) ── */
+/* ── Agent / Runtime timeline (right) ── */
+.timeline {
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  padding: 7px 10px;
+}
+
+.timeline-agent {
+  border-left-color: #a371f7;
+}
+
+.timeline-runtime {
+  border-left-color: #d29922;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.layer-badge {
+  min-width: 52px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.layer-agent {
+  color: #a371f7;
+}
+
+.layer-runtime {
+  color: #d29922;
+}
+
+.timeline-name {
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.timeline-time {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.timeline-data {
+  margin: 5px 0 0 60px;
+  color: var(--dim);
+  font: 11.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.timeline-raw {
+  margin: 6px 0 0 60px;
+}
+
+.timeline-raw .snapshot {
+  margin-top: 5px;
+}
+
+/* ── LLM raw events (right) ── */
 .raw-entry {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11.5px;

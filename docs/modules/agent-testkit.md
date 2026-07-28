@@ -10,7 +10,9 @@
 - 不访问真实 Provider、用户目录、应用数据库和 Tauri。
 - 时序测试使用 channel/barrier/gate，不用不稳定 sleep 判断顺序。
 - fixture 必须可审阅、可重放并移除 credential 和用户敏感内容。
-- 不进入应用或生产 Adapter 的依赖闭包。
+- 不进入应用或生产 Adapter 的依赖闭包；产品 crate 只能通过 dev-dependency
+  使用。本仓库唯一例外是独立开发工具 `tools/runtime-harness`：其离线 `verify`
+  命令运行时需要 scripted 能力，因此可以使用普通 dependency。
 - `examples/engine_demo.rs` 提供 v0.2.0 Agent Engine 离线演示，不访问真实
   Provider、文件系统或数据库。
 
