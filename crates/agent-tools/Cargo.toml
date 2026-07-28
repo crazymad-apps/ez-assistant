@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 agent-types.path = "../agent-types"
-futures-core.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

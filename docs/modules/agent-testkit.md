@@ -11,10 +11,13 @@
 - 时序测试使用 channel/barrier/gate，不用不稳定 sleep 判断顺序。
 - fixture 必须可审阅、可重放并移除 credential 和用户敏感内容。
 - 不进入应用或生产 Adapter 的依赖闭包。
+- `examples/engine_demo.rs` 提供 v0.2.0 Agent Engine 离线演示，不访问真实
+  Provider、文件系统或数据库。
 
 ## 验证
 
 ```bash
 cargo test -p agent-testkit
 cargo clippy -p agent-testkit --all-targets --all-features -- -D warnings
+cargo run -p agent-testkit --example engine_demo
 ```

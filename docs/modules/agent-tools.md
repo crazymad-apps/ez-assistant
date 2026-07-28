@@ -19,8 +19,9 @@
 - 只依赖 `agent-types` 与技术方案 §3.2 列明的第三方 crate；不依赖 `agent-core`、Tokio 运行时句柄、Tauri 或 Runtime。
 - 不使用 `async-trait`；异步 trait 方法手写 boxed future（沿 `ModelService` 先例）。
 - 类型化工具经 `register` 注册时，`input_schema` 固定由 schemars 从 `Input` 派生（擦除层强制，不依赖实现方自觉）；经 `register_erased` 注册的自定义实现自行负责 schema 与反序列化规则的一致性。
+- Dispatcher 必须校验擦除工具返回的 `ToolResult.call_id` 与原调用一致；异常实现统一转换为绑定原调用 ID 的错误结果，不能破坏 Call/Result 配对。
 - `ToolDefinition` 在注册时读取一次并与工具句柄共同冻结；重名检查、快照定义与名称索引都基于冻结定义。
-- `ToolError` 仅 `InvalidInput { message }`（校验/参数失败）与 `Execution { message }`（执行失败），均转为错误 `ToolResult` 回喂模型；取消不是 `ToolError`，由 `ToolContext.cancellation` 观察处理。
+- `ToolError` 仅 `InvalidInput { message }`（校验/参数失败）与 `Execution { message }`（执行失败），均转为错误 `ToolResult` 回喂模型；取消不是 `ToolError`，由 `ToolContext.cancellation` 观察处理；工具收到取消后必须完成资源清理再解析 future。
 - 能力契约只描述能力形状与错误语义，不含任何安全策略（权限、确认、审计归 Runtime/Adapter 与 Authorizer）。
 - 本 crate 不访问 `std::fs`、`tokio::fs`，不启动子进程；能力实现与桥接工具注册由 Runtime 装配。
 - Shell 契约：stdin 封闭、无后台执行、命令原样进入审计；敏感环境变量默认不传给子进程；超时、输出上限、取消与进程树清理由实现侧负责。

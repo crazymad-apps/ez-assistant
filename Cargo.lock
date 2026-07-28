@@ -61,6 +61,7 @@ dependencies = [
 name = "agent-testkit"
 version = "0.1.0"
 dependencies = [
+ "agent-core",
  "agent-model",
  "agent-tools",
  "agent-types",
@@ -75,7 +76,6 @@ name = "agent-tools"
 version = "0.1.0"
 dependencies = [
  "agent-types",
- "futures-core",
  "schemars 1.2.1",
  "serde",
  "serde_json",

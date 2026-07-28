@@ -25,12 +25,14 @@ Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools
 - Core 不直接调用 `std::fs`、`tokio::fs`、`Command`、HTTP 工具或桌面 API；所有副作用通过注入的模型/工具 trait。
 - Core 处理一个 `AgentExecution`，不持有 `RunId`，不负责跨会话排队和全局并发。
 - `ExecutionSpec` 是已经由 Runtime 解析完成的不可变执行事实源；Core 不再维护 `AgentProfile`、配置默认值或覆盖顺序。
-- 执行必须可取消，模型流和工具调用都要观察取消信号；取消收敛前 Core 为批次内未结算调用补记 interrupted 错误 ToolResult，保证 Tool Call/Result 配对。
+- 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛前为批次内未结算调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange。
 - 资源预算使用显式 `Option`；Core 不注入隐藏的最大轮次、超时或输出限制；预算是副作用前硬边界（`max_steps` 模型调用前预检、`max_tool_calls` dispatch 前预检）。
 - 启发式 Guardrail 必须支持 `Off`、`Observe`、`Enforce`，不能以未声明规则静默中止执行。
 - 工具输入先完成 schema/类型校验，再进入实现。
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
+- Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；规范快照不得暴露 pending exchange。
+- 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付且三种终态都报告丢弃计数。
 
 ## 最小可执行 Agent
 
@@ -39,7 +41,7 @@ Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools
 
 ## 权限预留（Authorizer）
 
-- 工具副作用顺序固定为 record → authorize → execute；Authorizing 是状态机固定位置，Core 只保证逐 Tool Call 独立过闸（Allow 即执行，再处理下一调用），不设"整批放行才执行"的规则。
+- 工具副作用顺序固定为 begin pending exchange → authorize → execute → complete batch；Authorizing 是状态机固定位置，Core 只保证逐 Tool Call 独立过闸（Allow 即执行，再处理下一调用），不设"整批放行才执行"的规则。
 - 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在 authorize 时提供本轮批次上下文（同轮全部 tool call），批次审批交互由 Runtime 借此自行完成。
 - Core 授权决策仅 `Allow` / `Deny { reason }`；`Deny` 在授权闸处转换为错误 `ToolResult`——回喂模型、驱动循环继续的唯一载体是 error `ToolResult`，对模型与循环不存在"被拒绝"类别；reason 措辞归 Runtime。
 - `ExecutionContext.authorizer` 为必传字段，类型层面杜绝"无授权闸"的隐藏默认；Core 只提供显式装配用的 `AllowAllAuthorizer`。
@@ -71,8 +73,9 @@ Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools
 - 引擎 Harness 宿主在 `agent-testkit/tests/`（`agent-core` 被 testkit 依赖，不反向 dev-depend）。
 - Agent Loop 使用 fake model 和 fake tool 覆盖：纯文本结束、工具调用、多轮工具、模型失败、工具失败和取消。
 - 覆盖有限/无限预算与 Guardrail 三种模式，不假定固定最大轮次。
-- 覆盖 Memory Plugin 聚合、Recorder 失败、Authorizer Allow/Deny 与授权等待中的取消 race、Provider reasoning/tool-call 往返保真。
+- 覆盖 Memory Plugin 聚合、Recorder begin/complete 失败与 pending 恢复、Authorizer Allow/Deny、授权等待中的取消 race、工具取消清理完成、Provider reasoning/tool-call 往返保真。
 - 事件顺序必须可断言，不依赖真实模型网络。
+- 可运行效果演示位于 `crates/agent-testkit/examples/engine_demo.rs`。
 
 ```bash
 cargo test -p agent-testkit

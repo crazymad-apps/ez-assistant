@@ -2,15 +2,18 @@
 //!
 //! 事件不是事实源（UI 断线后以规范对话快照恢复），论证为可安全丢弃。背压策略：
 //!
-//! - bounded `tokio::sync::mpsc`，容量 [`AGENT_EVENT_CHANNEL_CAPACITY`]；
-//! - 发送端 `try_send`：通道满即丢弃并用原子计数器计数，终态事件携带
+//! - 普通观察事件使用 bounded `tokio::sync::mpsc`，容量
+//!   [`AGENT_EVENT_CHANNEL_CAPACITY`]；
+//! - 普通事件经 `try_send`：通道满即丢弃并用原子计数器计数；
+//! - 唯一终态使用独立 oneshot，排在已入队普通事件之后可靠交付，三种终态都携带
 //!   `dropped_events`；
 //! - 订阅断开（receiver dropped）不影响执行，发送方不阻塞、不 panic。
 
 use std::{
+    future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -19,12 +22,12 @@ use std::{
 use agent_tools::ToolOutputChannel;
 use agent_types::{AssistantMessage, PartId, ToolCall, ToolCallId};
 use futures_core::Stream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::ExecutionError;
 
 /// 事件通道容量；超出后新事件丢弃并计数。
-pub const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
+pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// 一次 Agent 执行对外发出的规范事件。
 ///
@@ -85,6 +88,8 @@ pub enum AgentEvent {
     ExecutionCompleted {
         /// 最终 AssistantMessage。
         message: AssistantMessage,
+        /// 本次执行因普通队列背压丢弃的观察事件数。
+        dropped_events: u64,
     },
     /// 异常终态；模型失败、落账失败、预算到达等受控终止。
     ExecutionFailed {
@@ -122,37 +127,60 @@ impl AgentEvent {
     }
 }
 
-/// 创建执行事件通道：bounded mpsc（[`AGENT_EVENT_CHANNEL_CAPACITY`]）+
-/// `try_send` 丢弃计数；drop 接收端不影响发送方。
-pub fn agent_event_channel() -> (AgentEventSender, AgentEventStream) {
+/// 创建执行事件通道：普通事件 bounded mpsc + `try_send` 丢弃计数，唯一终态
+/// 独立 oneshot 可靠交付；drop 接收端不影响发送方。
+pub(crate) fn agent_event_channel() -> (AgentEventSender, AgentEventStream) {
     let (sender, receiver) = mpsc::channel(AGENT_EVENT_CHANNEL_CAPACITY);
+    let (terminal_sender, terminal_receiver) = oneshot::channel();
     (
         AgentEventSender {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            terminal_sender: Arc::new(Mutex::new(Some(terminal_sender))),
         },
-        AgentEventStream { receiver },
+        AgentEventStream {
+            receiver,
+            terminal_receiver,
+            terminal_delivered: false,
+        },
     )
 }
 
-/// 事件发送端（引擎侧持有）；发送永不阻塞、订阅断开不 panic。
-#[derive(Debug)]
-pub struct AgentEventSender {
+/// 事件发送端（引擎侧持有）；普通事件可丢弃，终态独立可靠发送。
+///
+/// 可克隆：工具流式输出桥接（`AgentEvent::ToolOutput`）等场景需要持有发送端
+/// 副本；所有克隆体共享同一丢弃计数。
+#[derive(Clone, Debug)]
+pub(crate) struct AgentEventSender {
     sender: mpsc::Sender<AgentEvent>,
     dropped_events: Arc<AtomicU64>,
+    terminal_sender: Arc<Mutex<Option<oneshot::Sender<AgentEvent>>>>,
 }
 
 impl AgentEventSender {
-    /// 非阻塞发送一个事件；通道满或订阅断开时丢弃并计数。
-    pub fn send(&self, event: AgentEvent) {
-        if self.sender.try_send(event).is_err() {
+    /// 非阻塞发送一个事件。
+    ///
+    /// 普通事件通道满时丢弃并计数；终态事件不进入普通队列，由独立 oneshot
+    /// 最多发送一次。订阅已断开时同样不阻塞。
+    pub(crate) fn send(&self, event: AgentEvent) {
+        if event.is_terminal() {
+            let terminal_sender = self
+                .terminal_sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let delivered = terminal_sender.is_some_and(|sender| sender.send(event).is_ok());
+            if !delivered {
+                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if self.sender.try_send(event).is_err() {
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// 截至当前未能投递（通道满或订阅断开）的事件数；终态事件的
-    /// `dropped_events` 字段由引擎以此填充。
-    pub fn dropped_events(&self) -> u64 {
+    /// 截至当前因普通队列满或订阅断开而未能投递的事件数；终态事件的
+    /// `dropped_events` 字段由引擎在发送前读取。
+    pub(crate) fn dropped_events(&self) -> u64 {
         self.dropped_events.load(Ordering::Relaxed)
     }
 }
@@ -161,13 +189,31 @@ impl AgentEventSender {
 #[derive(Debug)]
 pub struct AgentEventStream {
     receiver: mpsc::Receiver<AgentEvent>,
+    terminal_receiver: oneshot::Receiver<AgentEvent>,
+    terminal_delivered: bool,
 }
 
 impl Stream for AgentEventStream {
     type Item = AgentEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(cx)
+        if self.terminal_delivered {
+            return Poll::Ready(None);
+        }
+        if let Poll::Ready(Some(event)) = self.receiver.poll_recv(cx) {
+            return Poll::Ready(Some(event));
+        }
+        match Pin::new(&mut self.terminal_receiver).poll(cx) {
+            Poll::Ready(Ok(event)) => {
+                self.terminal_delivered = true;
+                Poll::Ready(Some(event))
+            }
+            Poll::Ready(Err(_)) => {
+                self.terminal_delivered = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -233,6 +279,7 @@ mod tests {
             },
             AgentEvent::ExecutionCompleted {
                 message: assistant_message(),
+                dropped_events: 2,
             },
             AgentEvent::ExecutionFailed {
                 error: ExecutionError::BudgetExceeded {
@@ -275,6 +322,7 @@ mod tests {
         let terminals = vec![
             AgentEvent::ExecutionCompleted {
                 message: assistant_message(),
+                dropped_events: 0,
             },
             AgentEvent::ExecutionFailed {
                 error: ExecutionError::BudgetExceeded {
@@ -326,6 +374,33 @@ mod tests {
             assert_eq!(next(&mut stream), Some(AgentEvent::ExecutionStarted));
         }
         assert_eq!(sender.dropped_events(), 2);
+    }
+
+    #[test]
+    fn terminal_is_reliable_and_last_when_observation_queue_is_full() {
+        let (sender, mut stream) = agent_event_channel();
+        for _ in 0..AGENT_EVENT_CHANNEL_CAPACITY {
+            sender.send(AgentEvent::ExecutionStarted);
+        }
+        sender.send(AgentEvent::StepStarted { step: 99 });
+        assert_eq!(sender.dropped_events(), 1);
+        sender.send(AgentEvent::ExecutionCompleted {
+            message: assistant_message(),
+            dropped_events: sender.dropped_events(),
+        });
+        drop(sender);
+
+        for _ in 0..AGENT_EVENT_CHANNEL_CAPACITY {
+            assert_eq!(next(&mut stream), Some(AgentEvent::ExecutionStarted));
+        }
+        assert_eq!(
+            next(&mut stream),
+            Some(AgentEvent::ExecutionCompleted {
+                message: assistant_message(),
+                dropped_events: 1,
+            })
+        );
+        assert_eq!(next(&mut stream), None);
     }
 
     #[test]

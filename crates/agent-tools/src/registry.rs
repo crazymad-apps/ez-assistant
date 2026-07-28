@@ -1,7 +1,7 @@
 //! 工具注册表与不可变快照。
 //!
 //! [`ToolRegistry`] 在装配期注册工具（重名拒绝），构建完成后冻结为
-//! [`ToolSetSnapshot`]；快照随 `ExecutionPlan` 进入执行，执行期间不变。
+//! [`ToolSetSnapshot`]；快照随外层 `ExecutionSpec` 进入执行，执行期间不变。
 
 use std::{
     collections::{HashMap, HashSet},

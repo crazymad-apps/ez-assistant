@@ -1,7 +1,8 @@
 //! 单次规范 Tool Call 派发。
 //!
 //! [`Dispatcher`] 一次只处理一个规范 Tool Call：按名称查表并交给擦除后的工具；
-//! 未知名、校验失败、执行失败都转为模型可读的错误 `ToolResult`。
+//! 未知名、校验失败、执行失败和异常结果 ID 都转为绑定原调用 ID 的模型可读
+//! 错误 `ToolResult`。
 //! Dispatcher 不负责模型请求与 Agent 继续循环。
 
 use std::{future::Future, pin::Pin};
@@ -21,7 +22,21 @@ impl Dispatcher {
         context: ToolContext,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         match snapshot.tool(&call.name) {
-            Some(tool) => tool.execute_json(call, context),
+            Some(tool) => Box::pin(async move {
+                let result = tool.execute_json(call, context).await;
+                if result.call_id == call.id {
+                    result
+                } else {
+                    ToolResult {
+                        call_id: call.id.clone(),
+                        status: ToolResultStatus::Error,
+                        content: ToolResultContent::Text(format!(
+                            "tool `{}` returned a result for a different call id",
+                            call.name
+                        )),
+                    }
+                }
+            }),
             None => Box::pin(std::future::ready(ToolResult {
                 call_id: call.id.clone(),
                 status: ToolResultStatus::Error,
@@ -33,10 +48,14 @@ impl Dispatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use agent_types::{ToolCallId, ToolDefinition, ToolName};
     use serde_json::json;
 
     use super::*;
     use crate::{
+        ErasedTool, ToolJsonFuture,
         registry::ToolRegistry,
         testutil::{AddTool, FailTool, block_on, tool_call},
     };
@@ -84,5 +103,50 @@ mod tests {
             ToolContext::default(),
         ));
         assert_eq!(result.status, ToolResultStatus::Error);
+    }
+
+    struct WrongCallIdTool;
+
+    impl ErasedTool for WrongCallIdTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: ToolName::new("wrong_id").expect("valid tool name"),
+                description: "returns a mismatched call id".to_owned(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        fn execute_json<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            _context: ToolContext,
+        ) -> ToolJsonFuture<'a> {
+            Box::pin(std::future::ready(ToolResult {
+                call_id: ToolCallId::new("different_call").expect("valid call id"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Json(json!({"unsafe": true})),
+            }))
+        }
+    }
+
+    #[test]
+    fn mismatched_result_id_becomes_error_for_original_call() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register_erased(Arc::new(WrongCallIdTool))
+            .expect("register erased tool");
+        let snapshot = registry.snapshot();
+        let call = tool_call("wrong_id", json!({}));
+        let result = block_on(Dispatcher::dispatch(
+            &snapshot,
+            &call,
+            ToolContext::default(),
+        ));
+        assert_eq!(result.call_id, call.id);
+        assert_eq!(result.status, ToolResultStatus::Error);
+        let ToolResultContent::Text(message) = result.content else {
+            panic!("contract violation must be model-readable text");
+        };
+        assert!(message.contains("different call id"));
     }
 }

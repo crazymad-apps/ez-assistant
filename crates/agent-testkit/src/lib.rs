@@ -5,6 +5,11 @@
 //!
 //! - [`ScriptedModelService`] / [`ModelScript`]：脚本化模型服务，覆盖正常完成、
 //!   建立前失败、流中失败和畸形事件序列注入。
+//! - [`ScriptedTool`]、[`InMemoryRecorder`]、[`ScriptedAuthorizer`] /
+//!   [`AuthorizeGate`]：引擎 Harness 的三种脚本化
+//!   Fake（成功/失败/挂起工具、可注入第 N 次失败的内存 Recorder、按名决策
+//!   可挂起的授权闸）；三者共享 [`OrderLog`] 顺序日志，供断言副作用前顺序
+//!   `begin(Assistant) → authorize → execute → complete(batch)`。
 //! - [`RecordedTransport`]：捕获出站请求并按 fixture 回放 HTTP/SSE 数据，
 //!   支持建立前连接失败与响应中途断流。
 //! - [`EventCollector`] / [`CollectedEvents`]：收集事件流并断言唯一终态与
@@ -13,6 +18,7 @@
 //! - [`FakeFileSystemTool`] / [`FakeShellTool`]：文件与 Shell 能力的确定性 Fake，
 //!   完整执行 `agent-tools` 能力契约语义（供引擎 Harness 复用）。
 //! - [`validate_request`] / [`validate_response`]：fixture 入库前的敏感信息把关。
+//! - `examples/engine_demo.rs`：可直接运行的 v0.2.0 两轮工具循环效果演示。
 //!
 //! Fixture 约定：可审阅文本格式；不包含真实 credential、用户内容或不可再现
 //! 动态值；明确 Provider profile 和预期规范事件。
@@ -21,22 +27,31 @@
 //!
 //! 最小使用示例：`script.rs` 内联测试演示脚本化模型服务；`RecordedTransport` 等
 //! 组件的真实消费见 `agent-provider-openai-compatible` 的 `stream_tests.rs` 与
-//! `deepseek_tests.rs`。
+//! `deepseek_tests.rs`；引擎 Harness 见 `tests/`（行为矩阵宿主）。完整 Engine
+//! 离线演示运行 `cargo run -p agent-testkit --example engine_demo`。
 
+mod authorizer;
 mod cancel;
 mod collect;
 mod fixture;
 mod fs;
+mod order;
 mod record;
+mod recorder;
 mod script;
 mod shell;
+mod tool;
 
+pub use authorizer::{AuthorizeGate, ScriptedAuthorizer};
 pub use cancel::CancelGate;
 pub use collect::{CollectedEvents, EventCollector};
 pub use fixture::{FixtureViolation, validate_request, validate_response};
 pub use fs::FakeFileSystemTool;
+pub use order::{LogEntry, OrderLog};
 pub use record::{
     BodyStep, RecordedRequest, RecordedResponse, RecordedTransport, RecordedTransportError,
 };
+pub use recorder::InMemoryRecorder;
 pub use script::{ModelScript, ScriptedModelService, message_events};
 pub use shell::{FakeShellScript, FakeShellTool};
+pub use tool::ScriptedTool;

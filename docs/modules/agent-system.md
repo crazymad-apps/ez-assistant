@@ -206,29 +206,36 @@ Provider Codec 必须保存继续下一轮所需的 reasoning、tool call、call
 
 ### 8.1 Conversation Journal
 
-Conversation Journal 由 Runtime 持有，是 Session 对话和恢复的权威状态。Core 不依赖 Repository 或数据库，而是通过已绑定当前 Runtime Run 的 `ExecutionRecorder` 提交规范增量：
+Conversation Journal 由 Runtime 持有，是 Session 对话和恢复的权威状态。Core 不依赖 Repository 或数据库，而是通过已绑定当前 Runtime Run 的 `ExecutionRecorder` 提交两阶段 tool exchange：
 
 ```rust
 #[async_trait]
 pub trait ExecutionRecorder: Send + Sync {
-    async fn record(
+    async fn begin_tool_exchange(
         &self,
-        delta: ConversationDelta,
-    ) -> Result<RecordReceipt, RecordError>;
+        assistant: AssistantMessage,
+    ) -> Result<ExchangeReceipt, RecordError>;
+
+    async fn complete_tool_exchange(
+        &self,
+        receipt: &ExchangeReceipt,
+        results: Vec<ToolMessage>,
+    ) -> Result<(), RecordError>;
 }
 ```
 
 Runtime 的实现可以在内部持有 `RunId`、`SessionId`、事务和存储连接；这些信息不进入 Core 接口。
+begin 产生的 pending exchange 是可恢复写前事实，不直接进入规范快照；complete 必须原子写入整批 ToolResult 并转为 completed。Runtime 恢复 pending 时先补齐 interrupted/unknown 结果，任何 `ConversationSnapshot` 都不得暴露未配对调用。
 
 发生工具副作用前必须完成：
 
 ```text
 完整 AssistantMessage
-→ ExecutionRecorder 确认
+→ begin pending exchange 确认
 → 权限决策
 → 工具执行
-→ ToolResult
-→ ExecutionRecorder 确认
+→ 完整批次 ToolResult
+→ complete exchange 原子确认
 ```
 
 纯内存或测试场景使用内存 Recorder；是否持久化是装配选择，不改变执行语义和消息顺序。

@@ -14,7 +14,7 @@ use crate::{ExecutionRecorder, ToolAuthorizer};
 pub struct ExecutionContext {
     /// 取消信号；模型流、授权等待与工具执行都必须观察。
     pub cancellation: CancellationToken,
-    /// 规范对话落账 SPI；record 失败阻断后续副作用。
+    /// 规范对话两阶段落账 SPI；begin 失败阻断后续副作用。
     pub recorder: Arc<dyn ExecutionRecorder>,
     /// 工具授权闸；每个 Tool Call 独立过闸后才允许执行。
     pub authorizer: Arc<dyn ToolAuthorizer>,
@@ -31,20 +31,45 @@ mod tests {
 
     use super::*;
     use crate::{
-        AllowAllAuthorizer, ConversationDelta, RecordFuture, RecordReceipt, ToolAuthorization,
+        AllowAllAuthorizer, ConversationDelta, ExchangeReceipt, RecordFuture, ToolAuthorization,
         testutil::block_on,
     };
 
     /// 记录 delta 的最小 Recorder，验证 SPI 可经 trait object 调用。
     struct ListRecorder {
         deltas: Mutex<Vec<ConversationDelta>>,
+        pending: Mutex<Option<AssistantMessage>>,
     }
 
     impl ExecutionRecorder for ListRecorder {
-        fn record<'a>(&'a self, delta: ConversationDelta) -> RecordFuture<'a> {
+        fn begin_tool_exchange<'a>(
+            &'a self,
+            assistant: AssistantMessage,
+        ) -> RecordFuture<'a, ExchangeReceipt> {
             Box::pin(async move {
-                self.deltas.lock().expect("lock deltas").push(delta);
-                Ok(RecordReceipt)
+                *self.pending.lock().expect("lock pending") = Some(assistant);
+                ExchangeReceipt::new("exchange_1")
+            })
+        }
+
+        fn complete_tool_exchange<'a>(
+            &'a self,
+            _receipt: &'a ExchangeReceipt,
+            results: Vec<agent_types::ToolMessage>,
+        ) -> RecordFuture<'a, ()> {
+            Box::pin(async move {
+                let assistant = self
+                    .pending
+                    .lock()
+                    .expect("lock pending")
+                    .take()
+                    .ok_or_else(|| crate::RecordError {
+                        message: "missing pending exchange".to_owned(),
+                    })?;
+                let mut deltas = self.deltas.lock().expect("lock deltas");
+                deltas.push(ConversationDelta::Assistant(assistant));
+                deltas.extend(results.into_iter().map(ConversationDelta::Tool));
+                Ok(())
             })
         }
     }
@@ -66,6 +91,7 @@ mod tests {
     fn context_wires_cancellation_recorder_and_authorizer() {
         let recorder = Arc::new(ListRecorder {
             deltas: Mutex::new(vec![]),
+            pending: Mutex::new(None),
         });
         let context = ExecutionContext {
             cancellation: CancellationToken::new(),
@@ -77,11 +103,12 @@ mod tests {
         let receipt = block_on(
             context
                 .recorder
-                .record(ConversationDelta::Assistant(sample_assistant_message())),
+                .begin_tool_exchange(sample_assistant_message()),
         )
-        .expect("record succeeds");
-        assert_eq!(receipt, RecordReceipt);
-        assert_eq!(recorder.deltas.lock().expect("lock deltas").len(), 1);
+        .expect("begin succeeds");
+        assert_eq!(receipt.as_str(), "exchange_1");
+        assert!(recorder.deltas.lock().expect("lock deltas").is_empty());
+        assert!(recorder.pending.lock().expect("lock pending").is_some());
 
         let call = ToolCall {
             id: ToolCallId::new("call_1").expect("valid call id"),
