@@ -1,5 +1,6 @@
 //! 执行错误分类。
 
+use agent_context::ContextWindowError;
 use agent_model::ModelError;
 use thiserror::Error;
 
@@ -16,6 +17,9 @@ pub enum ExecutionError {
     /// 模型调用失败（建立前失败或流中受控失败）。
     #[error(transparent)]
     Model(#[from] ModelError),
+    /// 上下文窗口配置不满足共享 Evaluator 约束。
+    #[error(transparent)]
+    ContextWindow(#[from] ContextWindowError),
     /// 规范对话落账失败；阻断后续副作用。
     #[error(transparent)]
     Record(#[from] RecordError),
@@ -51,6 +55,7 @@ mod tests {
                 message: "upstream rejected the request".to_owned(),
                 status: Some(400),
             }),
+            ExecutionError::ContextWindow(ContextWindowError::ZeroContextWindow),
             ExecutionError::Record(RecordError {
                 message: "disk is full".to_owned(),
             }),
@@ -106,6 +111,9 @@ mod tests {
             error.to_string(),
             "model authentication failed: invalid api key"
         );
+
+        let error = ExecutionError::from(ContextWindowError::ZeroContextWindow);
+        assert!(matches!(error, ExecutionError::ContextWindow(_)));
 
         let error = ExecutionError::from(RecordError {
             message: "disk is full".to_owned(),

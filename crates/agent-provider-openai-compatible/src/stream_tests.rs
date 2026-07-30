@@ -47,6 +47,8 @@ fn simple_text_body() -> String {
     format!("{FRAME_HELLO}{FRAME_WORLD}{FRAME_FINISH}{FRAME_DONE}")
 }
 
+const CONTEXT_OVERFLOW_FRAME: &str = include_str!("../fixtures/errors/context_overflow_stream.sse");
+
 fn provider_id(value: &str) -> ProviderId {
     ProviderId::new(value).expect("valid provider id")
 }
@@ -81,7 +83,7 @@ fn reasoning_profile() -> Profile {
         supports_temperature: true,
         supports_top_p: true,
         supports_stop: true,
-        max_tokens_field: Some("max_tokens".to_owned()),
+        max_output_tokens_field: Some("max_tokens".to_owned()),
         supports_tool_choice: true,
         tool_calls_require_reasoning: false,
         cached_input_tokens_field: None,
@@ -93,6 +95,7 @@ fn service_with(transport: &Arc<RecordedTransport>, profile: Profile) -> OpenAiC
         BASE_URL,
         BearerCredential::new(TOKEN),
         "deepseek-reasoner",
+        128_000,
         profile,
         transport.clone(),
     )
@@ -489,6 +492,29 @@ async fn cancellation_during_stream_yields_single_cancelled_terminal() {
     );
     // 取消后不再有事件（收集到 None 才结束），实现不派生任何后台任务。
     assert_eq!(gate.emitted(), 3);
+    collected.assert_single_terminal();
+}
+
+#[tokio::test]
+async fn structured_context_overflow_frame_yields_failed_terminal() {
+    let (service, _transport) = replay_service(CONTEXT_OVERFLOW_FRAME);
+    let stream = service
+        .stream(request(), ModelCallContext::default())
+        .await
+        .expect("http stream established");
+    let collected = EventCollector::collect_validated(stream).await;
+
+    assert!(
+        collected.events().iter().any(
+            |event| matches!(event, ModelEvent::TextDelta { delta, .. } if delta == "partial")
+        )
+    );
+    assert_eq!(
+        collected.assert_failed(),
+        &ModelError::ContextOverflow {
+            message: "stream context limit".to_owned(),
+        }
+    );
     collected.assert_single_terminal();
 }
 

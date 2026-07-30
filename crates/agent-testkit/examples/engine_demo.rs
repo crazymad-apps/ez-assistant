@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use agent_context::ContextWindowEvaluator;
 use agent_core::{
     AgentEvent, AgentExecution, ConversationDelta, ExecutionBudget, ExecutionContext,
     ExecutionInput, ExecutionOutcome, ExecutionSpec, ToolCompletionStatus,
@@ -67,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_calls: true,
             streaming: true,
         },
+        128_000,
         [
             ModelScript::Events(message_events(&tool_turn)),
             ModelScript::Events(message_events(&final_turn)),
@@ -90,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExecutionSpec {
             instructions: vec!["回答前可调用已注册工具。".to_owned()],
             model: model.clone(),
+            context_window: Arc::new(ContextWindowEvaluator::new(0.8)?),
             tools: registry.snapshot(),
             budget: ExecutionBudget {
                 max_steps: Some(4),
@@ -97,14 +100,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
         ExecutionInput {
-            conversation: ConversationSnapshot::default(),
-            user_input: UserMessage {
+            conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
                 id: MessageId::new("user_1")?,
                 parts: vec![UserPart::Text(TextPart {
                     id: PartId::new("user_text_1")?,
                     text: "杭州今天天气如何？".to_owned(),
                 })],
-            },
+            })]),
         },
         ExecutionContext {
             cancellation: CancellationToken::new(),
@@ -135,6 +137,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ExecutionOutcome::Failed(error) => println!("状态：Failed ({error})"),
         ExecutionOutcome::Cancelled => println!("状态：Cancelled"),
+        ExecutionOutcome::CompactionRequired { reason, step } => {
+            println!("状态：CompactionRequired ({reason:?}, step={step})")
+        }
     }
 
     println!("\n=== 副作用顺序 ===");
@@ -188,6 +193,10 @@ fn assistant_text(message: &AssistantMessage) -> String {
 fn describe_event(event: &AgentEvent) -> String {
     match event {
         AgentEvent::ExecutionStarted => "execution.started".to_owned(),
+        AgentEvent::UsageUpdated { step, usage } => format!(
+            "usage.updated #{step}: {} in / {} out / {} total",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens
+        ),
         AgentEvent::StepStarted { step } => format!("step.started #{step}"),
         AgentEvent::TextDelta { delta, .. } => format!("text.delta: {delta}"),
         AgentEvent::ReasoningDelta { delta, .. } => format!("reasoning.delta: {delta}"),
@@ -215,6 +224,14 @@ fn describe_event(event: &AgentEvent) -> String {
         AgentEvent::ExecutionCancelled { dropped_events } => {
             format!("execution.cancelled (dropped_events={dropped_events})")
         }
+        AgentEvent::ExecutionCompactionRequired {
+            reason,
+            step,
+            dropped_events,
+        } => format!(
+            "execution.compaction_required: {reason:?} step={step} \
+             (dropped_events={dropped_events})"
+        ),
     }
 }
 
@@ -256,6 +273,7 @@ fn describe_delta(delta: &ConversationDelta) -> String {
 fn conversation_role(message: &ConversationMessage) -> &'static str {
     match message {
         ConversationMessage::System(_) => "system",
+        ConversationMessage::ContextSummary(_) => "context_summary",
         ConversationMessage::User(_) => "user",
         ConversationMessage::Assistant(_) => "assistant(tool_call)",
         ConversationMessage::Tool(_) => "tool(result)",

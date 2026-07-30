@@ -168,7 +168,7 @@ function handle(msg) {
     if (p.name === "user_message_appended") {
       addUserMessage(msg, p.data);
     }
-    addTimeline(msg, "runtime", p.name, p.data);
+    addTimeline(msg, "runtime", runtimeTitle(p.name, p.data), p.data);
     return;
   }
   if (msg.ch !== "llm") return;
@@ -199,6 +199,25 @@ function handle(msg) {
     const [type, data] = Object.entries(p.event)[0];
     onModelEvent(msg, type, data);
   }
+}
+
+function runtimeTitle(name, data) {
+  if (name === "context_window_evaluated") {
+    const evaluation = data?.evaluation ?? {};
+    const decision = evaluation.decision?.type ?? evaluation.decision ?? "unknown";
+    return `${name} · ${decision} · ${evaluation.used_tokens ?? "?"}/${evaluation.context_window_tokens ?? "?"}`;
+  }
+  if (name === "context_compaction_finished") {
+    const cause = data?.report?.cause ?? "unknown";
+    return `${name} · ${data?.outcome ?? "unknown"} · ${cause}`;
+  }
+  if (name === "continuation_started") {
+    return `${name} · ${data?.previous_run_id ?? "?"} → ${data?.run_id ?? "?"}`;
+  }
+  if (name === "user_compaction_queued") {
+    return `${name} · after active task`;
+  }
+  return name;
 }
 
 function addUserMessage(msg, data) {
@@ -240,6 +259,10 @@ function onAgentEvent(msg, event) {
   delete detail.type;
   let title = type;
   if (type === "step_started") title = `${type} · step ${event.step}`;
+  if (type === "usage_updated") title = `${type} · step ${event.step}`;
+  if (type === "execution_compaction_required") {
+    title = `${type} · step ${event.step} · ${event.reason ?? "unknown"}`;
+  }
   if (type === "tool_started" || type === "tool_completed") {
     title = `${type} · ${event.call_id}`;
   }
@@ -421,9 +444,19 @@ function appendEntry(panel, el) {
   el.hidden = sessionHidden || channelHidden;
   panel.appendChild(el);
   if (panel === eventsEl) {
-    while (panel.childElementCount > EVENT_CAP) panel.firstChild.remove();
+    trimChannelEntries(panel, el.dataset.channel);
   }
   if (!el.hidden && panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120) {
     panel.scrollTop = panel.scrollHeight;
+  }
+}
+
+function trimChannelEntries(panel, channel) {
+  const entries = panel.querySelectorAll(
+    `.entry[data-channel="${CSS.escape(channel)}"]`,
+  );
+  const overflow = entries.length - EVENT_CAP;
+  for (let index = 0; index < overflow; index += 1) {
+    entries[index].remove();
   }
 }

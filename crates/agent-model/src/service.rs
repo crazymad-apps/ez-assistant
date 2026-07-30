@@ -27,6 +27,9 @@ pub trait ModelService: Send + Sync {
     /// 该服务对单次 Turn 的能力声明。
     fn capabilities(&self) -> &ModelCapabilities;
 
+    /// 调用方为当前服务绑定模型配置的上下文窗口上限。
+    fn context_window_tokens(&self) -> u64;
+
     /// 发起一次 Provider Turn。
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_>;
 }
@@ -55,6 +58,7 @@ mod tests {
     /// 只通过 `ModelService` SPI 完成一次模型 Turn 的确定性 Fake。
     struct FakeModelService {
         capabilities: ModelCapabilities,
+        context_window_tokens: u64,
         behavior: FakeBehavior,
     }
 
@@ -70,6 +74,10 @@ mod tests {
     impl ModelService for FakeModelService {
         fn capabilities(&self) -> &ModelCapabilities {
             &self.capabilities
+        }
+
+        fn context_window_tokens(&self) -> u64 {
+            self.context_window_tokens
         }
 
         fn stream(
@@ -260,6 +268,7 @@ mod tests {
                 tool_calls: true,
                 streaming: true,
             },
+            context_window_tokens: 128_000,
             behavior,
         }
     }
@@ -268,6 +277,7 @@ mod tests {
     fn fake_service_completes_a_model_turn_through_the_spi() {
         let service = fake_service(FakeBehavior::Complete(sample_message()));
         assert!(service.capabilities().reasoning);
+        assert_eq!(service.context_window_tokens(), 128_000);
         let stream = block_on(service.stream(sample_request(), ModelCallContext::default()))
             .expect("stream established");
         let events = collect(LifecycleValidator::new(stream));

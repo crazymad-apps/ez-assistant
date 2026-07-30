@@ -21,7 +21,7 @@ pub struct Profile {
     /// 是否支持 `stop` 序列参数。
     pub supports_stop: bool,
     /// 最大输出 token 参数在线上使用的字段名；`None` 表示不支持该参数。
-    pub max_tokens_field: Option<String>,
+    pub max_output_tokens_field: Option<String>,
     /// 是否接受显式的 `tool_choice` 参数。
     ///
     /// `ToolChoice::Auto` 不受影响：`auto` 是线上的默认值，编码器统一省略，
@@ -65,7 +65,7 @@ impl Profile {
             supports_temperature: true,
             supports_top_p: true,
             supports_stop: true,
-            max_tokens_field: Some("max_tokens".to_owned()),
+            max_output_tokens_field: Some("max_tokens".to_owned()),
             supports_tool_choice: true,
             tool_calls_require_reasoning: false,
             cached_input_tokens_field: None,
@@ -109,7 +109,7 @@ impl Profile {
             supports_temperature: false,
             supports_top_p: false,
             supports_stop: true,
-            max_tokens_field: Some("max_tokens".to_owned()),
+            max_output_tokens_field: Some("max_tokens".to_owned()),
             supports_tool_choice: false,
             tool_calls_require_reasoning: true,
             cached_input_tokens_field: Some("prompt_cache_hit_tokens".to_owned()),

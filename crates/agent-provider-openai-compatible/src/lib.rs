@@ -39,6 +39,8 @@
 //!    DEEPSEEK_API_KEY=<在此填入真实 Key>
 //!    # 可选，缺省为 https://api.deepseek.com
 //!    DEEPSEEK_BASE_URL=https://api.deepseek.com
+//!    # 可选，缺省为 128000
+//!    DEEPSEEK_CONTEXT_WINDOW_TOKENS=128000
 //!    ```
 //!
 //! 2. 运行：

@@ -146,6 +146,7 @@ fn service_with(transport: &Arc<RecordedTransport>) -> OpenAiCompatibleService {
         BASE_URL,
         BearerCredential::new(TOKEN),
         MODEL,
+        128_000,
         Profile::deepseek(),
         transport.clone(),
     )
@@ -470,7 +471,10 @@ async fn profile_declares_deepseek_dialect_and_derives_capabilities() {
     assert!(!profile.supports_temperature);
     assert!(!profile.supports_top_p);
     assert!(profile.supports_stop);
-    assert_eq!(profile.max_tokens_field.as_deref(), Some("max_tokens"));
+    assert_eq!(
+        profile.max_output_tokens_field.as_deref(),
+        Some("max_tokens")
+    );
     assert!(profile.tool_calls_require_reasoning);
     assert_eq!(
         profile.cached_input_tokens_field.as_deref(),
@@ -623,6 +627,7 @@ async fn real_api_smoke_thinking_tool_call_round_trip() {
         base_url.clone(),
         BearerCredential::new(api_key),
         "deepseek-v4-flash",
+        128_000,
         Profile::deepseek(),
         TransportTimeouts::default(),
     )

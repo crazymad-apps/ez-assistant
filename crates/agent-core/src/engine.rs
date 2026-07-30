@@ -9,11 +9,14 @@
 //!   → RecordingToolResults → BuildingContext …
 //! ```
 //!
-//! 终态为 Completed / Failed / Cancelled 之一且唯一。关键纪律：
+//! 终态为 Completed / Failed / Cancelled / CompactionRequired 之一且唯一。关键纪律：
 //!
 //! - step 从 1 开始计数；`max_steps` 在每次**模型调用前**预检（`Some(0)` 时
 //!   一次模型调用都不发生），`max_tool_calls` 在每次 **dispatch 前**预检，
 //!   两者都是副作用前的硬边界；预算按"实际 dispatch 数"计，授权 `Deny` 不计入。
+//! - 每个 Model Step 在 `StepStarted` 前调用共享 Context Window Evaluator；
+//!   达到阈值或 Provider 报 Context Overflow 时以 CompactionRequired 交回 Runtime，
+//!   Core 不在当前执行内压缩或重试。
 //! - 副作用前顺序：begin pending exchange → 逐 call 独立过闸 → 工具执行；
 //!   整批 ToolResult 原子完成 exchange 后才进入下一轮。
 //! - 取消收敛：模型流内经 `ModelCallContext` 传播并在终态收敛点检查令牌、
@@ -24,6 +27,7 @@
 
 use std::sync::Arc;
 
+use agent_context::ContextWindowDecision;
 use agent_model::{
     GenerationConfig, LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest,
     ProviderOptions,
@@ -37,9 +41,9 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentEvent, BudgetKind, ExchangeReceipt, ExecutionContext, ExecutionError, ExecutionInput,
-    ExecutionOutcome, ExecutionSpec, RecordError, ToolAuthorization, ToolCompletionStatus,
-    event::AgentEventSender,
+    AgentEvent, BudgetKind, CompactionReason, ExchangeReceipt, ExecutionContext, ExecutionError,
+    ExecutionInput, ExecutionOutcome, ExecutionSpec, RecordError, ToolAuthorization,
+    ToolCompletionStatus, event::AgentEventSender,
 };
 
 /// 取消收敛时为未结算调用补记的模型可读错误文本。
@@ -52,7 +56,7 @@ pub(crate) struct Engine {
     /// 执行级取消令牌（`context.cancellation` 的子令牌）。
     cancellation: CancellationToken,
     events: AgentEventSender,
-    /// 对话投影：输入快照 + 本轮用户输入 + 每轮追加的 Assistant/Tool 消息。
+    /// 对话投影：完整输入快照 + 每轮追加的 Assistant/Tool 消息。
     projection: Vec<ConversationMessage>,
     /// 已开始的模型 Turn 数（`max_steps` 预检基数）。
     steps: u32,
@@ -66,12 +70,12 @@ pub(crate) struct Engine {
 enum TurnEnd {
     /// 模型 Turn 正常聚合出完整消息。
     Finished(AssistantMessage),
-    /// 执行已收敛到终态（Failed/Cancelled），直接作为执行结果返回。
+    /// 执行已收敛到终态（Failed/Cancelled/CompactionRequired），直接返回。
     Terminal(ExecutionOutcome),
 }
 
 impl Engine {
-    /// 从执行事实源组装状态机；投影初始为输入快照消息 + 本轮用户输入。
+    /// 从执行事实源组装状态机；投影初始为 Runtime 提供的完整输入快照。
     pub(crate) fn new(
         spec: ExecutionSpec,
         input: ExecutionInput,
@@ -79,12 +83,8 @@ impl Engine {
         cancellation: CancellationToken,
         events: AgentEventSender,
     ) -> Self {
-        let ExecutionInput {
-            conversation,
-            user_input,
-        } = input;
-        let mut projection = conversation.messages;
-        projection.push(ConversationMessage::User(user_input));
+        let ExecutionInput { conversation } = input;
+        let projection = conversation.messages;
         Self {
             spec,
             context,
@@ -110,12 +110,24 @@ impl Engine {
                     limit,
                 });
             }
-            // step 从 1 开始。
-            self.steps += 1;
+            // next_step 从 1 开始；只有实际建立 Provider Turn 时才计入 steps。
+            let next_step = self.steps + 1;
+            let snapshot = ConversationSnapshot::new(self.projection.clone());
+            let evaluation = match self
+                .spec
+                .context_window
+                .evaluate(&snapshot, self.spec.model.as_ref())
+            {
+                Ok(evaluation) => evaluation,
+                Err(error) => return self.fail(ExecutionError::ContextWindow(error)),
+            };
+            if evaluation.decision == ContextWindowDecision::CompactionRequired {
+                return self.compaction_required(CompactionReason::ThresholdReached, next_step);
+            }
+            let request = self.build_request();
+            self.steps = next_step;
             self.events
                 .send(AgentEvent::StepStarted { step: self.steps });
-
-            let request = self.build_request();
             let message = match self.stream_turn(request).await {
                 TurnEnd::Finished(message) => message,
                 TurnEnd::Terminal(outcome) => return outcome,
@@ -191,6 +203,7 @@ impl Engine {
             Err(error) => return TurnEnd::Terminal(self.model_failure(error).await),
         };
         let mut stream = LifecycleValidator::new(stream);
+        let mut latest_usage = None;
         while let Some(event) = stream.next().await {
             match event {
                 ModelEvent::TextDelta { id, delta } => {
@@ -199,12 +212,23 @@ impl Engine {
                 ModelEvent::ReasoningDelta { id, delta } => {
                     self.events.send(AgentEvent::ReasoningDelta { id, delta });
                 }
-                ModelEvent::TurnFinished { message } => return TurnEnd::Finished(message),
+                ModelEvent::UsageUpdated { usage } => {
+                    latest_usage = Some(usage);
+                }
+                ModelEvent::TurnFinished { message } => {
+                    if let Some(usage) = message.usage.clone().or(latest_usage) {
+                        self.events.send(AgentEvent::UsageUpdated {
+                            step: self.steps,
+                            usage,
+                        });
+                    }
+                    return TurnEnd::Finished(message);
+                }
                 ModelEvent::TurnFailed { error } => {
                     return TurnEnd::Terminal(self.model_failure(error).await);
                 }
-                // TurnStarted、Part Started/Finished、ToolCall*、UsageUpdated
-                // 没有对应的 AgentEvent，只在最终消息与契约校验中体现。
+                // TurnStarted、Part Started/Finished、ToolCall* 没有对应的
+                // AgentEvent，只在最终消息与契约校验中体现。
                 _ => {}
             }
         }
@@ -216,10 +240,12 @@ impl Engine {
 
     /// 模型失败收敛：执行令牌已取消或错误为 `ModelError::Cancelled` 时归
     /// `ExecutionCancelled`（此时没有已宣告的 Tool Call，收敛无需补记）；
-    /// 其余归 `ExecutionFailed{Model}`。
+    /// Provider Context Overflow 归压缩交接终态，其余归 `ExecutionFailed{Model}`。
     async fn model_failure(&mut self, error: ModelError) -> ExecutionOutcome {
         if self.cancellation.is_cancelled() || matches!(error, ModelError::Cancelled) {
             self.cancelled()
+        } else if matches!(error, ModelError::ContextOverflow { .. }) {
+            self.compaction_required(CompactionReason::ProviderOverflow, self.steps)
         } else {
             self.fail(ExecutionError::Model(error))
         }
@@ -382,6 +408,16 @@ impl Engine {
             dropped_events: self.events.dropped_events(),
         });
         ExecutionOutcome::Cancelled
+    }
+
+    /// 收敛为上下文压缩交接终态；Core 不发起压缩，也不重试当前 Step。
+    fn compaction_required(&self, reason: CompactionReason, step: u32) -> ExecutionOutcome {
+        self.events.send(AgentEvent::ExecutionCompactionRequired {
+            reason,
+            step,
+            dropped_events: self.events.dropped_events(),
+        });
+        ExecutionOutcome::CompactionRequired { reason, step }
     }
 }
 

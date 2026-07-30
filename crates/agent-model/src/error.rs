@@ -30,6 +30,12 @@ pub enum ModelError {
     /// 限流或暂时不可用。
     #[error("provider rate limited the request: {0}")]
     RateLimited(String),
+    /// Provider 明确报告请求超过模型上下文窗口。
+    #[error("model context window exceeded: {message}")]
+    ContextOverflow {
+        /// 已脱敏的 Provider 诊断信息。
+        message: String,
+    },
     /// 响应不满足协议预期（schema、生命周期、畸形帧等）。
     #[error("provider stream violated the protocol: {0}")]
     Protocol(String),
@@ -63,6 +69,13 @@ mod tests {
         assert_eq!(
             ModelError::Protocol("missing terminal event".to_owned()).to_string(),
             "provider stream violated the protocol: missing terminal event"
+        );
+        assert_eq!(
+            ModelError::ContextOverflow {
+                message: "request exceeds the configured context window".to_owned(),
+            }
+            .to_string(),
+            "model context window exceeded: request exceeds the configured context window"
         );
     }
 }

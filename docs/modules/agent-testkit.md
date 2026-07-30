@@ -15,6 +15,8 @@
   命令运行时需要 scripted 能力，因此可以使用普通 dependency。
 - `examples/engine_demo.rs` 提供 v0.2.0 Agent Engine 离线演示，不访问真实
   Provider、文件系统或数据库。
+- 可以直接依赖 `agent-context` 提供其确定性测试桩和断言辅助，但不得在 testkit
+  复制窗口计算、历史布局或压缩算法。
 
 ## 验证
 

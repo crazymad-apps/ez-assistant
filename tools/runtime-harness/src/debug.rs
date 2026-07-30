@@ -6,6 +6,7 @@
 
 use std::{sync::Arc, time::Instant};
 
+use agent_context::ContextWindowEvaluation;
 use agent_core::{AgentEvent, ExecutionOutcome};
 use agent_model::{
     ModelCallContext, ModelCapabilities, ModelEventStream, ModelRequest, ModelService,
@@ -18,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::{
     cli::DebugLayerSelection,
+    context::{HarnessCompactionOutcome, HarnessCompactionReport},
     runtime::{HarnessRunId, RuntimeSnapshot},
 };
 
@@ -68,14 +70,54 @@ impl RunDebug {
         configured_model: &str,
     ) -> Option<Self> {
         let base_url = base_url.filter(|value| !value.trim().is_empty())?;
-        Some(Self {
+        Some(Self::new(
+            base_url,
+            selection,
+            snapshot.session_id.to_string(),
+            run_id.to_string(),
+            correlation_id,
+            endpoint,
+            configured_model,
+        ))
+    }
+
+    pub(crate) fn for_context_operation(
+        base_url: Option<&str>,
+        selection: DebugLayerSelection,
+        snapshot: &RuntimeSnapshot,
+        endpoint: &str,
+        configured_model: &str,
+    ) -> Option<Self> {
+        let base_url = base_url.filter(|value| !value.trim().is_empty())?;
+        let session_id = snapshot.session_id.to_string();
+        Some(Self::new(
+            base_url,
+            selection,
+            session_id.clone(),
+            "context".to_owned(),
+            format!("{session_id}/context"),
+            endpoint,
+            configured_model,
+        ))
+    }
+
+    fn new(
+        base_url: &str,
+        selection: DebugLayerSelection,
+        session_id: String,
+        run_id: String,
+        correlation_id: String,
+        endpoint: &str,
+        configured_model: &str,
+    ) -> Self {
+        Self {
             client: Arc::new(DebugClient::new(base_url).with_correlation_id(correlation_id)),
             route: selection.into(),
-            session_id: snapshot.session_id.to_string(),
-            run_id: run_id.to_string(),
+            session_id,
+            run_id,
             endpoint: endpoint.to_owned(),
             configured_model: configured_model.to_owned(),
-        })
+        }
     }
 
     /// Apply provider observation only when the selected route includes it.
@@ -127,11 +169,84 @@ impl RunDebug {
         );
     }
 
+    pub(crate) fn post_context_preflight(&self, evaluation: &ContextWindowEvaluation) {
+        self.post_runtime(
+            "context_window_evaluated",
+            json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "evaluation": evaluation,
+            }),
+        );
+    }
+
+    pub(crate) fn post_compaction_report(
+        &self,
+        outcome: &str,
+        report: &HarnessCompactionReport,
+        checkpoint_count: usize,
+    ) {
+        self.post_runtime(
+            "context_compaction_finished",
+            json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "outcome": outcome,
+                "report": report,
+                "checkpoint_count": checkpoint_count,
+            }),
+        );
+    }
+
+    pub(crate) fn post_user_compaction_outcome(
+        &self,
+        outcome: &HarnessCompactionOutcome,
+        checkpoint_count: usize,
+    ) {
+        match outcome {
+            HarnessCompactionOutcome::Compacted { report, .. } => {
+                self.post_compaction_report("compacted", report, checkpoint_count);
+            }
+            HarnessCompactionOutcome::NoOp { report } => {
+                self.post_compaction_report("no_op", report, checkpoint_count);
+            }
+        }
+    }
+
+    pub(crate) fn post_compaction_queued(&self) {
+        self.post_runtime(
+            "user_compaction_queued",
+            json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+            }),
+        );
+    }
+
+    pub(crate) fn post_continuation_started(
+        &self,
+        previous_run_id: &HarnessRunId,
+        next_run_id: &HarnessRunId,
+    ) {
+        self.post_runtime(
+            "continuation_started",
+            json!({
+                "session_id": self.session_id,
+                "previous_run_id": previous_run_id.to_string(),
+                "run_id": next_run_id.to_string(),
+            }),
+        );
+    }
+
     pub(crate) fn post_run_finished(&self, snapshot: &RuntimeSnapshot, outcome: &ExecutionOutcome) {
         let (name, error) = match outcome {
             ExecutionOutcome::Completed(_) => ("run_completed", None),
             ExecutionOutcome::Failed(error) => ("run_failed", Some(error.to_string())),
             ExecutionOutcome::Cancelled => ("run_cancelled", None),
+            ExecutionOutcome::CompactionRequired { reason, step } => (
+                "run_compaction_required",
+                Some(format!("{reason:?} at step {step}")),
+            ),
         };
         self.post_runtime_snapshot(name, snapshot, error);
         self.post_runtime(
@@ -146,6 +261,15 @@ impl RunDebug {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>(),
                 "pending_count": snapshot.pending.len(),
+                "checkpoint_count": snapshot.checkpoint_count,
+                "effective_roles": snapshot
+                    .effective_roles
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                "automatic_compactions": snapshot.automatic_compactions,
+                "max_automatic_compactions": snapshot.max_automatic_compactions,
+                "user_compaction_queued": snapshot.user_compaction_queued,
             }),
         );
     }
@@ -201,6 +325,10 @@ impl ModelService for ObservedModelService {
         self.inner.capabilities()
     }
 
+    fn context_window_tokens(&self) -> u64 {
+        self.inner.context_window_tokens()
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let debug = Arc::clone(&self.debug);
         let endpoint = self.endpoint.clone();
@@ -242,6 +370,7 @@ impl ModelService for ObservedModelService {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use agent_context::{ContextWindowDecision, StrategyReport};
     use agent_core::{AgentExecution, ExecutionBudget, ExecutionSpec};
     use agent_model::{
         GenerationConfig, ModelCallContext, ModelCapabilities, ModelError, ModelEvent,
@@ -259,6 +388,8 @@ mod tests {
 
     use super::*;
     use crate::runtime::HarnessRuntime;
+
+    const TEST_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
     async fn start_viewer() -> (String, mpsc::Receiver<BroadcastMessage>) {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -423,6 +554,7 @@ mod tests {
         let expected_events = message_events(&assistant());
         let inner = Arc::new(ScriptedModelService::new(
             capabilities(),
+            TEST_CONTEXT_WINDOW_TOKENS,
             [
                 ModelScript::Events(expected_events.clone()),
                 ModelScript::FailEstablishment(ModelError::Auth("denied".to_owned())),
@@ -488,6 +620,7 @@ mod tests {
         let expected_events = message_events(&assistant());
         let inner = Arc::new(ScriptedModelService::new(
             capabilities(),
+            TEST_CONTEXT_WINDOW_TOKENS,
             [
                 ModelScript::Events(expected_events),
                 ModelScript::Events(vec![
@@ -602,6 +735,7 @@ mod tests {
         let debug = debug.expect("debug enabled");
         let inner: Arc<dyn ModelService> = Arc::new(ScriptedModelService::completing(
             capabilities(),
+            TEST_CONTEXT_WINDOW_TOKENS,
             assistant(),
         ));
         let selected = debug.observe_model(Arc::clone(&inner));
@@ -653,6 +787,7 @@ mod tests {
         let expected_events = message_events(&assistant());
         let model = debug.observe_model(Arc::new(ScriptedModelService::new(
             capabilities(),
+            TEST_CONTEXT_WINDOW_TOKENS,
             [ModelScript::Events(expected_events.clone())],
         )));
         let stream = model
@@ -667,6 +802,61 @@ mod tests {
                 .iter()
                 .all(|message| message.envelope.ch == DebugChannel::Llm)
         );
+    }
+
+    #[tokio::test]
+    async fn context_runtime_events_are_structured_and_share_the_run_correlation() {
+        let (viewer_url, mut messages) = start_viewer().await;
+        let mut runtime = HarnessRuntime::for_scenario("context_debug");
+        let (prepared, debug) =
+            run_debug(Some(&viewer_url), DebugLayerSelection::Agent, &mut runtime);
+        let debug = debug.expect("debug enabled");
+        let evaluation = ContextWindowEvaluation {
+            used_tokens: Some(90),
+            context_window_tokens: 100,
+            used_ratio: Some(0.9),
+            decision: ContextWindowDecision::CompactionRequired,
+        };
+        let report = HarnessCompactionReport {
+            cause: crate::context::HarnessCompactionCause::BeforeRunThreshold,
+            strategy: StrategyReport {
+                strategy: "rolling_summary_same_model".to_owned(),
+                compressed_blocks: 2,
+                retained_blocks: 1,
+                model: None,
+                usage: None,
+            },
+            trigger: Some(evaluation.clone()),
+        };
+
+        debug.post_context_preflight(&evaluation);
+        debug.post_compaction_report("compacted", &report, 1);
+        debug.post_compaction_queued();
+        debug.post_continuation_started(&prepared.run_id, &HarnessRunId::from_sequence(2));
+
+        let received = receive_messages(&mut messages, 4).await;
+        assert!(received.iter().all(|message| {
+            message.envelope.ch == DebugChannel::Runtime
+                && message.envelope.correlation_id.as_deref()
+                    == Some("session_verify_context_debug/run_1")
+        }));
+        assert_eq!(
+            received
+                .iter()
+                .filter_map(|message| match &message.envelope.payload {
+                    DebugPayload::RuntimeEvent { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "context_window_evaluated",
+                "context_compaction_finished",
+                "user_compaction_queued",
+                "continuation_started",
+            ]
+        );
+        let serialized = serde_json::to_string(&received).expect("serialize debug events");
+        assert!(!serialized.contains("summary body"));
     }
 
     #[tokio::test]
@@ -686,11 +876,15 @@ mod tests {
         let debug = debug.expect("debug enabled");
         let model = debug.observe_model(Arc::new(ScriptedModelService::completing(
             capabilities(),
+            TEST_CONTEXT_WINDOW_TOKENS,
             assistant(),
         )));
         let spec = ExecutionSpec {
             instructions: vec![],
             model,
+            context_window: Arc::new(
+                agent_context::ContextWindowEvaluator::new(0.8).expect("valid test threshold"),
+            ),
             tools: ToolRegistry::new().snapshot(),
             budget: ExecutionBudget::default(),
         };

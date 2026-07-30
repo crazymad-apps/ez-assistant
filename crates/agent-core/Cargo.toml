@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+agent-context = { path = "../agent-context" }
 agent-model.path = "../agent-model"
 agent-tools.path = "../agent-tools"
 agent-types.path = "../agent-types"

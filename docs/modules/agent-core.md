@@ -14,10 +14,17 @@
 - Agent Loop 与终止条件。
 - 模型 Provider trait 和流式响应抽象。
 - 单次 `AgentExecution` 的上下文组装、工具结果回填和事件输出。
+- 每个 Model Step 建立请求前通过共享 Context Window Evaluator 执行上下文预检；
+  判断只使用最近完整 Provider Result 的 `total_tokens` 和当前模型
+  `context_window_tokens`。达到压缩阈值或 Provider 报告 Context Overflow 时，以
+  可靠终态交回 Runtime。
 - 与执行逻辑直接相关的 token、轮次和工具调用限制。
 - 规范对话、Provider Codec、Memory/Safety/Recorder/Authorizer 等稳定能力接口。
 
 Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools`](agent-tools.md)；Core 只消费 `ToolSetSnapshot` 与派发结果。
+
+Context Window Evaluator、历史布局和 replacement 校验归
+[`agent-context`](agent-context.md)；Core 只调用共享能力，不复制实现。
 
 ## 核心约束
 
@@ -32,7 +39,16 @@ Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；规范快照不得暴露 pending exchange。
-- 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付且三种终态都报告丢弃计数。
+- 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付；终态包括
+  Completed、Failed、Cancelled 和 CompactionRequired，均报告丢弃计数。
+- Core 不发起上下文压缩请求、不生成 Context Checkpoint，也不在同一个
+  `AgentExecution` 内压缩后重试；压缩编排和 continuation 属于上层。v0.3.0 由
+  Runtime Harness 临时验证，正式 Runtime 接口留待总体设计。
+- Provider 的 Context Overflow 通过 provider-neutral `ModelError` 进入 Core，Core
+  转换为 Agent 层 CompactionRequired 终态；Provider 不直接发布 AgentEvent。
+- 未完成 Model Step 的流式 delta 不是规范事实。Context Overflow 时丢弃当前 Step；
+  Core 只有在完整 `TurnFinished` 后才记录 Tool Call 并执行工具，因此压缩交接不得
+  留下未配对 Tool Call/Result。
 
 ## 最小可执行 Agent
 
@@ -65,6 +81,8 @@ Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools
 - Session 列表、标题、归档和持久化。
 - 全局 Run 队列、定时任务、模型账户配置。
 - `RunId` 的生成、状态、查询、取消、恢复和事件关联。
+- Compression Strategy 执行、compression request、Context Checkpoint 持久化和
+  上层 continuation 调度；v0.3.0 的对应行为只存在于 Runtime Harness。
 - 真实文件权限、Shell 确认界面和审计存储。
 - Tauri event/channel 与前端 DTO 转换。
 

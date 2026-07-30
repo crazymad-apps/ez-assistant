@@ -5,19 +5,22 @@
 
 use std::sync::Arc;
 
+use agent_context::ContextWindowEvaluator;
 use agent_model::ModelService;
 use agent_tools::ToolSetSnapshot;
 
 /// 一次 Agent 执行的不可变规格（事实源）。
 ///
-/// 本版本为四字段（无 `context`）：执行上下文组装是纯机械投影
-/// （instructions→system、投影+新输入→conversation、快照→tools），没有任何
-/// 真实策略字段；token 预算/裁剪/压缩等策略待真实需求再引入。
+/// 执行上下文组装保持纯机械投影
+/// （instructions→system、输入快照→conversation、工具快照→tools）；共享
+/// Evaluator 只负责每个 Model Step 前的窗口预检，不在 Core 内发起压缩。
 pub struct ExecutionSpec {
     /// 系统指令列表，直接映射 `ModelRequest.system`。
     pub instructions: Vec<String>,
     /// 已绑定的模型服务实例（构造期含 endpoint/credential/model）。
     pub model: Arc<dyn ModelService>,
+    /// 每个 Model Step 前使用的共享上下文窗口判断入口。
+    pub context_window: Arc<ContextWindowEvaluator>,
     /// 执行期不可变的工具集快照；空快照是合法输入（最小可执行 Agent 纯文本收尾）。
     pub tools: ToolSetSnapshot,
     /// 显式资源预算；全 `Option`，Core 不注入隐藏上限。
@@ -55,6 +58,10 @@ mod tests {
     impl ModelService for NoopModel {
         fn capabilities(&self) -> &ModelCapabilities {
             &self.capabilities
+        }
+
+        fn context_window_tokens(&self) -> u64 {
+            128_000
         }
 
         fn stream(
@@ -99,6 +106,7 @@ mod tests {
                     streaming: true,
                 },
             }),
+            context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: ToolSetSnapshot::default(),
             budget: ExecutionBudget::default(),
         };

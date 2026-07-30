@@ -11,6 +11,10 @@
 - 不依赖 Tokio、HTTP、Provider SDK、Tauri、Runtime、数据库或 `assistant-protocol`。
 - Provider 原生 schema 不得进入本 crate；不透明 Provider 状态必须有 Provider、Protocol、类型和格式版本边界。
 - 公共不变量使用受控构造并覆盖序列化 round-trip 测试。
+- `ConversationSnapshot` 是 ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果
+  顺序的唯一校验入口；Context、Provider 和 Harness 只能复用，不能各自实现。
+- `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存
+  策略、模型或 usage。
 
 ## 验证
 

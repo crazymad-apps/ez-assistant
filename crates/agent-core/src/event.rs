@@ -5,7 +5,7 @@
 //! - 普通观察事件使用 bounded `tokio::sync::mpsc`，容量
 //!   [`AGENT_EVENT_CHANNEL_CAPACITY`]；
 //! - 普通事件经 `try_send`：通道满即丢弃并用原子计数器计数；
-//! - 唯一终态使用独立 oneshot，排在已入队普通事件之后可靠交付，三种终态都携带
+//! - 唯一终态使用独立 oneshot，排在已入队普通事件之后可靠交付，四种终态都携带
 //!   `dropped_events`；
 //! - 订阅断开（receiver dropped）不影响执行，发送方不阻塞、不 panic。
 
@@ -20,11 +20,11 @@ use std::{
 };
 
 use agent_tools::ToolOutputChannel;
-use agent_types::{AssistantMessage, PartId, ToolCall, ToolCallId};
+use agent_types::{AssistantMessage, PartId, TokenUsage, ToolCall, ToolCallId};
 use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::ExecutionError;
+use crate::{CompactionReason, ExecutionError};
 
 /// 事件通道容量；超出后新事件丢弃并计数。
 pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -32,7 +32,8 @@ pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// 一次 Agent 执行对外发出的规范事件。
 ///
 /// 生命周期：首个事件为 `ExecutionStarted`，恰好以一个终态事件
-/// （`ExecutionCompleted` / `ExecutionFailed` / `ExecutionCancelled`）结束。
+/// （`ExecutionCompleted` / `ExecutionFailed` / `ExecutionCancelled` /
+/// `ExecutionCompactionRequired`）结束。
 /// 事件只面向 UI/诊断观察，规范对话以 Recorder 落账为准。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -43,6 +44,13 @@ pub enum AgentEvent {
     StepStarted {
         /// 当前模型 Turn 序号。
         step: u32,
+    },
+    /// 一个完整模型 Step 最终确认的 Provider token 用量。
+    UsageUpdated {
+        /// 当前模型 Turn 序号。
+        step: u32,
+        /// 本 Step 的最终 token 用量。
+        usage: TokenUsage,
     },
     /// 正文文本增量。
     TextDelta {
@@ -103,6 +111,15 @@ pub enum AgentEvent {
         /// 本次执行因背压或订阅断开丢弃的事件数。
         dropped_events: u64,
     },
+    /// 上下文压缩交接终态；Core 不在本次执行内发起压缩或续跑。
+    ExecutionCompactionRequired {
+        /// 触发交接的原因。
+        reason: CompactionReason,
+        /// 阈值预检即将开始或 Provider Overflow 已经开始的 Model Step。
+        step: u32,
+        /// 本次执行因背压或订阅断开丢弃的事件数。
+        dropped_events: u64,
+    },
 }
 
 /// 一次工具调用的完成状态；与 `agent_types::ToolResultStatus` 的成败语义对齐。
@@ -116,13 +133,14 @@ pub enum ToolCompletionStatus {
 }
 
 impl AgentEvent {
-    /// 是否为终态事件（`ExecutionCompleted` / `ExecutionFailed` / `ExecutionCancelled`）。
+    /// 是否为四种可靠终态事件之一。
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
             Self::ExecutionCompleted { .. }
                 | Self::ExecutionFailed { .. }
                 | Self::ExecutionCancelled { .. }
+                | Self::ExecutionCompactionRequired { .. }
         )
     }
 }
@@ -253,11 +271,25 @@ mod tests {
         }
     }
 
+    fn token_usage() -> TokenUsage {
+        TokenUsage {
+            input_tokens: 80,
+            output_tokens: 20,
+            total_tokens: 100,
+            cached_input_tokens: Some(32),
+            reasoning_tokens: Some(8),
+        }
+    }
+
     #[test]
     fn every_event_variant_round_trips_serde() {
         let events = vec![
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
+            AgentEvent::UsageUpdated {
+                step: 1,
+                usage: token_usage(),
+            },
             AgentEvent::TextDelta {
                 id: part_id(),
                 delta: "hello".to_owned(),
@@ -289,6 +321,11 @@ mod tests {
                 dropped_events: 3,
             },
             AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCompactionRequired {
+                reason: CompactionReason::ThresholdReached,
+                step: 2,
+                dropped_events: 1,
+            },
         ];
         for event in events {
             let json = serde_json::to_string(&event).expect("serialize event");
@@ -301,6 +338,12 @@ mod tests {
         let json =
             serde_json::to_value(AgentEvent::ExecutionStarted).expect("serialize event to value");
         assert_eq!(json, serde_json::json!({"type": "execution_started"}));
+        let json = serde_json::to_value(AgentEvent::UsageUpdated {
+            step: 1,
+            usage: token_usage(),
+        })
+        .expect("serialize event to value");
+        assert_eq!(json["type"], "usage_updated");
         let json = serde_json::to_value(AgentEvent::ToolOutput {
             call_id: call_id(),
             channel: ToolOutputChannel::Stdout,
@@ -318,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_are_exactly_the_three_end_states() {
+    fn terminal_events_are_exactly_the_four_end_states() {
         let terminals = vec![
             AgentEvent::ExecutionCompleted {
                 message: assistant_message(),
@@ -332,12 +375,21 @@ mod tests {
                 dropped_events: 0,
             },
             AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCompactionRequired {
+                reason: CompactionReason::ProviderOverflow,
+                step: 3,
+                dropped_events: 0,
+            },
         ];
         for event in terminals {
             assert!(event.is_terminal());
         }
         for event in [
             AgentEvent::ExecutionStarted,
+            AgentEvent::UsageUpdated {
+                step: 1,
+                usage: token_usage(),
+            },
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolStarted { call_id: call_id() },
         ] {
@@ -397,6 +449,38 @@ mod tests {
             next(&mut stream),
             Some(AgentEvent::ExecutionCompleted {
                 message: assistant_message(),
+                dropped_events: 1,
+            })
+        );
+        assert_eq!(next(&mut stream), None);
+    }
+
+    #[test]
+    fn compaction_terminal_is_reliable_when_observation_queue_is_full() {
+        let (sender, mut stream) = agent_event_channel();
+        for _ in 0..AGENT_EVENT_CHANNEL_CAPACITY {
+            sender.send(AgentEvent::ExecutionStarted);
+        }
+        sender.send(AgentEvent::UsageUpdated {
+            step: 4,
+            usage: token_usage(),
+        });
+        assert_eq!(sender.dropped_events(), 1);
+        sender.send(AgentEvent::ExecutionCompactionRequired {
+            reason: CompactionReason::ThresholdReached,
+            step: 4,
+            dropped_events: sender.dropped_events(),
+        });
+        drop(sender);
+
+        for _ in 0..AGENT_EVENT_CHANNEL_CAPACITY {
+            assert_eq!(next(&mut stream), Some(AgentEvent::ExecutionStarted));
+        }
+        assert_eq!(
+            next(&mut stream),
+            Some(AgentEvent::ExecutionCompactionRequired {
+                reason: CompactionReason::ThresholdReached,
+                step: 4,
                 dropped_events: 1,
             })
         );

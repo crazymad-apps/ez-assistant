@@ -1,9 +1,9 @@
 # 长任务机制参考（opencode 调研）
 
 - 记录日期：260726
-- 状态：待评估
+- 状态：已部分纳入 v0.3.0；Runtime drain/续跑部分仍待后续版本评估
 - 来源：对 `~/github/opencode`（v1.18.3-dev, commit 08fb473735）的只读调研
-- 目标版本：待定（预计为 Runtime 接入版本参考）
+- 目标版本：v0.3.0（上下文压缩/overflow 部分）及后续 Runtime 版本
 
 ## 原始内容
 
@@ -42,12 +42,29 @@
 长任务问题的核心关注点是**单轮请求撞上上下文窗口**：每轮重发完整对话，对话单调增长，工具输出是膨胀主力，撞墙只是时间问题。这是路线图 v0.3.0（上下文系统）的主题本身。分层防线（按"越早越便宜"排序）：
 
 1. 源头控制：工具输出有界（**v0.2.0 已覆盖**：read 分页/截断标记、search 条数上限、shell 尾部截断；opencode 另有超限落盘 + 预览提示，信息留在工具侧可再取回）。
-2. 历史裁剪：旧工具输出替换为占位符，保留 Tool Call/Result 配对（v0.3.0）。
-3. 压缩/摘要：早期历史压缩为 summary；不得破坏 reasoning、Provider 状态、配对（v0.3.0）。
-4. token 预算与预估：组装前估算、超限前先裁剪/压缩（v0.3.0）。
-5. Provider overflow 恢复：显式次数上限的压缩重试，禁止隐藏重试循环（v0.3.0）。
+2. 历史裁剪：旧工具输出替换为占位符，保留 Tool Call/Result 配对；v0.3.0 只保留
+   Compression Strategy 扩展点，暂不实现该策略。
+3. 压缩/摘要：v0.3.0 首期使用当前会话同一模型把早期闭合历史压缩为
+   Context Checkpoint；Checkpoint 保存完整 replacement snapshot，不使用
+   `covers_through`，且不得破坏 reasoning、Provider 状态、配对。
+4. 上下文窗口判断：模型服务显式提供 `context_window_tokens`；共享 Evaluator 使用
+   最近完整 Provider Result 的 `total_tokens` 计算占用比例。Runtime 在 Run 前、
+   Core 在每个 Model Step 前复用该入口；Run 内达到阈值时以 CompactionRequired
+   终态交回 Runtime，不在 Core 内压缩或重试（v0.3.0）。
+5. Provider overflow 恢复：Provider 映射 provider-neutral ContextOverflow，Core
+   丢弃当前未完成 Step 并发出同一个 CompactionRequired 终态；Runtime 以上一个完整
+   Step 为稳定边界，在显式次数上限内统一执行压缩和 continuation（v0.3.0）。
+6. 用户主动压缩：UI 只提交 Runtime 上下文维护意图；Runtime 直接压缩并提交
+   Checkpoint，不写入 UserMessage、不启动 AgentExecution，压缩后不 continuation
+   （v0.3.0）。
 
-v0.2.0 预留的插入点：BuildingContext 显式步骤（v0.3.0 Prompt Compiler 的挂载点）；`ExecutionSpec` 未来引入的 `context` 字段（v0.3.0 预算策略落点）；规范投影 + journal 保证裁剪不碰事实源。
+Run 前阈值、Run 内阈值、Provider Overflow 和用户主动压缩四条路径必须复用同一个
+Runtime 压缩核心入口；触发原因仅作为参数/审计信息，或由轻量调用封装区分后处理。
+上下文切分、compression request、replacement 校验和 Checkpoint 提交不得重复实现。
+
+v0.2.0 预留的插入点：BuildingContext 显式步骤（v0.3.0 Context Preflight 的挂载点）；
+`ExecutionSpec` 引入共享 Context Window Evaluator；既有 `ModelRequest` 继续作为统一
+请求契约，规范投影与 Conversation History 保证压缩不删除原始事实。
 
 ## 补充：单轮输出上限与"任务堆积在单轮"（2026-07-26 讨论结论）
 

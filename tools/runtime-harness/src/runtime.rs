@@ -6,14 +6,25 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use agent_context::ContextWindowEvaluator;
+use agent_context::{CompressionStrategy, ContextWindowEvaluation};
 use agent_core::{
-    AgentEvent, AgentExecution, ExecutionContext, ExecutionControl, ExecutionOutcome, ExecutionSpec,
+    AgentEvent, AgentExecution, CompactionReason, ExecutionContext, ExecutionControl,
+    ExecutionOutcome, ExecutionSpec,
 };
-use agent_types::{ConversationMessage, MessageId, PartId, TextPart, UserMessage, UserPart};
+use agent_types::{
+    ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart, UserMessage, UserPart,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     HarnessError,
+    context::{
+        HarnessCompactionOutcome, HarnessCompactionReport, HarnessCompactionRequiredRun,
+        HarnessContextCoordinator, HarnessPreparedContext, HarnessRunContextKind, HarnessTaskChain,
+        handle_compaction_required, handle_user_compaction, prepare_user_context,
+    },
     journal::{HarnessJournal, HarnessRecorder, JournalSnapshot, PendingSummary},
 };
 
@@ -54,6 +65,7 @@ pub(crate) enum RunStatus {
     Completed,
     Failed,
     Cancelled,
+    CompactionRequired,
 }
 
 impl fmt::Display for RunStatus {
@@ -64,6 +76,7 @@ impl fmt::Display for RunStatus {
             Self::Completed => formatter.write_str("completed"),
             Self::Failed => formatter.write_str("failed"),
             Self::Cancelled => formatter.write_str("cancelled"),
+            Self::CompactionRequired => formatter.write_str("compaction_required"),
         }
     }
 }
@@ -73,6 +86,7 @@ pub(crate) enum TerminalKind {
     Completed,
     Failed,
     Cancelled,
+    CompactionRequired,
 }
 
 impl fmt::Display for TerminalKind {
@@ -81,6 +95,7 @@ impl fmt::Display for TerminalKind {
             Self::Completed => formatter.write_str("completed"),
             Self::Failed => formatter.write_str("failed"),
             Self::Cancelled => formatter.write_str("cancelled"),
+            Self::CompactionRequired => formatter.write_str("compaction_required"),
         }
     }
 }
@@ -88,6 +103,7 @@ impl fmt::Display for TerminalKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MessageRole {
     System,
+    ContextSummary,
     User,
     Assistant,
     Tool,
@@ -97,6 +113,7 @@ impl fmt::Display for MessageRole {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::System => formatter.write_str("system"),
+            Self::ContextSummary => formatter.write_str("context_summary"),
             Self::User => formatter.write_str("user"),
             Self::Assistant => formatter.write_str("assistant"),
             Self::Tool => formatter.write_str("tool"),
@@ -117,18 +134,28 @@ pub(crate) struct RunSnapshot {
     pub(crate) dropped_events: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeSnapshot {
     pub(crate) session_id: HarnessSessionId,
     pub(crate) run: Option<RunSnapshot>,
     pub(crate) completed_messages: usize,
     pub(crate) roles: Vec<MessageRole>,
+    pub(crate) effective_roles: Vec<MessageRole>,
     pub(crate) pending: Vec<PendingSummary>,
+    pub(crate) checkpoint_count: usize,
+    pub(crate) automatic_compactions: u32,
+    pub(crate) max_automatic_compactions: u32,
+    pub(crate) user_compaction_queued: bool,
+    pub(crate) last_compaction: Option<HarnessCompactionReport>,
 }
 
 pub(crate) struct PreparedRun {
     pub(crate) run_id: HarnessRunId,
+    pub(crate) user: Option<UserMessage>,
+    pub(crate) kind: HarnessRunContextKind,
     pub(crate) input: agent_core::ExecutionInput,
+    pub(crate) preflight: Option<ContextWindowEvaluation>,
+    pub(crate) compaction: Option<HarnessCompactionReport>,
     pub(crate) recorder: Arc<HarnessRecorder>,
 }
 
@@ -177,7 +204,10 @@ impl HarnessRun {
             (RunStatus::Pending, RunStatus::Running)
                 | (
                     RunStatus::Running,
-                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                    RunStatus::Completed
+                        | RunStatus::Failed
+                        | RunStatus::Cancelled
+                        | RunStatus::CompactionRequired
                 )
         );
         if !is_valid {
@@ -202,6 +232,10 @@ impl HarnessRun {
             ExecutionOutcome::Completed(_) => (RunStatus::Completed, TerminalKind::Completed),
             ExecutionOutcome::Failed(_) => (RunStatus::Failed, TerminalKind::Failed),
             ExecutionOutcome::Cancelled => (RunStatus::Cancelled, TerminalKind::Cancelled),
+            ExecutionOutcome::CompactionRequired { .. } => (
+                RunStatus::CompactionRequired,
+                TerminalKind::CompactionRequired,
+            ),
         };
         self.transition(status)?;
         self.finished_at = Some(SystemTime::now());
@@ -226,6 +260,10 @@ impl HarnessRun {
             }
             AgentEvent::ExecutionCancelled { dropped_events } => {
                 self.events.terminal = Some(TerminalKind::Cancelled);
+                self.events.dropped_events = *dropped_events;
+            }
+            AgentEvent::ExecutionCompactionRequired { dropped_events, .. } => {
+                self.events.terminal = Some(TerminalKind::CompactionRequired);
                 self.events.dropped_events = *dropped_events;
             }
             _ => {}
@@ -258,26 +296,42 @@ pub(crate) struct HarnessRuntime {
     next_run: u64,
     active_run: Option<HarnessRun>,
     recent_run: Option<HarnessRun>,
+    task_chain: HarnessTaskChain,
+    user_compaction_queued: bool,
+    last_compaction: Option<HarnessCompactionReport>,
 }
 
 impl HarnessRuntime {
-    pub(crate) fn new() -> Result<Self, HarnessError> {
+    pub(crate) fn new_with_max_automatic_compactions(
+        max_automatic_compactions: u32,
+    ) -> Result<Self, HarnessError> {
         let start_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| HarnessError::Config("system clock is before Unix epoch".to_owned()))?
             .as_millis();
-        Ok(Self::with_session_id(HarnessSessionId::from_value(
-            format!("session_{}_{}", std::process::id(), start_ms),
-        )))
+        Ok(Self::with_session_id_and_limit(
+            HarnessSessionId::from_value(format!("session_{}_{}", std::process::id(), start_ms)),
+            max_automatic_compactions,
+        ))
     }
 
     fn with_session_id(session_id: HarnessSessionId) -> Self {
+        Self::with_session_id_and_limit(session_id, 2)
+    }
+
+    pub(crate) fn with_session_id_and_limit(
+        session_id: HarnessSessionId,
+        max_automatic_compactions: u32,
+    ) -> Self {
         Self {
             session_id,
             journal: HarnessJournal::new(),
             next_run: 1,
             active_run: None,
             recent_run: None,
+            task_chain: HarnessTaskChain::new(max_automatic_compactions),
+            user_compaction_queued: false,
+            last_compaction: None,
         }
     }
 
@@ -288,35 +342,125 @@ impl HarnessRuntime {
     }
 
     pub(crate) fn prepare_run(&mut self, text: &str) -> Result<PreparedRun, HarnessError> {
+        self.ensure_can_prepare(text)?;
+        self.task_chain.reset();
+        let run_id = self.allocate_run_id();
+        let user = user_message(&run_id, text)?;
+        self.journal.append_user(user.clone())?;
+        let snapshot = self.journal.snapshot()?.conversation;
+        self.active_run = Some(HarnessRun::new(run_id.clone()));
+
+        Ok(PreparedRun {
+            run_id: run_id.clone(),
+            user: Some(user),
+            kind: HarnessRunContextKind::Initial,
+            input: agent_core::ExecutionInput {
+                conversation: snapshot,
+            },
+            preflight: None,
+            compaction: None,
+            recorder: HarnessRecorder::new(Arc::clone(&self.journal), run_id),
+        })
+    }
+
+    pub(crate) async fn prepare_context_run(
+        &mut self,
+        text: &str,
+        spec: Arc<ExecutionSpec>,
+        strategy: Arc<dyn CompressionStrategy>,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedRun, HarnessError> {
+        self.ensure_can_prepare(text)?;
+        self.task_chain.reset();
+        let run_id = self.allocate_run_id();
+        let user = user_message(&run_id, text)?;
+        let coordinator = HarnessContextCoordinator::new(Arc::clone(&self.journal), strategy);
+        let prepared = prepare_user_context(
+            &coordinator,
+            &mut self.task_chain,
+            user.clone(),
+            spec,
+            cancellation,
+        )
+        .await
+        .map_err(context_error)?;
+        self.prepare_from_context(run_id, Some(user), prepared)
+    }
+
+    pub(crate) async fn prepare_continuation(
+        &mut self,
+        previous_run_id: HarnessRunId,
+        reason: CompactionReason,
+        step: u32,
+        spec: Arc<ExecutionSpec>,
+        strategy: Arc<dyn CompressionStrategy>,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedRun, HarnessError> {
         if self.active_run.is_some() {
             return Err(HarnessError::Execution(
-                "another run is already active".to_owned(),
+                "cannot prepare a continuation while a run is active".to_owned(),
             ));
         }
         if self.journal.has_pending()? {
             return Err(crate::journal::JournalError::PendingBlocksRun.into());
         }
-        if text.trim().is_empty() {
-            return Err(HarnessError::Config(
-                "user input must not be empty".to_owned(),
+        let coordinator = HarnessContextCoordinator::new(Arc::clone(&self.journal), strategy);
+        let prepared = handle_compaction_required(
+            &coordinator,
+            &mut self.task_chain,
+            &HarnessCompactionRequiredRun {
+                run_id: previous_run_id,
+                reason,
+                step,
+            },
+            spec,
+            cancellation,
+        )
+        .await
+        .map_err(context_error)?;
+        let run_id = self.allocate_run_id();
+        self.prepare_from_context(run_id, None, prepared)
+    }
+
+    pub(crate) async fn compact_user_context(
+        &mut self,
+        spec: Arc<ExecutionSpec>,
+        strategy: Arc<dyn CompressionStrategy>,
+        cancellation: CancellationToken,
+    ) -> Result<HarnessCompactionOutcome, HarnessError> {
+        if self.active_run.is_some() {
+            return Err(HarnessError::Execution(
+                "cannot compact context while a run is active".to_owned(),
             ));
         }
+        if self.journal.has_pending()? {
+            return Err(crate::journal::JournalError::PendingBlocksRun.into());
+        }
+        let coordinator = HarnessContextCoordinator::new(Arc::clone(&self.journal), strategy);
+        let outcome = handle_user_compaction(&coordinator, spec, cancellation)
+            .await
+            .map_err(context_error)?;
+        self.last_compaction = Some(match &outcome {
+            HarnessCompactionOutcome::Compacted { report, .. }
+            | HarnessCompactionOutcome::NoOp { report } => report.clone(),
+        });
+        Ok(outcome)
+    }
 
-        let run_id = HarnessRunId::from_sequence(self.next_run);
-        let snapshot = self.journal.snapshot()?.conversation;
-        let user = user_message(&run_id, text)?;
-        self.journal.append_user(user.clone())?;
-        self.next_run += 1;
-        self.active_run = Some(HarnessRun::new(run_id.clone()));
+    pub(crate) fn queue_user_compaction(&mut self) {
+        self.user_compaction_queued = true;
+    }
 
-        Ok(PreparedRun {
-            run_id: run_id.clone(),
-            input: agent_core::ExecutionInput {
-                conversation: snapshot,
-                user_input: user,
-            },
-            recorder: HarnessRecorder::new(Arc::clone(&self.journal), run_id),
-        })
+    pub(crate) fn take_queued_user_compaction(&mut self) -> bool {
+        std::mem::take(&mut self.user_compaction_queued)
+    }
+
+    pub(crate) fn inject_checkpoint_failure_for_verification(&self) {
+        self.journal.inject_checkpoint_failure_for_verification();
+    }
+
+    pub(crate) fn next_run_id(&self) -> HarnessRunId {
+        HarnessRunId::from_sequence(self.next_run)
     }
 
     #[cfg(test)]
@@ -428,11 +572,15 @@ impl HarnessRuntime {
         }
         self.journal.reset()?;
         self.recent_run = None;
+        self.task_chain.reset();
+        self.user_compaction_queued = false;
+        self.last_compaction = None;
         Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> Result<RuntimeSnapshot, HarnessError> {
         let journal = self.journal.snapshot()?;
+        let effective = self.journal.effective_snapshot()?;
         Ok(RuntimeSnapshot {
             session_id: self.session_id.clone(),
             run: self
@@ -442,7 +590,13 @@ impl HarnessRuntime {
                 .map(HarnessRun::snapshot),
             completed_messages: journal.conversation.messages.len(),
             roles: message_roles(&journal),
+            effective_roles: message_roles_from_conversation(&effective),
             pending: journal.pending,
+            checkpoint_count: self.journal.checkpoint_count()?,
+            automatic_compactions: self.task_chain.automatic_compactions(),
+            max_automatic_compactions: self.task_chain.max_automatic_compactions(),
+            user_compaction_queued: self.user_compaction_queued,
+            last_compaction: self.last_compaction.clone(),
         })
     }
 
@@ -463,6 +617,55 @@ impl HarnessRuntime {
             .filter(|run| run.id == *run_id)
             .ok_or_else(|| HarnessError::Execution(format!("run `{run_id}` is not active")))
     }
+
+    fn ensure_can_prepare(&self, text: &str) -> Result<(), HarnessError> {
+        if self.active_run.is_some() {
+            return Err(HarnessError::Execution(
+                "another run is already active".to_owned(),
+            ));
+        }
+        if self.journal.has_pending()? {
+            return Err(crate::journal::JournalError::PendingBlocksRun.into());
+        }
+        if text.trim().is_empty() {
+            return Err(HarnessError::Config(
+                "user input must not be empty".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn allocate_run_id(&mut self) -> HarnessRunId {
+        let run_id = HarnessRunId::from_sequence(self.next_run);
+        self.next_run += 1;
+        run_id
+    }
+
+    fn prepare_from_context(
+        &mut self,
+        run_id: HarnessRunId,
+        user: Option<UserMessage>,
+        prepared: HarnessPreparedContext,
+    ) -> Result<PreparedRun, HarnessError> {
+        if self.active_run.is_some() {
+            return Err(HarnessError::Execution(
+                "another run became active during context preparation".to_owned(),
+            ));
+        }
+        if let Some(report) = &prepared.compaction {
+            self.last_compaction = Some(report.clone());
+        }
+        self.active_run = Some(HarnessRun::new(run_id.clone()));
+        Ok(PreparedRun {
+            recorder: HarnessRecorder::new(Arc::clone(&self.journal), run_id.clone()),
+            run_id,
+            user,
+            kind: prepared.kind,
+            input: prepared.input,
+            preflight: prepared.preflight,
+            compaction: prepared.compaction,
+        })
+    }
 }
 
 fn user_message(run_id: &HarnessRunId, text: &str) -> Result<UserMessage, HarnessError> {
@@ -480,17 +683,25 @@ fn user_message(run_id: &HarnessRunId, text: &str) -> Result<UserMessage, Harnes
 }
 
 fn message_roles(snapshot: &JournalSnapshot) -> Vec<MessageRole> {
+    message_roles_from_conversation(&snapshot.conversation)
+}
+
+fn message_roles_from_conversation(snapshot: &ConversationSnapshot) -> Vec<MessageRole> {
     snapshot
-        .conversation
         .messages
         .iter()
         .map(|message| match message {
             ConversationMessage::System(_) => MessageRole::System,
+            ConversationMessage::ContextSummary(_) => MessageRole::ContextSummary,
             ConversationMessage::User(_) => MessageRole::User,
             ConversationMessage::Assistant(_) => MessageRole::Assistant,
             ConversationMessage::Tool(_) => MessageRole::Tool,
         })
         .collect()
+}
+
+fn context_error(error: impl std::fmt::Display) -> HarnessError {
+    HarnessError::Execution(format!("context orchestration failed: {error}"))
 }
 
 fn unix_ms(time: SystemTime) -> Option<u128> {
@@ -501,7 +712,9 @@ fn unix_ms(time: SystemTime) -> Option<u128> {
 
 #[cfg(test)]
 mod tests {
-    use agent_core::{BudgetKind, ExecutionBudget, ExecutionError, ExecutionRecorder};
+    use agent_core::{
+        BudgetKind, CompactionReason, ExecutionBudget, ExecutionError, ExecutionRecorder,
+    };
     use agent_model::{ModelCapabilities, ModelService};
     use agent_testkit::{ModelScript, ScriptedModelService, message_events};
     use agent_tools::{ToolRegistry, ToolSetSnapshot};
@@ -573,6 +786,9 @@ mod tests {
         let spec = ExecutionSpec {
             instructions: vec!["offline interactive test".to_owned()],
             model,
+            context_window: Arc::new(
+                ContextWindowEvaluator::new(0.8).expect("valid test threshold"),
+            ),
             tools,
             budget: ExecutionBudget {
                 max_steps: Some(8),
@@ -648,7 +864,11 @@ mod tests {
         runtime.reset().expect("reset clears pending");
         let next = runtime.prepare_run("allowed").expect("prepare after reset");
         assert_eq!(next.run_id, HarnessRunId::from_sequence(2));
-        assert!(next.input.conversation.messages.is_empty());
+        assert_eq!(next.input.conversation.messages.len(), 1);
+        assert!(matches!(
+            next.input.conversation.messages.last(),
+            Some(ConversationMessage::User(_))
+        ));
     }
 
     #[test]
@@ -656,7 +876,11 @@ mod tests {
         let mut runtime = runtime();
 
         let completed = runtime.prepare_run("complete").expect("prepare completed");
-        assert!(completed.input.conversation.messages.is_empty());
+        assert_eq!(completed.input.conversation.messages.len(), 1);
+        assert!(matches!(
+            completed.input.conversation.messages.last(),
+            Some(ConversationMessage::User(_))
+        ));
         runtime.mark_running(&completed.run_id).expect("start");
         runtime
             .finish_run(
@@ -671,7 +895,7 @@ mod tests {
         );
 
         let failed = runtime.prepare_run("fail").expect("prepare failed");
-        assert_eq!(failed.input.conversation.messages.len(), 2);
+        assert_eq!(failed.input.conversation.messages.len(), 3);
         runtime.mark_running(&failed.run_id).expect("start");
         runtime
             .finish_run(&failed.run_id, failure())
@@ -728,6 +952,39 @@ mod tests {
         assert!(run.started_at_ms <= run.finished_at_ms);
     }
 
+    #[test]
+    fn compaction_required_is_a_distinct_terminal_without_assistant_append() {
+        let mut runtime = runtime();
+        let prepared = runtime.prepare_run("compact").expect("prepare");
+        runtime.mark_running(&prepared.run_id).expect("start");
+        runtime
+            .observe_event(
+                &prepared.run_id,
+                &AgentEvent::ExecutionCompactionRequired {
+                    reason: CompactionReason::ThresholdReached,
+                    step: 1,
+                    dropped_events: 2,
+                },
+            )
+            .expect("observe terminal");
+        runtime
+            .finish_run(
+                &prepared.run_id,
+                ExecutionOutcome::CompactionRequired {
+                    reason: CompactionReason::ThresholdReached,
+                    step: 1,
+                },
+            )
+            .expect("finish");
+
+        let snapshot = runtime.snapshot().expect("snapshot");
+        let run = snapshot.run.expect("run");
+        assert_eq!(run.status, RunStatus::CompactionRequired);
+        assert_eq!(run.terminal, Some(TerminalKind::CompactionRequired));
+        assert_eq!(run.dropped_events, 2);
+        assert_eq!(snapshot.roles, vec![MessageRole::User]);
+    }
+
     #[tokio::test]
     async fn two_interactive_inputs_share_completed_tool_journal() {
         let tool_turn = tool_message("assistant_tool");
@@ -739,6 +996,7 @@ mod tests {
                 tool_calls: true,
                 streaming: true,
             },
+            128_000,
             [
                 ModelScript::Events(message_events(&tool_turn)),
                 ModelScript::Events(message_events(&first_final)),

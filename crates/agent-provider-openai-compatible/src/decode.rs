@@ -574,6 +574,9 @@ pub fn decode_error_body(body: &ChatErrorBody) -> ModelError {
     let kinds = [body.error.code.as_deref(), body.error.kind.as_deref()];
     for kind in kinds.into_iter().flatten() {
         match kind {
+            "context_length_exceeded" => {
+                return ModelError::ContextOverflow { message };
+            }
             "authentication_error"
             | "invalid_api_key"
             | "invalid_authentication"

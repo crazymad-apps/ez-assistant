@@ -17,6 +17,9 @@
 - 推送端 fire-and-forget：`post` 默认发送 `llm`，`post_on` 可指定通道；两者只做同一有界队列的非阻塞入队，共享序号、关联 ID 和静音状态。HTTP 发送由独立后台任务串行执行（连接/请求短超时）；队列满、发送失败或通道关闭时一次性告警后自静音，绝不影响主流程；server 只绑定 loopback。
 - credential 与请求/响应 header 永不进入调试 payload；消息正文、tool arguments 属于调试内容，由本地 loopback 承载。
 - 静态页由 `ServeDir` 伺服 `public/` 目录（根路径在编译期固定为本 crate 目录，运行时读盘，并统一返回 `Cache-Control: no-store`，确保普通刷新读取当前源码）；顶部 Session Tab 将 `<session>/<run>` correlation 按 session 部分聚合，同一会话的多次 Run 只显示一个 Tab，模型流卡片仍按完整 correlation 隔离；左侧固定展示模型输出，右侧以 `llm` / `agent` / `runtime` 单选 Tab 切换事件：LLM 展示原始事件，Agent/Runtime 展示轻量时间线并可展开完整原始 JSON。默认端口 7331，`DEBUG_PORT` 可覆盖。
+- Runtime 时间线对 `context_window_evaluated`、`context_compaction_finished`、
+  `user_compaction_queued` 和 `continuation_started` 提供可读标题；只投影已有结构化
+  数据，不在 viewer 中判断阈值、选择压缩策略或推导 continuation。
 
 ## 验证
 

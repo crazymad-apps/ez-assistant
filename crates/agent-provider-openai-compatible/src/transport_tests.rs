@@ -26,6 +26,7 @@ use crate::{
 
 const BASE_URL: &str = "https://api.openai.test";
 const TOKEN: &str = "sk-transport-test-marker";
+const CONTEXT_OVERFLOW_BODY: &str = include_str!("../fixtures/errors/context_overflow.json");
 
 /// 用户正文中的标记文本；任何错误与事件都不得携带它（防请求正文泄漏）。
 const USER_MARKER: &str = "USER-SECRET-MARKER";
@@ -49,6 +50,7 @@ fn service_with(transport: &Arc<RecordedTransport>) -> OpenAiCompatibleService {
         BASE_URL,
         BearerCredential::new(TOKEN),
         "gpt-test",
+        128_000,
         base_profile(),
         transport.clone(),
     )
@@ -172,6 +174,7 @@ async fn timeout_returns_transport_err() {
         BASE_URL,
         BearerCredential::new(TOKEN),
         "gpt-test",
+        128_000,
         base_profile(),
         Arc::new(StubTransport {
             error: TransportError::Timeout,
@@ -290,6 +293,27 @@ async fn structured_error_body_refines_classification() {
 }
 
 #[tokio::test]
+async fn structured_context_overflow_is_an_establishment_error() {
+    let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+        400,
+        CONTEXT_OVERFLOW_BODY,
+    ))]));
+    let service = service_with(&transport);
+
+    let error = service
+        .stream(simple_request(), ModelCallContext::default())
+        .await
+        .err()
+        .expect("context overflow must fail before stream establishment");
+    assert_eq!(
+        error,
+        ModelError::ContextOverflow {
+            message: "request is too large".to_owned(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn oversized_error_body_is_sampled_without_leaking() {
     // 超过采样上限的结构化正文被截断后按无结构化正文处理，且正文内容不外泄。
     let huge_message = "x".repeat(4096);
@@ -348,6 +372,7 @@ fn reqwest_transport_and_service_build_with_explicit_timeouts() {
         BASE_URL,
         BearerCredential::new(TOKEN),
         "gpt-test",
+        128_000,
         base_profile(),
         defaults,
     )
@@ -355,6 +380,7 @@ fn reqwest_transport_and_service_build_with_explicit_timeouts() {
     assert!(!service.capabilities().reasoning);
     assert!(service.capabilities().tool_calls);
     assert!(service.capabilities().streaming);
+    assert_eq!(service.context_window_tokens(), 128_000);
 }
 
 #[test]

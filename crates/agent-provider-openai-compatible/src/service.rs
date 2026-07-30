@@ -65,6 +65,8 @@ pub struct OpenAiCompatibleService {
     credential: BearerCredential,
     /// Provider 侧的模型名称，例如 `deepseek-v4-flash`。
     model: String,
+    /// 调用方为当前模型配置的上下文窗口上限。
+    context_window_tokens: u64,
     /// Provider 方言配置。
     profile: Profile,
     /// 底层 HTTP Transport。
@@ -74,11 +76,12 @@ pub struct OpenAiCompatibleService {
 }
 
 impl OpenAiCompatibleService {
-    /// 用默认 [`ReqwestTransport`] 创建服务。
+    /// 用默认 [`ReqwestTransport`] 和显式上下文窗口创建服务。
     pub fn new(
         base_url: impl Into<String>,
         credential: BearerCredential,
         model: impl Into<String>,
+        context_window_tokens: u64,
         profile: Profile,
         timeouts: TransportTimeouts,
     ) -> Result<Self, TransportError> {
@@ -87,16 +90,18 @@ impl OpenAiCompatibleService {
             base_url,
             credential,
             model,
+            context_window_tokens,
             profile,
             Arc::new(transport),
         ))
     }
 
-    /// 用指定 [`Transport`] 创建服务（测试与定制注入点）。
+    /// 用指定 [`Transport`] 和显式上下文窗口创建服务（测试与定制注入点）。
     pub fn with_transport(
         base_url: impl Into<String>,
         credential: BearerCredential,
         model: impl Into<String>,
+        context_window_tokens: u64,
         profile: Profile,
         transport: Arc<dyn Transport>,
     ) -> Self {
@@ -109,6 +114,7 @@ impl OpenAiCompatibleService {
             base_url: base_url.into(),
             credential,
             model: model.into(),
+            context_window_tokens,
             profile,
             transport,
             capabilities,
@@ -124,6 +130,10 @@ impl OpenAiCompatibleService {
 impl ModelService for OpenAiCompatibleService {
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        self.context_window_tokens
     }
 
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
@@ -296,14 +306,22 @@ fn event_stream(
                 }
                 let chunk: ChatChunk = match serde_json::from_str(&frame.data) {
                     Ok(chunk) => chunk,
-                    Err(error) => {
-                        yield ModelEvent::TurnFailed {
-                            error: ModelError::Protocol(format!(
-                                "sse data frame is not a valid chat chunk: {error}"
-                            )),
-                        };
-                        return;
-                    }
+                    Err(chunk_error) => match serde_json::from_str::<ChatErrorBody>(&frame.data) {
+                        Ok(body) => {
+                            yield ModelEvent::TurnFailed {
+                                error: decode_error_body(&body),
+                            };
+                            return;
+                        }
+                        Err(_) => {
+                            yield ModelEvent::TurnFailed {
+                                error: ModelError::Protocol(format!(
+                                    "sse data frame is not a valid chat chunk: {chunk_error}"
+                                )),
+                            };
+                            return;
+                        }
+                    },
                 };
                 let events = match assembler.push_chunk(&chunk) {
                     Ok(events) => events,

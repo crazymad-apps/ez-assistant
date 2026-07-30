@@ -7,7 +7,8 @@
 //! ```
 //!
 //! 环境变量：`DEEPSEEK_API_KEY`（必需）、`DEEPSEEK_BASE_URL`（可选，缺省官方
-//! endpoint）、`DEEPSEEK_MODEL`（可选，缺省 `deepseek-v4-flash`）。
+//! endpoint）、`DEEPSEEK_MODEL`（可选，缺省 `deepseek-v4-flash`）、
+//! `DEEPSEEK_CONTEXT_WINDOW_TOKENS`（可选，缺省 `128000`）。
 //! 输入一行后回车发送，reasoning 以暗色显示；`/quit` 或 Ctrl-D 退出。
 //!
 //! 调试：`--debug <url>`（或环境变量 `DEBUG_URL`）把每次 Turn 的请求快照、建立信息
@@ -47,11 +48,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "deepseek-v4-flash".to_owned());
+    let context_window_tokens = std::env::var("DEEPSEEK_CONTEXT_WINDOW_TOKENS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| "DEEPSEEK_CONTEXT_WINDOW_TOKENS 必须是正整数")?
+        .unwrap_or(128_000);
+    if context_window_tokens == 0 {
+        return Err("DEEPSEEK_CONTEXT_WINDOW_TOKENS 必须大于 0".into());
+    }
 
     let service = OpenAiCompatibleService::new(
         base_url.clone(),
         BearerCredential::new(api_key),
         model.clone(),
+        context_window_tokens,
         Profile::deepseek(),
         TransportTimeouts::default(),
     )?;

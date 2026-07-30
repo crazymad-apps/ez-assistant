@@ -10,6 +10,7 @@
 │   └── desktop/                 # Tauri 桌面应用（Vanilla TypeScript + Vite + Rust）
 ├── crates/
 │   ├── agent-core/              # Agent 推理循环、模型与工具抽象
+│   ├── agent-context/           # 共享上下文窗口判断、布局、校验与压缩策略
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
 │   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
 │   ├── agent-testkit/           # Agent 确定性测试支持
@@ -47,6 +48,7 @@
 | `apps/desktop/src/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/desktop/src-tauri/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `crates/agent-core/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-core.md`](docs/modules/agent-core.md) |
+| `crates/agent-context/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-context.md`](docs/modules/agent-context.md) |
 | `crates/agent-types/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-types.md`](docs/modules/agent-types.md) |
 | `crates/agent-model/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-model.md`](docs/modules/agent-model.md) |
 | `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
@@ -69,7 +71,11 @@
 - `assistant-runtime` 持有会话、Run、定时任务、配置、持久化和并发调度；`agent-core` 只负责单次 Agent 执行能力。
 - 不同会话可以并发；同一会话中会改变上下文的 Run 默认串行。使用 Tokio 异步任务，不为历史会话绑定操作系统线程。
 - `assistant-protocol` 必须保持轻量，只承载跨层契约；不得依赖 Tauri、具体模型、数据库或 Runtime 实现。
-- 执行依赖方向保持为：`desktop -> assistant-runtime -> agent-core -> agent-tools -> agent-types`；应用协议由 `desktop` 和 `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行类型不依赖应用协议，所有依赖禁止反向。
+- 执行依赖方向保持为：`desktop -> assistant-runtime -> agent-core -> agent-tools -> agent-types`；
+  `agent-core` 与 `assistant-runtime` 可共同向下依赖 `agent-context`，
+  `agent-context` 只依赖 `agent-model` 与 `agent-types`。应用协议由 `desktop` 和
+  `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行
+  类型不依赖应用协议，所有依赖禁止反向。
 
 ## 四、Agent 工具边界
 

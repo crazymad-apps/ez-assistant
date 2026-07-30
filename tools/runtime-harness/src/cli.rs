@@ -12,7 +12,7 @@ runtime-harness — ez-assistant version verification host
 
 USAGE:
   runtime-harness list
-  runtime-harness verify v0.2
+  runtime-harness verify v0.2|v0.3
   runtime-harness chat [--debug <url>] [--debug-layer provider|agent|both]
   runtime-harness --help
 
@@ -37,12 +37,14 @@ pub(crate) enum Command {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VersionBaseline {
     V0_2,
+    V0_3,
 }
 
 impl fmt::Display for VersionBaseline {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::V0_2 => formatter.write_str("v0.2"),
+            Self::V0_3 => formatter.write_str("v0.3"),
         }
     }
 }
@@ -126,14 +128,18 @@ fn require_no_args(command: &str, args: &[String]) -> Result<(), HarnessError> {
 
 fn parse_verify(args: &[String]) -> Result<Command, HarnessError> {
     match args {
-        [version] if version == "v0.2" => Ok(Command::Verify {
-            version: VersionBaseline::V0_2,
+        [version] if version == "v0.2" || version == "v0.3" => Ok(Command::Verify {
+            version: if version == "v0.2" {
+                VersionBaseline::V0_2
+            } else {
+                VersionBaseline::V0_3
+            },
         }),
         [] => Err(HarnessError::Cli(
-            "`verify` requires a version; supported: v0.2".to_owned(),
+            "`verify` requires a version; supported: v0.2, v0.3".to_owned(),
         )),
         [version] => Err(HarnessError::Cli(format!(
-            "unsupported version `{version}`; supported: v0.2"
+            "unsupported version `{version}`; supported: v0.2, v0.3"
         ))),
         _ => Err(HarnessError::Cli(
             "`verify` accepts exactly one version".to_owned(),
@@ -234,6 +240,12 @@ mod tests {
             parse_ok(&["verify", "v0.2"], None),
             Command::Verify {
                 version: VersionBaseline::V0_2,
+            }
+        );
+        assert_eq!(
+            parse_ok(&["verify", "v0.3"], None),
+            Command::Verify {
+                version: VersionBaseline::V0_3,
             }
         );
         assert_eq!(

@@ -10,6 +10,7 @@ const INPUT_CAPACITY: usize = 16;
 pub(crate) enum InputCommand {
     Text(String),
     State,
+    Compact,
     Reset,
     Cancel,
     Quit,
@@ -19,6 +20,8 @@ pub(crate) enum InputCommand {
 pub(crate) enum InputAction {
     Start(String),
     ShowState,
+    Compact,
+    QueueCompaction,
     Reset,
     Cancel,
     Quit,
@@ -65,6 +68,8 @@ pub(crate) fn action_for(command: InputCommand, has_active_run: bool) -> InputAc
             InputAction::Reject("a run is active; use /cancel or wait for completion")
         }
         (InputCommand::State, _) => InputAction::ShowState,
+        (InputCommand::Compact, false) => InputAction::Compact,
+        (InputCommand::Compact, true) => InputAction::QueueCompaction,
         (InputCommand::Reset, false) => InputAction::Reset,
         (InputCommand::Reset, true) => {
             InputAction::Reject("cannot reset while a run is active; use /cancel first")
@@ -93,6 +98,7 @@ fn parse_line(line: &str) -> Option<InputCommand> {
     match line {
         "" => None,
         "/state" => Some(InputCommand::State),
+        "/compact" => Some(InputCommand::Compact),
         "/reset" => Some(InputCommand::Reset),
         "/cancel" => Some(InputCommand::Cancel),
         "/quit" => Some(InputCommand::Quit),
@@ -113,6 +119,7 @@ mod tests {
             Some(InputCommand::Text("hello".to_owned()))
         );
         assert_eq!(parse_line("/state"), Some(InputCommand::State));
+        assert_eq!(parse_line("/compact"), Some(InputCommand::Compact));
         assert_eq!(parse_line("/reset"), Some(InputCommand::Reset));
         assert_eq!(parse_line("/cancel"), Some(InputCommand::Cancel));
         assert_eq!(parse_line("/quit"), Some(InputCommand::Quit));
@@ -147,6 +154,10 @@ mod tests {
             action_for(InputCommand::State, true),
             InputAction::ShowState
         );
+        assert_eq!(
+            action_for(InputCommand::Compact, true),
+            InputAction::QueueCompaction
+        );
     }
 
     #[test]
@@ -156,6 +167,10 @@ mod tests {
             InputAction::Start("next".to_owned())
         );
         assert_eq!(action_for(InputCommand::Reset, false), InputAction::Reset);
+        assert_eq!(
+            action_for(InputCommand::Compact, false),
+            InputAction::Compact
+        );
         assert!(matches!(
             action_for(InputCommand::Cancel, false),
             InputAction::Reject(_)

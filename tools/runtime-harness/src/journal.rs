@@ -10,6 +10,7 @@ use agent_types::{
     AssistantMessage, ConversationMessage, ConversationSnapshot, IdentifierError, ToolMessage,
     UserMessage,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::runtime::HarnessRunId;
@@ -28,6 +29,20 @@ pub(crate) enum JournalError {
     PendingBlocksRun,
     #[error("failed to create a conversation identifier")]
     InvalidIdentifier(#[source] IdentifierError),
+    #[error("injected context journal failure: {0}")]
+    Injected(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HarnessContextCheckpoint {
+    pub(crate) replacement: ConversationSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum ConversationRecord {
+    Message(ConversationMessage),
+    Checkpoint(HarnessContextCheckpoint),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,9 +58,12 @@ pub(crate) struct JournalSnapshot {
 }
 
 struct JournalState {
-    messages: Vec<ConversationMessage>,
+    records: Vec<ConversationRecord>,
     pending: Vec<PendingExchange>,
     next_exchange: u64,
+    #[cfg(test)]
+    fail_effective_snapshot: bool,
+    fail_next_checkpoint_commit: bool,
 }
 
 struct PendingExchange {
@@ -62,9 +80,12 @@ impl HarnessJournal {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(JournalState {
-                messages: Vec::new(),
+                records: Vec::new(),
                 pending: Vec::new(),
                 next_exchange: 1,
+                #[cfg(test)]
+                fail_effective_snapshot: false,
+                fail_next_checkpoint_commit: false,
             }),
         })
     }
@@ -72,7 +93,7 @@ impl HarnessJournal {
     pub(crate) fn snapshot(&self) -> Result<JournalSnapshot, JournalError> {
         let state = self.lock()?;
         Ok(JournalSnapshot {
-            conversation: ConversationSnapshot::new(state.messages.clone()),
+            conversation: original_messages_from_records(&state.records),
             pending: state
                 .pending
                 .iter()
@@ -90,21 +111,90 @@ impl HarnessJournal {
 
     pub(crate) fn append_user(&self, message: UserMessage) -> Result<(), JournalError> {
         self.lock()?
-            .messages
-            .push(ConversationMessage::User(message));
+            .records
+            .push(ConversationRecord::Message(ConversationMessage::User(
+                message,
+            )));
         Ok(())
     }
 
     pub(crate) fn append_assistant(&self, message: AssistantMessage) -> Result<(), JournalError> {
         self.lock()?
-            .messages
-            .push(ConversationMessage::Assistant(message));
+            .records
+            .push(ConversationRecord::Message(ConversationMessage::Assistant(
+                message,
+            )));
         Ok(())
+    }
+
+    pub(crate) fn effective_snapshot(&self) -> Result<ConversationSnapshot, JournalError> {
+        let state = self.lock()?;
+        #[cfg(test)]
+        if state.fail_effective_snapshot {
+            return Err(JournalError::Injected("effective snapshot"));
+        }
+        Ok(effective_snapshot_from_records(&state.records))
+    }
+
+    pub(crate) fn commit_checkpoint(
+        &self,
+        checkpoint: HarnessContextCheckpoint,
+    ) -> Result<(), JournalError> {
+        let mut state = self.lock()?;
+        if state.fail_next_checkpoint_commit {
+            state.fail_next_checkpoint_commit = false;
+            return Err(JournalError::Injected("checkpoint commit"));
+        }
+        state
+            .records
+            .push(ConversationRecord::Checkpoint(checkpoint));
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_count(&self) -> Result<usize, JournalError> {
+        Ok(self
+            .lock()?
+            .records
+            .iter()
+            .filter(|record| matches!(record, ConversationRecord::Checkpoint(_)))
+            .count())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_effective_snapshot(&self, fail: bool) {
+        self.state
+            .lock()
+            .expect("journal test lock")
+            .fail_effective_snapshot = fail;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_checkpoint_commit(&self, fail: bool) {
+        self.state
+            .lock()
+            .expect("journal test lock")
+            .fail_next_checkpoint_commit = fail;
+    }
+
+    pub(crate) fn inject_checkpoint_failure_for_verification(&self) {
+        self.state
+            .lock()
+            .expect("journal verification lock")
+            .fail_next_checkpoint_commit = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn records(&self) -> Vec<ConversationRecord> {
+        self.state
+            .lock()
+            .expect("journal test lock")
+            .records
+            .clone()
     }
 
     pub(crate) fn reset(&self) -> Result<(), JournalError> {
         let mut state = self.lock()?;
-        state.messages.clear();
+        state.records.clear();
         state.pending.clear();
         Ok(())
     }
@@ -150,7 +240,9 @@ impl HarnessJournal {
             state.pending[index].assistant.clone(),
         ));
         completed.extend(results.into_iter().map(ConversationMessage::Tool));
-        state.messages.extend(completed);
+        state
+            .records
+            .extend(completed.into_iter().map(ConversationRecord::Message));
         state.pending.remove(index);
         Ok(())
     }
@@ -158,6 +250,46 @@ impl HarnessJournal {
     fn lock(&self) -> Result<MutexGuard<'_, JournalState>, JournalError> {
         self.state.lock().map_err(|_| JournalError::Poisoned)
     }
+}
+
+pub(crate) fn effective_snapshot_from_records(
+    records: &[ConversationRecord],
+) -> ConversationSnapshot {
+    let checkpoint_index = records
+        .iter()
+        .rposition(|record| matches!(record, ConversationRecord::Checkpoint(_)));
+    let (mut messages, suffix_start) = checkpoint_index.map_or_else(
+        || (Vec::new(), 0),
+        |index| {
+            let ConversationRecord::Checkpoint(checkpoint) = &records[index] else {
+                unreachable!("rposition only returns checkpoint records");
+            };
+            (checkpoint.replacement.messages.clone(), index + 1)
+        },
+    );
+    messages.extend(
+        records[suffix_start..]
+            .iter()
+            .filter_map(|record| match record {
+                ConversationRecord::Message(message) => Some(message.clone()),
+                ConversationRecord::Checkpoint(_) => None,
+            }),
+    );
+    ConversationSnapshot::new(messages)
+}
+
+pub(crate) fn original_messages_from_records(
+    records: &[ConversationRecord],
+) -> ConversationSnapshot {
+    ConversationSnapshot::new(
+        records
+            .iter()
+            .filter_map(|record| match record {
+                ConversationRecord::Message(message) => Some(message.clone()),
+                ConversationRecord::Checkpoint(_) => None,
+            })
+            .collect(),
+    )
 }
 
 pub(crate) struct HarnessRecorder {

@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
+use agent_context::ContextWindowEvaluator;
 use agent_core::{
-    AgentEvent, AgentExecution, BudgetKind, ConversationDelta, ExecutionBudget, ExecutionContext,
-    ExecutionError, ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec,
-    RecordError, ToolAuthorization, ToolAuthorizer, ToolCompletionStatus,
+    AgentEvent, AgentExecution, BudgetKind, CompactionReason, ConversationDelta, ExecutionBudget,
+    ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome, ExecutionRecorder,
+    ExecutionSpec, RecordError, ToolAuthorization, ToolAuthorizer, ToolCompletionStatus,
 };
 use agent_model::{
     ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelRequest,
@@ -21,14 +22,16 @@ use agent_testkit::{
 use agent_tools::{ToolOutputChannel, ToolOutputChunk, ToolRegistry, ToolSetSnapshot};
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
-    OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart, TextPart, ToolCall,
-    ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
+    OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage,
+    ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
     UserMessage, UserPart,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+const TEST_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
 // ---------- 构造辅助 ----------
 
@@ -136,16 +139,28 @@ fn make_spec(
     tools: ToolSetSnapshot,
     budget: ExecutionBudget,
 ) -> ExecutionSpec {
+    make_spec_with_threshold(model, tools, budget, 0.8)
+}
+
+fn make_spec_with_threshold(
+    model: Arc<dyn ModelService>,
+    tools: ToolSetSnapshot,
+    budget: ExecutionBudget,
+    threshold: f64,
+) -> ExecutionSpec {
     ExecutionSpec {
         instructions: instructions(),
         model,
+        context_window: Arc::new(
+            ContextWindowEvaluator::new(threshold).expect("valid test threshold"),
+        ),
         tools,
         budget,
     }
 }
 
-/// 默认输入：给定历史快照 + 固定本轮用户输入；返回输入与用户消息副本。
-fn make_input(history: Vec<ConversationMessage>) -> (ExecutionInput, UserMessage) {
+/// 默认输入：Runtime 已将固定用户消息追加到历史；返回完整输入与用户消息副本。
+fn make_input(mut history: Vec<ConversationMessage>) -> (ExecutionInput, UserMessage) {
     let user_input = UserMessage {
         id: msg_id("message_u1"),
         parts: vec![UserPart::Text(TextPart {
@@ -153,10 +168,10 @@ fn make_input(history: Vec<ConversationMessage>) -> (ExecutionInput, UserMessage
             text: "What is today?".to_owned(),
         })],
     };
+    history.push(ConversationMessage::User(user_input.clone()));
     (
         ExecutionInput {
             conversation: agent_types::ConversationSnapshot::new(history),
-            user_input: user_input.clone(),
         },
         user_input,
     )
@@ -257,6 +272,7 @@ async fn plain_text_completes_with_empty_tool_set() {
     let log = OrderLog::new();
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&text_message(
             "message_1",
             "Hi there.",
@@ -307,12 +323,74 @@ async fn plain_text_completes_with_empty_tool_set() {
 }
 
 #[tokio::test]
+async fn successful_step_emits_only_one_final_usage_update() {
+    let log = OrderLog::new();
+    let provisional_usage = TokenUsage {
+        input_tokens: 40,
+        output_tokens: 5,
+        total_tokens: 45,
+        cached_input_tokens: Some(16),
+        reasoning_tokens: Some(2),
+    };
+    let final_usage = TokenUsage {
+        input_tokens: 40,
+        output_tokens: 10,
+        total_tokens: 50,
+        cached_input_tokens: Some(16),
+        reasoning_tokens: Some(4),
+    };
+    let mut message = text_message("message_usage", "Done.");
+    message.usage = Some(final_usage.clone());
+    let mut model_events = message_events(&message);
+    let final_usage_index = model_events
+        .iter()
+        .position(|event| matches!(event, ModelEvent::UsageUpdated { .. }))
+        .expect("message events include final usage");
+    model_events.insert(
+        final_usage_index,
+        ModelEvent::UsageUpdated {
+            usage: provisional_usage,
+        },
+    );
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::Events(model_events)],
+    ));
+    let (input, _) = make_input(vec![]);
+    let execution = AgentExecution::start(
+        make_spec(
+            model,
+            ToolSetSnapshot::default(),
+            ExecutionBudget::default(),
+        ),
+        input,
+        make_context(
+            Arc::new(InMemoryRecorder::new(log.clone())),
+            Arc::new(ScriptedAuthorizer::allow_all(log)),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(outcome, ExecutionOutcome::Completed(message));
+    let usage_events = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UsageUpdated { step, usage } => Some((*step, usage.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage_events, vec![(1, final_usage)]);
+}
+
+#[tokio::test]
 async fn single_tool_round_trip_in_strict_side_effect_order() {
     let log = OrderLog::new();
     let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);
     let turn2 = text_message("message_2", "Today is 2026-07-27.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -411,6 +489,7 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
     let turn2 = text_message("message_2", "Read it; the write was denied.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -523,6 +602,7 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     let turn3 = text_message("message_3", "It is 2026-07-27 10:00.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -589,6 +669,7 @@ async fn model_establishment_failure_converges_to_failed() {
     let log = OrderLog::new();
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::FailEstablishment(ModelError::Auth(
             "bad key".to_owned(),
         ))],
@@ -634,6 +715,7 @@ async fn model_in_stream_failure_converges_to_failed() {
     let log = OrderLog::new();
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(vec![
             ModelEvent::TurnStarted {
                 message_id: msg_id("message_1"),
@@ -699,12 +781,284 @@ async fn model_in_stream_failure_converges_to_failed() {
 }
 
 #[tokio::test]
+async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
+    let log = OrderLog::new();
+    let model = Arc::new(ScriptedModelService::new(capabilities(), 100, []));
+    let mut previous = text_message("message_previous", "previous answer");
+    previous.usage = Some(TokenUsage {
+        input_tokens: 60,
+        output_tokens: 20,
+        total_tokens: 80,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+    });
+    let history = vec![
+        ConversationMessage::User(UserMessage {
+            id: msg_id("message_previous_user"),
+            parts: vec![UserPart::Text(TextPart {
+                id: part_id("message_previous_user_text"),
+                text: "previous question".to_owned(),
+            })],
+        }),
+        ConversationMessage::Assistant(previous),
+    ];
+    let (input, _) = make_input(history);
+    let execution = AgentExecution::start(
+        make_spec_with_threshold(
+            model.clone(),
+            ToolSetSnapshot::default(),
+            ExecutionBudget::default(),
+            0.8,
+        ),
+        input,
+        make_context(
+            Arc::new(InMemoryRecorder::new(log.clone())),
+            Arc::new(ScriptedAuthorizer::allow_all(log)),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::CompactionRequired {
+            reason: CompactionReason::ThresholdReached,
+            step: 1,
+        }
+    );
+    assert_eq!(
+        events,
+        vec![
+            AgentEvent::ExecutionStarted,
+            AgentEvent::ExecutionCompactionRequired {
+                reason: CompactionReason::ThresholdReached,
+                step: 1,
+                dropped_events: 0,
+            },
+        ]
+    );
+    assert!(model.take_requests().is_empty());
+}
+
+#[tokio::test]
+async fn establishment_context_overflow_converges_to_compaction_terminal() {
+    let log = OrderLog::new();
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::FailEstablishment(
+            ModelError::ContextOverflow {
+                message: "request exceeds context window".to_owned(),
+            },
+        )],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let (input, _) = make_input(vec![]);
+    let execution = AgentExecution::start(
+        make_spec(
+            model.clone(),
+            ToolSetSnapshot::default(),
+            ExecutionBudget::default(),
+        ),
+        input,
+        make_context(
+            recorder.clone(),
+            Arc::new(ScriptedAuthorizer::allow_all(log.clone())),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::CompactionRequired {
+            reason: CompactionReason::ProviderOverflow,
+            step: 1,
+        }
+    );
+    assert_eq!(
+        events,
+        vec![
+            AgentEvent::ExecutionStarted,
+            AgentEvent::StepStarted { step: 1 },
+            AgentEvent::ExecutionCompactionRequired {
+                reason: CompactionReason::ProviderOverflow,
+                step: 1,
+                dropped_events: 0,
+            },
+        ]
+    );
+    assert_eq!(model.take_requests().len(), 1);
+    assert!(recorder.deltas().is_empty());
+    assert!(log.entries().is_empty());
+}
+
+#[tokio::test]
+async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
+    let log = OrderLog::new();
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::Events(vec![
+            ModelEvent::TurnStarted {
+                message_id: msg_id("message_overflow"),
+                model: model_identity(),
+            },
+            ModelEvent::ReasoningStarted {
+                id: part_id("reasoning_overflow"),
+            },
+            ModelEvent::ReasoningDelta {
+                id: part_id("reasoning_overflow"),
+                delta: "partial reasoning".to_owned(),
+            },
+            ModelEvent::TextStarted {
+                id: part_id("text_overflow"),
+            },
+            ModelEvent::TextDelta {
+                id: part_id("text_overflow"),
+                delta: "partial text".to_owned(),
+            },
+            ModelEvent::ToolCallStarted {
+                id: call_id("call_overflow"),
+                name: tool_name("never_execute"),
+            },
+            ModelEvent::ToolCallDelta {
+                id: call_id("call_overflow"),
+                arguments_delta: "{\"path\":".to_owned(),
+            },
+            ModelEvent::UsageUpdated {
+                usage: TokenUsage {
+                    input_tokens: 80,
+                    output_tokens: 10,
+                    total_tokens: 90,
+                    cached_input_tokens: None,
+                    reasoning_tokens: Some(5),
+                },
+            },
+            ModelEvent::TurnFailed {
+                error: ModelError::ContextOverflow {
+                    message: "stream exceeded context window".to_owned(),
+                },
+            },
+        ])],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let (input, _) = make_input(vec![]);
+    let execution = AgentExecution::start(
+        make_spec(
+            model,
+            ToolSetSnapshot::default(),
+            ExecutionBudget::default(),
+        ),
+        input,
+        make_context(
+            recorder.clone(),
+            Arc::new(ScriptedAuthorizer::allow_all(log.clone())),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::CompactionRequired {
+            reason: CompactionReason::ProviderOverflow,
+            step: 1,
+        }
+    );
+    assert!(events.contains(&AgentEvent::ReasoningDelta {
+        id: part_id("reasoning_overflow"),
+        delta: "partial reasoning".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::TextDelta {
+        id: part_id("text_overflow"),
+        delta: "partial text".to_owned(),
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolProposed { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UsageUpdated { .. }))
+    );
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::ExecutionCompactionRequired {
+            reason: CompactionReason::ProviderOverflow,
+            step: 1,
+            dropped_events: 0,
+        })
+    );
+    assert!(recorder.deltas().is_empty());
+    assert!(log.entries().is_empty());
+}
+
+#[tokio::test]
+async fn overflow_after_completed_tool_exchange_does_not_replay_side_effects() {
+    let log = OrderLog::new();
+    let turn1 = calls_message("message_tool", vec![call("call_1", "get_date", json!({}))]);
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&turn1)),
+            ModelScript::FailEstablishment(ModelError::ContextOverflow {
+                message: "second step exceeds context window".to_owned(),
+            }),
+        ],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        "get_date",
+        json!({"date": "2026-07-29"}),
+        log.clone(),
+    )]);
+    let (input, user_input) = make_input(vec![]);
+    let execution = AgentExecution::start(
+        make_spec(model, tools, ExecutionBudget::default()),
+        input,
+        make_context(
+            recorder.clone(),
+            Arc::new(ScriptedAuthorizer::allow_all(log.clone())),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::CompactionRequired {
+            reason: CompactionReason::ProviderOverflow,
+            step: 2,
+        }
+    );
+    assert_eq!(
+        log.entries()
+            .iter()
+            .filter(|entry| matches!(entry, LogEntry::ToolExecute { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(recorder.deltas().len(), 2);
+    assert_tool_pairing(&reconstruct(&user_input, &recorder.deltas()));
+    assert!(events.contains(&AgentEvent::StepStarted { step: 2 }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::ExecutionCompactionRequired {
+            reason: CompactionReason::ProviderOverflow,
+            step: 2,
+            dropped_events: 0,
+        })
+    );
+}
+
+#[tokio::test]
 async fn tool_failure_feeds_error_result_and_continues() {
     let log = OrderLog::new();
     let turn1 = calls_message("message_1", vec![call("call_1", "explode", json!({}))]);
     let turn2 = text_message("message_2", "The tool failed; recovered.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -753,6 +1107,7 @@ async fn unknown_tool_name_feeds_error_result() {
     let turn2 = text_message("message_2", "No such tool; moving on.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -801,6 +1156,7 @@ async fn hallucinated_tool_with_empty_snapshot_feeds_error_result() {
     let turn2 = text_message("message_2", "Imagined that one; sorry.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -845,6 +1201,7 @@ async fn tool_output_chunks_bridge_to_agent_events() {
     let turn2 = text_message("message_2", "Done chatting.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -919,6 +1276,7 @@ async fn terminal_event_survives_real_engine_event_queue_overflow() {
     let turn2 = text_message("message_2", "Done chatting.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -975,6 +1333,7 @@ async fn recorder_failure_blocks_all_side_effects() {
     let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     // 第 1 次 Recorder 调用 begin(Assistant) 即失败。
@@ -1023,6 +1382,7 @@ async fn recorder_failure_at_tool_record_fails_controlled() {
     let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     // 第 2 次 Recorder 调用（complete）失败：pending 已建立、工具已执行，
@@ -1089,6 +1449,7 @@ async fn max_steps_zero_fails_before_any_model_call() {
     let log = OrderLog::new();
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&text_message(
             "message_1",
             "never reached",
@@ -1144,6 +1505,7 @@ async fn max_steps_exactly_at_limit_completes() {
     let turn2 = text_message("message_2", "Done in two turns.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -1187,6 +1549,7 @@ async fn max_steps_exceeded_fails_at_next_precheck() {
     let turn2 = text_message("message_2", "never requested");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -1221,7 +1584,8 @@ async fn max_steps_exceeded_fails_at_next_precheck() {
             limit: 1,
         })
     );
-    // 第一轮完整处理后，第二轮模型调用前预检受控终止（无 StepStarted{2}）。
+    // 第一轮完整处理后，第二轮 max_steps 预检先于 Context Evaluator 受控终止
+    // （无 StepStarted{2}）。
     assert_eq!(
         events,
         vec![
@@ -1260,6 +1624,7 @@ async fn max_tool_calls_zero_settles_batch_without_dispatch() {
     let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
@@ -1343,6 +1708,7 @@ async fn max_tool_calls_exactly_at_limit_completes() {
     let turn2 = text_message("message_2", "One call is enough.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -1387,6 +1753,7 @@ async fn max_tool_calls_crossed_within_batch_settles_rest() {
     );
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
@@ -1497,6 +1864,7 @@ async fn deny_does_not_count_toward_tool_call_budget() {
     let turn2 = text_message("message_2", "Deny consumed no budget.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -1564,6 +1932,10 @@ struct PausedModel {
 impl ModelService for PausedModel {
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        TEST_CONTEXT_WINDOW_TOKENS
     }
 
     fn stream(&self, _request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
@@ -1683,6 +2055,7 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
     );
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
@@ -1829,6 +2202,7 @@ async fn cancel_during_authorize_hang_settles_batch() {
     );
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::Events(message_events(&turn1))],
     ));
     let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
@@ -1923,6 +2297,7 @@ async fn dropped_completion_receiver_still_finishes_execution() {
     let turn2 = text_message("message_2", "Receiverless completion.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),
@@ -1967,6 +2342,7 @@ async fn dropped_event_stream_still_resolves_completion() {
     let turn2 = text_message("message_2", "No subscriber at all.");
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&turn1)),
             ModelScript::Events(message_events(&turn2)),

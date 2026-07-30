@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use agent_model::{ModelError, ModelRequest, ReasoningEffort};
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, ToolChoice,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage, ToolChoice,
     ToolDefinition, ToolMessage, ToolResultContent, UserMessage, UserPart,
 };
 use serde_json::Value;
@@ -32,6 +32,9 @@ const RESERVED_REQUEST_KEYS: &[&str] = &[
     "stream_options",
 ];
 
+/// 派生摘要在线上编码为 system message 时使用的固定说明。
+const CONTEXT_SUMMARY_PREFIX: &str = "[Context summary derived from earlier conversation]";
+
 /// 把规范请求编码为 Chat Completions 原生请求。
 ///
 /// 请求固定为流式（`stream: true` 且要求流末下发 usage）：Adapter 只走流式调用，
@@ -49,7 +52,10 @@ pub fn encode_request(
     profile: &Profile,
     model: &str,
 ) -> Result<ChatRequest, ModelError> {
-    validate_tool_result_pairing(&request.conversation)?;
+    request
+        .conversation
+        .validate_tool_exchange_pairs()
+        .map_err(|error| ModelError::Config(error.to_string()))?;
     let mut messages = Vec::new();
     // 每条 system 指令按序生成一个 system 消息，置于对话消息之前。
     for system in &request.system {
@@ -133,7 +139,7 @@ pub fn encode_request(
 
     let mut extra = BTreeMap::new();
     if let Some(max_output_tokens) = generation.max_output_tokens {
-        let Some(field) = &profile.max_tokens_field else {
+        let Some(field) = &profile.max_output_tokens_field else {
             return Err(ModelError::Config(
                 "generation.max_output_tokens is set but the profile declares no max tokens field"
                     .to_owned(),
@@ -195,37 +201,6 @@ pub fn encode_request(
     })
 }
 
-/// 对话级配对校验：每条 tool 结果消息必须引用对话中此前真实出现的 tool call。
-///
-/// Chat Completions 协议要求 tool 消息与 assistant 消息中的 tool call 严格配对；
-/// 引用不存在的 `tool_call_id` 必然被 Provider 拒绝（DeepSeek 契约测试的失败用例之一，
-/// 见 <https://api-docs.deepseek.com/guides/thinking_mode/> 的消息拼接约定），
-/// 编码侧以 [`ModelError::Config`] 显式失败而不是发出无效请求。
-fn validate_tool_result_pairing(conversation: &ConversationSnapshot) -> Result<(), ModelError> {
-    let mut known_call_ids = HashSet::new();
-    for message in &conversation.messages {
-        match message {
-            ConversationMessage::Assistant(message) => {
-                for part in &message.parts {
-                    if let AssistantPart::ToolCall(call) = part {
-                        known_call_ids.insert(call.id.as_str());
-                    }
-                }
-            }
-            ConversationMessage::Tool(message) => {
-                let call_id = message.result.call_id.as_str();
-                if !known_call_ids.contains(call_id) {
-                    return Err(ModelError::Config(format!(
-                        "tool message references tool call id `{call_id}` that matches no preceding tool call in the conversation"
-                    )));
-                }
-            }
-            ConversationMessage::System(_) | ConversationMessage::User(_) => {}
-        }
-    }
-    Ok(())
-}
-
 /// 把一条规范对话消息编码为原生消息。
 fn encode_conversation_message(
     message: &ConversationMessage,
@@ -235,11 +210,21 @@ fn encode_conversation_message(
         ConversationMessage::System(message) => Ok(ChatMessage::System(ChatSystemMessage {
             content: message.text.clone(),
         })),
+        ConversationMessage::ContextSummary(message) => {
+            Ok(ChatMessage::System(encode_context_summary(message)))
+        }
         ConversationMessage::User(message) => Ok(ChatMessage::User(encode_user_message(message))),
         ConversationMessage::Assistant(message) => Ok(ChatMessage::Assistant(
             encode_assistant_message(message, profile)?,
         )),
         ConversationMessage::Tool(message) => Ok(ChatMessage::Tool(encode_tool_message(message))),
+    }
+}
+
+/// 把派生上下文摘要编码为带固定说明的 system 消息。
+fn encode_context_summary(message: &ContextSummaryMessage) -> ChatSystemMessage {
+    ChatSystemMessage {
+        content: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.text),
     }
 }
 

@@ -92,8 +92,8 @@ async fn static_page_and_malformed_ingest_behave() {
     assert!(html.contains("data-channel=\"agent\""));
     assert!(html.contains("data-channel=\"runtime\""));
     assert!(!html.contains("type=\"checkbox\""));
-    assert!(html.contains("app.css?v=v0.2.1-session-tabs"));
-    assert!(html.contains("app.js?v=v0.2.1-session-tabs"));
+    assert!(html.contains("app.css?v=v0.3-context"));
+    assert!(html.contains("app.js?v=v0.3-context"));
 
     let js_response = client
         .get(format!("{base}/app.js"))
@@ -123,7 +123,16 @@ async fn static_page_and_malformed_ingest_behave() {
     assert!(js.contains("function addUserMessage"));
     assert!(!js.contains("function lastUserText"));
     assert!(js.contains("function onAgentEvent"));
+    assert!(js.contains("usage_updated"));
+    assert!(js.contains("execution_compaction_required"));
     assert!(js.contains("function addTimeline"));
+    assert!(js.contains("function runtimeTitle"));
+    assert!(js.contains("context_window_evaluated"));
+    assert!(js.contains("context_compaction_finished"));
+    assert!(js.contains("continuation_started"));
+    assert!(js.contains("function trimChannelEntries"));
+    assert!(js.contains("entries.length - EVENT_CAP"));
+    assert!(!js.contains("panel.firstChild.remove()"));
 
     // 畸形 payload：缺 payload 字段，反序列化失败 → 4xx，不影响后续请求。
     let status = client

@@ -19,6 +19,11 @@
   debug-viewer。
 - 内部 SessionId、RunId、状态机和 Journal 类型保持私有，不进入
   `assistant-protocol`，不定义正式 Runtime 产品语义。
+- v0.3.0 直接装配 `agent-context` 的公共 Evaluator、Layout、Validator 和 Strategy；
+  Checkpoint、任务链与 continuation 仅在本工具内以私有临时类型验证，不进入
+  `assistant-runtime` 或 `assistant-protocol`，也不代表正式 Runtime 产品接口。
+- Harness 可以持有临时压缩编排入口，但不得复制 `agent-context` 已有的窗口计算、
+  历史切分、replacement 校验或 Rolling Summary 算法。
 - Core 仍只负责一次 `AgentExecution`；Run/Session correlation 由本工具在外围
   附加，不传入 Core。
 - 默认 `list`、`verify` 和测试完全离线，不读取 credential，不访问网络、用户文件、
@@ -41,6 +46,7 @@ scripted model/tool/authorizer。该例外不得扩展到产品 crate。
 ```bash
 cargo run -p runtime-harness -- list
 cargo run -p runtime-harness -- verify v0.2
+cargo run -p runtime-harness -- verify v0.3
 cargo run -p runtime-harness -- chat
 cargo run -p runtime-harness -- chat \
   --debug http://localhost:7331 \
@@ -48,9 +54,23 @@ cargo run -p runtime-harness -- chat \
 ```
 
 - `list` / `verify` / 默认测试不加载 `.env`，保持完全离线。
-- `chat` 才加载 `.env` 并要求 `DEEPSEEK_API_KEY`；base URL 和模型分别由
-  `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 可选覆盖。
-- chat 内支持 `/state`、`/reset`、`/cancel`、`/quit`；Ctrl-D 等价 `/quit`。
+- `chat` 才加载 `.env` 并要求 `DEEPSEEK_API_KEY`；base URL、模型和上下文窗口分别由
+  `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_CONTEXT_WINDOW_TOKENS`
+  可选覆盖。上下文窗口缺省为 `128000`，必须是大于零的整数。
+- Context 验证参数分别由 `HARNESS_COMPACTION_THRESHOLD_RATIO`（默认 `0.8`）、
+  `HARNESS_SUMMARY_OUTPUT_TOKENS`（默认 `1024`）、
+  `HARNESS_MINIMUM_RECENT_USER_TURNS`（默认 `1`）和
+  `HARNESS_MAX_AUTOMATIC_COMPACTIONS`（默认 `2`）覆盖。比例必须位于 `(0, 1]`，
+  摘要输出和自动压缩上限必须大于零，最少近期用户轮次允许为零。
+- chat 内支持 `/state`、`/compact`、`/reset`、`/cancel`、`/quit`；Ctrl-D 等价
+  `/quit`。空闲时 `/compact` 只执行主动压缩，不创建 Run、不续跑；活动任务链期间
+  只按 Session 记录一个待执行请求，并在当前 Run/continuation 链结束后串行执行。
+- 新用户消息先进入原始 Journal，再执行 Run 前窗口判断；阈值命中时先提交
+  Checkpoint，随后才创建初始 Run。Core 返回 `CompactionRequired` 时，Harness
+  结算当前 Run、压缩稳定历史并创建不重复 UserMessage 的 continuation Run。
+- `/state` 同时显示原始消息角色、最新 Checkpoint 的 effective roles、Checkpoint
+  数、当前任务链自动压缩次数/上限、主动压缩排队状态和最近压缩报告；默认不打印
+  摘要正文。
 - 活动 Run 中普通文本与 `/reset` 明确拒绝；`/quit` 先取消并等待 Core 收敛和
   Journal 清理。
 - `lookup_weather` 是固定返回演示数据的无副作用类型化工具，不访问真实天气服务。
@@ -60,6 +80,8 @@ cargo run -p runtime-harness -- chat \
   `agent` 推送 `AgentEvent` 和 Run/Journal 事件；`both` 同时推送三路且为默认值。
 - 同一 Run 的三路事件共享 `<session>/<run>` correlation 和全局递增 `seq`。
   viewer 的 Session 单选与右侧通道 Tab 只过滤页面展示，不限制 server 接收。
+- Run 外的主动 Context 维护使用 `<session>/context` correlation；Runtime 通道可读
+  展示窗口判断、压缩完成、主动压缩排队和 continuation 关联，完整结构仍可展开。
 - 用户输入成功写入 Journal 后，Runtime 发送一次 `user_message_appended`；它是用户
   消息的权威调试来源，不从每个 Provider `TurnRequested` 重复推导输入。
 - `--debug` 优先于 `DEBUG_URL`；未配置 URL 时不创建 client 或模型观察 decorator。
@@ -83,4 +105,5 @@ cargo test -p runtime-harness
 cargo clippy -p runtime-harness --all-targets --all-features -- -D warnings
 cargo run -p runtime-harness -- list
 cargo run -p runtime-harness -- verify v0.2
+cargo run -p runtime-harness -- verify v0.3
 ```

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use thiserror::Error;
@@ -21,6 +23,125 @@ impl ConversationSnapshot {
     pub fn new(messages: Vec<ConversationMessage>) -> Self {
         Self { messages }
     }
+
+    /// 严格校验快照内所有 Tool Call 与 Tool Result 的双向配对和顺序。
+    ///
+    /// 每个 ToolCallId 必须全局唯一；含 Tool Call 的 AssistantMessage 后必须立即按
+    /// 声明顺序出现恰好一个对应 ToolMessage，才能开始下一条非 Tool 消息。
+    pub fn validate_tool_exchange_pairs(&self) -> Result<(), ConversationValidationError> {
+        let mut seen_calls = HashSet::new();
+        let mut completed_calls = HashSet::new();
+        let mut pending_calls = Vec::new();
+        let mut next_result = 0;
+
+        for message in &self.messages {
+            match message {
+                ConversationMessage::Tool(message) => {
+                    let actual = &message.result.call_id;
+                    if pending_calls.is_empty() {
+                        return if completed_calls.contains(actual) {
+                            Err(ConversationValidationError::DuplicateToolResult {
+                                call_id: actual.clone(),
+                            })
+                        } else {
+                            Err(ConversationValidationError::ToolResultWithoutCall {
+                                call_id: actual.clone(),
+                            })
+                        };
+                    }
+
+                    let expected = &pending_calls[next_result];
+                    if actual != expected {
+                        return if completed_calls.contains(actual) {
+                            Err(ConversationValidationError::DuplicateToolResult {
+                                call_id: actual.clone(),
+                            })
+                        } else if pending_calls[next_result + 1..].contains(actual) {
+                            Err(ConversationValidationError::ToolResultOutOfOrder {
+                                expected: expected.clone(),
+                                actual: actual.clone(),
+                            })
+                        } else {
+                            Err(ConversationValidationError::ToolResultWithoutCall {
+                                call_id: actual.clone(),
+                            })
+                        };
+                    }
+
+                    completed_calls.insert(actual.clone());
+                    next_result += 1;
+                    if next_result == pending_calls.len() {
+                        pending_calls.clear();
+                        next_result = 0;
+                    }
+                }
+                non_tool => {
+                    if let Some(missing) = pending_calls.get(next_result) {
+                        return Err(ConversationValidationError::MissingToolResult {
+                            call_id: missing.clone(),
+                        });
+                    }
+
+                    if let ConversationMessage::Assistant(message) = non_tool {
+                        for part in &message.parts {
+                            if let AssistantPart::ToolCall(call) = part {
+                                if !seen_calls.insert(call.id.clone()) {
+                                    return Err(ConversationValidationError::DuplicateToolCallId {
+                                        call_id: call.id.clone(),
+                                    });
+                                }
+                                pending_calls.push(call.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(missing) = pending_calls.get(next_result) {
+            return Err(ConversationValidationError::MissingToolResult {
+                call_id: missing.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// 规范对话中的 Tool Call/Result 结构不满足双向配对约束。
+pub enum ConversationValidationError {
+    /// 同一个 ToolCallId 被声明多次。
+    #[error("tool call id `{call_id}` is declared more than once")]
+    DuplicateToolCallId {
+        /// 重复的 ToolCallId。
+        call_id: ToolCallId,
+    },
+    /// ToolMessage 没有对应当前 exchange 中的 Tool Call。
+    #[error("tool result references call id `{call_id}` without a matching pending tool call")]
+    ToolResultWithoutCall {
+        /// 无法配对的 ToolCallId。
+        call_id: ToolCallId,
+    },
+    /// Tool Result 没有按照 Tool Call 的声明顺序出现。
+    #[error("tool results are out of order: expected `{expected}`, got `{actual}`")]
+    ToolResultOutOfOrder {
+        /// 当前应当结算的 ToolCallId。
+        expected: ToolCallId,
+        /// 实际到达的 ToolCallId。
+        actual: ToolCallId,
+    },
+    /// Tool Call 在 exchange 结束前缺少结果。
+    #[error("tool call id `{call_id}` has no matching tool result")]
+    MissingToolResult {
+        /// 缺少结果的 ToolCallId。
+        call_id: ToolCallId,
+    },
+    /// 同一个 Tool Call 收到了多个结果。
+    #[error("tool call id `{call_id}` has more than one tool result")]
+    DuplicateToolResult {
+        /// 重复结算的 ToolCallId。
+        call_id: ToolCallId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,6 +153,8 @@ impl ConversationSnapshot {
 pub enum ConversationMessage {
     /// 系统级指令。
     System(SystemMessage),
+    /// 由较早对话派生的上下文摘要。
+    ContextSummary(ContextSummaryMessage),
     /// 用户输入。
     User(UserMessage),
     /// 模型生成的完整响应。
@@ -46,6 +169,15 @@ pub struct SystemMessage {
     /// 规范消息 ID。
     pub id: MessageId,
     /// 系统指令正文。
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// 由较早规范对话派生、供后续模型请求使用的上下文摘要。
+pub struct ContextSummaryMessage {
+    /// 规范消息 ID。
+    pub id: MessageId,
+    /// 摘要正文。
     pub text: String,
 }
 
@@ -268,6 +400,36 @@ mod tests {
         value.to_owned().try_into().expect("valid id")
     }
 
+    fn tool_call_message(message_id: &str, call_ids: &[&str]) -> ConversationMessage {
+        ConversationMessage::Assistant(AssistantMessage {
+            id: id(message_id),
+            model: ModelIdentity::new(id("deepseek"), "deepseek-reasoner"),
+            parts: call_ids
+                .iter()
+                .map(|call_id| {
+                    AssistantPart::ToolCall(ToolCall {
+                        id: id(call_id),
+                        name: ToolName::new("get_date").expect("valid tool name"),
+                        arguments: serde_json::json!({}),
+                    })
+                })
+                .collect(),
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        })
+    }
+
+    fn tool_result_message(message_id: &str, call_id: &str) -> ConversationMessage {
+        ConversationMessage::Tool(ToolMessage {
+            id: id(message_id),
+            result: ToolResult {
+                call_id: id(call_id),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Text("ok".to_owned()),
+            },
+        })
+    }
+
     #[test]
     fn mixed_assistant_parts_preserve_order() {
         let turn = AssistantMessage {
@@ -333,6 +495,97 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ConversationSnapshot>(&json).expect("deserialize conversation"),
             snapshot
+        );
+    }
+
+    #[test]
+    fn context_summary_round_trips_with_an_explicit_role() {
+        let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
+            id: id("summary_1"),
+            text: "The user selected the local-first architecture.".to_owned(),
+        });
+        let json = serde_json::to_string(&message).expect("serialize context summary");
+        assert!(json.contains(r#""role":"context_summary""#));
+        assert_eq!(
+            serde_json::from_str::<ConversationMessage>(&json)
+                .expect("deserialize context summary"),
+            message
+        );
+    }
+
+    #[test]
+    fn tool_exchange_validation_accepts_complete_ordered_batches() {
+        let snapshot = ConversationSnapshot::new(vec![
+            tool_call_message("assistant_1", &["call_1", "call_2"]),
+            tool_result_message("tool_1", "call_1"),
+            tool_result_message("tool_2", "call_2"),
+            tool_call_message("assistant_2", &["call_3"]),
+            tool_result_message("tool_3", "call_3"),
+        ]);
+
+        assert_eq!(snapshot.validate_tool_exchange_pairs(), Ok(()));
+    }
+
+    #[test]
+    fn tool_exchange_validation_rejects_duplicate_call_ids() {
+        let snapshot = ConversationSnapshot::new(vec![
+            tool_call_message("assistant_1", &["call_1"]),
+            tool_result_message("tool_1", "call_1"),
+            tool_call_message("assistant_2", &["call_1"]),
+        ]);
+
+        assert_eq!(
+            snapshot.validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::DuplicateToolCallId {
+                call_id: id("call_1"),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_exchange_validation_rejects_missing_or_orphan_results() {
+        let missing =
+            ConversationSnapshot::new(vec![tool_call_message("assistant_1", &["call_1"])]);
+        assert_eq!(
+            missing.validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::MissingToolResult {
+                call_id: id("call_1"),
+            })
+        );
+
+        let orphan = ConversationSnapshot::new(vec![tool_result_message("tool_1", "call_1")]);
+        assert_eq!(
+            orphan.validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::ToolResultWithoutCall {
+                call_id: id("call_1"),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_exchange_validation_rejects_out_of_order_or_duplicate_results() {
+        let out_of_order = ConversationSnapshot::new(vec![
+            tool_call_message("assistant_1", &["call_1", "call_2"]),
+            tool_result_message("tool_2", "call_2"),
+        ]);
+        assert_eq!(
+            out_of_order.validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::ToolResultOutOfOrder {
+                expected: id("call_1"),
+                actual: id("call_2"),
+            })
+        );
+
+        let duplicate = ConversationSnapshot::new(vec![
+            tool_call_message("assistant_1", &["call_1"]),
+            tool_result_message("tool_1", "call_1"),
+            tool_result_message("tool_2", "call_1"),
+        ]);
+        assert_eq!(
+            duplicate.validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::DuplicateToolResult {
+                call_id: id("call_1"),
+            })
         );
     }
 

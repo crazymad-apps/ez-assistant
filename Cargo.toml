@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
+    "crates/agent-context",
     "crates/agent-core",
     "crates/agent-model",
     "crates/agent-provider-openai-compatible",

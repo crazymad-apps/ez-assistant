@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use agent_context::ContextWindowEvaluator;
 use agent_core::{
     AgentEvent, AgentExecution, ExecutionBudget, ExecutionContext, ExecutionError,
     ExecutionOutcome, ExecutionSpec, ToolAuthorization, ToolAuthorizer, ToolCompletionStatus,
@@ -32,6 +33,8 @@ use crate::{
     },
     scenario::{ScenarioFuture, ScenarioReport, ScenarioStatus},
 };
+
+const TEST_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
 struct ExecutionEvidence {
     report: ScenarioReport,
@@ -67,6 +70,7 @@ async fn run_plain_text() -> Result<ScenarioReport, HarnessError> {
     let final_message = text_message("plain_final", "offline plain text completed")?;
     let model = Arc::new(ScriptedModelService::completing(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         final_message.clone(),
     ));
     let evidence = execute_collected(
@@ -101,6 +105,7 @@ async fn run_single_tool_loop() -> Result<ScenarioReport, HarnessError> {
     let final_message = text_message("tool_final", "The scripted date is 2026-07-28.")?;
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&tool_turn)),
             ModelScript::Events(message_events(&final_message)),
@@ -179,6 +184,7 @@ async fn run_allow_deny_batch() -> Result<ScenarioReport, HarnessError> {
     )?;
     let model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&tool_turn)),
             ModelScript::Events(message_events(&final_message)),
@@ -248,6 +254,7 @@ async fn run_allow_deny_batch() -> Result<ScenarioReport, HarnessError> {
 async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
     let establishment_model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [ModelScript::FailEstablishment(ModelError::Transport(
             "scripted offline outage".to_owned(),
         ))],
@@ -280,6 +287,7 @@ async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
         text_message("failure_recovered", "The tool error was handled as data.")?;
     let tool_model = Arc::new(ScriptedModelService::new(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         [
             ModelScript::Events(message_events(&tool_turn)),
             ModelScript::Events(message_events(&recovered_message)),
@@ -377,6 +385,7 @@ async fn run_observation_disconnect() -> Result<ScenarioReport, HarnessError> {
     let final_message = text_message("disconnect_final", "Completion survived disconnect.")?;
     let model = Arc::new(ScriptedModelService::completing(
         capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
         final_message.clone(),
     ));
     let execution = AgentExecution::start(
@@ -467,6 +476,9 @@ fn make_spec(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> ExecutionS
     ExecutionSpec {
         instructions: vec!["This is a deterministic offline verification scenario.".to_owned()],
         model,
+        context_window: Arc::new(
+            ContextWindowEvaluator::new(0.8).expect("valid scenario threshold"),
+        ),
         tools,
         budget: ExecutionBudget {
             max_steps: Some(8),
@@ -493,6 +505,7 @@ fn build_report(
         ExecutionOutcome::Completed(_) => RunStatus::Completed,
         ExecutionOutcome::Failed(_) => RunStatus::Failed,
         ExecutionOutcome::Cancelled => RunStatus::Cancelled,
+        ExecutionOutcome::CompactionRequired { .. } => RunStatus::CompactionRequired,
     };
     ensure(
         run.status == expected_status,
@@ -677,6 +690,10 @@ impl PausableModel {
 impl ModelService for PausableModel {
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        TEST_CONTEXT_WINDOW_TOKENS
     }
 
     fn stream(&self, _request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {

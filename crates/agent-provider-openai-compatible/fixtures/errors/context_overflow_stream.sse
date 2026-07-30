@@ -1,0 +1,5 @@
+data: {"id":"chatcmpl-overflow","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}
+
+data: {"error":{"message":"stream context limit","type":"invalid_request_error","code":"context_length_exceeded"}}
+
+: end-of-fixture

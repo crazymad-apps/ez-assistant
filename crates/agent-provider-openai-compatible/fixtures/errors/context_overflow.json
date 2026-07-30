@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "request is too large",
+    "type": "invalid_request_error",
+    "code": "context_length_exceeded"
+  }
+}

@@ -45,6 +45,13 @@ Agent Engine
 
 依赖只能由上向下；Agent Engine 及其能力接口不得反向依赖 Runtime 或应用层。
 
+窗口判断、规范历史布局、replacement 校验和压缩策略边界位于共享
+`agent-context` crate。v0.3.0 的正式调用方是 `agent-core`，临时
+`runtime-harness` 直接装配其余能力完成版本验证；正式 `assistant-runtime` 是否以及
+如何接入留待总体设计。`agent-core`、Harness 和未来 Runtime 都只能向下依赖它；
+`agent-context` 只依赖 `agent-model` 和 `agent-types`，不得反向依赖 Core、Runtime、
+Provider Adapter、应用协议或存储。
+
 ## 四、核心术语和所有权
 
 ### 4.1 Runtime Run
@@ -100,8 +107,6 @@ Core 不定义 `AgentProfile`。配置文件、用户偏好、Agent 模板、会
 ```rust
 pub struct ExecutionInput {
     pub conversation: ConversationSnapshot,
-    pub user_input: UserInput,
-    pub attachments: Vec<Attachment>,
 }
 
 pub struct ExecutionContext {
@@ -111,7 +116,8 @@ pub struct ExecutionContext {
 }
 ```
 
-- `ExecutionInput` 只包含会影响模型语义的输入。
+- `ExecutionInput` 只包含 Runtime 已经选定的完整有效对话快照；新用户 Run 必须先将
+  UserMessage 写入规范历史再构造 Snapshot，Core 不再单独追加用户输入。
 - `ExecutionContext` 只包含控制面和已经绑定当前 Runtime Run 的能力。
 - Core 不通过 `ConversationRef` 自行加载 Session；Runtime 传入规范快照。
 - `MemoryScope` 是不透明的能力作用域，不等同于 `SessionId`。
@@ -136,8 +142,12 @@ Preparing
     ▼
 BuildingContext
     │
+    ├── 达到压缩阈值 ────────────────► CompactionRequired
+    │
     ▼
 StreamingModel
+    │
+    ├── Context Overflow ─────────────► CompactionRequired
     │
     ├── 无工具调用 ─────────────────────► Completed
     │
@@ -160,7 +170,7 @@ StreamingModel
             └────────────────────────────► BuildingContext
 ```
 
-模型服务一次只执行一个 Provider Turn。工具调用后的继续、预算、取消和终止全部由 Agent Engine 显式控制，Provider 不得隐藏 Agent Loop。`Ask` 不在 Core 状态机内：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成。
+模型服务一次只执行一个 Provider Turn。工具调用后的继续、预算、取消和终止全部由 Agent Engine 显式控制，Provider 不得隐藏 Agent Loop。上下文压缩是例外的 Runtime 后继动作：Core 以 CompactionRequired 终态结束当前执行，Runtime 压缩后启动新的 continuation，而不是 Core 在原执行内重试。`Ask` 不在 Core 状态机内：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成。
 
 ## 七、规范对话与 Provider 隔离
 
@@ -247,17 +257,19 @@ begin 产生的 pending exchange 是可恢复写前事实，不直接进入规�
 ```text
 ExecutionStarted
 StepStarted
+UsageUpdated
 TextDelta
 ToolProposed
 ToolStarted
 ToolOutput
 ToolCompleted
 GuardrailTriggered
-ContextCompacted
-ExecutionCompleted / Failed / Cancelled
+ExecutionCompleted / Failed / Cancelled / CompactionRequired
 ```
 
 审批事件由 Runtime 自行产生，不属于 `AgentEvent`。
+compression operation、Context Checkpoint 提交与 continuation 由 Runtime 事件表达，
+不伪装成 Core `AgentEvent`。
 
 - Runtime 可以给事件附加 `RunId`、`SessionId` 和序号后持久化或广播。
 - UI 断线后以 Runtime 快照恢复，不能依赖重放所有 token delta。
@@ -377,13 +389,32 @@ Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 To
 Context Engine 只处理当前模型上下文窗口：
 
 - 稳定 system 前缀和动态上下文组装。
-- token 估算与预算。
+- 基于 Provider usage 与模型窗口的统一上下文占用判断；需要时可由后续版本扩展估算器。
 - 工具输出裁剪。
 - 压缩、摘要和 Provider overflow 恢复。
 
 Memory Service 处理跨执行的召回和观察。Memory 返回的内容只是 Context 的一个输入来源；Context 不写长期记忆，Memory 不直接修改规范会话。
 
-上下文压缩不得破坏仍需回传的 Provider 状态、未完成工具调用或 Tool Call/Result 配对。Provider overflow 恢复必须有显式次数上限，不能形成隐藏重试循环。
+已确定的正式层级边界是：模型服务显式提供 `context_window_tokens`；共享 Context
+Window Evaluator 只使用最近完整 Provider Result 的 `total_tokens` 计算窗口比例；
+Core 在每个 Model Step 前执行该判断；Provider/Model 层只报告 provider-neutral
+Context Overflow；Core 将 Run 内预算阈值或 Overflow 转换为 CompactionRequired
+可靠终态。Core 和 Provider 均不得在原执行内隐藏压缩或重试。
+
+Run 前判断、Checkpoint、用户主动压缩、恢复次数和 continuation 是未来 Runtime
+需要承接的行为目标，但其 Session、Run、Repository、事件和并发接口尚未完成总体
+设计。v0.3.0 仅由 `runtime-harness` 使用私有临时类型验证以下语义：用户消息先落账；
+Run 前压缩成功后再创建首个 Run；Core 交接后压缩成功才 continuation；用户主动压缩
+不启动 Core、不生成 UserMessage、也不续跑。
+
+Harness 中 Run 前阈值、Run 内阈值、Provider Overflow 和用户主动压缩四条路径复用
+同一个私有压缩编排入口；该入口调用 `agent-context` 的 Layout、Strategy 和 Validator
+后提交内存 Checkpoint。该私有入口是行为验证代码，不是正式 Runtime 公共契约。
+
+上下文压缩不得破坏仍需回传的 Provider 状态、未完成工具调用或 Tool Call/Result
+配对。Overflow 所在的未完成 Step 整体丢弃；Core 只有在完整 TurnFinished 后才允许
+记录和执行 Tool Call，因此交接边界取上一个已完整提交的 Step。Provider overflow
+恢复必须有上层编排管理的显式次数上限，不能形成隐藏重试循环。
 
 ## 十三、物理组织原则
 
@@ -409,6 +440,12 @@ agent-testkit
 - 编译期边界能显著减少 Provider、存储或应用依赖泄漏。
 
 不能仅为目录整齐创建没有替换边界和独立调用方的空 crate。
+
+v0.3.0 将 Context Engine 拆为 `agent-context`：Core 的每个 Model Step Preflight
+是正式调用方，Harness 的 Run 前判断与压缩编排是临时验证调用方。共享
+Evaluator/Layout/Validator/Strategy 可以阻止规则分叉；Harness 私有的 Session、Run、
+Checkpoint、恢复次数和 continuation 不进入产品 crate。`ModelRequest` 已是统一请求
+契约，Core 和压缩策略按各自明确语义直接构造，不增加一一映射的 Compiler/Input DTO。
 
 ## 十四、Harness 验证
 

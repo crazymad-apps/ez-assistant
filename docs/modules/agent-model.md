@@ -11,6 +11,12 @@
 - 规范事件具有明确 Part 生命周期和唯一终态。
 - 请求和调用上下文不携带业务 `RunId`、应用 Session 或 credential 明文。
 - 错误区分建立前失败、流中失败和取消，不泄露 prompt、credential 或完整响应正文。
+- `ModelService` 直接暴露当前实例绑定模型的 `context_window_tokens`；调用方不得按
+  provider/model 名称猜测窗口。
+- Provider 明确报告上下文过长时使用 provider-neutral `ContextOverflow`；建立前与
+  流内仍遵守既有错误边界。
+- `GenerationConfig.max_output_tokens` 只表示本次请求的输出上限；是否能编码由具体
+  Adapter 的方言配置判断，不在 `ModelCapabilities` 重复声明。
 - 不依赖 Tauri、Runtime、数据库和具体 Provider Adapter。
 
 ## 验证

@@ -32,6 +32,7 @@ pub enum ModelScript {
 /// 建立前 `ModelError::Config` 失败，提醒测试补脚本。
 pub struct ScriptedModelService {
     capabilities: ModelCapabilities,
+    context_window_tokens: u64,
     scripts: Mutex<VecDeque<ModelScript>>,
     requests: Mutex<Vec<ModelRequest>>,
 }
@@ -40,19 +41,26 @@ impl ScriptedModelService {
     /// 用给定能力声明和脚本队列创建服务。
     pub fn new(
         capabilities: ModelCapabilities,
+        context_window_tokens: u64,
         scripts: impl IntoIterator<Item = ModelScript>,
     ) -> Self {
         Self {
             capabilities,
+            context_window_tokens,
             scripts: Mutex::new(scripts.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
         }
     }
 
     /// 便捷构造：单脚本，正常完成一个由完整消息描述的 Turn。
-    pub fn completing(capabilities: ModelCapabilities, message: AssistantMessage) -> Self {
+    pub fn completing(
+        capabilities: ModelCapabilities,
+        context_window_tokens: u64,
+        message: AssistantMessage,
+    ) -> Self {
         Self::new(
             capabilities,
+            context_window_tokens,
             [ModelScript::Events(message_events(&message))],
         )
     }
@@ -71,6 +79,10 @@ impl ScriptedModelService {
 impl ModelService for ScriptedModelService {
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        self.context_window_tokens
     }
 
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
@@ -271,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_service_completes_text_reasoning_and_tool_call_turns() {
-        let service = ScriptedModelService::completing(capabilities(), sample_message());
+        let service = ScriptedModelService::completing(capabilities(), 128_000, sample_message());
         let stream = service
             .stream(sample_request(), ModelCallContext::default())
             .await
@@ -285,6 +297,7 @@ mod tests {
     async fn scripted_service_replays_establishment_and_in_stream_failures() {
         let service = ScriptedModelService::new(
             capabilities(),
+            128_000,
             [
                 ModelScript::FailEstablishment(ModelError::Auth("bad key".to_owned())),
                 ModelScript::Events(vec![
@@ -322,8 +335,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_service_exposes_window_and_context_overflow_at_both_boundaries() {
+        let overflow = || ModelError::ContextOverflow {
+            message: "scripted context limit".to_owned(),
+        };
+        let service = ScriptedModelService::new(
+            capabilities(),
+            32_768,
+            [
+                ModelScript::FailEstablishment(overflow()),
+                ModelScript::Events(vec![
+                    ModelEvent::TurnStarted {
+                        message_id: MessageId::new("message_1").expect("valid message id"),
+                        model: ModelIdentity::new(
+                            ProviderId::new("deepseek").expect("valid provider id"),
+                            "deepseek-reasoner",
+                        ),
+                    },
+                    ModelEvent::TurnFailed { error: overflow() },
+                ]),
+            ],
+        );
+        assert_eq!(service.context_window_tokens(), 32_768);
+
+        let establishment = service
+            .stream(sample_request(), ModelCallContext::default())
+            .await
+            .err()
+            .expect("establishment overflow");
+        assert_eq!(establishment, overflow());
+
+        let stream = service
+            .stream(sample_request(), ModelCallContext::default())
+            .await
+            .expect("stream establishes");
+        let collected = EventCollector::collect(stream).await;
+        assert_eq!(collected.assert_failed(), &overflow());
+    }
+
+    #[tokio::test]
     async fn scripted_service_rejects_calls_beyond_the_script() {
-        let service = ScriptedModelService::new(capabilities(), []);
+        let service = ScriptedModelService::new(capabilities(), 128_000, []);
         let error = service
             .stream(sample_request(), ModelCallContext::default())
             .await
@@ -349,8 +401,11 @@ mod tests {
             },
         ];
         let expected_len = malformed.len();
-        let service =
-            ScriptedModelService::new(capabilities(), [ModelScript::Events(malformed.clone())]);
+        let service = ScriptedModelService::new(
+            capabilities(),
+            128_000,
+            [ModelScript::Events(malformed.clone())],
+        );
 
         // 不套 validator：脚本原样回放（畸形序列确实到达消费方）。
         let stream = service
@@ -361,7 +416,8 @@ mod tests {
         assert_eq!(raw.events(), malformed.as_slice());
 
         // 套 validator：畸形序列被替换为唯一协议失败终态。
-        let service = ScriptedModelService::new(capabilities(), [ModelScript::Events(malformed)]);
+        let service =
+            ScriptedModelService::new(capabilities(), 128_000, [ModelScript::Events(malformed)]);
         let stream = service
             .stream(sample_request(), ModelCallContext::default())
             .await

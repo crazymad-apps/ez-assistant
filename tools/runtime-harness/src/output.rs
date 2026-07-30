@@ -5,6 +5,7 @@ use std::fmt::Write;
 use agent_core::{AgentEvent, ExecutionOutcome};
 
 use crate::{
+    context::HarnessCompactionOutcome,
     runtime::RuntimeSnapshot,
     scenario::{ScenarioStatus, VerificationSummary, versions},
 };
@@ -135,12 +136,65 @@ pub(crate) fn format_state(snapshot: &RuntimeSnapshot) -> String {
             pending.receipt, pending.assistant_message_id
         );
     }
+    let effective_roles = snapshot
+        .effective_roles
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let _ = writeln!(
+        output,
+        "context: checkpoints={} effective_roles=[{effective_roles}]",
+        snapshot.checkpoint_count
+    );
+    let _ = writeln!(
+        output,
+        "compactions: automatic={}/{} user_queued={}",
+        snapshot.automatic_compactions,
+        snapshot.max_automatic_compactions,
+        snapshot.user_compaction_queued
+    );
+    if let Some(report) = &snapshot.last_compaction {
+        let _ = writeln!(
+            output,
+            "last_compaction: cause={:?} strategy={} compressed_blocks={} retained_blocks={}",
+            report.cause,
+            report.strategy.strategy,
+            report.strategy.compressed_blocks,
+            report.strategy.retained_blocks
+        );
+    } else {
+        let _ = writeln!(output, "last_compaction: none");
+    }
     output
+}
+
+pub(crate) fn format_compaction_outcome(outcome: &HarnessCompactionOutcome) -> String {
+    match outcome {
+        HarnessCompactionOutcome::Compacted { report, .. } => format!(
+            "compacted cause={:?} strategy={} compressed_blocks={} retained_blocks={}",
+            report.cause,
+            report.strategy.strategy,
+            report.strategy.compressed_blocks,
+            report.strategy.retained_blocks
+        ),
+        HarnessCompactionOutcome::NoOp { report } => format!(
+            "no_op cause={:?} strategy={} compressed_blocks={} retained_blocks={}",
+            report.cause,
+            report.strategy.strategy,
+            report.strategy.compressed_blocks,
+            report.strategy.retained_blocks
+        ),
+    }
 }
 
 pub(crate) fn format_event(event: &AgentEvent) -> String {
     match event {
         AgentEvent::ExecutionStarted => "agent.execution_started".to_owned(),
+        AgentEvent::UsageUpdated { step, usage } => format!(
+            "agent.usage_updated step={step} input={} output={} total={}",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens
+        ),
         AgentEvent::StepStarted { step } => format!("agent.step_started step={step}"),
         AgentEvent::TextDelta { id, delta } => {
             format!("agent.text_delta id={id} text={delta}")
@@ -178,6 +232,14 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
         AgentEvent::ExecutionCancelled { dropped_events } => {
             format!("agent.execution_cancelled dropped={dropped_events}")
         }
+        AgentEvent::ExecutionCompactionRequired {
+            reason,
+            step,
+            dropped_events,
+        } => format!(
+            "agent.execution_compaction_required reason={reason:?} step={step} \
+             dropped={dropped_events}"
+        ),
     }
 }
 
@@ -188,6 +250,9 @@ pub(crate) fn format_outcome(outcome: &ExecutionOutcome) -> String {
         }
         ExecutionOutcome::Failed(error) => format!("failed error={error}"),
         ExecutionOutcome::Cancelled => "cancelled".to_owned(),
+        ExecutionOutcome::CompactionRequired { reason, step } => {
+            format!("compaction_required reason={reason:?} step={step}")
+        }
     }
 }
 
@@ -222,16 +287,24 @@ mod tests {
             }),
             completed_messages: 2,
             roles: vec![MessageRole::User, MessageRole::Assistant],
+            effective_roles: vec![MessageRole::ContextSummary, MessageRole::User],
             pending: vec![PendingSummary {
                 receipt: "run_3_exchange_1".to_owned(),
                 assistant_message_id: "assistant_secret_body_is_elsewhere".to_owned(),
             }],
+            checkpoint_count: 1,
+            automatic_compactions: 1,
+            max_automatic_compactions: 2,
+            user_compaction_queued: false,
+            last_compaction: None,
         };
         let output = format_state(&snapshot);
         assert!(output.contains("session: session_test"));
         assert!(output.contains("status=failed"));
         assert!(output.contains("user -> assistant"));
         assert!(output.contains("run_3_exchange_1"));
+        assert!(output.contains("checkpoints=1"));
+        assert!(output.contains("automatic=1/2"));
         assert!(!output.contains("DEEPSEEK_API_KEY"));
         assert!(!output.contains("sk-secret"));
         assert!(!output.contains("actual user message body"));
@@ -244,6 +317,8 @@ mod tests {
         assert!(output.contains("offline: none"));
         assert!(output.contains("v0.2"));
         assert!(output.contains("offline: verify v0.2 (6 scenarios)"));
+        assert!(output.contains("v0.3"));
+        assert!(output.contains("offline: verify v0.3 (14 scenarios)"));
         assert!(output.contains("manual: chat"));
     }
 }

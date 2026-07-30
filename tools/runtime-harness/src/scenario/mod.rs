@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod v0_2;
+mod v0_3;
 
 pub(crate) type ScenarioFuture =
     Pin<Box<dyn Future<Output = Result<ScenarioReport, HarnessError>> + Send>>;
@@ -96,6 +97,16 @@ const VERSIONS: &[VersionEntry] = &[
         offline_verify: Some(VersionBaseline::V0_2),
         manual_modes: &["chat"],
     },
+    VersionEntry {
+        version: "v0.3",
+        capabilities: &[
+            "shared context-window preflight and CompactionRequired handoff",
+            "rolling-summary checkpoints and automatic continuation",
+            "explicit /compact maintenance without continuation",
+        ],
+        offline_verify: Some(VersionBaseline::V0_3),
+        manual_modes: &["chat", "chat /compact"],
+    },
 ];
 
 const SCENARIOS: &[ScenarioDefinition] = &[
@@ -129,6 +140,46 @@ const SCENARIOS: &[ScenarioDefinition] = &[
         baseline: VersionBaseline::V0_2,
         run: v0_2::observation_disconnect,
     },
+    ScenarioDefinition {
+        name: "context_short_path",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_short_path,
+    },
+    ScenarioDefinition {
+        name: "context_before_run_compaction",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_before_run_compaction,
+    },
+    ScenarioDefinition {
+        name: "context_in_run_continuation",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_in_run_continuation,
+    },
+    ScenarioDefinition {
+        name: "context_provider_overflow_recovery",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_provider_overflow_recovery,
+    },
+    ScenarioDefinition {
+        name: "context_user_compaction",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_user_compaction,
+    },
+    ScenarioDefinition {
+        name: "context_rolling_checkpoints",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_rolling_checkpoints,
+    },
+    ScenarioDefinition {
+        name: "context_queued_compaction",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_queued_compaction,
+    },
+    ScenarioDefinition {
+        name: "context_failure_boundaries",
+        baseline: VersionBaseline::V0_3,
+        run: v0_3::context_failure_boundaries,
+    },
 ];
 
 pub(crate) fn versions() -> &'static [VersionEntry] {
@@ -139,7 +190,10 @@ pub(crate) fn definitions(baseline: VersionBaseline) -> Vec<ScenarioDefinition> 
     SCENARIOS
         .iter()
         .copied()
-        .filter(|definition| definition.baseline == baseline)
+        .filter(|definition| match baseline {
+            VersionBaseline::V0_2 => definition.baseline == VersionBaseline::V0_2,
+            VersionBaseline::V0_3 => true,
+        })
         .collect()
 }
 
@@ -227,6 +281,22 @@ mod tests {
         assert_eq!(version.offline_verify, Some(VersionBaseline::V0_2));
     }
 
+    #[test]
+    fn v0_3_registry_is_cumulative() {
+        let definitions = definitions(VersionBaseline::V0_3);
+        assert_eq!(definitions.len(), 14);
+        assert_eq!(definitions[0].name, "plain_text");
+        assert_eq!(
+            definitions.last().map(|definition| definition.name),
+            Some("context_failure_boundaries")
+        );
+        let version = versions()
+            .iter()
+            .find(|entry| entry.version == "v0.3")
+            .expect("v0.3 registry entry");
+        assert_eq!(version.offline_verify, Some(VersionBaseline::V0_3));
+    }
+
     #[tokio::test]
     async fn a_failed_scenario_does_not_hide_following_reports() {
         FOLLOW_UP_RUNS.store(0, Ordering::Relaxed);
@@ -261,5 +331,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(summary.is_success(), "scenario failures: {failures:?}");
         assert_eq!(summary.passed(), 6);
+    }
+
+    #[tokio::test]
+    async fn every_registered_v0_3_scenario_passes() {
+        let summary = verify(VersionBaseline::V0_3).await;
+        let failures = summary
+            .results
+            .iter()
+            .filter_map(|result| result.error.as_deref())
+            .collect::<Vec<_>>();
+        assert!(summary.is_success(), "scenario failures: {failures:?}");
+        assert_eq!(summary.passed(), 14);
     }
 }

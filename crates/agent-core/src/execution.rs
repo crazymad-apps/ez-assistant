@@ -26,12 +26,24 @@ use crate::{
 /// 不影响执行本身。
 pub type CompletionFuture = Pin<Box<dyn Future<Output = ExecutionOutcome> + Send>>;
 
-/// 一次执行的最终结果；与三个终态事件镜像。
+/// 请求 Runtime 执行上下文压缩的原因。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReason {
+    /// 最近完整模型结果的窗口占用达到配置阈值。
+    ThresholdReached,
+    /// Provider 在请求建立前或模型流内明确报告上下文超限。
+    ProviderOverflow,
+}
+
+/// 一次执行的最终结果；与四个终态事件镜像。
 ///
 /// `ExecutionCompleted{message}` ↔ [`ExecutionOutcome::Completed`]、
 /// `ExecutionFailed{error}` ↔ [`ExecutionOutcome::Failed`]、
-/// `ExecutionCancelled` ↔ [`ExecutionOutcome::Cancelled`]。每次执行恰好收敛到
-/// 一个终态，完成结果与终态事件承载同一事实。
+/// `ExecutionCancelled` ↔ [`ExecutionOutcome::Cancelled`]、
+/// `ExecutionCompactionRequired{reason,step}` ↔
+/// [`ExecutionOutcome::CompactionRequired`]。每次执行恰好收敛到一个终态，
+/// 完成结果与终态事件承载同一事实。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ExecutionOutcome {
@@ -41,6 +53,13 @@ pub enum ExecutionOutcome {
     Failed(ExecutionError),
     /// 已取消；收敛前所有未结算 Tool Call 已补记 interrupted 错误 `ToolResult`。
     Cancelled,
+    /// 当前执行在指定 Model Step 前或期间需要由 Runtime 压缩上下文。
+    CompactionRequired {
+        /// 触发压缩交接的原因。
+        reason: CompactionReason,
+        /// 阈值预检即将开始或 Provider Overflow 已经开始的 Model Step。
+        step: u32,
+    },
 }
 
 /// 一次执行的取消控制句柄。
@@ -116,13 +135,14 @@ mod tests {
         task::{Context, Poll},
     };
 
+    use agent_context::ContextWindowEvaluator;
     use agent_model::{
         ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
         ModelRequest, ModelService, ModelStreamFuture,
     };
     use agent_types::{
-        ConversationSnapshot, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
-        UserMessage, UserPart,
+        ConversationMessage, ConversationSnapshot, FinishReason, MessageId, ModelIdentity, PartId,
+        ProviderId, TextPart, UserMessage, UserPart,
     };
     use futures_core::Stream;
     use futures_util::StreamExt;
@@ -198,6 +218,10 @@ mod tests {
             &self.capabilities
         }
 
+        fn context_window_tokens(&self) -> u64 {
+            128_000
+        }
+
         fn stream(
             &self,
             _request: ModelRequest,
@@ -267,6 +291,7 @@ mod tests {
         ExecutionSpec {
             instructions: vec!["You are a helpful assistant.".to_owned()],
             model: Arc::new(model),
+            context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: Default::default(),
             budget: ExecutionBudget::default(),
         }
@@ -274,14 +299,13 @@ mod tests {
 
     fn input() -> ExecutionInput {
         ExecutionInput {
-            conversation: ConversationSnapshot::new(vec![]),
-            user_input: UserMessage {
+            conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
                 id: MessageId::new("message_u1").expect("valid message id"),
                 parts: vec![UserPart::Text(TextPart {
                     id: PartId::new("text_u1").expect("valid part id"),
                     text: "Hello.".to_owned(),
                 })],
-            },
+            })]),
         }
     }
 
@@ -310,6 +334,10 @@ mod tests {
                 limit: 4,
             }),
             ExecutionOutcome::Cancelled,
+            ExecutionOutcome::CompactionRequired {
+                reason: CompactionReason::ThresholdReached,
+                step: 2,
+            },
         ];
         for outcome in outcomes {
             let json = serde_json::to_string(&outcome).expect("serialize outcome");

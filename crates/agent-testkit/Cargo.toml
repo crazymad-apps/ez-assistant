@@ -16,3 +16,6 @@ futures-util.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+agent-context = { path = "../agent-context" }

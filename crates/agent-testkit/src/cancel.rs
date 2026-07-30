@@ -157,6 +157,7 @@ mod tests {
                 tool_calls: false,
                 streaming: true,
             },
+            128_000,
             message,
         )
     }

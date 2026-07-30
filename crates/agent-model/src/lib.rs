@@ -12,8 +12,8 @@
 //!   [`ModelStreamFuture`] 返回 `Err`；流建立后的失败以 `TurnFailed` 受控终态结束。
 //! - [`LifecycleValidator`]：强制执行 Part 生命周期配对与唯一终态，
 //!   不依赖任何具体 Provider。
-//! - [`ModelError`]：配置、认证、Transport、Provider、限流、协议、
-//!   Tool arguments 和取消的分类，只携带脱敏诊断信息。
+//! - [`ModelError`]：配置、认证、Transport、Provider、限流、Context Overflow、
+//!   协议、Tool arguments 和取消的分类，只携带脱敏诊断信息。
 //!
 //! 最小调用示例见 `service.rs` 内联测试：`FakeModelService` 演示了通过
 //! [`ModelService`] SPI 完成一次 Turn 的完整路径；真实 Adapter 的端到端调用见

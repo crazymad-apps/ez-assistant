@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 /// 一个模型服务对单次 Provider Turn 支持能力的显式声明。
 ///
 /// 调用方据此决定请求内容（例如能力不含 tool call 时不下发工具定义），

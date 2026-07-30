@@ -3,10 +3,11 @@ use agent_model::{
     ReasoningEffort,
 };
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
-    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
-    SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition,
-    ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
+    ConversationSnapshot, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
+    ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,
+    ToolCallId, ToolChoice, ToolDefinition, ToolMessage, ToolName, ToolResult, ToolResultContent,
+    ToolResultStatus, UserMessage, UserPart,
 };
 use serde_json::{Value, json};
 
@@ -55,7 +56,7 @@ fn reasoning_profile() -> Profile {
         supports_temperature: true,
         supports_top_p: true,
         supports_stop: true,
-        max_tokens_field: Some("max_tokens".to_owned()),
+        max_output_tokens_field: Some("max_tokens".to_owned()),
         supports_tool_choice: true,
         tool_calls_require_reasoning: false,
         cached_input_tokens_field: None,
@@ -72,7 +73,7 @@ fn limited_profile() -> Profile {
         supports_temperature: false,
         supports_top_p: false,
         supports_stop: false,
-        max_tokens_field: None,
+        max_output_tokens_field: None,
         supports_tool_choice: false,
         tool_calls_require_reasoning: false,
         cached_input_tokens_field: None,
@@ -268,6 +269,25 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
             {"type": "text", "text": "<constraint>answer briefly</constraint>"},
             {"type": "text", "text": "What date is it?"},
         ])
+    );
+}
+
+#[test]
+fn encode_context_summary_uses_a_derived_system_message() {
+    let profile = base_profile();
+    let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
+        id: message_id("summary_1"),
+        text: "The user selected a local-first architecture.".to_owned(),
+    });
+
+    let encoded = encode_request(&request(vec![message]), &profile, MODEL).expect("encode request");
+    let json = serde_json::to_value(&encoded).expect("serialize request");
+    assert_eq!(
+        json["messages"][0],
+        json!({
+            "role": "system",
+            "content": "[Context summary derived from earlier conversation]\nThe user selected a local-first architecture."
+        })
     );
 }
 
@@ -730,6 +750,47 @@ fn decode_error_body_maps_type_and_code_strings() {
     assert_eq!(
         decode_error_body(&body),
         ModelError::RateLimited("slow down".to_owned())
+    );
+
+    let body: ChatErrorBody =
+        serde_json::from_str(include_str!("../fixtures/errors/context_overflow.json"))
+            .expect("parse context overflow fixture");
+    assert_eq!(
+        decode_error_body(&body),
+        ModelError::ContextOverflow {
+            message: "request is too large".to_owned(),
+        }
+    );
+
+    let body: ChatErrorBody = serde_json::from_value(json!({
+        "error": {
+            "message": "request is too large",
+            "type": "context_length_exceeded"
+        },
+    }))
+    .expect("parse error body");
+    assert_eq!(
+        decode_error_body(&body),
+        ModelError::ContextOverflow {
+            message: "request is too large".to_owned(),
+        }
+    );
+
+    // 未经 fixture 确认的相似 code 不得通过文本或模糊匹配升级为 Overflow。
+    let body: ChatErrorBody = serde_json::from_value(json!({
+        "error": {
+            "message": "context_length_exceeded appears only in the message",
+            "type": "invalid_request_error",
+            "code": "context_window_too_large"
+        },
+    }))
+    .expect("parse error body");
+    assert_eq!(
+        decode_error_body(&body),
+        ModelError::Provider {
+            message: "context_length_exceeded appears only in the message".to_owned(),
+            status: None,
+        }
     );
 
     let body: ChatErrorBody = serde_json::from_value(json!({
@@ -1345,6 +1406,45 @@ fn tool_call_id_round_trips_from_call_to_result() {
 }
 
 #[test]
+fn encode_reuses_strict_bidirectional_tool_exchange_validation() {
+    let profile = reasoning_profile();
+    let missing = request(vec![assistant_message(vec![tool_call_part(
+        "call_1",
+        "get_date",
+        json!({}),
+    )])]);
+    let error = encode_request(&missing, &profile, MODEL).expect_err("missing result must fail");
+    assert!(matches!(error, ModelError::Config(message) if message.contains("call_1")));
+
+    let out_of_order = request(vec![
+        assistant_message(vec![
+            tool_call_part("call_1", "get_date", json!({})),
+            tool_call_part("call_2", "get_date", json!({})),
+        ]),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("tool_2"),
+            result: ToolResult {
+                call_id: call_id("call_2"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Text("ok".to_owned()),
+            },
+        }),
+    ]);
+    let error = encode_request(&out_of_order, &profile, MODEL).expect_err("out of order must fail");
+    assert!(
+        matches!(error, ModelError::Config(message) if message.contains("call_1") && message.contains("call_2"))
+    );
+
+    let duplicate = request(vec![assistant_message(vec![
+        tool_call_part("call_1", "get_date", json!({})),
+        tool_call_part("call_1", "get_date", json!({})),
+    ])]);
+    let error =
+        encode_request(&duplicate, &profile, MODEL).expect_err("duplicate call id must fail");
+    assert!(matches!(error, ModelError::Config(message) if message.contains("call_1")));
+}
+
+#[test]
 fn canonical_native_canonical_round_trip_preserves_assistant_parts() {
     let profile = reasoning_profile();
     let calls = vec![
@@ -1369,6 +1469,22 @@ fn canonical_native_canonical_round_trip_preserves_assistant_parts() {
             AssistantPart::ToolCall(calls[0].clone()),
             AssistantPart::ToolCall(calls[1].clone()),
         ]),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("tool_1"),
+            result: ToolResult {
+                call_id: call_id("call_1"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Text("sunny".to_owned()),
+            },
+        }),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("tool_2"),
+            result: ToolResult {
+                call_id: call_id("call_2"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Text("12:00".to_owned()),
+            },
+        }),
     ]);
 
     let encoded = encode_request(&req, &profile, MODEL).expect("encode request");

@@ -9,7 +9,8 @@
 //! - [`AgentExecution`] / [`ExecutionOutcome`] / [`ExecutionControl`]：执行句柄——
 //!   `start` 后由单一 tokio 任务驱动 Agent Loop 状态机（预检预算 → 模型 Turn →
 //!   AssistantMessage 落账 → 逐 call 授权 → 工具执行 → ToolResult 落账 → 下一轮），
-//!   终态 Completed / Failed / Cancelled 恰一，完成结果与终态事件镜像。
+//!   终态 Completed / Failed / Cancelled / CompactionRequired 恰一，完成结果与
+//!   终态事件镜像。
 //! - [`ExecutionRecorder`] / [`ToolAuthorizer`]：pending/completed 两阶段 tool
 //!   exchange 落账与工具授权 SPI，沿用 `ModelService` 的手写 boxed-future 模式。
 //! - [`AgentEvent`] / [`AgentEventStream`]：普通观察事件使用 bounded mpsc
@@ -32,7 +33,9 @@ pub use authorizer::{AllowAllAuthorizer, AuthorizationFuture, ToolAuthorization,
 pub use context::ExecutionContext;
 pub use error::{BudgetKind, ExecutionError};
 pub use event::{AgentEvent, AgentEventStream, ToolCompletionStatus};
-pub use execution::{AgentExecution, CompletionFuture, ExecutionControl, ExecutionOutcome};
+pub use execution::{
+    AgentExecution, CompactionReason, CompletionFuture, ExecutionControl, ExecutionOutcome,
+};
 pub use input::ExecutionInput;
 pub use recorder::{
     ConversationDelta, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
