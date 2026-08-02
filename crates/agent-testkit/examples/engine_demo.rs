@@ -98,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_steps: Some(4),
                 max_tool_calls: Some(2),
             },
+            guardrails: None,
         },
         ExecutionInput {
             conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
@@ -214,6 +215,16 @@ fn describe_event(event: &AgentEvent) -> String {
             };
             format!("tool.completed: {call_id} ({status})")
         }
+        AgentEvent::GuardrailTriggered {
+            kind,
+            mode,
+            threshold,
+            observed,
+            call_id,
+        } => format!(
+            "guardrail.triggered: {kind:?} mode={mode:?} threshold={threshold} \
+             observed={observed} call={call_id}"
+        ),
         AgentEvent::ExecutionCompleted { dropped_events, .. } => {
             format!("execution.completed (dropped_events={dropped_events})")
         }
@@ -239,6 +250,9 @@ fn describe_order_entry(entry: &LogEntry) -> String {
     match entry {
         LogEntry::RecordAssistant => "recorder.begin(AssistantMessage)".to_owned(),
         LogEntry::RecordTool => "recorder.complete(ToolMessage batch)".to_owned(),
+        LogEntry::PolicyEvaluate { name, batch_size } => {
+            format!("policy.evaluate({name}, batch_size={batch_size})")
+        }
         LogEntry::Authorize { name, batch_size } => {
             format!("authorizer.allow({name}, batch_size={batch_size})")
         }

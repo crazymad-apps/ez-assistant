@@ -5,11 +5,11 @@
 //!
 //! - [`ScriptedModelService`] / [`ModelScript`]：脚本化模型服务，覆盖正常完成、
 //!   建立前失败、流中失败和畸形事件序列注入。
-//! - [`ScriptedTool`]、[`InMemoryRecorder`]、[`ScriptedAuthorizer`] /
+//! - [`ScriptedTool`]、[`InMemoryRecorder`]、[`ScriptedPolicy`]、[`ScriptedAuthorizer`] /
 //!   [`AuthorizeGate`]：引擎 Harness 的三种脚本化
 //!   Fake（成功/失败/挂起工具、可注入第 N 次失败的内存 Recorder、按名决策
-//!   可挂起的授权闸）；三者共享 [`OrderLog`] 顺序日志，供断言副作用前顺序
-//!   `begin(Assistant) → authorize → execute → complete(batch)`。
+//!   策略、可挂起的 resolved 授权闸）；各组件共享 [`OrderLog`] 顺序日志，
+//!   供断言 `begin → policy → authorize → execute → complete`。
 //! - [`RecordedTransport`]：捕获出站请求并按 fixture 回放 HTTP/SSE 数据，
 //!   支持建立前连接失败与响应中途断流。
 //! - [`EventCollector`] / [`CollectedEvents`]：收集事件流并断言唯一终态与
@@ -36,22 +36,24 @@ mod collect;
 mod fixture;
 mod fs;
 mod order;
+mod policy;
 mod record;
 mod recorder;
 mod script;
 mod shell;
 mod tool;
 
-pub use authorizer::{AuthorizeGate, ScriptedAuthorizer};
+pub use authorizer::{AuthorizationObservation, AuthorizeGate, ScriptedAuthorizer};
 pub use cancel::CancelGate;
 pub use collect::{CollectedEvents, EventCollector};
 pub use fixture::{FixtureViolation, validate_request, validate_response};
 pub use fs::FakeFileSystemTool;
 pub use order::{LogEntry, OrderLog};
+pub use policy::ScriptedPolicy;
 pub use record::{
     BodyStep, RecordedRequest, RecordedResponse, RecordedTransport, RecordedTransportError,
 };
 pub use recorder::InMemoryRecorder;
 pub use script::{ModelScript, ScriptedModelService, message_events};
-pub use shell::{FakeShellScript, FakeShellTool};
+pub use shell::{FakeShellCompletion, FakeShellScript, FakeShellTool};
 pub use tool::ScriptedTool;

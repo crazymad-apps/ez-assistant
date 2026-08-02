@@ -11,6 +11,7 @@
 
 use std::{
     future::Future,
+    num::NonZeroU32,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -24,7 +25,7 @@ use agent_types::{AssistantMessage, PartId, TokenUsage, ToolCall, ToolCallId};
 use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{CompactionReason, ExecutionError};
+use crate::{ActiveGuardrailMode, CompactionReason, ExecutionError, GuardrailKind};
 
 /// 事件通道容量；超出后新事件丢弃并计数。
 pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -91,6 +92,19 @@ pub enum AgentEvent {
         call_id: ToolCallId,
         /// 完成状态。
         status: ToolCompletionStatus,
+    },
+    /// 一个 Guardrail 检测器首次达到当前连续序列阈值。
+    GuardrailTriggered {
+        /// 触发的检测器类别。
+        kind: GuardrailKind,
+        /// 本次触发只观察还是强制终止。
+        mode: ActiveGuardrailMode,
+        /// 配置的非零阈值。
+        threshold: NonZeroU32,
+        /// 触发时实际观察到的连续次数。
+        observed: u32,
+        /// 使检测器达到阈值的 Tool Call。
+        call_id: ToolCallId,
     },
     /// 唯一正常终态，携带最终聚合的规范响应。
     ExecutionCompleted {
@@ -237,6 +251,8 @@ impl Stream for AgentEventStream {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use agent_types::{FinishReason, MessageId, ModelIdentity, ProviderId, ToolName};
 
     use super::*;
@@ -308,6 +324,13 @@ mod tests {
             AgentEvent::ToolCompleted {
                 call_id: call_id(),
                 status: ToolCompletionStatus::Failed,
+            },
+            AgentEvent::GuardrailTriggered {
+                kind: GuardrailKind::RepeatedInvocation,
+                mode: ActiveGuardrailMode::Observe,
+                threshold: NonZeroU32::new(3).expect("non-zero threshold"),
+                observed: 3,
+                call_id: call_id(),
             },
             AgentEvent::ExecutionCompleted {
                 message: assistant_message(),
@@ -392,6 +415,13 @@ mod tests {
             },
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolStarted { call_id: call_id() },
+            AgentEvent::GuardrailTriggered {
+                kind: GuardrailKind::ConsecutiveFailures,
+                mode: ActiveGuardrailMode::Enforce,
+                threshold: NonZeroU32::new(2).expect("non-zero threshold"),
+                observed: 2,
+                call_id: call_id(),
+            },
         ] {
             assert!(!event.is_terminal());
         }

@@ -887,6 +887,7 @@ mod tests {
             ),
             tools: ToolRegistry::new().snapshot(),
             budget: ExecutionBudget::default(),
+            guardrails: None,
         };
         let (run_id, execution) = runtime
             .start_prepared(spec, prepared)

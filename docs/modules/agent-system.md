@@ -157,6 +157,10 @@ StreamingModel
       RecordingAssistantMessage
             │
             ▼
+      ResolvingToolInvocations
+        │
+        ├── 未知工具/参数无效：产生错误 ToolResult
+        ▼
         Authorizing
         │         │
       Allow      Deny：产生错误 ToolResult，对应工具不执行
@@ -354,35 +358,46 @@ pub struct ExecutionBudget {
 
 ### 10.3 启发式 Guardrail
 
-完全相同调用、连续失败和无进展检测分别支持：
+启用的完全相同调用、连续失败和无进展检测分别支持：
 
 ```rust
-pub enum EnforcementMode {
-    Off,
+pub enum ActiveGuardrailMode {
     Observe,
     Enforce,
 }
 ```
 
-- `Off`：不检测。
+- 未配置对应检测器：不检测。
 - `Observe`：只发诊断事件。
 - `Enforce`：按显式阈值警告、阻断或终止。
 
-每条规则独立配置；Core 不允许未声明的启发式规则静默中止执行。
+整体 Guardrail 配置和每个检测器配置均为可选；Core 不允许未声明的启发式规则静默
+中止执行。
+
+v0.4.0 首期只实现完全相同调用和连续失败；无进展检测在没有可靠通用信号前保留为
+后续能力。关闭通过未配置对应检测器表达，Observe 只发诊断事件，Enforce 才在完整
+结算 Tool Call/Result 后终止当前 AgentExecution。
 
 ### 10.4 权限与审批
 
-Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 ToolResult（回喂模型、驱动循环继续的唯一载体是 error ToolResult），对应工具不执行，循环继续。Core 只保证逐 Tool Call 独立过闸；审批编排（串行询问、攒批询问、规则自动放行）归 Runtime 的 authorizer 实现，Core 在 authorize 时提供本轮批次上下文（同轮全部 tool call）供其实现批次审批交互。`Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成；`ApprovalService` 归 Runtime/Adapter。规则保存、UI 交互、无人值守策略和审计属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
+Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 ToolResult（回喂模型、驱动循环继续的唯一载体是 error ToolResult），对应工具不执行，循环继续。工具名查找、类型化参数校验、模型可见默认值落实和确定性路径解析必须先形成 resolved invocation；Authorizer、Guardrail 和执行器使用同一份冻结事实，未知工具和无效输入不进入授权。Core 只保证逐 Tool Call 独立过闸，并提供按顺序组合类型化策略与最终 Authorizer 的通用机制；审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现，authorize 时可观察本轮 resolved batch。`Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成；`ApprovalService` 归 Runtime/Adapter。Plan/Build 等能力上限必须先于 Ask/Auto fallback，Auto 不能覆盖上层明确 Deny。规则保存、UI 交互、无人值守策略和审计属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
 
 ## 十一、工具边界
 
 - Tool 使用结构化定义、输入 schema、输出 schema 和稳定错误。
+- Dispatcher 分为无副作用 resolve 与一次性 execute；类型化输入只解析一次，授权和
+  执行使用同一 resolved invocation。
+- 会影响返回范围、时长或副作用的工具默认值必须进入冻结 Tool Definition，不能只
+  隐藏在执行器构造参数中。
 - Tool Registry 在 `ExecutionSpec` 编译阶段生成不可变快照；执行期间不修改模型可见工具集合。
-- Dispatcher 一次只负责一个规范 Tool Call，不负责模型请求和 Agent 继续循环。
+- Dispatcher 对一个规范 Tool Call 批次做无副作用 resolve，并按明确位置一次性
+  execute；它不负责策略、模型请求或 Agent 继续循环。
 - 同批工具是否并行由显式执行策略决定；有副作用的工具默认不推断为可安全并行。
 - 文件 read/list/search/write/delete/edit 共享文件能力实现；`grep`/`rg` 是 `search` 的内部后端。
 - Shell 是独立通用工具，其当前用户权限能力不能被描述为文件沙盒。
-- 真实文件、Shell、网络和桌面工具实现位于 Runtime/Adapter，不进入 Agent Engine。
+- 真实文件与 Shell 机制位于独立本地基础设施 Adapter；Runtime 负责装配工作目录、
+  能力策略、审批、环境过滤和审计。真实网络和桌面工具同样位于 Runtime/Adapter，
+  均不进入 Agent Engine。
 
 ## 十二、Context 与 Memory 的边界
 
@@ -424,6 +439,7 @@ Harness 中 Run 前阈值、Run 内阈值、Provider Overflow 和用户主动压
 agent-types
 agent-model
 agent-tools
+agent-tools-local
 agent-memory
 agent-safety
 agent-context
@@ -446,6 +462,12 @@ v0.3.0 将 Context Engine 拆为 `agent-context`：Core 的每个 Model Step Pre
 Evaluator/Layout/Validator/Strategy 可以阻止规则分叉；Harness 私有的 Session、Run、
 Checkpoint、恢复次数和 continuation 不进入产品 crate。`ModelRequest` 已是统一请求
 契约，Core 和压缩策略按各自明确语义直接构造，不增加一一映射的 Compiler/Input DTO。
+
+v0.4.0 将真实文件与 Shell 机制拆为 `agent-tools-local`：该 crate 只向下依赖
+`agent-tools`，不感知 Core、工作模式、审批、审计或 UI。`tools/safety-demo` 是验证
+调用方和顶层独立开发工具，可装配 Agent Core、Provider 与本地 Adapter，并只在
+loopback 提供临时安全页面；其 Session、Run、审批、审计和 HTTP DTO 均保持私有，
+不得上提为正式 Runtime 或应用协议。
 
 ## 十四、Harness 验证
 

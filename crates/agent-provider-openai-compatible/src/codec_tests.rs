@@ -210,6 +210,16 @@ fn assemble(chunks: Vec<ChatChunk>) -> Result<Vec<ModelEvent>, ModelError> {
     Ok(events)
 }
 
+fn assemble_with_profile(
+    profile: Profile,
+    chunks: Vec<ChatChunk>,
+) -> Result<Vec<ModelEvent>, ModelError> {
+    let mut assembler = ChunkAssembler::new(profile);
+    let mut events = feed(&mut assembler, chunks)?;
+    events.extend(assembler.finalize()?);
+    Ok(events)
+}
+
 #[test]
 fn encode_plain_text_request_uses_streaming_wire() {
     let profile = base_profile();
@@ -708,6 +718,72 @@ fn decode_response_parses_tool_call_arguments() {
         ]
     );
     assert_eq!(message.finish_reason, FinishReason::ToolCalls);
+}
+
+#[test]
+fn decode_rejects_tool_call_response_without_required_reasoning() {
+    let response: ChatResponse = serde_json::from_value(json!({
+        "id": "chatcmpl_missing_reasoning",
+        "model": "deepseek-v4-flash",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }))
+    .expect("parse response");
+
+    let error = decode_response(&response, &Profile::deepseek())
+        .expect_err("thinking tool-call response without reasoning must fail");
+    assert!(
+        matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
+    );
+
+    // 不要求 reasoning 的普通兼容方言仍接受相同原生消息。
+    assert!(decode_response(&response, &reasoning_profile()).is_ok());
+}
+
+#[test]
+fn decode_rejects_empty_null_and_text_only_reasoning_on_tool_call_turns() {
+    for (label, reasoning, content) in [
+        ("empty", json!(""), Value::Null),
+        ("null", Value::Null, Value::Null),
+        ("text-only", Value::Null, json!("I will use a tool")),
+    ] {
+        let response: ChatResponse = serde_json::from_value(json!({
+            "id": format!("chatcmpl_{label}"),
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": reasoning,
+                    "content": content,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "{}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .expect("parse response");
+        let error = decode_response(&response, &Profile::deepseek())
+            .expect_err("tool call requires non-empty reasoning");
+        assert!(
+            matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content")),
+            "case {label}"
+        );
+    }
 }
 
 #[test]
@@ -1343,6 +1419,57 @@ fn stream_finalize_requires_chunks_and_finish_reason() {
     let mut assembler = ChunkAssembler::new(reasoning_profile());
     feed(&mut assembler, vec![content_chunk("Hi")]).expect("chunk assembles");
     assert!(matches!(assembler.finalize(), Err(ModelError::Protocol(_))));
+}
+
+#[test]
+fn stream_rejects_tool_call_turn_without_required_reasoning_before_turn_finished() {
+    let mut assembler = ChunkAssembler::new(Profile::deepseek());
+    feed(
+        &mut assembler,
+        vec![
+            tool_chunk(json!([{
+                "index": 0,
+                "id": "call_1",
+                "function": {"name": "shell", "arguments": "{}"}
+            }])),
+            finish_chunk("tool_calls"),
+        ],
+    )
+    .expect("tool call chunks assemble before final response validation");
+
+    let error = assembler
+        .finalize()
+        .expect_err("missing reasoning must prevent TurnFinished");
+    assert!(
+        matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
+    );
+}
+
+#[test]
+fn stream_rejects_empty_null_and_text_only_reasoning_on_tool_call_turns() {
+    let cases = [
+        vec![reasoning_chunk("")],
+        vec![chunk(json!({
+            "id": "chatcmpl_1",
+            "model": "deepseek-reasoner",
+            "choices": [{"index": 0, "delta": {"reasoning_content": null}}],
+        }))],
+        vec![content_chunk("I will use a tool")],
+    ];
+    for prefix in cases {
+        let mut chunks = prefix;
+        chunks.push(tool_chunk(json!([{
+            "index": 0,
+            "id": "call_1",
+            "function": {"name": "shell", "arguments": "{}"}
+        }])));
+        chunks.push(finish_chunk("tool_calls"));
+        let error = assemble_with_profile(Profile::deepseek(), chunks)
+            .expect_err("tool call requires non-empty reasoning");
+        assert!(
+            matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
+        );
+    }
 }
 
 #[test]

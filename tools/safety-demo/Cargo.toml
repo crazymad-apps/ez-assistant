@@ -1,0 +1,40 @@
+[package]
+name = "safety-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-context = { path = "../../crates/agent-context" }
+agent-core = { path = "../../crates/agent-core" }
+agent-model = { path = "../../crates/agent-model" }
+agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
+agent-tools = { path = "../../crates/agent-tools" }
+agent-tools-local = { path = "../../crates/agent-tools-local" }
+agent-types = { path = "../../crates/agent-types" }
+async-stream.workspace = true
+axum.workspace = true
+dotenvy.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util.workspace = true
+tower-http.workspace = true
+
+[dev-dependencies]
+agent-testkit = { path = "../../crates/agent-testkit" }
+reqwest.workspace = true

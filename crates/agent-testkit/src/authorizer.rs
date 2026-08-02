@@ -4,10 +4,15 @@
 //! [`AuthorizeGate`] 的 Notify/令牌语义同步（禁止 sleep）：`authorize` 进入时
 //! 通知 `wait_entered`，随后挂起直到 `release` 或所在 future 被引擎取消丢弃。
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use agent_core::{AuthorizationFuture, ToolAuthorization, ToolAuthorizer};
-use agent_types::ToolCall;
+use agent_tools::{ResolvedToolBatch, ResolvedToolInvocation};
+use agent_types::{ToolCallId, ToolName};
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -54,6 +59,20 @@ pub struct ScriptedAuthorizer {
     decisions: HashMap<String, ToolAuthorization>,
     gate: Option<AuthorizeGate>,
     log: OrderLog,
+    observations: Arc<Mutex<Vec<AuthorizationObservation>>>,
+}
+
+/// 脚本化 Authorizer 观察到的一次 resolved 授权请求。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizationObservation {
+    /// 模型协议中的原始 Tool Call ID。
+    pub call_id: ToolCallId,
+    /// 冻结后的模型可见工具名。
+    pub tool_name: ToolName,
+    /// 授权代码实际看到的完整 resolved 参数。
+    pub resolved_arguments: Value,
+    /// 原 resolved batch 的位置数，包含 invalid 位置。
+    pub batch_size: usize,
 }
 
 impl ScriptedAuthorizer {
@@ -63,6 +82,7 @@ impl ScriptedAuthorizer {
             decisions: HashMap::new(),
             gate: None,
             log,
+            observations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -75,6 +95,7 @@ impl ScriptedAuthorizer {
             decisions: decisions.into_iter().collect(),
             gate: None,
             log,
+            observations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -83,24 +104,41 @@ impl ScriptedAuthorizer {
         self.gate = Some(gate);
         self
     }
+
+    /// 按调用顺序返回 Authorizer 观察到的 resolved 请求快照。
+    pub fn observations(&self) -> Vec<AuthorizationObservation> {
+        self.observations
+            .lock()
+            .expect("authorization observations mutex poisoned")
+            .clone()
+    }
 }
 
 impl ToolAuthorizer for ScriptedAuthorizer {
     fn authorize<'a>(
         &'a self,
-        call: &'a ToolCall,
-        batch: &'a [ToolCall],
+        invocation: &'a ResolvedToolInvocation,
+        batch: &'a ResolvedToolBatch,
     ) -> AuthorizationFuture<'a> {
         Box::pin(async move {
             self.log.push(LogEntry::Authorize {
-                name: call.name.as_str().to_owned(),
+                name: invocation.tool_name().as_str().to_owned(),
                 batch_size: batch.len(),
             });
+            self.observations
+                .lock()
+                .expect("authorization observations mutex poisoned")
+                .push(AuthorizationObservation {
+                    call_id: invocation.call_id().clone(),
+                    tool_name: invocation.tool_name().clone(),
+                    resolved_arguments: invocation.resolved_arguments().clone(),
+                    batch_size: batch.len(),
+                });
             if let Some(gate) = &self.gate {
                 gate.hang_until_released().await;
             }
             self.decisions
-                .get(call.name.as_str())
+                .get(invocation.tool_name().as_str())
                 .cloned()
                 .unwrap_or(ToolAuthorization::Allow)
         })
@@ -109,9 +147,12 @@ impl ToolAuthorizer for ScriptedAuthorizer {
 
 #[cfg(test)]
 mod tests {
-    use agent_types::{ToolCallId, ToolName};
+    use agent_tools::{Dispatcher, ResolvedBatchItemRef, ToolRegistry};
+    use agent_types::ToolCall;
+    use serde_json::json;
 
     use super::*;
+    use crate::ScriptedTool;
 
     fn call(name: &str) -> ToolCall {
         ToolCall {
@@ -119,6 +160,20 @@ mod tests {
             name: ToolName::new(name).expect("valid tool name"),
             arguments: serde_json::json!({}),
         }
+    }
+
+    fn resolved(calls: &[ToolCall], log: &OrderLog) -> agent_tools::ResolvedToolBatch {
+        let mut registry = ToolRegistry::new();
+        for call in calls {
+            registry
+                .register(ScriptedTool::succeed(
+                    call.name.as_str(),
+                    json!(null),
+                    log.clone(),
+                ))
+                .expect("register scripted tool");
+        }
+        Dispatcher::resolve_batch(&registry.snapshot(), calls)
     }
 
     #[tokio::test]
@@ -133,13 +188,20 @@ mod tests {
                 },
             )],
         );
-        let batch = vec![call("read_file"), call("write_file")];
+        let calls = vec![call("read_file"), call("write_file")];
+        let batch = resolved(&calls, &log);
+        let Some(ResolvedBatchItemRef::Valid(read)) = batch.get(0) else {
+            panic!("read resolves");
+        };
+        let Some(ResolvedBatchItemRef::Valid(write)) = batch.get(1) else {
+            panic!("write resolves");
+        };
         assert_eq!(
-            authorizer.authorize(&batch[0], &batch).await,
+            authorizer.authorize(read, &batch).await,
             ToolAuthorization::Allow
         );
         assert_eq!(
-            authorizer.authorize(&batch[1], &batch).await,
+            authorizer.authorize(write, &batch).await,
             ToolAuthorization::Deny {
                 reason: "no writes".to_owned(),
             }
@@ -164,9 +226,13 @@ mod tests {
     async fn gate_hangs_authorize_until_released() {
         let log = OrderLog::new();
         let gate = AuthorizeGate::new();
-        let authorizer = ScriptedAuthorizer::allow_all(log).with_gate(gate.clone());
-        let call = call("read_file");
-        let pending = authorizer.authorize(&call, std::slice::from_ref(&call));
+        let authorizer = ScriptedAuthorizer::allow_all(log.clone()).with_gate(gate.clone());
+        let calls = [call("read_file")];
+        let batch = resolved(&calls, &log);
+        let Some(ResolvedBatchItemRef::Valid(invocation)) = batch.get(0) else {
+            panic!("read resolves");
+        };
+        let pending = authorizer.authorize(invocation, &batch);
         tokio::pin!(pending);
 
         // 未放行时挂起：先驱动一次 poll（authorize 进入并发出 entered 通知后挂起）。
@@ -181,9 +247,7 @@ mod tests {
         assert_eq!(pending.await, ToolAuthorization::Allow);
         // 放行后后续授权不再挂起。
         assert_eq!(
-            authorizer
-                .authorize(&call, std::slice::from_ref(&call))
-                .await,
+            authorizer.authorize(invocation, &batch).await,
             ToolAuthorization::Allow
         );
     }

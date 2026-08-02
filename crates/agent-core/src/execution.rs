@@ -128,6 +128,8 @@ impl AgentExecution {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use std::{
         collections::VecDeque,
         pin::Pin,
@@ -294,6 +296,7 @@ mod tests {
             context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: Default::default(),
             budget: ExecutionBudget::default(),
+            guardrails: None,
         }
     }
 
@@ -332,6 +335,10 @@ mod tests {
             ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
                 kind: BudgetKind::Steps,
                 limit: 4,
+            }),
+            ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
+                kind: crate::GuardrailKind::RepeatedInvocation,
+                threshold: NonZeroU32::new(3).expect("non-zero threshold"),
             }),
             ExecutionOutcome::Cancelled,
             ExecutionOutcome::CompactionRequired {

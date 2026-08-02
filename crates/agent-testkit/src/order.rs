@@ -14,6 +14,13 @@ pub enum LogEntry {
     RecordAssistant,
     /// Recorder 收到一次整批 complete（含注入失败的尝试）。
     RecordTool,
+    /// 顺序策略链评估一次 resolved invocation。
+    PolicyEvaluate {
+        /// resolved invocation 的工具名。
+        name: String,
+        /// 原 resolved batch 位置数。
+        batch_size: usize,
+    },
     /// Authorizer 收到一次授权请求。
     Authorize {
         /// 过闸的 Tool Call 名称。

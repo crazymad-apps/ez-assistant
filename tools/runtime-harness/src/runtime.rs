@@ -794,6 +794,7 @@ mod tests {
                 max_steps: Some(8),
                 max_tool_calls: Some(8),
             },
+            guardrails: None,
         };
         let (run_id, execution) = runtime
             .start_execution(spec, text)

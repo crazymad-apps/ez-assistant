@@ -484,6 +484,7 @@ fn make_spec(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> ExecutionS
             max_steps: Some(8),
             max_tool_calls: Some(8),
         },
+        guardrails: None,
     }
 }
 

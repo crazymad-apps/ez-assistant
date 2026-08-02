@@ -432,6 +432,7 @@ mod tests {
             ),
             tools: Default::default(),
             budget: ExecutionBudget::default(),
+            guardrails: None,
         })
     }
 

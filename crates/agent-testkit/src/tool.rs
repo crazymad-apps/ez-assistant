@@ -5,9 +5,11 @@
 //! 片段（验证引擎的 `ToolOutput` 事件桥接）。每次执行写入共享
 //! [`OrderLog`](crate::OrderLog)。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolOutputChunk};
+use agent_tools::{
+    Tool, ToolContext, ToolError, ToolExecuteFuture, ToolOutputChunk, ToolResolution,
+};
 use agent_types::ToolName;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -27,6 +29,7 @@ enum ToolBehavior {
 }
 
 /// 脚本化的确定性 Fake 工具。
+#[derive(Clone)]
 pub struct ScriptedTool {
     name: ToolName,
     description: String,
@@ -34,6 +37,8 @@ pub struct ScriptedTool {
     output_chunks: Vec<ToolOutputChunk>,
     entered: Option<Arc<Notify>>,
     cleanup_completed: Option<Arc<Notify>>,
+    resolved_input: Option<Value>,
+    executed_inputs: Arc<Mutex<Vec<Value>>>,
     log: OrderLog,
 }
 
@@ -61,6 +66,8 @@ impl ScriptedTool {
             output_chunks: vec![],
             entered: None,
             cleanup_completed: None,
+            resolved_input: None,
+            executed_inputs: Arc::new(Mutex::new(Vec::new())),
             log,
         }
     }
@@ -88,22 +95,50 @@ impl ScriptedTool {
         self.cleanup_completed = Some(cleanup_completed);
         self
     }
+
+    /// 覆盖无副作用 resolve 的输出，供授权观察与执行一致性测试使用。
+    pub fn with_resolved_input(mut self, resolved_input: Value) -> Self {
+        self.resolved_input = Some(resolved_input);
+        self
+    }
+
+    /// 返回 `execute` 实际消费过的 resolved input 快照。
+    pub fn executed_inputs(&self) -> Vec<Value> {
+        self.executed_inputs
+            .lock()
+            .expect("executed inputs mutex poisoned")
+            .clone()
+    }
 }
 
 impl Tool for ScriptedTool {
     type Input = Value;
+    type ResolvedInput = Value;
     type Output = Value;
 
     fn name(&self) -> ToolName {
         self.name.clone()
     }
 
-    fn description(&self) -> &str {
-        &self.description
+    fn description(&self) -> String {
+        self.description.clone()
     }
 
-    fn execute<'a>(&'a self, _input: Value, context: ToolContext) -> ToolExecuteFuture<'a, Value> {
+    fn resolve(
+        &self,
+        input: Self::Input,
+    ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+        Ok(ToolResolution::general(
+            self.resolved_input.clone().unwrap_or(input),
+        ))
+    }
+
+    fn execute<'a>(&'a self, input: Value, context: ToolContext) -> ToolExecuteFuture<'a, Value> {
         Box::pin(async move {
+            self.executed_inputs
+                .lock()
+                .expect("executed inputs mutex poisoned")
+                .push(input);
             self.log.push(LogEntry::ToolExecute {
                 name: self.name.as_str().to_owned(),
             });
@@ -135,7 +170,7 @@ impl Tool for ScriptedTool {
 mod tests {
     use std::sync::Arc;
 
-    use agent_tools::{ToolOutputChannel, ToolRegistry};
+    use agent_tools::{Dispatcher, ResolvedBatchItemRef, ToolOutputChannel, ToolRegistry};
     use agent_types::{ToolCall, ToolCallId, ToolResultContent, ToolResultStatus};
     use serde_json::json;
 
@@ -153,7 +188,16 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(tool).expect("register scripted tool");
         let snapshot = registry.snapshot();
-        agent_tools::Dispatcher::dispatch(&snapshot, call, ToolContext::default()).await
+        let mut batch = Dispatcher::resolve_batch(&snapshot, std::slice::from_ref(call));
+        match batch.get(0) {
+            Some(ResolvedBatchItemRef::Invalid(result)) => result.clone(),
+            Some(ResolvedBatchItemRef::Valid(_)) => {
+                Dispatcher::execute(&mut batch, 0, ToolContext::default())
+                    .expect("single-item batch index")
+                    .await
+            }
+            None => panic!("single-item batch"),
+        }
     }
 
     #[tokio::test]
@@ -212,7 +256,11 @@ mod tests {
                 sink_received.lock().expect("lock received").push(chunk);
             }),
         );
-        let result = agent_tools::Dispatcher::dispatch(&snapshot, &call("chatty"), context).await;
+        let call = call("chatty");
+        let mut batch = Dispatcher::resolve_batch(&snapshot, std::slice::from_ref(&call));
+        let result = Dispatcher::execute(&mut batch, 0, context)
+            .expect("single-item batch index")
+            .await;
         assert_eq!(result.status, ToolResultStatus::Success);
         assert_eq!(*received.lock().expect("lock received"), chunks);
     }

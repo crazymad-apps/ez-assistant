@@ -218,6 +218,16 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
         AgentEvent::ToolCompleted { call_id, status } => {
             format!("agent.tool_completed id={call_id} status={status:?}")
         }
+        AgentEvent::GuardrailTriggered {
+            kind,
+            mode,
+            threshold,
+            observed,
+            call_id,
+        } => format!(
+            "agent.guardrail_triggered kind={kind:?} mode={mode:?} threshold={threshold} \
+             observed={observed} id={call_id}"
+        ),
         AgentEvent::ExecutionCompleted {
             message,
             dropped_events,

@@ -153,6 +153,7 @@ impl ChatResources {
                 max_steps: Some(8),
                 max_tool_calls: Some(8),
             },
+            guardrails: None,
         }
     }
 }

@@ -1,7 +1,4 @@
-//! 工具注册表与不可变快照。
-//!
-//! [`ToolRegistry`] 在装配期注册工具（重名拒绝），构建完成后冻结为
-//! [`ToolSetSnapshot`]；快照随外层 `ExecutionSpec` 进入执行，执行期间不变。
+//! 类型化工具注册表与不可变快照。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -11,20 +8,27 @@ use std::{
 use agent_types::{ToolDefinition, ToolName};
 use thiserror::Error;
 
-use crate::tool::{ErasedTool, Tool, TypedToolErasure};
+use crate::tool::{ErasedTool, Tool, TypedToolErasure, frozen_definition};
 
-/// 注册工具失败。
+/// 工具注册失败。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum RegisterToolError {
-    /// 同名工具已经注册。
+    /// 相同冻结名称的工具已经存在。
     #[error("tool `{0}` is already registered")]
     DuplicateName(ToolName),
+    /// 派生 Schema 与工具实例提供的默认值无法组成有效冻结定义。
+    #[error("invalid definition for tool `{name}`: {message}")]
+    InvalidDefinition {
+        /// 在注册边界读取并冻结的工具名。
+        name: ToolName,
+        /// 稳定、可重现的定义校验失败原因。
+        message: String,
+    },
 }
 
-/// 装配期工具注册表。
+/// 装配阶段使用的类型化工具注册表。
 ///
-/// `ToolDefinition` 在注册时读取一次并与工具句柄共同冻结：重名检查、快照定义
-/// 与名称索引都基于冻结定义，不受实现方后续动态变化影响。
+/// 完成注册后通过 [`ToolRegistry::snapshot`] 消费注册表，进入执行期不可变快照。
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: Vec<(ToolDefinition, Arc<dyn ErasedTool>)>,
@@ -37,22 +41,25 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// 注册类型化工具；重名拒绝。
-    pub fn register<T: Tool + 'static>(&mut self, tool: T) -> Result<(), RegisterToolError> {
-        self.register_erased(Arc::new(TypedToolErasure(tool)))
-    }
-
-    /// 注册已擦除的工具；重名拒绝。定义在注册时冻结，快照不再二次读取。
-    pub fn register_erased(&mut self, tool: Arc<dyn ErasedTool>) -> Result<(), RegisterToolError> {
-        let definition = tool.definition();
+    /// 注册一个类型化工具，并一次冻结名称、描述、Schema 和默认值。
+    pub fn register<T: Tool>(&mut self, tool: T) -> Result<(), RegisterToolError> {
+        let name = tool.name();
+        let definition = frozen_definition(&tool, name.clone()).map_err(|message| {
+            RegisterToolError::InvalidDefinition {
+                name: name.clone(),
+                message,
+            }
+        })?;
         if !self.names.insert(definition.name.as_str().to_owned()) {
             return Err(RegisterToolError::DuplicateName(definition.name));
         }
-        self.tools.push((definition, tool));
+        let tool = Arc::new(tool);
+        self.tools
+            .push((definition, Arc::new(TypedToolErasure::new(tool))));
         Ok(())
     }
 
-    /// 冻结为不可变快照；定义顺序与注册顺序一致，直接消费注册时冻结的定义。
+    /// 消费注册表，冻结注册顺序、工具定义、工具句柄和名称索引。
     pub fn snapshot(self) -> ToolSetSnapshot {
         let mut definitions = Vec::with_capacity(self.tools.len());
         let mut tools = Vec::with_capacity(self.tools.len());
@@ -70,7 +77,7 @@ impl ToolRegistry {
     }
 }
 
-/// 不可变工具集快照；空快照是合法输入（最小可执行 Agent 不含工具）。
+/// 执行期使用的不可变工具集快照；空快照也是合法输入。
 #[derive(Clone, Default)]
 pub struct ToolSetSnapshot {
     definitions: Vec<ToolDefinition>,
@@ -79,22 +86,21 @@ pub struct ToolSetSnapshot {
 }
 
 impl ToolSetSnapshot {
-    /// 模型可见的工具定义列表，顺序与注册顺序一致。
+    /// 按注册顺序返回模型可见工具定义。
     pub fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
     }
 
-    /// 快照中的工具数量。
+    /// 已冻结工具定义数量。
     pub fn len(&self) -> usize {
         self.definitions.len()
     }
 
-    /// 快照是否为空。
+    /// 是否不包含任何工具。
     pub fn is_empty(&self) -> bool {
         self.definitions.is_empty()
     }
 
-    /// 按名称查找已擦除的工具。
     pub(crate) fn tool(&self, name: &ToolName) -> Option<&Arc<dyn ErasedTool>> {
         self.by_name
             .get(name.as_str())
@@ -104,8 +110,19 @@ impl ToolSetSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+
     use super::*;
-    use crate::testutil::{AddTool, FailTool};
+    use crate::{
+        ToolContext, ToolError, ToolExecuteFuture, ToolInputDefaults, ToolResolution,
+        testutil::{AddTool, FailTool},
+    };
 
     #[test]
     fn duplicate_registration_is_rejected() {
@@ -121,106 +138,189 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_preserves_registration_order() {
+    fn snapshot_preserves_registration_order_and_empty_snapshot_is_valid() {
         let mut registry = ToolRegistry::new();
         registry.register(FailTool).expect("register fail tool");
         registry.register(AddTool).expect("register add tool");
         let snapshot = registry.snapshot();
-        assert_eq!(snapshot.len(), 2);
         let names: Vec<&str> = snapshot
             .definitions()
             .iter()
             .map(|definition| definition.name.as_str())
             .collect();
         assert_eq!(names, ["fail", "add"]);
+
+        let empty = ToolRegistry::new().snapshot();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.definitions().is_empty());
     }
 
-    #[test]
-    fn empty_snapshot_is_valid() {
-        let snapshot = ToolRegistry::new().snapshot();
-        assert!(snapshot.is_empty());
-        assert_eq!(snapshot.len(), 0);
-        assert!(snapshot.definitions().is_empty());
-        assert!(ToolSetSnapshot::default().is_empty());
+    struct InvalidDefaultTool {
+        defaults: ToolInputDefaults,
     }
 
-    /// definition() 每次返回不同名称的异常实现。
-    struct ShiftingTool {
-        calls: std::sync::atomic::AtomicUsize,
-    }
+    impl crate::Tool for InvalidDefaultTool {
+        type Input = crate::testutil::AddInput;
+        type ResolvedInput = crate::testutil::AddInput;
+        type Output = crate::testutil::AddOutput;
 
-    impl crate::ErasedTool for ShiftingTool {
-        fn definition(&self) -> ToolDefinition {
-            let call_count = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let name = if call_count.is_multiple_of(2) {
-                "even"
-            } else {
-                "odd"
-            };
-            ToolDefinition {
-                name: ToolName::new(name).expect("valid tool name"),
-                description: "Return a different name on every definition() call".to_owned(),
-                input_schema: serde_json::Value::Null,
-            }
+        fn name(&self) -> ToolName {
+            ToolName::new("invalid_default").expect("valid name")
         }
 
-        fn execute_json<'a>(
+        fn description(&self) -> String {
+            "invalid defaults".to_owned()
+        }
+
+        fn input_defaults(&self) -> ToolInputDefaults {
+            self.defaults.clone()
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            Ok(ToolResolution::general(input))
+        }
+
+        fn execute<'a>(
             &'a self,
-            call: &'a agent_types::ToolCall,
-            _context: crate::ToolContext,
-        ) -> crate::ToolJsonFuture<'a> {
-            Box::pin(std::future::ready(agent_types::ToolResult {
-                call_id: call.id.clone(),
-                status: agent_types::ToolResultStatus::Success,
-                content: agent_types::ToolResultContent::Json(serde_json::json!({"ok": true})),
-            }))
+            input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(crate::testutil::AddOutput {
+                sum: input.a + input.b,
+            })))
         }
     }
 
     #[test]
-    fn frozen_definition_survives_shifting_names() {
+    fn invalid_defaults_do_not_partially_register() {
         let mut registry = ToolRegistry::new();
-        // 注册时读取一次定义（"even"）并冻结；此后实现方返回什么不再重要。
-        registry
-            .register_erased(std::sync::Arc::new(ShiftingTool {
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }))
-            .expect("register shifting tool");
-
-        // 重名检查以冻结名称为准：另一个首调用同样返回 "even" 的实现必须被拒绝。
         let error = registry
-            .register_erased(std::sync::Arc::new(ShiftingTool {
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }))
-            .expect_err("frozen duplicate name must be rejected");
-        assert_eq!(
-            error,
-            RegisterToolError::DuplicateName(ToolName::new("even").expect("valid tool name"))
-        );
+            .register(InvalidDefaultTool {
+                defaults: ToolInputDefaults::new().with("missing", 1),
+            })
+            .expect_err("unknown property must fail registration");
+        assert!(matches!(error, RegisterToolError::InvalidDefinition { .. }));
+        assert!(registry.snapshot().is_empty());
+    }
 
-        // 快照只含冻结名称；按冻结名称可派发，按后续动态名称不可派发。
+    #[derive(Deserialize, JsonSchema, Serialize)]
+    struct OptionalInput {
+        limit: Option<u32>,
+    }
+
+    struct DefaultTool;
+
+    impl crate::Tool for DefaultTool {
+        type Input = OptionalInput;
+        type ResolvedInput = OptionalInput;
+        type Output = OptionalInput;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("default_tool").expect("valid name")
+        }
+
+        fn description(&self) -> String {
+            "default tool".to_owned()
+        }
+
+        fn input_defaults(&self) -> ToolInputDefaults {
+            ToolInputDefaults::new().with("limit", 200_u32)
+        }
+
+        fn resolve(
+            &self,
+            mut input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            input.limit = Some(input.limit.unwrap_or(200));
+            Ok(ToolResolution::general(input))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(input)))
+        }
+    }
+
+    #[test]
+    fn definition_defaults_are_frozen_once() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(DefaultTool)
+            .expect("register default tool");
         let snapshot = registry.snapshot();
-        let names: Vec<&str> = snapshot
-            .definitions()
-            .iter()
-            .map(|definition| definition.name.as_str())
-            .collect();
-        assert_eq!(names, ["even"]);
+        assert_eq!(
+            snapshot.definitions()[0].input_schema["properties"]["limit"]["default"],
+            serde_json::json!(200)
+        );
+    }
 
-        let frozen = crate::testutil::tool_call("even", serde_json::json!({}));
-        let result = crate::testutil::block_on(crate::Dispatcher::dispatch(
-            &snapshot,
-            &frozen,
-            crate::ToolContext::default(),
-        ));
-        assert_eq!(result.status, agent_types::ToolResultStatus::Success);
+    struct CountingDefinitionTool {
+        name_calls: Arc<AtomicUsize>,
+        description_calls: Arc<AtomicUsize>,
+        defaults_calls: Arc<AtomicUsize>,
+    }
 
-        let shifted = crate::testutil::tool_call("odd", serde_json::json!({}));
-        let result = crate::testutil::block_on(crate::Dispatcher::dispatch(
-            &snapshot,
-            &shifted,
-            crate::ToolContext::default(),
-        ));
-        assert_eq!(result.status, agent_types::ToolResultStatus::Error);
+    impl crate::Tool for CountingDefinitionTool {
+        type Input = OptionalInput;
+        type ResolvedInput = OptionalInput;
+        type Output = OptionalInput;
+
+        fn name(&self) -> ToolName {
+            self.name_calls.fetch_add(1, Ordering::SeqCst);
+            ToolName::new("counting_definition").expect("valid name")
+        }
+
+        fn description(&self) -> String {
+            self.description_calls.fetch_add(1, Ordering::SeqCst);
+            "frozen description".to_owned()
+        }
+
+        fn input_defaults(&self) -> ToolInputDefaults {
+            self.defaults_calls.fetch_add(1, Ordering::SeqCst);
+            ToolInputDefaults::new().with("limit", 10_u32)
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            Ok(ToolResolution::general(input))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(input)))
+        }
+    }
+
+    #[test]
+    fn definition_components_are_read_once_at_registration() {
+        let name_calls = Arc::new(AtomicUsize::new(0));
+        let description_calls = Arc::new(AtomicUsize::new(0));
+        let defaults_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(CountingDefinitionTool {
+                name_calls: name_calls.clone(),
+                description_calls: description_calls.clone(),
+                defaults_calls: defaults_calls.clone(),
+            })
+            .expect("register counting tool");
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.definitions()[0].description, "frozen description");
+        assert_eq!(snapshot.definitions()[0].description, "frozen description");
+        assert_eq!(name_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(description_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(defaults_calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -1,13 +1,16 @@
 //! 一次 Agent 执行的不可变规格。
 //!
 //! [`ExecutionSpec`] 是已经由 Runtime 解析完成的执行事实源：指令、模型服务、
-//! 工具快照与资源预算在启动前冻结，Core 不再维护配置默认值或覆盖顺序。
+//! 工具快照、资源预算与可选 Guardrail 在启动前冻结，Core 不再维护配置默认值或
+//! 覆盖顺序。
 
 use std::sync::Arc;
 
 use agent_context::ContextWindowEvaluator;
 use agent_model::ModelService;
 use agent_tools::ToolSetSnapshot;
+
+use crate::GuardrailConfig;
 
 /// 一次 Agent 执行的不可变规格（事实源）。
 ///
@@ -25,6 +28,8 @@ pub struct ExecutionSpec {
     pub tools: ToolSetSnapshot,
     /// 显式资源预算；全 `Option`，Core 不注入隐藏上限。
     pub budget: ExecutionBudget,
+    /// 可选 Guardrail 配置；`None` 表示整个 Guardrail 机制关闭。
+    pub guardrails: Option<GuardrailConfig>,
 }
 
 /// 单次执行的资源预算；预算是副作用前的硬边界。
@@ -44,6 +49,8 @@ pub struct ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use agent_model::{
         ModelCallContext, ModelCapabilities, ModelError, ModelRequest, ModelStreamFuture,
     };
@@ -96,6 +103,29 @@ mod tests {
     }
 
     #[test]
+    fn guardrails_have_no_hidden_defaults_and_round_trip() {
+        let disabled = GuardrailConfig::default();
+        assert_eq!(disabled.repeated_invocation, None);
+        assert_eq!(disabled.consecutive_failures, None);
+
+        let configured = GuardrailConfig {
+            repeated_invocation: Some(crate::GuardrailCheckConfig {
+                mode: crate::ActiveGuardrailMode::Observe,
+                threshold: NonZeroU32::new(3).expect("non-zero threshold"),
+            }),
+            consecutive_failures: Some(crate::GuardrailCheckConfig {
+                mode: crate::ActiveGuardrailMode::Enforce,
+                threshold: NonZeroU32::new(5).expect("non-zero threshold"),
+            }),
+        };
+        let json = serde_json::to_string(&configured).expect("serialize guardrails");
+        assert_eq!(
+            serde_json::from_str::<GuardrailConfig>(&json).expect("deserialize guardrails"),
+            configured
+        );
+    }
+
+    #[test]
     fn spec_assembles_with_empty_tool_snapshot() {
         let spec = ExecutionSpec {
             instructions: vec!["You are a helpful assistant.".to_owned()],
@@ -109,6 +139,7 @@ mod tests {
             context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: ToolSetSnapshot::default(),
             budget: ExecutionBudget::default(),
+            guardrails: None,
         };
         assert_eq!(spec.instructions.len(), 1);
         // 空快照合法：最小可执行 Agent 不含任何工具。

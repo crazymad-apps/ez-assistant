@@ -7,11 +7,13 @@ members = [
     "crates/agent-provider-openai-compatible",
     "crates/agent-testkit",
     "crates/agent-tools",
+    "crates/agent-tools-local",
     "crates/agent-types",
     "crates/assistant-protocol",
     "crates/assistant-runtime",
     "tools/debug-viewer",
     "tools/runtime-harness",
+    "tools/safety-demo",
 ]
 resolver = "3"
 
@@ -26,11 +28,20 @@ axum = "0.8.4"
 dotenvy = "0.15.7"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
+path-absolutize = "4.0.1"
+process-wrap = { version = "9.1.0", default-features = false, features = [
+    "tokio1",
+    "process-group",
+    "job-object",
+    "creation-flags",
+    "kill-on-drop",
+] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
+tempfile = "3.27.0"
 tokio = { version = "1.52.4", features = ["macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tower-http = { version = "0.6.11", features = ["fs"] }

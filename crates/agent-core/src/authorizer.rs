@@ -1,12 +1,12 @@
 //! 工具授权 SPI。
 //!
-//! 每个 Tool Call 执行前独立过闸：[`ToolAuthorizer::authorize`] 携本轮批次
-//! 上下文（同轮全部 Tool Call），Core 只保证逐 call 独立决策；审批编排
+//! 每个 resolved invocation 执行前独立过闸：[`ToolAuthorizer::authorize`]
+//! 携本轮完整 resolved batch 上下文，Core 只保证逐调用独立决策；审批编排
 //! （串行询问、攒批询问、规则自动放行）由 Runtime 实现借批次上下文自行完成。
 
 use std::{future::Future, pin::Pin};
 
-use agent_types::ToolCall;
+use agent_tools::{ResolvedToolBatch, ResolvedToolInvocation};
 
 /// 一次授权决策的 Future。
 pub type AuthorizationFuture<'a> = Pin<Box<dyn Future<Output = ToolAuthorization> + Send + 'a>>;
@@ -17,11 +17,11 @@ pub type AuthorizationFuture<'a> = Pin<Box<dyn Future<Output = ToolAuthorization
 /// 授权等待必须与取消 race：实现方应观察执行取消信号，避免挂起的审批阻塞
 /// 取消收敛；审批交互本身由 Runtime 侧代理完成，`Ask` 不进 Core 词汇表。
 pub trait ToolAuthorizer: Send + Sync {
-    /// 对单个 Tool Call 做出决策；`batch` 为本轮全部 Tool Call（含 `call` 自身）。
+    /// 对单个 resolved invocation 做出决策；`batch` 保留本轮原数量与顺序。
     fn authorize<'a>(
         &'a self,
-        call: &'a ToolCall,
-        batch: &'a [ToolCall],
+        invocation: &'a ResolvedToolInvocation,
+        batch: &'a ResolvedToolBatch,
     ) -> AuthorizationFuture<'a>;
 }
 
@@ -47,8 +47,8 @@ pub struct AllowAllAuthorizer;
 impl ToolAuthorizer for AllowAllAuthorizer {
     fn authorize<'a>(
         &'a self,
-        _call: &'a ToolCall,
-        _batch: &'a [ToolCall],
+        _invocation: &'a ResolvedToolInvocation,
+        _batch: &'a ResolvedToolBatch,
     ) -> AuthorizationFuture<'a> {
         Box::pin(std::future::ready(ToolAuthorization::Allow))
     }
@@ -56,25 +56,73 @@ impl ToolAuthorizer for AllowAllAuthorizer {
 
 #[cfg(test)]
 mod tests {
-    use agent_types::{ToolCallId, ToolName};
+    use std::{num::NonZeroU64, sync::Arc, time::Duration};
+
+    use agent_tools::{
+        AbsolutePath, Dispatcher, SessionPathResolver, ShellExecTool, ShellExecToolConfig,
+        ShellFuture, ShellOutputSink, ShellRequest, ShellTool, ShellToolError, ToolRegistry,
+    };
+    use agent_types::{ToolCall, ToolCallId, ToolName};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::testutil::block_on;
 
-    fn sample_call(name: &str) -> ToolCall {
+    struct NeverShell;
+
+    impl ShellTool for NeverShell {
+        fn exec<'a>(
+            &'a self,
+            _request: ShellRequest,
+            _sink: ShellOutputSink,
+            _cancellation: CancellationToken,
+        ) -> ShellFuture<'a> {
+            Box::pin(std::future::ready(Err(ShellToolError::InvalidInput {
+                message: "not executed".to_owned(),
+            })))
+        }
+    }
+
+    fn shell_tool() -> ShellExecTool {
+        let config = ShellExecToolConfig::new(
+            Duration::from_secs(120),
+            Duration::from_secs(600),
+            NonZeroU64::new(1024).expect("non-zero"),
+        )
+        .expect("valid shell config");
+        ShellExecTool::new(
+            Arc::new(NeverShell),
+            SessionPathResolver::new(
+                AbsolutePath::new(std::env::temp_dir()).expect("absolute temp directory"),
+            ),
+            config,
+        )
+    }
+
+    fn sample_call(command: &str) -> ToolCall {
         ToolCall {
             id: ToolCallId::new("call_1").expect("valid call id"),
-            name: ToolName::new(name).expect("valid tool name"),
-            arguments: serde_json::json!({}),
+            name: ToolName::new("shell").expect("valid tool name"),
+            arguments: serde_json::json!({"command": command}),
         }
+    }
+
+    fn sample_batch(calls: &[ToolCall]) -> agent_tools::ResolvedToolBatch {
+        let mut registry = ToolRegistry::new();
+        registry.register(shell_tool()).expect("register shell");
+        Dispatcher::resolve_batch(&registry.snapshot(), calls)
     }
 
     #[test]
     fn allow_all_authorizer_allows_every_call() {
         let authorizer = AllowAllAuthorizer;
-        let batch = vec![sample_call("read_file"), sample_call("write_file")];
-        for call in &batch {
-            let authorization = block_on(authorizer.authorize(call, &batch));
+        let calls = vec![sample_call("pwd"), sample_call("ls")];
+        let batch = sample_batch(&calls);
+        for item in batch.iter() {
+            let agent_tools::ResolvedBatchItemRef::Valid(invocation) = item else {
+                panic!("shell resolves");
+            };
+            let authorization = block_on(authorizer.authorize(invocation, &batch));
             assert_eq!(authorization, ToolAuthorization::Allow);
         }
     }

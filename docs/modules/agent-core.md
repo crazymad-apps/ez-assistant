@@ -12,6 +12,7 @@
 ## 职责
 
 - Agent Loop 与终止条件。
+- resolved tool invocation 之后的类型化策略装配、Allow/Deny 授权闸和 Guardrail。
 - 模型 Provider trait 和流式响应抽象。
 - 单次 `AgentExecution` 的上下文组装、工具结果回填和事件输出。
 - 每个 Model Step 建立请求前通过共享 Context Window Evaluator 执行上下文预检；
@@ -34,8 +35,10 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - `ExecutionSpec` 是已经由 Runtime 解析完成的不可变执行事实源；Core 不再维护 `AgentProfile`、配置默认值或覆盖顺序。
 - 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛前为批次内未结算调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange。
 - 资源预算使用显式 `Option`；Core 不注入隐藏的最大轮次、超时或输出限制；预算是副作用前硬边界（`max_steps` 模型调用前预检、`max_tool_calls` dispatch 前预检）。
-- 启发式 Guardrail 必须支持 `Off`、`Observe`、`Enforce`，不能以未声明规则静默中止执行。
-- 工具输入先完成 schema/类型校验，再进入实现。
+- 启发式 Guardrail 检测器必须支持未配置、`Observe`、`Enforce`；未配置表示关闭，
+  不能以未声明规则静默中止执行。
+- 工具输入先完成 schema/类型校验和确定性参数解析，形成 resolved invocation 后才
+  进入 Authorizer；授权和执行不得再次各自解析原始 JSON。
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；规范快照不得暴露 pending exchange。
@@ -53,12 +56,26 @@ Context Window Evaluator、历史布局和 replacement 校验归
 ## 最小可执行 Agent
 
 - 空 `ToolSetSnapshot` 是合法输入：不含任何工具的 Agent 必须可以正常执行并纯文本收尾。
-- Core 不内嵌任何工具实现，对工具来源（内置桥接、Runtime 外部注册）无差别；工具装配完全由 Runtime 完成。
+- Core 不内嵌任何工具实现，对标准工具壳或上层自定义工具无差别；
+  工具与能力实现由 Runtime 或其他上层宿主装配。
 
-## 权限预留（Authorizer）
+## 权限与策略装配（Authorizer）
 
-- 工具副作用顺序固定为 begin pending exchange → authorize → execute → complete batch；Authorizing 是状态机固定位置，Core 只保证逐 Tool Call 独立过闸（Allow 即执行，再处理下一调用），不设"整批放行才执行"的规则。
-- 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在 authorize 时提供本轮批次上下文（同轮全部 tool call），批次审批交互由 Runtime 借此自行完成。
+- 工具副作用顺序固定为 begin pending exchange → resolve batch → guardrail → authorize
+  → execute → complete batch；resolve 不得访问真实文件系统、网络或启动进程。
+- Core 提供策略顺序装配机制；策略可以明确 Allow/Deny 或未匹配后继续，全部未匹配
+  才进入最终 Authorizer。Engine 本身只接收 Allow/Deny。
+- `TypedPolicyAdapter<F, P>` 只在 facts 类型匹配时调用 typed policy；
+  `ComposedToolAuthorizer` 严格按装配顺序采用第一个明确决策，全部 Continue
+  才调用必传 final authorizer。
+- whole-batch resolve 保留 valid/invalid 原位置；invalid item 直接结算错误
+  `ToolResult`，不进入 policy、Authorizer、预算或 execute。
+- 文件、Shell 和通用工具使用各自的类型化授权事实，不强制共享一个 whitelist
+  结构；策略具体规则、Plan/Build 和名单内容由上层装配。
+- Core 只保证逐 Tool Call 独立过闸（Allow 即执行，再处理下一调用），不设"整批放行
+  才执行"的规则。
+- 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在
+  authorize 时提供本轮 resolved batch 上下文，批次审批交互由 Runtime 借此自行完成。
 - Core 授权决策仅 `Allow` / `Deny { reason }`；`Deny` 在授权闸处转换为错误 `ToolResult`——回喂模型、驱动循环继续的唯一载体是 error `ToolResult`，对模型与循环不存在"被拒绝"类别；reason 措辞归 Runtime。
 - `ExecutionContext.authorizer` 为必传字段，类型层面杜绝"无授权闸"的隐藏默认；Core 只提供显式装配用的 `AllowAllAuthorizer`。
 - `Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成，审批事件由 Runtime 自行产生。
@@ -66,7 +83,10 @@ Context Window Evaluator、历史布局和 replacement 校验归
 
 ## 文件与 Shell 工具
 
-文件/Shell 能力契约与内置桥接见 [`agent-tools`](agent-tools.md)。Core 通过注入的 Authorizer 完成决策编排；规则保存、用户交互、审计和真实执行约束由 Runtime/Adapter 完成。
+文件/Shell 能力契约、resolved invocation 与标准工具壳定义见
+[`agent-tools`](agent-tools.md)。Core 通过类型化策略和最终 Authorizer 完成决策编排；
+真实文件/Shell 机制位于本地基础设施 Adapter，规则保存、用户交互、环境策略和持久
+审计由 Runtime 完成。
 
 ## Memory 与 Provider 边界
 

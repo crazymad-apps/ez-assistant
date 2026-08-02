@@ -1,9 +1,11 @@
 # 长任务机制参考（opencode 调研）
 
 - 记录日期：260726
-- 状态：已部分纳入 v0.3.0；Runtime drain/续跑部分仍待后续版本评估
+- 状态：上下文部分已纳入 v0.3.0，重复调用/连续失败 Guardrail 已纳入 v0.4.0；
+  Runtime drain/续跑部分仍待后续版本评估
 - 来源：对 `~/github/opencode`（v1.18.3-dev, commit 08fb473735）的只读调研
-- 目标版本：v0.3.0（上下文压缩/overflow 部分）及后续 Runtime 版本
+- 目标版本：v0.3.0（上下文压缩/overflow）、v0.4.0（重复调用/连续失败
+  Guardrail）及后续 Runtime 版本
 
 ## 原始内容
 

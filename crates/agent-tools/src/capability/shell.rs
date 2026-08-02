@@ -1,96 +1,108 @@
-//! Shell 能力契约：一等工具，承载任意系统命令执行。
+//! Shell 能力契约：完整 command、绝对工作目录、超时、分离输出与取消。
 //!
-//! 契约固化的实现侧义务（真实实现归 Runtime/Adapter）：
-//!
-//! - stdin 封闭，不支持交互式 TTY 与后台任务；`exec` 返回即进程树结束；
-//! - 完整命令原样进入审计与确认，不在展示时截断或静默改写；
-//! - 敏感环境变量（API Key、令牌等）默认不传给子进程，允许名单归实现侧配置；
-//! - 超时与取消必须终止整棵进程树，不留孤儿进程。
-//!
-//! 结构化文件能力与 Shell 并存：模型读/写/搜文件应使用文件工具，Shell 不按
-//! 每条系统命令枚举专用工具。
+//! 平台 launcher、环境过滤和真实进程树管理属于 Adapter；模型输入保持完整 command，
+//! 不在本 crate 中解析 Shell AST，也不把 program/args 暴露给模型。
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, num::NonZeroU64, pin::Pin, sync::Arc, time::Duration};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-/// Shell 执行的 Future。
+use crate::AbsolutePath;
+
 pub type ShellFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ShellOutcome, ShellToolError>> + Send + 'a>>;
 
-/// Shell 失败分类；非零退出码不是错误，属于 [`ShellOutcome`]。
+/// Shell 策略读取的类型化 resolved 事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShellAuthorizationFacts {
+    /// 完整命令字符串，不解析管道或重定向。
+    pub command: String,
+    /// 已解析的绝对逻辑工作目录。
+    pub workdir: AbsolutePath,
+    /// 已落实默认值并通过实例上限校验的超时。
+    pub timeout: Duration,
+    /// 工具返回后是否继续管理本次调用产生的进程树。
+    pub process_mode: ShellProcessMode,
+}
+
+/// Shell 调用产生的进程树生命周期。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellProcessMode {
+    /// 工具返回前清理仍可管理的进程树。
+    #[default]
+    Managed,
+    /// 主 Shell 退出且输出管道收敛后，允许后代脱离工具生命周期。
+    Detached,
+}
+
+/// Shell 失败分类；非零退出码不是错误，超时是保留部分输出的模型可见错误。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ShellToolError {
-    /// 请求参数违反契约（空命令等）。
     #[error("invalid input: {message}")]
-    InvalidInput {
-        /// 模型可读的失败原因。
-        message: String,
-    },
-    /// 进程启动或底层 I/O 失败。
+    InvalidInput { message: String },
     #[error("io error: {message}")]
-    Io {
-        /// 模型可读的失败原因。
-        message: String,
+    Io { message: String },
+    #[error("shell execution timed out")]
+    TimedOut {
+        stdout: String,
+        stderr: String,
+        truncated: bool,
     },
-    /// 执行被取消；取消语义由引擎在外围收敛，不进入模型可见结果。
+    /// Adapter 完成进程树清理后的取消控制结果；Engine 不把它回喂模型。
     #[error("shell execution cancelled")]
     Cancelled,
 }
 
-/// Shell 输出通道。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellOutputChannel {
-    /// 标准输出。
     Stdout,
-    /// 标准错误。
     Stderr,
 }
 
-/// 一段流式输出。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellOutputChunk {
-    /// 输出通道。
+    /// 输出来自 stdout 还是 stderr。
     pub channel: ShellOutputChannel,
-    /// 文本片段。
+    /// 本次增量文本。
     pub data: String,
 }
 
-/// 流式输出回调；实现侧按到达顺序回调。
 pub type ShellOutputSink = Arc<dyn Fn(ShellOutputChunk) + Send + Sync>;
 
-/// Shell 执行请求。
+/// 已落实全部默认值和上限的 Shell 能力请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellRequest {
-    /// 完整命令；原样进入审计与确认。
+    /// 完整命令，原样交给平台 Shell launcher。
     pub command: String,
-    /// 工作目录；缺省为能力根。
-    pub workdir: Option<String>,
-    /// 超时；缺省由实现侧给定。超时终止置 `timed_out`。
-    pub timeout: Option<Duration>,
-    /// 聚合输出字节上限；超限保留尾部并置 `truncated`。
-    pub max_output_bytes: Option<u64>,
+    pub workdir: AbsolutePath,
+    pub timeout: Duration,
+    /// stdout + stderr 合计允许保留的最大字节数。
+    pub max_output_bytes: NonZeroU64,
+    /// 本次命令采用的显式进程树生命周期。
+    pub process_mode: ShellProcessMode,
 }
 
-/// Shell 执行结果。
+/// 正常结束的 Shell 结果；非零 `exit_code` 仍属于成功结果。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ShellOutcome {
-    /// 退出码；`None` 表示被信号终止或无法取得。
+    /// 正常退出码；被信号终止或平台无法提供时为 `None`。
     pub exit_code: Option<i32>,
-    /// 是否因超时终止。
-    pub timed_out: bool,
-    /// 按 chunk 到达顺序聚合的输出；超限保留尾部。
-    pub aggregated: String,
-    /// 聚合输出因超限被截断。
+    /// 在合计输出上限内保留的标准输出。
+    pub stdout: String,
+    /// 在合计输出上限内保留的标准错误输出。
+    pub stderr: String,
+    /// 是否有输出因上限而未被保留。
     pub truncated: bool,
+    /// 实际执行采用的进程树生命周期。
+    pub process_mode: ShellProcessMode,
 }
 
-/// Provider-neutral 的 Shell 能力。
 pub trait ShellTool: Send + Sync {
-    /// 执行一条完整命令，流式回报输出，返回聚合结果。
     fn exec<'a>(
         &'a self,
         request: ShellRequest,
@@ -99,22 +111,16 @@ pub trait ShellTool: Send + Sync {
     ) -> ShellFuture<'a>;
 }
 
-/// 契约级聚合截断：fake 与真实实现共用，保证尾部保留语义同构。
-///
-/// 按字节截断时对齐 char 边界（截断点可能略早于上限）。
-pub fn tail_truncate(text: &str, max_bytes: Option<u64>) -> (String, bool) {
-    let Some(max_bytes) = max_bytes else {
-        return (text.to_owned(), false);
-    };
-    let max_bytes = max_bytes as usize;
+/// 取不超过给定字节数的 UTF-8 前缀；边界落在字符内部时向前收缩。
+pub fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
-        return (text.to_owned(), false);
+        return text;
     }
-    let mut start = text.len() - max_bytes;
-    while !text.is_char_boundary(start) {
-        start += 1;
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
     }
-    (text[start..].to_owned(), true)
+    &text[..end]
 }
 
 #[cfg(test)]
@@ -122,21 +128,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tail_truncate_keeps_tail_on_char_boundary() {
-        let (text, truncated) = tail_truncate("abcdef", Some(3));
-        assert_eq!(text, "def");
-        assert!(truncated);
+    fn utf8_prefix_respects_bytes_and_char_boundaries() {
+        assert_eq!(utf8_prefix("abcdef", 3), "abc");
+        assert_eq!(utf8_prefix("中文abc", 4), "中");
+        assert_eq!(utf8_prefix("abc", 10), "abc");
+        assert_eq!(utf8_prefix("abc", 0), "");
+    }
 
-        let (text, truncated) = tail_truncate("中文测试abc", Some(7));
-        assert_eq!(text, "试abc");
-        assert!(truncated);
+    #[test]
+    fn timeout_and_nonzero_exit_have_distinct_contract_shapes() {
+        let timeout = ShellToolError::TimedOut {
+            stdout: "partial out".to_owned(),
+            stderr: "partial err".to_owned(),
+            truncated: true,
+        };
+        assert!(matches!(timeout, ShellToolError::TimedOut { .. }));
 
-        let (text, truncated) = tail_truncate("abc", Some(10));
-        assert_eq!(text, "abc");
-        assert!(!truncated);
-
-        let (text, truncated) = tail_truncate("abc", None);
-        assert_eq!(text, "abc");
-        assert!(!truncated);
+        let nonzero = ShellOutcome {
+            exit_code: Some(7),
+            stdout: String::new(),
+            stderr: "failed command".to_owned(),
+            truncated: false,
+            process_mode: ShellProcessMode::Managed,
+        };
+        assert_eq!(nonzero.exit_code, Some(7));
     }
 }

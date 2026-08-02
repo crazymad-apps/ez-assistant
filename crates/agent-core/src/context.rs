@@ -22,8 +22,13 @@ pub struct ExecutionContext {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{num::NonZeroU64, sync::Mutex, time::Duration};
 
+    use agent_tools::{
+        AbsolutePath, Dispatcher, ResolvedBatchItemRef, SessionPathResolver, ShellExecTool,
+        ShellExecToolConfig, ShellFuture, ShellOutputSink, ShellRequest, ShellTool, ShellToolError,
+        ToolRegistry,
+    };
     use agent_types::{
         AssistantMessage, FinishReason, MessageId, ModelIdentity, ProviderId, ToolCall, ToolCallId,
         ToolName,
@@ -39,6 +44,36 @@ mod tests {
     struct ListRecorder {
         deltas: Mutex<Vec<ConversationDelta>>,
         pending: Mutex<Option<AssistantMessage>>,
+    }
+
+    struct NeverShell;
+
+    impl ShellTool for NeverShell {
+        fn exec<'a>(
+            &'a self,
+            _request: ShellRequest,
+            _sink: ShellOutputSink,
+            _cancellation: CancellationToken,
+        ) -> ShellFuture<'a> {
+            Box::pin(std::future::ready(Err(ShellToolError::InvalidInput {
+                message: "not executed".to_owned(),
+            })))
+        }
+    }
+
+    fn shell_tool() -> ShellExecTool {
+        let workdir = AbsolutePath::new(std::env::temp_dir()).expect("absolute temp directory");
+        let config = ShellExecToolConfig::new(
+            Duration::from_secs(120),
+            Duration::from_secs(600),
+            NonZeroU64::new(1024).expect("non-zero"),
+        )
+        .expect("valid shell config");
+        ShellExecTool::new(
+            Arc::new(NeverShell),
+            SessionPathResolver::new(workdir),
+            config,
+        )
     }
 
     impl ExecutionRecorder for ListRecorder {
@@ -112,14 +147,16 @@ mod tests {
 
         let call = ToolCall {
             id: ToolCallId::new("call_1").expect("valid call id"),
-            name: ToolName::new("read_file").expect("valid tool name"),
-            arguments: serde_json::json!({}),
+            name: ToolName::new("shell").expect("valid tool name"),
+            arguments: serde_json::json!({"command": "pwd"}),
         };
-        let authorization = block_on(
-            context
-                .authorizer
-                .authorize(&call, std::slice::from_ref(&call)),
-        );
+        let mut registry = ToolRegistry::new();
+        registry.register(shell_tool()).expect("register shell");
+        let batch = Dispatcher::resolve_batch(&registry.snapshot(), std::slice::from_ref(&call));
+        let Some(ResolvedBatchItemRef::Valid(invocation)) = batch.get(0) else {
+            panic!("shell resolves");
+        };
+        let authorization = block_on(context.authorizer.authorize(invocation, &batch));
         assert_eq!(authorization, ToolAuthorization::Allow);
     }
 }

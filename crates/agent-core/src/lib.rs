@@ -8,7 +8,8 @@
 //!   类型层面杜绝"无授权闸"的隐藏默认。
 //! - [`AgentExecution`] / [`ExecutionOutcome`] / [`ExecutionControl`]：执行句柄——
 //!   `start` 后由单一 tokio 任务驱动 Agent Loop 状态机（预检预算 → 模型 Turn →
-//!   AssistantMessage 落账 → 逐 call 授权 → 工具执行 → ToolResult 落账 → 下一轮），
+//!   AssistantMessage 落账 → 整批 resolve → 逐 valid invocation 授权/执行 →
+//!   ToolResult 落账 → 下一轮），
 //!   终态 Completed / Failed / Cancelled / CompactionRequired 恰一，完成结果与
 //!   终态事件镜像。
 //! - [`ExecutionRecorder`] / [`ToolAuthorizer`]：pending/completed 两阶段 tool
@@ -16,8 +17,9 @@
 //! - [`AgentEvent`] / [`AgentEventStream`]：普通观察事件使用 bounded mpsc
 //!   （容量 256）+ `try_send`，唯一终态使用独立 oneshot 可靠交付；订阅断开
 //!   不影响执行。
-//! - [`ExecutionError`] / [`ExecutionBudget`]：受控终止分类与显式资源预算；
-//!   工具失败与授权 `Deny` 不是执行错误，预算是副作用前的硬边界。
+//! - [`ExecutionError`] / [`ExecutionBudget`] / [`GuardrailConfig`]：受控终止分类、
+//!   显式资源预算与可选启发式检测；工具失败与授权 `Deny` 不是执行错误，预算是
+//!   副作用前硬边界，Guardrail 只在显式配置后启用。
 
 mod authorizer;
 mod context;
@@ -25,7 +27,9 @@ mod engine;
 mod error;
 mod event;
 mod execution;
+mod guardrail;
 mod input;
+mod policy;
 mod recorder;
 mod spec;
 
@@ -36,7 +40,12 @@ pub use event::{AgentEvent, AgentEventStream, ToolCompletionStatus};
 pub use execution::{
     AgentExecution, CompactionReason, CompletionFuture, ExecutionControl, ExecutionOutcome,
 };
+pub use guardrail::{ActiveGuardrailMode, GuardrailCheckConfig, GuardrailConfig, GuardrailKind};
 pub use input::ExecutionInput;
+pub use policy::{
+    ComposedToolAuthorizer, FileToolPolicyAdapter, GeneralToolPolicyAdapter, PolicyEvaluation,
+    ShellToolPolicyAdapter, ToolPolicy, TypedPolicyAdapter, TypedToolPolicy,
+};
 pub use recorder::{
     ConversationDelta, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
 };

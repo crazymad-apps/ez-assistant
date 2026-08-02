@@ -37,6 +37,13 @@ const REPLAY_BODY: &str = concat!(
     "data: [DONE]\n\n",
 );
 
+/// DeepSeek thinking Profile 下不合法的工具调用响应：缺少 `reasoning_content`。
+const TOOL_CALL_WITHOUT_REASONING_BODY: &str = concat!(
+    "data: {\"id\":\"chatcmpl-missing-reasoning\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl-missing-reasoning\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n",
+);
+
 /// 纯文本 Turn 的各个 frame，用于组合不同的字节投递形状。
 const FRAME_HELLO: &str = "data: {\"id\":\"chatcmpl-2\",\"model\":\"deepseek-reasoner\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello, \"},\"finish_reason\":null}]}\n\n";
 const FRAME_WORLD: &str = "data: {\"id\":\"chatcmpl-2\",\"model\":\"deepseek-reasoner\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world!\"},\"finish_reason\":null}]}\n\n";
@@ -297,6 +304,32 @@ async fn stream_replays_reasoning_text_and_tool_call_turn_end_to_end() {
         },
     ];
     assert_eq!(collected.events(), expected.as_slice());
+    collected.assert_single_terminal();
+}
+
+#[tokio::test]
+async fn deepseek_stream_rejects_tool_call_without_reasoning_as_protocol_terminal() {
+    let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+        200,
+        TOOL_CALL_WITHOUT_REASONING_BODY,
+    ))]));
+    let service = service_with(&transport, Profile::deepseek());
+    let stream = service
+        .stream(request(), ModelCallContext::default())
+        .await
+        .expect("stream established");
+    let collected = EventCollector::collect_validated(stream).await;
+
+    let ModelError::Protocol(message) = collected.assert_failed() else {
+        panic!("expected protocol failure");
+    };
+    assert!(message.contains("no reasoning content"));
+    assert!(
+        !collected
+            .events()
+            .iter()
+            .any(|event| matches!(event, ModelEvent::TurnFinished { .. }))
+    );
     collected.assert_single_terminal();
 }
 

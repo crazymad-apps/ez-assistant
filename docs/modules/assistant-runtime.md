@@ -17,7 +17,7 @@
 - 将配置、Agent 模板、用户偏好和会话覆盖编译成唯一不可变的 `ExecutionSpec`。
 - 为每个 Runtime Run 创建绑定 `RunId`/`SessionId` 的 Recorder、Memory、Approval 和 Event Adapter。
 - 定时任务、配置加载、后台任务与恢复。
-- 文件、Shell 等工具的真实实现、授权、确认与审计。
+- 装配真实文件/Shell Adapter，并负责授权、确认、环境策略与审计。
 - Repository/持久化边界和应用级错误。
 
 ## 并发模型
@@ -41,7 +41,8 @@ Tauri 进程
 
 ## 文件能力
 
-- `FileSystemTool` 的 Runtime 实现负责真实路径、授权根、符号链接策略、大小限制、确认和审计。
+- Runtime 装配本地 `FileSystemTool` Adapter，负责工作目录、能力范围、确认和审计；
+  Adapter 负责真实路径解析、符号链接操作、大小限制和 I/O。
 - `search` 可以调用打包的 `rg` 或 Rust 搜索后端，必须使用参数数组启动程序，不通过 `sh -c` 拼接查询。
 - 写入优先采用同目录临时文件和原子替换；覆盖、删除等策略由权限模式决定。
 - 文件授权只约束结构化文件工具，不能宣称约束 Shell。
@@ -49,6 +50,8 @@ Tauri 进程
 ## Shell 能力
 
 - Shell 是通用工具，不维护不可持续的完整命令白名单。
+- Runtime 装配本地 Shell Adapter，并注入工作目录、环境过滤、权限模式与审计策略；
+  Adapter 负责进程启动、输出、超时、取消和进程树清理。
 - 支持 `Disabled`、逐次确认、会话信任、工作区信任和完全信任等策略；工作区信任不是 OS 沙盒。
 - 执行记录包含原始脚本、cwd、开始/结束时间、退出码和确认依据。
 - stdout/stderr 流式输出并限制总量；支持超时、取消和进程树清理。
@@ -72,6 +75,18 @@ Tauri 进程
 - 具体 UI 文案和确认弹窗实现。
 - 与单次 Agent Loop 内部算法强相关但不涉及应用调度的逻辑。
 - Provider 消息编解码、规范工具分发、上下文压缩算法和启发式 Guardrail 实现。
+
+## v0.4.0 设计边界
+
+- v0.4.0 不修改 `assistant-runtime` 代码、依赖、Session/Run 类型或产品协议。
+- Core 只提供 resolved invocation、Allow/Deny 策略装配与 Guardrail；Plan/Build、
+  Ask/Auto、规则保存、审批交互和审计仍属于未来 Runtime 的上层编排职责。
+- 真实文件与 Shell 机制由独立本地基础设施 Adapter 提供，未来 Runtime 负责注入
+  工作目录、能力策略、环境过滤、审批和持久审计；Adapter 不反向定义 Runtime API。
+- `tools/safety-demo` 在 v0.4.0 中临时验证上述行为，其 Session、Run、审批、HTTP 和
+  内存审计类型均不是正式 Runtime 契约，不得直接复制到本 crate。
+- v0.4.0 的本地 Adapter 不承诺事务或原子文件替换；正式产品接入若需要更强写入
+  保障，应在后续 Runtime 总体设计中明确能力要求和恢复语义。
 
 ## Harness 验证
 

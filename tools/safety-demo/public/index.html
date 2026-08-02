@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Safety Demo · ez-assistant</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="loading-view" class="loading-view" aria-live="polite">
+      <header class="topbar topbar-skeleton" aria-hidden="true">
+        <div class="skeleton skeleton-brand"></div>
+        <div class="skeleton skeleton-path"></div>
+        <div class="skeleton skeleton-action"></div>
+      </header>
+      <div class="loading-grid" aria-hidden="true">
+        <section class="skeleton-stack">
+          <div class="skeleton skeleton-card"></div>
+          <div class="skeleton skeleton-card skeleton-card-short"></div>
+          <div class="skeleton skeleton-card"></div>
+        </section>
+        <aside class="skeleton skeleton-inspector"></aside>
+      </div>
+      <p>正在读取 Session 快照…</p>
+    </div>
+
+    <main id="blocked-view" class="blocked-view" hidden>
+      <p class="eyebrow">ez-assistant / Safety Demo</p>
+      <h1 id="blocked-title">无法连接 Safety Demo</h1>
+      <p id="blocked-message">本机 Safety Demo 尚未启动或已经停止。</p>
+      <p class="muted">请检查启动终端并重新打开其中的地址。</p>
+      <button id="retry-button" class="button button-primary" type="button">重试连接</button>
+    </main>
+
+    <div id="app" class="app" hidden>
+      <div id="connection-banner" class="connection-banner" role="alert" hidden></div>
+
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">ez-assistant</p>
+          <div class="brand-line">
+            <h1>Safety Demo</h1>
+            <span id="connection-badge" class="badge badge-neutral">正在连接</span>
+            <span id="risk-badge" class="badge badge-risk" hidden>Build + Auto 高风险</span>
+          </div>
+          <p class="safety-caption">
+            仅监听本机，但工具以当前用户权限运行；使用后请关闭进程。
+          </p>
+        </div>
+
+        <section class="environment-block" aria-label="Session 环境">
+          <div class="path-row">
+            <span class="field-label">工作目录</span>
+            <code id="session-workdir" class="path-value" tabindex="0"></code>
+            <button class="button button-quiet button-copy" type="button" data-action="copy" data-copy-id="session-workdir">复制</button>
+          </div>
+          <div class="path-row">
+            <span class="field-label">临时工作区</span>
+            <code id="temporary-workspace" class="path-value" tabindex="0"></code>
+            <button class="button button-quiet button-copy" type="button" data-action="copy" data-copy-id="temporary-workspace">复制</button>
+          </div>
+          <p class="sandbox-notice">
+            路径规则是逻辑路径策略，不是系统沙盒；符号链接可能指向范围外目标。
+          </p>
+        </section>
+
+        <section class="run-control" aria-label="当前 Run">
+          <div>
+            <span class="field-label">当前 Run</span>
+            <p id="run-status" class="run-status" aria-live="polite">空闲</p>
+            <p id="run-action-error" class="inline-error" role="alert" hidden></p>
+          </div>
+          <button id="run-action-button" class="button button-secondary" type="button">
+            重置 Session
+          </button>
+        </section>
+      </header>
+
+      <div class="workspace">
+        <section class="conversation-pane" aria-labelledby="conversation-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">权威 Journal</p>
+              <h2 id="conversation-title">对话与工具过程</h2>
+            </div>
+            <span id="session-id" class="session-id"></span>
+          </div>
+          <div id="conversation" class="conversation" aria-live="polite"></div>
+
+          <section id="composer" class="composer" aria-labelledby="composer-title">
+            <div class="composer-heading">
+              <div>
+                <p class="eyebrow">下一次运行</p>
+                <h2 id="composer-title">模式与任务</h2>
+              </div>
+              <span id="draft-risk-badge" class="badge badge-risk" hidden>高风险</span>
+            </div>
+
+            <div class="mode-grid">
+              <fieldset class="mode-fieldset">
+                <legend>执行模式</legend>
+                <div class="segmented" aria-label="执行模式">
+                  <button type="button" data-mode-group="execution" data-mode-value="plan" aria-pressed="true">Plan</button>
+                  <button type="button" data-mode-group="execution" data-mode-value="build" aria-pressed="false">Build</button>
+                </div>
+                <p id="execution-mode-help" class="mode-help"></p>
+              </fieldset>
+              <fieldset class="mode-fieldset">
+                <legend>审批模式</legend>
+                <div class="segmented" aria-label="审批模式">
+                  <button type="button" data-mode-group="approval" data-mode-value="ask" aria-pressed="true">Ask</button>
+                  <button type="button" data-mode-group="approval" data-mode-value="auto" aria-pressed="false">Auto</button>
+                </div>
+                <p id="approval-mode-help" class="mode-help"></p>
+              </fieldset>
+            </div>
+
+            <p id="mode-freeze-note" class="mode-note" hidden>当前修改仅对下一次运行生效。</p>
+            <p id="plan-auto-note" class="mode-note" hidden>Auto 不能越过 Plan 能力边界。</p>
+
+            <div id="build-auto-confirmation" class="risk-confirmation" hidden>
+              <strong>确认启用 Build + Auto</strong>
+              <p>
+                这会自动允许能力边界内未命中的文件和 Shell 调用。Shell 以当前用户权限运行，这不是沙盒。
+              </p>
+              <div class="button-row">
+                <button type="button" class="button button-secondary" data-action="return-safe-mode">返回安全模式</button>
+                <button type="button" class="button button-danger" data-action="confirm-build-auto">启用 Build + Auto</button>
+              </div>
+            </div>
+
+            <label class="message-label" for="message-input">任务描述</label>
+            <textarea
+              id="message-input"
+              rows="4"
+              placeholder="描述要完成的任务，或要求读取/修改/执行命令…"
+            ></textarea>
+            <div class="composer-footer">
+              <div>
+                <p id="composer-error" class="inline-error" role="alert" hidden></p>
+                <p class="shortcut-hint">Ctrl/Cmd + Enter 发送，Enter 换行</p>
+              </div>
+              <button id="send-button" class="button button-primary" type="button">以 Plan + Ask 运行</button>
+            </div>
+          </section>
+        </section>
+
+        <aside class="inspector" aria-labelledby="inspector-title">
+          <div class="inspector-header">
+            <div>
+              <p class="eyebrow">Execution Inspector</p>
+              <h2 id="inspector-title">执行检查器</h2>
+            </div>
+            <span id="event-sequence" class="sequence-label">seq 0</span>
+          </div>
+
+          <div id="inspector-tabs" class="tabs" role="tablist" aria-label="执行检查器">
+            <button id="tab-approval" role="tab" aria-selected="false" aria-controls="panel-approval" tabindex="-1" data-tab="approval">审批 <span id="approval-count">0</span></button>
+            <button id="tab-activity" role="tab" aria-selected="false" aria-controls="panel-activity" tabindex="-1" data-tab="activity">活动 <span id="activity-count">0</span></button>
+            <button id="tab-audit" role="tab" aria-selected="true" aria-controls="panel-audit" tabindex="0" data-tab="audit">审计 <span id="audit-count">0</span></button>
+          </div>
+
+          <section id="panel-approval" class="tab-panel" role="tabpanel" aria-labelledby="tab-approval" hidden></section>
+          <section id="panel-activity" class="tab-panel" role="tabpanel" aria-labelledby="tab-activity" hidden></section>
+          <section id="panel-audit" class="tab-panel" role="tabpanel" aria-labelledby="tab-audit"></section>
+        </aside>
+      </div>
+    </div>
+
+    <dialog id="reset-dialog" class="modal">
+      <form method="dialog">
+        <p class="eyebrow">不可撤销的 Demo 清理</p>
+        <h2>重置 Session？</h2>
+        <p>这会清空当前对话、审计和最近 Run，并删除以下临时工作区：</p>
+        <code id="reset-workspace-path" class="modal-path"></code>
+        <p id="reset-error" class="inline-error" role="alert" hidden></p>
+        <div class="button-row button-row-end">
+          <button id="reset-cancel-button" class="button button-secondary" value="cancel">取消</button>
+          <button id="reset-confirm-button" class="button button-danger" type="button">重置并删除临时工作区</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

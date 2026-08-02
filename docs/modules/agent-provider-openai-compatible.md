@@ -11,6 +11,12 @@
 - credential 通过构造依赖注入，不进入请求 DTO、事件、Debug 和错误文本。
 - Provider 差异通过显式 Profile 表达，不在 Core 中按名称分支。
 - DeepSeek thinking 工具调用必须完整往返 `reasoning_content`、`tool_calls` 和 `tool_call_id`。
+- `Profile::deepseek()` 明确表示 thinking-enabled 形态；经 `provider_options` 关闭
+  thinking 不属于该 Profile 的支持范围，不能一边关闭 thinking 一边沿用其 reasoning
+  必填校验。
+- 当 Profile 要求工具调用携带 reasoning 时，流式和非流式响应都必须在产出完整
+  `AssistantMessage` / `TurnFinished` 前校验该不变量；缺失时以 Provider 协议错误终止
+  当前 Turn，不能把无法回放的 Tool Call 交给 Core 执行或写入 Journal。
 - Context Summary 编码为带固定派生说明的 system message。
 - 请求编码前复用 `ConversationSnapshot` 的严格 Tool Call/Result 双向校验，不在
   Adapter 内维护第二套配对算法。

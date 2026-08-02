@@ -81,6 +81,8 @@ impl Profile {
     ///   （<https://api-docs.deepseek.com/guides/thinking_mode/>）。开关不编码进
     ///   Profile：调用方经 `ModelRequest::provider_options` 的 `deepseek` 命名空间
     ///   传入，编码器按命名空间合并进请求根。
+    ///   本 Profile 的响应校验始终按 thinking-enabled 语义执行；通过
+    ///   `provider_options` 传入 `thinking.type = disabled` 不属于受支持形态。
     /// - thinking 模式下 `temperature` / `top_p` / `presence_penalty` /
     ///   `frequency_penalty` 不生效（设置不报错但无作用，见同一文档），因此
     ///   `supports_temperature` / `supports_top_p` 为 `false`；`stop` 与

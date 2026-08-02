@@ -1,62 +1,111 @@
-//! 单次规范 Tool Call 派发。
-//!
-//! [`Dispatcher`] 一次只处理一个规范 Tool Call：按名称查表并交给擦除后的工具；
-//! 未知名、校验失败、执行失败和异常结果 ID 都转为绑定原调用 ID 的模型可读
-//! 错误 `ToolResult`。
-//! Dispatcher 不负责模型请求与 Agent 继续循环。
+//! Tool Call 整批无副作用解析与 resolved invocation 一次性执行。
 
-use std::{future::Future, pin::Pin};
+use std::sync::Mutex;
 
-use agent_types::{ToolCall, ToolResult, ToolResultContent, ToolResultStatus};
+use agent_types::ToolCall;
+use thiserror::Error;
 
-use crate::{registry::ToolSetSnapshot, tool::ToolContext};
+use crate::{
+    ToolContext, ToolJsonFuture,
+    registry::ToolSetSnapshot,
+    resolution::{ResolvedBatchItem, ResolvedToolBatch, ready_result},
+    tool::{text_error_result, text_error_result_for_id},
+};
 
-/// 规范 Tool Call 派发器。
+/// 调用方传入无效 batch 位置时的 Dispatcher 契约错误。
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum DispatchError {
+    /// 请求位置不存在于 resolved batch。
+    #[error("resolved tool batch index {index} is out of bounds for length {len}")]
+    IndexOutOfBounds {
+        /// 调用方请求的位置。
+        index: usize,
+        /// batch 的实际长度。
+        len: usize,
+    },
+}
+
+/// resolved invocation 解析与执行派发器。
 pub struct Dispatcher;
 
 impl Dispatcher {
-    /// 派发一次 Tool Call；任何失败路径都表达为错误 `ToolResult`。
-    pub fn dispatch<'a>(
-        snapshot: &'a ToolSetSnapshot,
-        call: &'a ToolCall,
+    /// 对完整 Tool Call 批次做无 I/O、无副作用解析。
+    ///
+    /// 结果严格保留原数量和顺序；单项失败只影响当前位置。
+    pub fn resolve_batch(snapshot: &ToolSetSnapshot, calls: &[ToolCall]) -> ResolvedToolBatch {
+        let items = calls
+            .iter()
+            .map(|call| match snapshot.tool(&call.name) {
+                Some(tool) => match tool.resolve(call) {
+                    Ok(resolved) => ResolvedBatchItem::Valid {
+                        invocation: resolved.invocation,
+                        executor: Mutex::new(Some(resolved.executor)),
+                    },
+                    Err(result) => ResolvedBatchItem::Invalid(result),
+                },
+                None => ResolvedBatchItem::Invalid(text_error_result(
+                    call,
+                    format!("unknown tool: `{}`", call.name),
+                )),
+            })
+            .collect();
+        ResolvedToolBatch { items }
+    }
+
+    /// 执行一个解析成功的位置，并消费该位置的一次性 executor。
+    ///
+    /// 执行 Invalid 位置或重复执行会得到绑定原 call ID 的内部契约错误。
+    /// 仅位置越界直接返回 [`DispatchError`]，因为此时没有可绑定的协议 call ID。
+    pub fn execute(
+        batch: &mut ResolvedToolBatch,
+        index: usize,
         context: ToolContext,
-    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
-        match snapshot.tool(&call.name) {
-            Some(tool) => Box::pin(async move {
-                let result = tool.execute_json(call, context).await;
-                if result.call_id == call.id {
-                    result
-                } else {
-                    ToolResult {
-                        call_id: call.id.clone(),
-                        status: ToolResultStatus::Error,
-                        content: ToolResultContent::Text(format!(
-                            "tool `{}` returned a result for a different call id",
-                            call.name
-                        )),
-                    }
-                }
-            }),
-            None => Box::pin(std::future::ready(ToolResult {
-                call_id: call.id.clone(),
-                status: ToolResultStatus::Error,
-                content: ToolResultContent::Text(format!("unknown tool: `{}`", call.name)),
-            })),
+    ) -> Result<ToolJsonFuture<'static>, DispatchError> {
+        let len = batch.items.len();
+        let item = batch
+            .items
+            .get_mut(index)
+            .ok_or(DispatchError::IndexOutOfBounds { index, len })?;
+        match item {
+            ResolvedBatchItem::Invalid(result) => Ok(ready_result(text_error_result_for_id(
+                result.call_id.clone(),
+                "dispatcher contract violation: cannot execute an invalid resolved item".to_owned(),
+            ))),
+            ResolvedBatchItem::Valid {
+                invocation,
+                executor,
+            } => match executor
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                Some(executor) => Ok(executor.execute(context)),
+                None => Ok(ready_result(text_error_result_for_id(
+                    invocation.call_id().clone(),
+                    format!(
+                        "dispatcher contract violation: resolved tool `{}` was already executed",
+                        invocation.tool_name()
+                    ),
+                ))),
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use agent_types::{ToolCallId, ToolDefinition, ToolName};
+    use agent_types::{ToolName, ToolResultContent, ToolResultStatus};
     use serde_json::json;
 
     use super::*;
     use crate::{
-        ErasedTool, ToolJsonFuture,
-        registry::ToolRegistry,
+        GeneralAuthorizationFacts, ResolvedBatchItemRef, Tool, ToolError, ToolExecuteFuture,
+        ToolRegistry, ToolResolution,
         testutil::{AddTool, FailTool, block_on, tool_call},
     };
 
@@ -68,85 +117,166 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_returns_error_result() {
-        let snapshot = snapshot();
-        let call = tool_call("missing", json!({}));
-        let result = block_on(Dispatcher::dispatch(
-            &snapshot,
-            &call,
-            ToolContext::default(),
+    fn whole_batch_resolution_preserves_valid_and_invalid_order() {
+        let calls = [
+            tool_call("add", json!({"a": 40, "b": 2})),
+            tool_call("missing", json!({})),
+            tool_call("add", json!({"a": "wrong", "b": 2})),
+        ];
+        let batch = Dispatcher::resolve_batch(&snapshot(), &calls);
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(batch.get(0), Some(ResolvedBatchItemRef::Valid(_))));
+        assert!(matches!(
+            batch.get(1),
+            Some(ResolvedBatchItemRef::Invalid(result))
+                if result.call_id == calls[1].id
         ));
-        assert_eq!(result.status, ToolResultStatus::Error);
-        assert_eq!(result.call_id, call.id);
-        let ToolResultContent::Text(message) = result.content else {
-            panic!("error result must carry model-readable text");
-        };
-        assert!(message.contains("unknown tool: `missing`"));
+        assert!(matches!(
+            batch.get(2),
+            Some(ResolvedBatchItemRef::Invalid(result))
+                if result.call_id == calls[2].id
+        ));
     }
 
     #[test]
-    fn dispatch_routes_call_to_matching_tool() {
-        let snapshot = snapshot();
-        let add = tool_call("add", json!({"a": 40, "b": 2}));
-        let result = block_on(Dispatcher::dispatch(
-            &snapshot,
-            &add,
-            ToolContext::default(),
-        ));
+    fn resolved_description_facts_fingerprint_and_execution_share_one_input() {
+        let call = tool_call("add", json!({"a": 40, "b": 2}));
+        let mut batch = Dispatcher::resolve_batch(&snapshot(), std::slice::from_ref(&call));
+        let Some(ResolvedBatchItemRef::Valid(invocation)) = batch.get(0) else {
+            panic!("add resolves");
+        };
+        assert_eq!(invocation.call_id(), &call.id);
+        assert_eq!(invocation.resolved_arguments(), &json!({"a": 40, "b": 2}));
+        assert_eq!(
+            invocation
+                .facts::<GeneralAuthorizationFacts>()
+                .expect("general facts")
+                .tool_name,
+            call.name
+        );
+        assert!(invocation.facts::<String>().is_none());
+        assert_eq!(
+            invocation.fingerprint().semantic_arguments(),
+            &json!({"a": 40, "b": 2})
+        );
+
+        let result = block_on(
+            Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
+        );
         assert_eq!(result.status, ToolResultStatus::Success);
         assert_eq!(result.content, ToolResultContent::Json(json!({"sum": 42})));
 
-        let fail = tool_call("fail", json!({"a": 1, "b": 2}));
-        let result = block_on(Dispatcher::dispatch(
-            &snapshot,
-            &fail,
-            ToolContext::default(),
-        ));
-        assert_eq!(result.status, ToolResultStatus::Error);
+        let repeated = block_on(
+            Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
+        );
+        assert_eq!(repeated.call_id, call.id);
+        assert_eq!(repeated.status, ToolResultStatus::Error);
     }
 
-    struct WrongCallIdTool;
+    #[test]
+    fn execution_failure_stays_bound_to_the_original_call() {
+        let call = tool_call("fail", json!({"a": 1, "b": 2}));
+        let mut batch = Dispatcher::resolve_batch(&snapshot(), std::slice::from_ref(&call));
+        let result = block_on(
+            Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
+        );
+        assert_eq!(result.call_id, call.id);
+        assert_eq!(result.status, ToolResultStatus::Error);
+        let ToolResultContent::Text(message) = result.content else {
+            panic!("plain execution failure is text");
+        };
+        assert!(message.contains("boom"));
+    }
 
-    impl ErasedTool for WrongCallIdTool {
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: ToolName::new("wrong_id").expect("valid tool name"),
-                description: "returns a mismatched call id".to_owned(),
-                input_schema: json!({"type": "object"}),
-            }
+    struct ResolveFlagTool {
+        executions: Arc<AtomicUsize>,
+    }
+
+    impl Tool for ResolveFlagTool {
+        type Input = serde_json::Value;
+        type ResolvedInput = serde_json::Value;
+        type Output = serde_json::Value;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("resolve_flag").expect("valid name")
         }
 
-        fn execute_json<'a>(
+        fn description(&self) -> String {
+            "resolve flag".to_owned()
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            if input == json!({"deny": true}) {
+                return Err(ToolError::invalid_input("rejected in resolve"));
+            }
+            if input == json!({"wrong_phase": true}) {
+                return Err(ToolError::execution("incorrect resolve error"));
+            }
+            Ok(ToolResolution::general(input))
+        }
+
+        fn execute<'a>(
             &'a self,
-            _call: &'a ToolCall,
+            input: Self::ResolvedInput,
             _context: ToolContext,
-        ) -> ToolJsonFuture<'a> {
-            Box::pin(std::future::ready(ToolResult {
-                call_id: ToolCallId::new("different_call").expect("valid call id"),
-                status: ToolResultStatus::Success,
-                content: ToolResultContent::Json(json!({"unsafe": true})),
-            }))
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(input)))
         }
     }
 
     #[test]
-    fn mismatched_result_id_becomes_error_for_original_call() {
+    fn resolve_failure_never_creates_an_executor() {
+        let executions = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::new();
         registry
-            .register_erased(Arc::new(WrongCallIdTool))
-            .expect("register erased tool");
+            .register(ResolveFlagTool {
+                executions: executions.clone(),
+            })
+            .expect("register tool");
         let snapshot = registry.snapshot();
-        let call = tool_call("wrong_id", json!({}));
-        let result = block_on(Dispatcher::dispatch(
-            &snapshot,
-            &call,
-            ToolContext::default(),
-        ));
-        assert_eq!(result.call_id, call.id);
+        let call = tool_call("resolve_flag", json!({"deny": true}));
+        let mut batch = Dispatcher::resolve_batch(&snapshot, &[call]);
+        let result = block_on(
+            Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
+        );
         assert_eq!(result.status, ToolResultStatus::Error);
-        let ToolResultContent::Text(message) = result.content else {
-            panic!("contract violation must be model-readable text");
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn resolve_execution_error_is_normalized_to_invalid_input() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(ResolveFlagTool {
+                executions: executions.clone(),
+            })
+            .expect("register tool");
+        let snapshot = registry.snapshot();
+        let call = tool_call("resolve_flag", json!({"wrong_phase": true}));
+        let batch = Dispatcher::resolve_batch(&snapshot, &[call]);
+        let Some(ResolvedBatchItemRef::Invalid(result)) = batch.get(0) else {
+            panic!("resolve error creates invalid item");
         };
-        assert!(message.contains("different call id"));
+        let ToolResultContent::Text(message) = &result.content else {
+            panic!("resolve error is model-visible text");
+        };
+        assert!(message.starts_with("invalid tool input:"));
+        assert!(message.contains("incorrect resolve error"));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn out_of_bounds_is_an_explicit_caller_error() {
+        let mut batch = Dispatcher::resolve_batch(&snapshot(), &[]);
+        let error = match Dispatcher::execute(&mut batch, 0, ToolContext::default()) {
+            Ok(_) => panic!("out of bounds must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error, DispatchError::IndexOutOfBounds { index: 0, len: 0 });
     }
 }

@@ -4,7 +4,7 @@ use agent_context::ContextWindowError;
 use agent_model::ModelError;
 use thiserror::Error;
 
-use crate::RecordError;
+use crate::{GuardrailKind, RecordError};
 
 /// 一次 Agent 执行的受控终止原因。
 ///
@@ -31,6 +31,14 @@ pub enum ExecutionError {
         /// 预算上限值。
         limit: u32,
     },
+    /// Enforce Guardrail 已完成当前 pending exchange 后终止执行。
+    #[error("guardrail triggered ({kind:?}, threshold {threshold})")]
+    GuardrailTriggered {
+        /// 触发的检测器类别。
+        kind: GuardrailKind,
+        /// 配置的非零阈值。
+        threshold: std::num::NonZeroU32,
+    },
 }
 
 /// 资源预算类别。
@@ -45,6 +53,8 @@ pub enum BudgetKind {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
 
     #[test]
@@ -66,6 +76,10 @@ mod tests {
             ExecutionError::BudgetExceeded {
                 kind: BudgetKind::ToolCalls,
                 limit: 32,
+            },
+            ExecutionError::GuardrailTriggered {
+                kind: GuardrailKind::RepeatedInvocation,
+                threshold: NonZeroU32::new(3).expect("non-zero threshold"),
             },
         ];
         for error in errors {

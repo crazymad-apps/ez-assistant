@@ -14,13 +14,15 @@
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
 │   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
 │   ├── agent-testkit/           # Agent 确定性测试支持
-│   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与内置工具
+│   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与标准工具壳
+│   ├── agent-tools-local/       # 真实本地文件与 Shell 基础设施 Adapter
 │   ├── agent-types/             # Provider-neutral 规范类型
 │   ├── assistant-protocol/      # 跨层共享 DTO、事件与标识类型
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
 ├── tools/
 │   ├── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
-│   └── runtime-harness/         # 版本验证宿主（独立按需运行的临时 Runtime）
+│   ├── runtime-harness/         # 版本验证宿主（独立按需运行的临时 Runtime）
+│   └── safety-demo/             # 安全策略与真实工具执行的独立验证宿主
 ├── docs/
 │   ├── specs/                   # 开发流程、Rust/前端规范、进度模板
 │   ├── modules/                 # 各应用/crate 专属约束
@@ -54,10 +56,12 @@
 | `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
 | `crates/agent-testkit/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-testkit.md`](docs/modules/agent-testkit.md) |
 | `crates/agent-tools/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools.md`](docs/modules/agent-tools.md) |
+| `crates/agent-tools-local/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools-local.md`](docs/modules/agent-tools-local.md) |
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
 | `tools/runtime-harness/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-harness.md`](docs/modules/runtime-harness.md) |
+| `tools/safety-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`safety-demo.md`](docs/modules/safety-demo.md) |
 
 根 `AGENTS.md`、`docs/specs/` 与 `docs/modules/` 是本仓库开发约束的唯一来源。不要在源码目录重复创建相互冲突的约束文件。
 
@@ -66,6 +70,10 @@
 - 当前采用**单进程模块化架构**。Tauri、Assistant Runtime 和 Agent Core 共同运行于 Tauri Rust 进程；未经明确架构决策，不引入 sidecar、daemon、本地 HTTP 服务或常驻 Worker 进程。
 - `tools/debug-viewer` 是独立开发工具，不属于产品进程；产品进程只向它建立出向连接（POST 推送调试事件），自身不监听调试端口（决策见 `docs/重要决策与变更记录.md`）。
 - `tools/runtime-harness` 是开发者显式启动的版本验证宿主，不属于产品进程或正式 `assistant-runtime`，不得把其临时 Session、Run、Journal 或 CLI 语义视为产品契约。
+- `tools/safety-demo` 是开发者显式启动的安全验证宿主；它只在 loopback 上提供无访问
+  令牌的临时 HTTP 页面，并通过 Host、Origin 和 POST 来源校验降低跨站误触风险；它不
+  属于产品进程、正式 `assistant-runtime`、sidecar 或 daemon，其私有 Session、Run、
+  审批、审计和 HTTP DTO 不得成为产品契约。
 - 关闭窗口与退出进程是两个动作；后台任务的生命周期属于 Assistant Runtime，不得绑定 WebView 页面生命周期。
 - UI 只发送用户意图和展示事件，不持有会话、Run、调度或 Agent Loop 的权威业务状态。
 - `assistant-runtime` 持有会话、Run、定时任务、配置、持久化和并发调度；`agent-core` 只负责单次 Agent 执行能力。
@@ -75,12 +83,17 @@
   `agent-core` 与 `assistant-runtime` 可共同向下依赖 `agent-context`，
   `agent-context` 只依赖 `agent-model` 与 `agent-types`。应用协议由 `desktop` 和
   `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行
-  类型不依赖应用协议，所有依赖禁止反向。
+  类型不依赖应用协议。`agent-tools-local -> agent-tools`，`safety-demo` 只作为顶层
+  开发工具向下依赖 Agent crate 与本地 Adapter；所有依赖禁止反向。
 
 ## 四、Agent 工具边界
 
 - 文件读取、列目录、内容搜索、写入、删除和局部编辑（edit）统一归入文件能力；`grep`/`rg` 的语义由 `FileSystemTool::search` 承载，`rg` 仅可作为内部实现。
-- Agent Core 不直接访问 `std::fs`、`tokio::fs` 或启动 `rg`；它只能依赖工具 trait。真实路径解析、权限、确认、审计和执行属于 Runtime/基础设施实现。
+- Agent Core 不直接访问 `std::fs`、`tokio::fs` 或启动 `rg`；它只能依赖工具 trait。
+  无副作用的词法路径解析属于工具 resolve；具体文件状态、搜索后端与读写机制
+  属于装配的文件能力实现，本版本的本地实现位于 `agent-tools-local`。Shell
+  进程与环境过滤同样由 `agent-tools-local` 实现；权限、确认和审计由 Runtime
+  或其他上层宿主装配。
 - Shell 是独立的一等工具，不按每条系统命令枚举专用工具。结构化文件工具与 Shell 并存，不能用 Shell 取代所有文件能力。
 - Shell 子进程以当前用户权限运行，可以绕过应用层文件授权。任何 UI 和文档都不得把“工作目录”表述为强沙盒。
 - Shell 必须支持权限模式、完整命令展示、流式 stdout/stderr、超时、取消、输出上限和审计；敏感环境变量默认不传递给子进程。
