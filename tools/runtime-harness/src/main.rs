@@ -21,7 +21,7 @@ use agent_core::{
     AgentEventStream, AgentExecution, CompletionFuture, ExecutionBudget, ExecutionOutcome,
     ExecutionSpec,
 };
-use agent_model::ModelService;
+use agent_model::{ModelService, SystemPromptSnapshot};
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
 };
@@ -140,12 +140,12 @@ impl ChatResources {
             |debug| debug.observe_model(Arc::clone(&self.model)),
         );
         ExecutionSpec {
-            instructions: vec![
+            system_prompt: SystemPromptSnapshot::new(vec![
                 "You are running inside the ez-assistant Runtime Harness.".to_owned(),
                 "For weather questions, call lookup_weather before answering and clearly state \
                  that its fixed result is demo data."
                     .to_owned(),
-            ],
+            ]),
             model,
             context_window: Arc::clone(&self.context_window),
             tools: self.tools.clone(),

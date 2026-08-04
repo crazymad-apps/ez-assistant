@@ -251,7 +251,7 @@ mod tests {
 
     fn sample_request() -> ModelRequest {
         ModelRequest {
-            system: vec![],
+            system: crate::SystemPromptSnapshot::default(),
             conversation: agent_types::ConversationSnapshot::new(vec![]),
             tools: vec![],
             tool_choice: agent_types::ToolChoice::Auto,

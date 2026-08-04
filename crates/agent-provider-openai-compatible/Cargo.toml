@@ -11,6 +11,7 @@ workspace = true
 agent-model = { path = "../agent-model" }
 agent-types = { path = "../agent-types" }
 async-stream.workspace = true
+base64.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true

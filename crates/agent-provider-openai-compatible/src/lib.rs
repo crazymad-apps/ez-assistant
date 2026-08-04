@@ -14,6 +14,8 @@
 //!
 //! - [`Transport`] / [`TransportRequest`] / [`TransportResponse`] / [`TransportError`]：
 //!   可替换的 HTTP Transport 边界；[`ReqwestTransport`] 是默认实现。
+//! - [`ObservedTransport`] / [`ProviderWireEvent`]：在不改变请求、响应分块和错误的前提下，
+//!   观察已排除 credential header 的原始 wire 事实；观察数据仍包含高敏正文。
 //! - [`SseParser`] / [`SseFrame`]：SSE frame 增量解析。
 //! - [`OpenAiCompatibleService`] / [`BearerCredential`]：把 Codec 与 Transport 组装成
 //!   [`agent_model::ModelService`]；credential 只进入 `Authorization` header，
@@ -81,9 +83,10 @@ pub use schema::{
     ChatToolChoice, ChatToolChoiceMode, ChatToolKind, ChatToolMessage, ChatUsage, ChatUserContent,
     ChatUserMessage,
 };
-pub use service::{BearerCredential, OpenAiCompatibleService};
+pub use service::{BearerCredential, OpenAiCompatibleService, OpenAiCompatibleServiceError};
 pub use sse::{SseFrame, SseParser};
 pub use transport::{
-    BodyStream, ReqwestTransport, Transport, TransportError, TransportFuture, TransportRequest,
+    BodyStream, ObservedTransport, ProviderWireEvent, ProviderWireObserver, RecordedWireRequest,
+    ReqwestTransport, Transport, TransportError, TransportFuture, TransportRequest,
     TransportResponse, TransportTimeouts,
 };

@@ -129,7 +129,9 @@ impl Stream for GatedStream {
 
 #[cfg(test)]
 mod tests {
-    use agent_model::{ModelCallContext, ModelCapabilities, ModelError, ModelService};
+    use agent_model::{
+        ModelCallContext, ModelCapabilities, ModelError, ModelService, SystemPromptSnapshot,
+    };
     use agent_types::{
         AssistantMessage, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
     };
@@ -165,7 +167,7 @@ mod tests {
     fn request() -> agent_model::ModelRequest {
         use agent_types::{ConversationSnapshot, ToolChoice};
         agent_model::ModelRequest {
-            system: vec![],
+            system: SystemPromptSnapshot::default(),
             conversation: ConversationSnapshot::new(vec![]),
             tools: vec![],
             tool_choice: ToolChoice::Auto,

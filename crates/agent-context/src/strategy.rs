@@ -2,7 +2,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use agent_model::{ModelError, ModelService};
+use agent_model::{ModelError, ModelService, SystemPromptSnapshot};
 use agent_types::{ConversationSnapshot, ModelIdentity, TokenUsage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,8 +29,8 @@ pub trait CompressionStrategy: Send + Sync {
 pub struct CompactionInput {
     /// 当前 ExecutionSpec 使用的同一模型服务。
     pub model: Arc<dyn ModelService>,
-    /// 正常模型请求使用的原始 system instructions；压缩请求必须保持相同前缀。
-    pub instructions: Vec<String>,
+    /// 正常模型请求使用的完整冻结 System Prompt；压缩请求必须保持相同前缀。
+    pub system_prompt: SystemPromptSnapshot,
     /// 已完成共享结构校验的历史布局。
     pub layout: ContextLayout,
 }
@@ -154,7 +154,7 @@ mod tests {
             model: Arc::new(NoopModel {
                 capabilities: ModelCapabilities::default(),
             }),
-            instructions: vec!["normal instruction".to_owned()],
+            system_prompt: SystemPromptSnapshot::new(vec!["normal instruction".to_owned()]),
             layout: ContextLayout::build(&ConversationSnapshot::default())
                 .expect("empty layout is valid"),
         };

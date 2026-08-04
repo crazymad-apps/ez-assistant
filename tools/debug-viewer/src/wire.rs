@@ -107,6 +107,7 @@ pub(crate) fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use agent_model::{ModelError, ModelTransportErrorKind};
     use agent_types::{MessageId, ModelIdentity, ProviderId};
     use serde_json::json;
 
@@ -141,9 +142,37 @@ mod tests {
     }
 
     #[test]
+    fn structured_model_error_round_trips_in_model_event_payload() {
+        let envelope = DebugEnvelope {
+            ch: DebugChannel::Llm,
+            seq: 8,
+            sent_at_ms: 1_752_000_000_001,
+            correlation_id: Some("chat-2".to_owned()),
+            payload: DebugPayload::ModelEvent {
+                event: ModelEvent::TurnFailed {
+                    error: ModelError::Transport {
+                        kind: ModelTransportErrorKind::Interrupted,
+                        message: "connection reset".to_owned(),
+                    },
+                },
+            },
+        };
+
+        let json = serde_json::to_value(&envelope).expect("serialize envelope");
+        assert_eq!(
+            json["payload"]["event"]["TurnFailed"]["error"]["Transport"]["kind"],
+            json!("interrupted")
+        );
+        assert_eq!(
+            serde_json::from_value::<DebugEnvelope>(json).expect("deserialize envelope"),
+            envelope
+        );
+    }
+
+    #[test]
     fn turn_requested_payload_round_trips() {
         let request = ModelRequest {
-            system: vec![],
+            system: agent_model::SystemPromptSnapshot::default(),
             conversation: agent_types::ConversationSnapshot::new(vec![
                 agent_types::ConversationMessage::User(agent_types::UserMessage {
                     id: MessageId::new("user_1").expect("valid message id"),

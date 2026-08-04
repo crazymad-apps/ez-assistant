@@ -10,7 +10,8 @@
 
 - Agent 执行能力独立于 Tauri、UI、会话调度和具体部署形态。
 - 同一执行引擎可用于纯本地客户端、C/S、B/S 和本地/远程混合架构。
-- 模型、工具、记忆、安全、上下文和记录能力均通过稳定边界组合，不形成巨型 Agent 对象。
+- 模型、工具、安全、上下文和记录能力均通过稳定边界组合；记忆通过冻结 Prompt 与普通
+  工具接入，不形成巨型 Agent 对象或 Core 专用阶段。
 - Provider 特殊协议限制在适配层，不污染 Agent Loop。
 - Runtime 持有业务 Run、会话和持久化权威状态；Core 只执行一次 `AgentExecution`。
 - 所有策略来源在进入 Core 前解析为一份不可变执行规格，不在 Core 内重复维护 Profile、默认值和覆盖关系。
@@ -25,6 +26,8 @@ Assistant Runtime
 ├── Session / Message / Run
 ├── 调度、并发、恢复与配置编译
 ├── Conversation Journal
+├── Session Prompt Snapshot / Pinned Memory Store
+├── RecallSource 与记忆工具能力装配
 ├── 权限记录与审计
 └── 本地或远程能力适配器装配
           │ ExecutionSpec + ExecutionInput + bound services
@@ -38,7 +41,6 @@ Agent Engine
           │
           ├── Model Service / Provider Codec
           ├── Tool Service
-          ├── Memory Service
           ├── Safety / Approval Service
           └── Execution Recorder
 ```
@@ -88,13 +90,12 @@ Core 只接收一份已经合并、校验并解析完成的 `ExecutionSpec`：
 
 ```rust
 pub struct ExecutionSpec {
-    pub instructions: InstructionSet,
-    pub model: ResolvedModel,
+    pub system_prompt: SystemPromptSnapshot,
+    pub model: Arc<dyn ModelService>,
     pub tools: ToolSetSnapshot,
-    pub context: ContextPolicy,
-    pub memory: MemoryBinding,
-    pub safety: SafetyPlan,
+    pub context_window: Arc<ContextWindowEvaluator>,
     pub budget: ExecutionBudget,
+    pub guardrails: Option<GuardrailConfig>,
 }
 ```
 
@@ -111,16 +112,15 @@ pub struct ExecutionInput {
 
 pub struct ExecutionContext {
     pub cancellation: CancellationToken,
-    pub memory_scope: MemoryScope,
     pub recorder: Arc<dyn ExecutionRecorder>,
+    pub authorizer: Arc<dyn ToolAuthorizer>,
 }
 ```
 
 - `ExecutionInput` 只包含 Runtime 已经选定的完整有效对话快照；新用户 Run 必须先将
   UserMessage 写入规范历史再构造 Snapshot，Core 不再单独追加用户输入。
-- `ExecutionContext` 只包含控制面和已经绑定当前 Runtime Run 的能力。
+- `ExecutionContext` 只包含取消、落账和授权控制面。
 - Core 不通过 `ConversationRef` 自行加载 Session；Runtime 传入规范快照。
-- `MemoryScope` 是不透明的能力作用域，不等同于 `SessionId`。
 
 ### 5.3 返回句柄
 
@@ -216,6 +216,21 @@ Model Route → Protocol Codec → Transport → Stream Decoder
 
 Provider Codec 必须保存继续下一轮所需的 reasoning、tool call、call ID 和不透明 Provider 状态。例如 [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/) 的工具调用轮次必须完整回传 `reasoning_content`；该约束只能存在于 DeepSeek/OpenAI-compatible Codec 和相应契约测试中，不能进入 Agent Loop 的条件分支。
 
+### 7.3 模型建立重试
+
+Provider-neutral 的模型重试只允许包装 `ModelService::stream()` 的建流前错误。上层必须显式
+装配有限策略；错误提供 Connection、Timeout、RateLimited、Unavailable 与 Retry-After 等稳定
+事实，但不替上层决定是否重试。
+
+- 每个 attempt 使用完全相同的 `ModelRequest`，属于同一个 Core Model Step。
+- attempt 数、等待和取消必须可观察；等待与下一次请求都必须响应取消。
+- `stream()` 一旦返回事件流，任何后续 `TurnFailed` 都结束当前 Step，不透明重试或拼接输出。
+- Config、Auth、Protocol、ToolArguments、ContextOverflow 和 Cancelled 不进入通用重试。
+- Tool、Recorder、Pinned Store 和 RecallSource 不因模型重试能力获得通用自动重试。
+
+Core 不知道 attempt，也不增加重试状态机；Runtime 或其他上层宿主只通过装配后的单个
+`ModelService` 使用该能力。
+
 ## 八、权威记录与观察事件
 
 ### 8.1 Conversation Journal
@@ -279,53 +294,53 @@ compression operation、Context Checkpoint 提交与 continuation 由 Runtime �
 - UI 断线后以 Runtime 快照恢复，不能依赖重放所有 token delta。
 - UI 或观察者事件订阅断开不能改变 Provider 对话内容；Recorder 失败则必须阻止后续副作用并终止或受控恢复。
 
+### 8.3 完整 Trace 与分层回放
+
+完整 Trace 是 Runtime 所有的高敏诊断副本，不是 Conversation Journal。记录点直接复用各层
+已经拥有的事实：完整 `ModelRequest` / `ModelEvent`、Provider 编码请求与 raw response、
+`AgentEvent` 以及 Runtime/Journal 事件；只为当前缺失的 Provider wire 和 retry attempt 增加
+所属层事件，不建立平行 Trace 业务模型。
+
+- Runtime 为 Session、Run、AgentExecution、逻辑模型调用和 attempt 建立关联，并选择关闭、
+  元数据或 Full Replay 录制以及持久化、权限和保留策略。
+- Core、Model、Provider 和 Tool Adapter 只提供观察接缝，不直接写文件或数据库。
+- Authorization、API key、Cookie、代理认证和其他 credential 在记录类型构造前永久排除；
+  Full Trace 的其余 prompt、reasoning、工具参数与正文仍按高敏数据管理。
+- Trace 写入、队列或容量失败只把记录标为 Incomplete，不改变模型或 AgentExecution 结果；
+  Journal 提交失败仍按权威业务错误处理。
+- Wire Replay 重走真实 Provider Decoder，Model Replay 重现规范模型服务，Timeline 只读展示；
+  三者都不重新执行历史真实工具、审批或 Journal 副作用。
+- debug-viewer 继续是允许丢弃的开发观察通道，不能作为 Full Replay 的权威来源。
+
+v0.6.0 不修改正式 Runtime，由顶层 `tools/reliability-demo` 私有验证 Collector、JSONL、完整性
+和回放；其文件、事件封装和 CLI 不是产品契约。
+
 ## 九、记忆扩展架构
 
-### 9.1 稳定窄接口
+### 9.1 Pinned Memory
 
-Agent Engine 只依赖：
+少量常驻记忆由实现无关的 `PinnedMemoryStore` 管理。创建新 Session 时，上层读取当前
+条目并确定性渲染为一个 System Prompt Part，随后与其他 system parts 一起冻结为
+`SystemPromptSnapshot`。修改 Store 不刷新当前 Session；恢复、继续、压缩续接和分支
+必须复用原快照，不能读取最新 Store 重建。
 
-```rust
-#[async_trait]
-pub trait MemoryService: Send + Sync {
-    async fn recall(
-        &self,
-        request: RecallRequest,
-    ) -> Result<MemoryContext, MemoryError>;
+最终 Session 只需保存渲染完成的 Prompt 状态。结构化条目、容量规则和 Store Adapter
+属于初始化输入与能力装配，不进入 Core 执行状态机。
 
-    async fn record(
-        &self,
-        observation: MemoryObservation,
-    ) -> Result<(), MemoryError>;
-}
-```
+### 9.2 Memory Recall
 
-### 9.2 插件协议
+大量或外置信息只通过普通 `recall_memory` 工具按需进入当前工具上下文。`RecallSource`
+表示可替换的数据源适配器，具体 `MemoryRecall` 实现可以协调多个 Source，负责显式默认
+集合、并发、超时、确定排序、精确去重、截断和部分失败。
 
-记忆插件抽象完整记忆能力，而不只抽象数据库 CRUD：
-
-```rust
-#[async_trait]
-pub trait MemoryPlugin: Send + Sync {
-    fn descriptor(&self) -> MemoryPluginDescriptor;
-    async fn recall(&self, request: RecallRequest) -> Result<RecallResponse, MemoryError>;
-    async fn observe(&self, observation: MemoryObservation) -> Result<(), MemoryError>;
-    async fn consolidate(&self, request: ConsolidationRequest)
-        -> Result<ConsolidationResult, MemoryError>;
-    async fn mutate(&self, command: MemoryCommand)
-        -> Result<MemoryMutationResult, MemoryError>;
-}
-```
-
-`MemoryOrchestrator` 在 Agent Engine 外部组合插件，并负责并行召回、超时隔离、去重、评分归一、token 配额、写入路由和降级。支持但不限于：
-
-- 本地嵌入式记忆。
-- 远程 C/S 或 B/S 记忆服务。
-- 本地短期加云端长期的混合记忆。
-- 多来源组合记忆。
-- 完全关闭记忆的 No-op 实现。
-
-记忆插件需要暴露模型工具时，必须作为普通 Tool Contribution 注册，禁止 Memory SPI 直接依赖 Tool SPI。
+- Recall 结果天然携带来源，不自动写入 Pinned Memory 或修改 Session Prompt。
+- Source 是否对模型可见、是否允许模型指定，由 System Prompt、Skill 和上层授权决定，
+  不进入 Source trait 或动态工具定义。
+- Core 只看到标准 Tool Call/Result，不依赖 Store、MemoryRecall 或 RecallSource。
+- `agent-memory` 只定义实现无关的领域、能力契约、快照渲染和协调逻辑；本地、远程和
+  混合 Adapter 由 Runtime、应用或验证宿主实现。
+- 本版本不引入 MemoryService、MemoryPlugin、公共 Orchestrator、自动观察、后台整合、
+  自动淘汰或自动写入链路。
 
 ## 十、安全、预算与 Guardrail
 
@@ -408,13 +423,16 @@ Context Engine 只处理当前模型上下文窗口：
 - 工具输出裁剪。
 - 压缩、摘要和 Provider overflow 恢复。
 
-Memory Service 处理跨执行的召回和观察。Memory 返回的内容只是 Context 的一个输入来源；Context 不写长期记忆，Memory 不直接修改规范会话。
+Pinned Memory 在 Session 创建前渲染并成为冻结 system prefix；Memory Recall 的结果只以
+普通 Tool Result 进入规范对话。Context 不读写 Store 或 Source，不自动把当前对话转成
+长期记忆；记忆能力也不直接修改规范会话。
 
 已确定的正式层级边界是：模型服务显式提供 `context_window_tokens`；共享 Context
 Window Evaluator 只使用最近完整 Provider Result 的 `total_tokens` 计算窗口比例；
 Core 在每个 Model Step 前执行该判断；Provider/Model 层只报告 provider-neutral
 Context Overflow；Core 将 Run 内预算阈值或 Overflow 转换为 CompactionRequired
-可靠终态。Core 和 Provider 均不得在原执行内隐藏压缩或重试。
+可靠终态。Core 和 Provider 均不得在原执行内隐藏压缩或流建立后的重试；显式装配的模型
+建立重试仍属于同一个 Model Step，并遵守 §7.3 的严格边界。
 
 Run 前判断、Checkpoint、用户主动压缩、恢复次数和 continuation 是未来 Runtime
 需要承接的行为目标，但其 Session、Run、Repository、事件和并发接口尚未完成总体
@@ -469,6 +487,16 @@ v0.4.0 将真实文件与 Shell 机制拆为 `agent-tools-local`：该 crate 只
 loopback 提供临时安全页面；其 Session、Run、审批、审计和 HTTP DTO 均保持私有，
 不得上提为正式 Runtime 或应用协议。
 
+v0.5.0 将实现无关的 Pinned Memory 与 RecallSource 契约拆为 `agent-memory`；标准
+记忆工具壳由 `agent-tools` 提供。`tools/memory-demo` 是顶层验证调用方，可私有实现
+JSON Store、RecallSource、Session 和 Journal，但这些类型与文件格式不得上提为正式
+Runtime 契约。仓库不建立 `agent-memory-local`，未来 Adapter 由实际应用装配选择。
+
+v0.6.0 不新建 recording 或 replay 公共 crate：Provider wire 事件归具体 Adapter，模型 attempt
+事件与建立重试归 `agent-model`；正式持久化编排未来归 Runtime。`tools/reliability-demo` 是顶层
+验证调用方，私有实现 Trace 文件、Loader、ReplayTransport、ReplayModelService、Timeline 和
+宿主事件，不得把这些临时类型上提为 Runtime 或应用协议。
+
 ## 十四、Harness 验证
 
 Agent Core 必须可以在不启动 Tauri、数据库和真实网络的情况下验证：
@@ -477,11 +505,15 @@ Agent Core 必须可以在不启动 Tauri、数据库和真实网络的情况下
 - 单个和多个工具调用。
 - AssistantMessage 在工具副作用前完成记录。
 - DeepSeek reasoning + tool call + result 的往返保真。
-- 模型、工具、Recorder、Memory 和 Approval 失败。
+- 模型、工具、Recorder 和 Authorizer 失败。
 - 取消传播。
 - 有限和无限预算语义。
 - Guardrail 的 `Off`、`Observe`、`Enforce`。
-- Memory Plugin 超时、部分失败、聚合和 No-op。
+- 普通记忆工具的 Source 超时、部分失败、来源保留和多轮继续。
 - UI 或观察者事件订阅断开不破坏规范对话。
+- 建流前有限重试、Retry-After、取消和 attempt 关联。
+- Provider wire 观察前后请求、分块、错误和生命周期等价。
+- Complete/Incomplete、损坏 Trace、Wire/Model Replay 和并发调用隔离。
 
-测试优先使用 scripted model、fake tool、in-memory recorder、fake memory、fake approval 和确定性时钟，不依赖真实 Provider 的偶然输出。
+测试优先使用 scripted model、fake tool、scripted RecallSource、in-memory recorder、
+fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。

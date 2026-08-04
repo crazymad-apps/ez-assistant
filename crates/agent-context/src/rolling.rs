@@ -99,7 +99,7 @@ impl CompressionStrategy for RollingSummarySameModel {
 
             let CompactionInput {
                 model,
-                instructions,
+                system_prompt,
                 layout,
             } = input;
             let partition = layout.partition(policy.minimum_recent_user_turns());
@@ -119,7 +119,7 @@ impl CompressionStrategy for RollingSummarySameModel {
 
             let request = ModelRequest {
                 // 保持正常请求的 system prompt 不变，使 Provider 可以复用前缀缓存。
-                system: instructions,
+                system: system_prompt,
                 conversation: build_compression_conversation(
                     partition.protected_prefix(),
                     partition.compressible_head(),
@@ -477,10 +477,10 @@ mod tests {
     fn input(model: Arc<ScriptedModel>, snapshot: &ConversationSnapshot) -> CompactionInput {
         CompactionInput {
             model,
-            instructions: vec![
+            system_prompt: agent_model::SystemPromptSnapshot::new(vec![
                 "normal agent instruction".to_owned(),
                 "stable prefix".to_owned(),
-            ],
+            ]),
             layout: crate::ContextLayout::build(snapshot).expect("valid layout"),
         }
     }
@@ -578,10 +578,10 @@ mod tests {
         let request = &requests[0];
         assert_eq!(
             request.system,
-            vec![
+            agent_model::SystemPromptSnapshot::new(vec![
                 "normal agent instruction".to_owned(),
                 "stable prefix".to_owned(),
-            ]
+            ])
         );
         let mut expected_conversation = snapshot.messages[..5].to_vec();
         expected_conversation.push(compression_instruction_message());

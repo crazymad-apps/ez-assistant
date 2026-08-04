@@ -7,3 +7,4 @@ dist/
 *.log
 .env
 docs/开发进度.md
+docs/tmp

@@ -13,10 +13,11 @@ use std::{fmt, sync::Arc};
 
 use agent_model::{
     LifecycleValidator, ModelCallContext, ModelCapabilities, ModelError, ModelEvent,
-    ModelEventStream, ModelRequest, ModelService, ModelStreamFuture,
+    ModelEventStream, ModelRequest, ModelService, ModelStreamFuture, ModelTransportErrorKind,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -53,6 +54,19 @@ impl fmt::Debug for BearerCredential {
     }
 }
 
+#[derive(Debug, Error)]
+/// OpenAI-compatible Service 的构造错误。
+///
+/// 无效 URL 的错误只描述违反的规则，不回显可能含 credential 的原始输入。
+pub enum OpenAiCompatibleServiceError {
+    /// Base URL 不是可安全记录的绝对 URL。
+    #[error("invalid OpenAI-compatible base URL: {0}")]
+    InvalidBaseUrl(&'static str),
+    /// 默认 HTTP Transport 构造失败。
+    #[error("failed to construct OpenAI-compatible transport: {0}")]
+    Transport(#[from] TransportError),
+}
+
 /// OpenAI Chat Completions compatible 的单次模型 Turn 服务。
 ///
 /// 构造时注入 base URL、credential、模型名、[`Profile`] 与 [`Transport`]——一个
@@ -84,9 +98,10 @@ impl OpenAiCompatibleService {
         context_window_tokens: u64,
         profile: Profile,
         timeouts: TransportTimeouts,
-    ) -> Result<Self, TransportError> {
+    ) -> Result<Self, OpenAiCompatibleServiceError> {
+        let base_url = validate_base_url(base_url.into())?;
         let transport = ReqwestTransport::with_timeouts(timeouts)?;
-        Ok(Self::with_transport(
+        Ok(Self::build(
             base_url,
             credential,
             model,
@@ -104,6 +119,26 @@ impl OpenAiCompatibleService {
         context_window_tokens: u64,
         profile: Profile,
         transport: Arc<dyn Transport>,
+    ) -> Result<Self, OpenAiCompatibleServiceError> {
+        let base_url = validate_base_url(base_url.into())?;
+        Ok(Self::build(
+            base_url,
+            credential,
+            model,
+            context_window_tokens,
+            profile,
+            transport,
+        ))
+    }
+
+    /// 使用已验证的 base URL 组装服务。
+    fn build(
+        base_url: String,
+        credential: BearerCredential,
+        model: impl Into<String>,
+        context_window_tokens: u64,
+        profile: Profile,
+        transport: Arc<dyn Transport>,
     ) -> Self {
         let capabilities = ModelCapabilities {
             reasoning: profile.reasoning_content_field.is_some(),
@@ -111,7 +146,7 @@ impl OpenAiCompatibleService {
             streaming: true,
         };
         Self {
-            base_url: base_url.into(),
+            base_url,
             credential,
             model: model.into(),
             context_window_tokens,
@@ -125,6 +160,34 @@ impl OpenAiCompatibleService {
     fn completion_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+}
+
+/// 验证 base URL 不会把 credential 或非路径配置带入可记录 URL。
+fn validate_base_url(base_url: String) -> Result<String, OpenAiCompatibleServiceError> {
+    let parsed = reqwest::Url::parse(&base_url).map_err(|_| {
+        OpenAiCompatibleServiceError::InvalidBaseUrl("must be a valid absolute URL")
+    })?;
+    if parsed.cannot_be_a_base() {
+        return Err(OpenAiCompatibleServiceError::InvalidBaseUrl(
+            "must support path joining",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(OpenAiCompatibleServiceError::InvalidBaseUrl(
+            "userinfo is not allowed",
+        ));
+    }
+    if parsed.query().is_some() {
+        return Err(OpenAiCompatibleServiceError::InvalidBaseUrl(
+            "query is not allowed",
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(OpenAiCompatibleServiceError::InvalidBaseUrl(
+            "fragment is not allowed",
+        ));
+    }
+    Ok(base_url)
 }
 
 impl ModelService for OpenAiCompatibleService {
@@ -147,6 +210,7 @@ impl ModelService for OpenAiCompatibleService {
                 ModelError::Config(format!("failed to serialize the encoded request: {error}"))
             })?;
             let transport_request = TransportRequest {
+                trace: context.trace.clone(),
                 method: "POST".to_owned(),
                 url: self.completion_url(),
                 headers: vec![
@@ -166,11 +230,13 @@ impl ModelService for OpenAiCompatibleService {
             };
             let response = match response {
                 Ok(response) => response,
-                Err(error) => return Err(ModelError::Transport(error.to_string())),
+                Err(error) => return Err(map_transport_error(error)),
             };
             if !(200..300).contains(&response.status) {
+                let status = response.status;
+                let headers = response.headers;
                 let sample = read_error_sample(response.body, &context.cancellation).await?;
-                return Err(classify_http_error(response.status, &sample));
+                return Err(classify_http_error(status, &headers, &sample));
             }
             let events = event_stream(response.body, self.profile.clone(), context.cancellation);
             Ok(Box::pin(LifecycleValidator::new(Box::pin(events))) as ModelEventStream)
@@ -209,17 +275,25 @@ async fn read_error_sample(
 /// 把非 2xx 响应分类为规范错误；结构化错误正文用于细化分类与诊断消息。
 ///
 /// 错误文本只携带 Provider 的结构化诊断消息与状态码，不含原始正文。
-fn classify_http_error(status: u16, sample: &[u8]) -> ModelError {
+fn classify_http_error(status: u16, headers: &[(String, String)], sample: &[u8]) -> ModelError {
     let body = serde_json::from_slice::<ChatErrorBody>(sample).ok();
     let message = body.as_ref().map(|body| body.error.message.clone());
+    let retry_after_ms = parse_retry_after_ms(headers);
     match status {
         401 | 403 => ModelError::Auth(message.unwrap_or_else(|| {
             format!("provider rejected the request as unauthorized (status {status})")
         })),
-        429 => ModelError::RateLimited(
-            message
+        429 => ModelError::RateLimited {
+            message: message
                 .unwrap_or_else(|| format!("provider rate limited the request (status {status})")),
-        ),
+            retry_after_ms,
+        },
+        408 | 425 | 500..=599 => ModelError::Unavailable {
+            message: message
+                .unwrap_or_else(|| format!("provider temporarily unavailable (status {status})")),
+            status: Some(status),
+            retry_after_ms,
+        },
         _ => match body {
             Some(body) => match decode_error_body(&body) {
                 // 保留 decode_error_body 的细化分类；Provider 分支补上状态码。
@@ -229,6 +303,10 @@ fn classify_http_error(status: u16, sample: &[u8]) -> ModelError {
                 } => ModelError::Provider {
                     message,
                     status: Some(status),
+                },
+                ModelError::RateLimited { message, .. } => ModelError::RateLimited {
+                    message,
+                    retry_after_ms,
                 },
                 other => other,
             },
@@ -240,6 +318,30 @@ fn classify_http_error(status: u16, sample: &[u8]) -> ModelError {
             },
         },
     }
+}
+
+/// 只接受 Retry-After 的非负十进制秒数形式，并安全换算为毫秒。
+///
+/// HTTP-date、负数、非数字和乘法溢出均返回 `None`，不猜测等待时间。
+fn parse_retry_after_ms(headers: &[(String, String)]) -> Option<u64> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+}
+
+/// 保留 Transport 原始分类，避免重试等上层策略解析展示文本。
+fn map_transport_error(error: TransportError) -> ModelError {
+    let (kind, message) = match error {
+        TransportError::Connect(message) => (ModelTransportErrorKind::Connection, message),
+        TransportError::Timeout => (
+            ModelTransportErrorKind::Timeout,
+            "request timed out".to_owned(),
+        ),
+        TransportError::Interrupted(message) => (ModelTransportErrorKind::Interrupted, message),
+    };
+    ModelError::Transport { kind, message }
 }
 
 /// 把 SSE 字节流解码为规范事件流。
@@ -283,7 +385,7 @@ fn event_stream(
                 // `TurnFailed(Transport)` 受控结束，不能把中断误报为成功。
                 Some(Err(error)) => {
                     yield ModelEvent::TurnFailed {
-                        error: ModelError::Transport(error.to_string()),
+                        error: map_transport_error(error),
                     };
                     return;
                 }

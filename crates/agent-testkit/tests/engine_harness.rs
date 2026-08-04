@@ -4,7 +4,8 @@
 //! 事件生命周期由 [`finish`] 统一断言（首事件 `ExecutionStarted`、恰一个终态）。
 
 use std::{
-    num::{NonZeroU32, NonZeroU64},
+    collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -17,18 +18,23 @@ use agent_core::{
     GuardrailConfig, GuardrailKind, RecordError, ToolAuthorization, ToolAuthorizer,
     ToolCompletionStatus,
 };
+use agent_memory::{
+    MemoryPropertyValue, MemoryRecallRequest, MemoryRecallResponse, PinnedMemoryCategory,
+    PinnedMemoryDraft, PinnedMemoryLimits, RecallItem, RecallOrigin, RecallSourceId,
+};
 use agent_model::{
     ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelRequest,
-    ModelService, ModelStreamFuture,
+    ModelService, ModelStreamFuture, SystemPromptSnapshot,
 };
 use agent_testkit::{
-    AuthorizeGate, FakeShellCompletion, FakeShellScript, FakeShellTool, InMemoryRecorder, LogEntry,
-    ModelScript, OrderLog, ScriptedAuthorizer, ScriptedModelService, ScriptedPolicy, ScriptedTool,
-    message_events,
+    AuthorizeGate, FakePinnedMemoryStore, FakeShellCompletion, FakeShellScript, FakeShellTool,
+    InMemoryRecorder, LogEntry, ModelScript, OrderLog, PinnedMemoryObservation, ScriptedAuthorizer,
+    ScriptedMemoryRecall, ScriptedModelService, ScriptedPolicy, ScriptedTool, message_events,
 };
 use agent_tools::{
-    AbsolutePath, SessionPathResolver, ShellExecTool, ShellExecToolConfig, ToolOutputChannel,
-    ToolOutputChunk, ToolRegistry, ToolSetSnapshot,
+    AbsolutePath, ListPinnedMemoriesTool, PinMemoryTool, RecallMemoryTool, RecallMemoryToolConfig,
+    SessionPathResolver, ShellExecTool, ShellExecToolConfig, ToolOutputChannel, ToolOutputChunk,
+    ToolRegistry, ToolSetSnapshot, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
@@ -76,8 +82,8 @@ fn model_identity() -> ModelIdentity {
     )
 }
 
-fn instructions() -> Vec<String> {
-    vec!["You are a helpful assistant.".to_owned()]
+fn system_prompt() -> SystemPromptSnapshot {
+    SystemPromptSnapshot::new(vec!["You are a helpful assistant.".to_owned()])
 }
 
 fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
@@ -144,6 +150,46 @@ fn snapshot_of(tools: Vec<ScriptedTool>) -> ToolSetSnapshot {
     registry.snapshot()
 }
 
+fn memory_limits() -> PinnedMemoryLimits {
+    PinnedMemoryLimits {
+        max_entries: NonZeroUsize::new(16).expect("non-zero"),
+        max_id_bytes: NonZeroUsize::new(64).expect("non-zero"),
+        max_category_bytes: NonZeroUsize::new(32).expect("non-zero"),
+        max_content_bytes: NonZeroUsize::new(512).expect("non-zero"),
+        max_attributes_per_entry: NonZeroUsize::new(8).expect("non-zero"),
+        max_attribute_key_bytes: NonZeroUsize::new(32).expect("non-zero"),
+        max_attribute_string_bytes: NonZeroUsize::new(128).expect("non-zero"),
+        max_description_bytes: NonZeroUsize::new(512).expect("non-zero"),
+        max_snapshot_bytes: NonZeroUsize::new(8192).expect("non-zero"),
+    }
+}
+
+fn memory_tools_snapshot(
+    store: Arc<FakePinnedMemoryStore>,
+    recall: Arc<ScriptedMemoryRecall>,
+) -> ToolSetSnapshot {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(PinMemoryTool::new(store.clone(), memory_limits()))
+        .expect("register pin memory");
+    registry
+        .register(UpdatePinnedMemoryTool::new(store.clone(), memory_limits()))
+        .expect("register update pinned memory");
+    registry
+        .register(UnpinMemoryTool::new(store.clone(), memory_limits()))
+        .expect("register unpin memory");
+    registry
+        .register(ListPinnedMemoriesTool::new(store))
+        .expect("register list pinned memories");
+    registry
+        .register(RecallMemoryTool::new(
+            recall,
+            RecallMemoryToolConfig::new(NonZeroUsize::new(10).expect("non-zero")),
+        ))
+        .expect("register recall memory");
+    registry.snapshot()
+}
+
 fn make_spec(
     model: Arc<dyn ModelService>,
     tools: ToolSetSnapshot,
@@ -171,7 +217,7 @@ fn make_spec_with_threshold(
     threshold: f64,
 ) -> ExecutionSpec {
     ExecutionSpec {
-        instructions: instructions(),
+        system_prompt: system_prompt(),
         model,
         context_window: Arc::new(
             ContextWindowEvaluator::new(threshold).expect("valid test threshold"),
@@ -337,7 +383,7 @@ async fn plain_text_completes_with_empty_tool_set() {
     assert!(log.entries().is_empty());
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].system, instructions());
+    assert_eq!(requests[0].system, system_prompt());
     assert!(requests[0].tools.is_empty());
     assert_eq!(
         requests[0].conversation.messages,
@@ -672,6 +718,13 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     }));
     let requests = model.take_requests();
     assert_eq!(requests.len(), 3);
+    let expected_system = system_prompt();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.system == expected_system),
+        "every model step must reuse the frozen system prompt"
+    );
     // 第一轮：历史 + 用户输入；工具定义随快照原样下发。
     assert_eq!(requests[0].tools, definitions);
     let mut expected = history;
@@ -693,6 +746,230 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     assert_eq!(requests[2].conversation.messages, expected);
     // 多轮后 Tool Call/Result 配对完整。
     assert_tool_pairing(&reconstruct(&user_input, &recorder.deltas()));
+}
+
+#[tokio::test]
+async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() {
+    let log = OrderLog::new();
+    let turn1 = calls_message(
+        "message_memory_1",
+        vec![call(
+            "call_memory_1",
+            "pin_memory",
+            json!({
+                "category": "preference",
+                "content": "Use dark mode",
+                "attributes": {"scope": "desktop"}
+            }),
+        )],
+    );
+    let turn2 = calls_message(
+        "message_memory_2",
+        vec![call(
+            "call_memory_2",
+            "recall_memory",
+            json!({"query": "preferred editor", "limit": 2, "sources": ["notes"]}),
+        )],
+    );
+    let turn3 = text_message(
+        "message_memory_3",
+        "I saved the preference and recalled the editor note.",
+    );
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&turn1)),
+            ModelScript::Events(message_events(&turn2)),
+            ModelScript::Events(message_events(&turn3)),
+        ],
+    ));
+    let store = Arc::new(FakePinnedMemoryStore::new(vec![]));
+    let recall_response = MemoryRecallResponse {
+        items: vec![RecallItem {
+            content: "The preferred editor is Helix".to_owned(),
+            origins: vec![RecallOrigin {
+                source_id: RecallSourceId::new("notes").expect("valid source id"),
+                reference: Some("note-editor".to_owned()),
+            }],
+            attributes: BTreeMap::new(),
+        }],
+        failures: vec![],
+        truncated: false,
+    };
+    let recall = Arc::new(ScriptedMemoryRecall::new(Ok(recall_response.clone())));
+    let tools = memory_tools_snapshot(store.clone(), recall.clone());
+    let frozen_prompt = SystemPromptSnapshot::new(vec![
+        "You are a helpful assistant.".to_owned(),
+        "<pinned_memories><entries></entries></pinned_memories>".to_owned(),
+    ]);
+    let mut spec = make_spec(model.clone(), tools, ExecutionBudget::default());
+    spec.system_prompt = frozen_prompt.clone();
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log));
+    let (input, user_input) = make_input(vec![]);
+
+    let (outcome, _) = finish(AgentExecution::start(
+        spec,
+        input,
+        make_context(recorder.clone(), authorizer.clone()),
+    ))
+    .await;
+    assert_eq!(outcome, ExecutionOutcome::Completed(turn3));
+
+    assert_eq!(store.entries().len(), 1);
+    assert_eq!(store.entries()[0].content, "Use dark mode");
+    assert_eq!(
+        store.observations(),
+        vec![PinnedMemoryObservation::Pin(PinnedMemoryDraft {
+            category: PinnedMemoryCategory::new("preference").expect("valid category"),
+            content: "Use dark mode".to_owned(),
+            attributes: BTreeMap::from([(
+                "scope".to_owned(),
+                MemoryPropertyValue::String("desktop".to_owned()),
+            )]),
+        })]
+    );
+    assert_eq!(
+        recall.requests(),
+        vec![MemoryRecallRequest {
+            query: "preferred editor".to_owned(),
+            limit: NonZeroUsize::new(2).expect("non-zero"),
+            sources: Some(vec![RecallSourceId::new("notes").expect("valid source id")]),
+        }]
+    );
+    assert_eq!(
+        authorizer
+            .observations()
+            .iter()
+            .map(|observation| observation.tool_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pin_memory", "recall_memory"]
+    );
+
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.system == frozen_prompt),
+        "Store changes must not refresh this execution's system prompt"
+    );
+    assert!(requests.iter().all(|request| request.tools.len() == 5));
+
+    let deltas = recorder.deltas();
+    let tool_results = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            ConversationDelta::Tool(message) => Some(&message.result),
+            ConversationDelta::Assistant(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_results.len(), 2);
+    assert!(
+        tool_results
+            .iter()
+            .all(|result| result.status == ToolResultStatus::Success)
+    );
+    assert_eq!(
+        tool_results[1].content,
+        ToolResultContent::Json(
+            serde_json::to_value(recall_response).expect("serialize recall response")
+        )
+    );
+    assert_tool_pairing(&reconstruct(&user_input, &deltas));
+}
+
+#[tokio::test]
+async fn denied_memory_tools_do_not_touch_store_or_recall_capabilities() {
+    let log = OrderLog::new();
+    let turn1 = calls_message(
+        "message_memory_deny_1",
+        vec![
+            call(
+                "call_memory_deny_1",
+                "pin_memory",
+                json!({
+                    "category": "preference",
+                    "content": "Use dark mode",
+                    "attributes": {}
+                }),
+            ),
+            call(
+                "call_memory_deny_2",
+                "recall_memory",
+                json!({"query": "private note", "limit": 1}),
+            ),
+        ],
+    );
+    let turn2 = text_message("message_memory_deny_2", "Both memory actions were denied.");
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&turn1)),
+            ModelScript::Events(message_events(&turn2)),
+        ],
+    ));
+    let store = Arc::new(FakePinnedMemoryStore::new(vec![]));
+    let recall = Arc::new(ScriptedMemoryRecall::new(Ok(MemoryRecallResponse {
+        items: vec![],
+        failures: vec![],
+        truncated: false,
+    })));
+    let tools = memory_tools_snapshot(store.clone(), recall.clone());
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::with_decisions(
+        log,
+        [
+            (
+                "pin_memory".to_owned(),
+                ToolAuthorization::Deny {
+                    reason: "pinned writes are disabled".to_owned(),
+                },
+            ),
+            (
+                "recall_memory".to_owned(),
+                ToolAuthorization::Deny {
+                    reason: "recall is disabled".to_owned(),
+                },
+            ),
+        ],
+    ));
+    let (input, user_input) = make_input(vec![]);
+
+    let (outcome, events) = finish(AgentExecution::start(
+        make_spec(model, tools, ExecutionBudget::default()),
+        input,
+        make_context(recorder.clone(), authorizer.clone()),
+    ))
+    .await;
+    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert!(store.entries().is_empty());
+    assert!(store.observations().is_empty());
+    assert!(recall.requests().is_empty());
+    assert_eq!(authorizer.observations().len(), 2);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+    );
+
+    let deltas = recorder.deltas();
+    let results = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            ConversationDelta::Tool(message) => Some(&message.result),
+            ConversationDelta::Assistant(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.status == ToolResultStatus::Error)
+    );
+    assert_tool_pairing(&reconstruct(&user_input, &deltas));
 }
 
 #[tokio::test]

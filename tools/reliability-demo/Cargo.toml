@@ -1,0 +1,36 @@
+[package]
+name = "reliability-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-context = { path = "../../crates/agent-context" }
+agent-core = { path = "../../crates/agent-core" }
+agent-model = { path = "../../crates/agent-model" }
+agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
+agent-tools = { path = "../../crates/agent-tools" }
+agent-types = { path = "../../crates/agent-types" }
+dotenvy.workspace = true
+futures-util.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+agent-testkit = { path = "../../crates/agent-testkit" }
+tempfile.workspace = true

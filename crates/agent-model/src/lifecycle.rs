@@ -206,7 +206,7 @@ mod tests {
     use futures_util::stream;
 
     use super::*;
-    use crate::testutil::collect;
+    use crate::{ModelTransportErrorKind, testutil::collect};
 
     fn part_id(value: &str) -> PartId {
         PartId::new(value).expect("valid part id")
@@ -523,7 +523,10 @@ mod tests {
         let output = validate(vec![
             started(),
             ModelEvent::TurnFailed {
-                error: ModelError::Transport("connection reset".to_owned()),
+                error: ModelError::Transport {
+                    kind: ModelTransportErrorKind::Interrupted,
+                    message: "connection reset".to_owned(),
+                },
             },
             finished(vec![]),
         ]);
@@ -531,7 +534,10 @@ mod tests {
         assert_eq!(
             output[1],
             ModelEvent::TurnFailed {
-                error: ModelError::Transport("connection reset".to_owned())
+                error: ModelError::Transport {
+                    kind: ModelTransportErrorKind::Interrupted,
+                    message: "connection reset".to_owned(),
+                }
             }
         );
     }

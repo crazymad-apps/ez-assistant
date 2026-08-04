@@ -715,7 +715,7 @@ mod tests {
     use agent_core::{
         BudgetKind, CompactionReason, ExecutionBudget, ExecutionError, ExecutionRecorder,
     };
-    use agent_model::{ModelCapabilities, ModelService};
+    use agent_model::{ModelCapabilities, ModelService, SystemPromptSnapshot};
     use agent_testkit::{ModelScript, ScriptedModelService, message_events};
     use agent_tools::{ToolRegistry, ToolSetSnapshot};
     use agent_types::{
@@ -784,7 +784,7 @@ mod tests {
         text: &str,
     ) {
         let spec = ExecutionSpec {
-            instructions: vec!["offline interactive test".to_owned()],
+            system_prompt: SystemPromptSnapshot::new(vec!["offline interactive test".to_owned()]),
             model,
             context_window: Arc::new(
                 ContextWindowEvaluator::new(0.8).expect("valid test threshold"),

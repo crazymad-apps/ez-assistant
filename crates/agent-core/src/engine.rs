@@ -186,7 +186,7 @@ impl Engine {
     /// 组装一次模型 Turn 的规范请求（纯机械投影，无隐藏策略）。
     fn build_request(&self) -> ModelRequest {
         ModelRequest {
-            system: self.spec.instructions.clone(),
+            system: self.spec.system_prompt.clone(),
             conversation: ConversationSnapshot::new(self.projection.clone()),
             tools: self.spec.tools.definitions().to_vec(),
             tool_choice: ToolChoice::Auto,

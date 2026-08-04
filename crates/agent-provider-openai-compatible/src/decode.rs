@@ -612,7 +612,12 @@ pub fn decode_error_body(body: &ChatErrorBody) -> ModelError {
             "insufficient_quota"
             | "rate_limit_error"
             | "rate_limit_exceeded"
-            | "throttling_error" => return ModelError::RateLimited(message),
+            | "throttling_error" => {
+                return ModelError::RateLimited {
+                    message,
+                    retry_after_ms: None,
+                };
+            }
             _ => {}
         }
     }

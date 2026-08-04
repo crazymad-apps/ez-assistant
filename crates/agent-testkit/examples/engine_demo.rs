@@ -13,7 +13,7 @@ use agent_core::{
     AgentEvent, AgentExecution, ConversationDelta, ExecutionBudget, ExecutionContext,
     ExecutionInput, ExecutionOutcome, ExecutionSpec, ToolCompletionStatus,
 };
-use agent_model::ModelCapabilities;
+use agent_model::{ModelCapabilities, SystemPromptSnapshot};
 use agent_testkit::{
     InMemoryRecorder, LogEntry, ModelScript, OrderLog, ScriptedAuthorizer, ScriptedModelService,
     ScriptedTool, message_events,
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let execution = AgentExecution::start(
         ExecutionSpec {
-            instructions: vec!["回答前可调用已注册工具。".to_owned()],
+            system_prompt: SystemPromptSnapshot::new(vec!["回答前可调用已注册工具。".to_owned()]),
             model: model.clone(),
             context_window: Arc::new(ContextWindowEvaluator::new(0.8)?),
             tools: registry.snapshot(),

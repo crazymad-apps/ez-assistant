@@ -17,6 +17,8 @@
 //! - [`CancelGate`]：在指定事件序号处精确触发取消。
 //! - [`FakeFileSystemTool`] / [`FakeShellTool`]：文件与 Shell 能力的确定性 Fake，
 //!   完整执行 `agent-tools` 能力契约语义（供引擎 Harness 复用）。
+//! - [`FakePinnedMemoryStore`] / [`ScriptedRecallSource`] / [`ScriptedMemoryRecall`]：
+//!   记忆 Store、单 Source 与统一召回能力的离线 Fake，可观察全部请求与最新状态。
 //! - [`validate_request`] / [`validate_response`]：fixture 入库前的敏感信息把关。
 //! - `examples/engine_demo.rs`：可直接运行的 v0.2.0 两轮工具循环效果演示。
 //!
@@ -35,6 +37,7 @@ mod cancel;
 mod collect;
 mod fixture;
 mod fs;
+mod memory;
 mod order;
 mod policy;
 mod record;
@@ -48,6 +51,9 @@ pub use cancel::CancelGate;
 pub use collect::{CollectedEvents, EventCollector};
 pub use fixture::{FixtureViolation, validate_request, validate_response};
 pub use fs::FakeFileSystemTool;
+pub use memory::{
+    FakePinnedMemoryStore, PinnedMemoryObservation, ScriptedMemoryRecall, ScriptedRecallSource,
+};
 pub use order::{LogEntry, OrderLog};
 pub use policy::ScriptedPolicy;
 pub use record::{

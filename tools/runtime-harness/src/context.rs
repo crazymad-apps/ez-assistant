@@ -122,7 +122,7 @@ impl HarnessContextCoordinator {
             .compact(
                 CompactionInput {
                     model: Arc::clone(&request.spec.model),
-                    instructions: request.spec.instructions.clone(),
+                    system_prompt: request.spec.system_prompt.clone(),
                     layout,
                 },
                 request.cancellation.clone(),
@@ -422,7 +422,9 @@ mod tests {
 
     fn spec(threshold: f64) -> Arc<ExecutionSpec> {
         Arc::new(ExecutionSpec {
-            instructions: vec!["normal instruction".to_owned()],
+            system_prompt: agent_model::SystemPromptSnapshot::new(vec![
+                "normal instruction".to_owned(),
+            ]),
             model: Arc::new(WindowModel {
                 capabilities: ModelCapabilities::default(),
                 context_window_tokens: 100,

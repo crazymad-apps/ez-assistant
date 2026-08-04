@@ -2,7 +2,7 @@
 
 ## 模块定位
 
-`crates/agent-tools` 承载 Agent 工具 SPI、注册表、派发器、文件/Shell 能力契约与标准工具壳定义。修改前必须阅读 [`Agent 系统技术架构`](agent-system.md) 和 [`Rust 编程规范`](../specs/Rust编程规范.md)。
+`crates/agent-tools` 承载 Agent 工具 SPI、注册表、派发器、文件/Shell 能力契约与标准工具壳定义。修改前必须阅读 [`Agent 系统技术架构`](agent-system.md) 和 [`Rust 编程规范`](../specs/Rust编程规范.md)。涉及记忆工具时还必须阅读 [`agent-memory 模块约束`](agent-memory.md)。
 
 本 crate 只定义工具能力、resolved invocation 与规范 Tool Call 的派发契约；标准
 工具壳不绑定本地 I/O，本地、远程或测试能力实现均可由 Runtime 或其他宿主
@@ -25,10 +25,13 @@
 - 文件与 Shell 能力契约（trait、输入输出类型、错误语义）。
 - 标准工具壳：固定模型可见名称、输入、描述、默认值和 resolved 语义，
   执行时委托给装配的能力实现。
+- 标准 Pinned Memory 与 Memory Recall 工具壳；领域类型和能力 trait 来自
+  `agent-memory`，本 crate 不实现 Store 或 RecallSource。
 
 ## 核心约束
 
-- 只依赖 `agent-types` 与技术方案 §3.2 列明的第三方 crate；不依赖 `agent-core`、Tokio 运行时句柄、Tauri 或 Runtime。
+- 只依赖 `agent-types`、`agent-memory` 与已确认的通用第三方 crate；不依赖
+  `agent-core`、具体 Store/RecallSource、Tokio 运行时句柄、Tauri 或 Runtime。
 - 不使用 `async-trait`；异步 trait 方法手写 boxed future（沿 `ModelService` 先例）。
 - 工具统一经类型化 `register` 注册，`input_schema` 固定由 schemars 从 `Input`
   派生（擦除层强制，不依赖实现方自觉）；类型擦除和一次性 resolved executor 是
@@ -51,6 +54,9 @@
   Runtime 与 Authorizer）。
 - 本 crate 不访问 `std::fs`、`tokio::fs`，不启动子进程；具体能力实现由基础设施
   Adapter 提供，标准工具壳由 Runtime 或其他宿主装配。
+- `pin_memory`、`update_pinned_memory`、`unpin_memory`、`list_pinned_memories` 和
+  `recall_memory` 使用固定模型可见 Schema，通过普通 Registry/Dispatcher 路径工作；
+  Source 列表不用于动态生成工具定义。
 - Shell 契约：stdin 封闭、命令原样进入审计，显式区分 `managed` / `detached`
   生命周期；敏感环境变量默认不传给子进程；超时、输出上限、取消、输出收敛与进程树
   清理由实现侧负责。`detached` 只是 fire-and-forget 交接，不代表服务健康或受 Session

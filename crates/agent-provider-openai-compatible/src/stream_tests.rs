@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelError, ModelEvent, ModelRequest, ModelService,
-    ProviderOptions,
+    ModelTransportErrorKind, ProviderOptions, SystemPromptSnapshot,
 };
 use agent_testkit::{BodyStep, CancelGate, EventCollector, RecordedResponse, RecordedTransport};
 use agent_types::{
@@ -106,6 +106,7 @@ fn service_with(transport: &Arc<RecordedTransport>, profile: Profile) -> OpenAiC
         profile,
         transport.clone(),
     )
+    .expect("test base URL should be valid")
 }
 
 fn replay_service(body: impl Into<Vec<u8>>) -> (OpenAiCompatibleService, Arc<RecordedTransport>) {
@@ -118,7 +119,7 @@ fn replay_service(body: impl Into<Vec<u8>>) -> (OpenAiCompatibleService, Arc<Rec
 
 fn request() -> ModelRequest {
     ModelRequest {
-        system: vec![],
+        system: SystemPromptSnapshot::default(),
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
             id: message_id("message_1"),
             parts: vec![UserPart::Text(TextPart {
@@ -421,9 +422,10 @@ async fn interrupted_body_fails_with_transport_terminal() {
         .await
         .expect("stream established");
     let collected = EventCollector::collect_validated(stream).await;
-    let ModelError::Transport(message) = collected.assert_failed() else {
+    let ModelError::Transport { kind, message } = collected.assert_failed() else {
         panic!("expected transport failure");
     };
+    assert_eq!(*kind, ModelTransportErrorKind::Interrupted);
     assert!(message.contains("connection reset by peer"));
     collected.assert_single_terminal();
 }
@@ -446,9 +448,10 @@ async fn interrupted_after_finish_chunk_fails_with_transport() {
         .await
         .expect("stream established");
     let collected = EventCollector::collect_validated(stream).await;
-    let ModelError::Transport(message) = collected.assert_failed() else {
+    let ModelError::Transport { kind, message } = collected.assert_failed() else {
         panic!("expected transport failure, not a successful finish");
     };
+    assert_eq!(*kind, ModelTransportErrorKind::Interrupted);
     assert!(message.contains("connection reset by peer"));
     collected.assert_single_terminal();
 }

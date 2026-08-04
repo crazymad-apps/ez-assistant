@@ -9,7 +9,7 @@ use agent_core::{
 };
 use agent_model::{
     ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelRequest,
-    ModelService, ModelStreamFuture,
+    ModelService, ModelStreamFuture, ModelTransportErrorKind, SystemPromptSnapshot,
 };
 use agent_testkit::{
     LogEntry, ModelScript, OrderLog, ScriptedAuthorizer, ScriptedModelService, ScriptedTool,
@@ -255,9 +255,10 @@ async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
     let establishment_model = Arc::new(ScriptedModelService::new(
         capabilities(),
         TEST_CONTEXT_WINDOW_TOKENS,
-        [ModelScript::FailEstablishment(ModelError::Transport(
-            "scripted offline outage".to_owned(),
-        ))],
+        [ModelScript::FailEstablishment(ModelError::Transport {
+            kind: ModelTransportErrorKind::Connection,
+            message: "scripted offline outage".to_owned(),
+        })],
     ));
     let mut establishment = execute_collected(
         "controlled_failure",
@@ -270,7 +271,7 @@ async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
     ensure(
         matches!(
             establishment.outcome,
-            ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Transport(_)))
+            ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Transport { .. }))
         ),
         "controlled_failure establishment subcase did not fail as expected",
     )?;
@@ -474,7 +475,9 @@ async fn execute_collected(
 
 fn make_spec(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> ExecutionSpec {
     ExecutionSpec {
-        instructions: vec!["This is a deterministic offline verification scenario.".to_owned()],
+        system_prompt: SystemPromptSnapshot::new(vec![
+            "This is a deterministic offline verification scenario.".to_owned(),
+        ]),
         model,
         context_window: Arc::new(
             ContextWindowEvaluator::new(0.8).expect("valid scenario threshold"),

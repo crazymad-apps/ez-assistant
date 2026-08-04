@@ -3,6 +3,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/agent-context",
     "crates/agent-core",
+    "crates/agent-memory",
     "crates/agent-model",
     "crates/agent-provider-openai-compatible",
     "crates/agent-testkit",
@@ -12,6 +13,8 @@ members = [
     "crates/assistant-protocol",
     "crates/assistant-runtime",
     "tools/debug-viewer",
+    "tools/memory-demo",
+    "tools/reliability-demo",
     "tools/runtime-harness",
     "tools/safety-demo",
 ]
@@ -25,6 +28,7 @@ version = "0.1.0"
 [workspace.dependencies]
 async-stream = "0.3.6"
 axum = "0.8.4"
+base64 = "0.22.1"
 dotenvy = "0.15.7"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
@@ -36,6 +40,7 @@ process-wrap = { version = "9.1.0", default-features = false, features = [
     "creation-flags",
     "kill-on-drop",
 ] }
+quick-xml = "0.41.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }

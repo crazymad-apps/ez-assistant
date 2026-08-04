@@ -9,7 +9,7 @@ use agent_context::{
 use agent_core::{
     AgentEvent, AgentExecution, CompactionReason, ExecutionBudget, ExecutionOutcome, ExecutionSpec,
 };
-use agent_model::{ModelCapabilities, ModelError, ModelEvent, ModelService};
+use agent_model::{ModelCapabilities, ModelError, ModelEvent, ModelService, SystemPromptSnapshot};
 use agent_testkit::{ModelScript, OrderLog, ScriptedModelService, ScriptedTool, message_events};
 use agent_tools::{ToolRegistry, ToolSetSnapshot};
 use agent_types::{
@@ -896,7 +896,9 @@ fn runtime(name: &str, max_automatic_compactions: u32) -> HarnessRuntime {
 
 fn spec(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> ExecutionSpec {
     ExecutionSpec {
-        instructions: vec!["This is a deterministic v0.3 context scenario.".to_owned()],
+        system_prompt: SystemPromptSnapshot::new(vec![
+            "This is a deterministic v0.3 context scenario.".to_owned(),
+        ]),
         model,
         context_window: Arc::new(
             ContextWindowEvaluator::new(THRESHOLD_RATIO).expect("valid scenario threshold"),

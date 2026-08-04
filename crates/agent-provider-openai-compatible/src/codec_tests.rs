@@ -1,6 +1,6 @@
 use agent_model::{
     GenerationConfig, ModelError, ModelEvent, ModelRequest, ProviderOptions, ReasoningConfig,
-    ReasoningEffort,
+    ReasoningEffort, SystemPromptSnapshot,
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
@@ -85,7 +85,7 @@ const MODEL: &str = "deepseek-reasoner";
 
 fn request(conversation: Vec<ConversationMessage>) -> ModelRequest {
     ModelRequest {
-        system: vec![],
+        system: SystemPromptSnapshot::default(),
         conversation: ConversationSnapshot::new(conversation),
         tools: vec![],
         tool_choice: ToolChoice::Auto,
@@ -224,7 +224,7 @@ fn assemble_with_profile(
 fn encode_plain_text_request_uses_streaming_wire() {
     let profile = base_profile();
     let mut req = request(vec![user_message("message_1", &["What date is it?"])]);
-    req.system = vec!["You are brief.".to_owned()];
+    req.system = SystemPromptSnapshot::new(vec!["You are brief.".to_owned()]);
 
     let encoded = encode_request(&req, &profile, MODEL).expect("encode request");
     assert_eq!(encoded.model, "deepseek-reasoner");
@@ -324,7 +324,7 @@ fn encode_system_and_multi_turn_conversation_preserves_order() {
             },
         }),
     ]);
-    req.system = vec!["system one".to_owned(), "system two".to_owned()];
+    req.system = SystemPromptSnapshot::new(vec!["system one".to_owned(), "system two".to_owned()]);
 
     let encoded = encode_request(&req, &profile, MODEL).expect("encode request");
     let json = serde_json::to_value(&encoded).expect("serialize request");
@@ -825,7 +825,10 @@ fn decode_error_body_maps_type_and_code_strings() {
     .expect("parse error body");
     assert_eq!(
         decode_error_body(&body),
-        ModelError::RateLimited("slow down".to_owned())
+        ModelError::RateLimited {
+            message: "slow down".to_owned(),
+            retry_after_ms: None,
+        }
     );
 
     let body: ChatErrorBody =

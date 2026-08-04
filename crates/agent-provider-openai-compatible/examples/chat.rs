@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelEvent, ModelRequest, ModelService, ProviderOptions,
+    SystemPromptSnapshot,
 };
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
@@ -110,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::json!({"thinking": {"type": "enabled"}}),
         )?;
         let request = ModelRequest {
-            system: vec![],
+            system: SystemPromptSnapshot::default(),
             conversation: ConversationSnapshot::new(messages.clone()),
             tools: vec![],
             tool_choice: ToolChoice::Auto,

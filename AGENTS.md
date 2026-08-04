@@ -12,6 +12,7 @@
 │   ├── agent-core/              # Agent 推理循环、模型与工具抽象
 │   ├── agent-context/           # 共享上下文窗口判断、布局、校验与压缩策略
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
+│   ├── agent-memory/            # Pinned Memory、RecallSource 与协调契约
 │   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
 │   ├── agent-testkit/           # Agent 确定性测试支持
 │   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与标准工具壳
@@ -21,6 +22,8 @@
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
 ├── tools/
 │   ├── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
+│   ├── memory-demo/             # 记忆能力与私有本地实现的独立验证宿主
+│   ├── reliability-demo/        # 完整录制、有限重试与分层回放的独立验证宿主
 │   ├── runtime-harness/         # 版本验证宿主（独立按需运行的临时 Runtime）
 │   └── safety-demo/             # 安全策略与真实工具执行的独立验证宿主
 ├── docs/
@@ -51,6 +54,7 @@
 | `apps/desktop/src-tauri/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `crates/agent-core/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-core.md`](docs/modules/agent-core.md) |
 | `crates/agent-context/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-context.md`](docs/modules/agent-context.md) |
+| `crates/agent-memory/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-memory.md`](docs/modules/agent-memory.md) |
 | `crates/agent-types/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-types.md`](docs/modules/agent-types.md) |
 | `crates/agent-model/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-model.md`](docs/modules/agent-model.md) |
 | `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
@@ -60,6 +64,8 @@
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
+| `tools/memory-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`memory-demo.md`](docs/modules/memory-demo.md) |
+| `tools/reliability-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`reliability-demo.md`](docs/modules/reliability-demo.md) |
 | `tools/runtime-harness/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-harness.md`](docs/modules/runtime-harness.md) |
 | `tools/safety-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`safety-demo.md`](docs/modules/safety-demo.md) |
 
@@ -70,6 +76,11 @@
 - 当前采用**单进程模块化架构**。Tauri、Assistant Runtime 和 Agent Core 共同运行于 Tauri Rust 进程；未经明确架构决策，不引入 sidecar、daemon、本地 HTTP 服务或常驻 Worker 进程。
 - `tools/debug-viewer` 是独立开发工具，不属于产品进程；产品进程只向它建立出向连接（POST 推送调试事件），自身不监听调试端口（决策见 `docs/重要决策与变更记录.md`）。
 - `tools/runtime-harness` 是开发者显式启动的版本验证宿主，不属于产品进程或正式 `assistant-runtime`，不得把其临时 Session、Run、Journal 或 CLI 语义视为产品契约。
+- `tools/memory-demo` 是开发者显式启动的记忆验证宿主；其 JSON Store、RecallSource、
+  Session、Journal 和 CLI 均为私有验证实现，不属于正式 Runtime 或产品协议。
+- `tools/reliability-demo` 是开发者显式启动的可靠性验证宿主；其 Trace JSONL、Provider
+  metadata、Replay、Timeline、宿主事件和 CLI 均为私有验证实现，不属于正式 Runtime 或
+  产品协议。只有显式 record 入口可以访问真实 Provider，离线回放不得执行历史工具副作用。
 - `tools/safety-demo` 是开发者显式启动的安全验证宿主；它只在 loopback 上提供无访问
   令牌的临时 HTTP 页面，并通过 Host、Origin 和 POST 来源校验降低跨站误触风险；它不
   属于产品进程、正式 `assistant-runtime`、sidecar 或 daemon，其私有 Session、Run、
@@ -83,8 +94,10 @@
   `agent-core` 与 `assistant-runtime` 可共同向下依赖 `agent-context`，
   `agent-context` 只依赖 `agent-model` 与 `agent-types`。应用协议由 `desktop` 和
   `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行
-  类型不依赖应用协议。`agent-tools-local -> agent-tools`，`safety-demo` 只作为顶层
-  开发工具向下依赖 Agent crate 与本地 Adapter；所有依赖禁止反向。
+  类型不依赖应用协议。`agent-memory` 只承载实现无关的记忆领域与能力契约，
+  `agent-tools -> agent-memory` 提供普通记忆工具壳；`agent-tools-local -> agent-tools`。
+  `safety-demo`、`memory-demo` 与 `reliability-demo` 只作为顶层开发工具向下依赖 Agent crate 与所需
+  Adapter；所有依赖禁止反向。
 
 ## 四、Agent 工具边界
 

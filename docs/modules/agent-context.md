@@ -39,7 +39,7 @@
 - usage 缺失时返回明确判断结果，不在业务代码中回退到裸算或隐藏 TokenEstimator。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。
 - `RollingSummarySameModel` 只调用一次 `CompactionInput` 中的当前 ModelService；
-  请求原样保留正常 Agent instructions，并由 Strategy 内部在
+  请求原样保留正常 Agent 的完整冻结 System Prompt，并由 Strategy 内部在
   `protected prefix + compressible head` 后追加临时摘要指令；调用方不拼接请求
   conversation，recent tail 不发送给压缩模型。
 - 临时摘要指令使用 `UserPart::Injected`，只存在于 compression request，不写入原始

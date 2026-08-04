@@ -131,16 +131,21 @@ mod tests {
     use std::num::NonZeroU32;
 
     use std::{
-        collections::VecDeque,
+        collections::{BTreeSet, VecDeque},
         pin::Pin,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         task::{Context, Poll},
+        time::Duration,
     };
 
     use agent_context::ContextWindowEvaluator;
     use agent_model::{
         ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
-        ModelRequest, ModelService, ModelStreamFuture,
+        ModelRequest, ModelRetryPolicy, ModelRetryReason, ModelService, ModelStreamFuture,
+        ModelTransportErrorKind, RetryingModelService, SystemPromptSnapshot,
     };
     use agent_types::{
         ConversationMessage, ConversationSnapshot, FinishReason, MessageId, ModelIdentity, PartId,
@@ -253,6 +258,50 @@ mod tests {
         }
     }
 
+    /// 第一次建流失败、第二次成功的模型，用于证明 Core 只看到一个逻辑 Model Step。
+    struct FailOnceThenCompleteModel {
+        capabilities: ModelCapabilities,
+        message: AssistantMessage,
+        calls: AtomicUsize,
+    }
+
+    impl ModelService for FailOnceThenCompleteModel {
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        fn context_window_tokens(&self) -> u64 {
+            128_000
+        }
+
+        fn stream(
+            &self,
+            _request: ModelRequest,
+            _context: ModelCallContext,
+        ) -> ModelStreamFuture<'_> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let message = self.message.clone();
+            Box::pin(async move {
+                if call == 0 {
+                    return Err(ModelError::Transport {
+                        kind: ModelTransportErrorKind::Connection,
+                        message: "scripted connection failure".to_owned(),
+                    });
+                }
+                Ok(Box::pin(StubStream {
+                    events: vec![
+                        ModelEvent::TurnStarted {
+                            message_id: message.id.clone(),
+                            model: message.model.clone(),
+                        },
+                        ModelEvent::TurnFinished { message },
+                    ]
+                    .into(),
+                }) as ModelEventStream)
+            })
+        }
+    }
+
     struct StubStream {
         events: VecDeque<ModelEvent>,
     }
@@ -291,7 +340,9 @@ mod tests {
 
     fn spec(model: impl ModelService + 'static) -> ExecutionSpec {
         ExecutionSpec {
-            instructions: vec!["You are a helpful assistant.".to_owned()],
+            system_prompt: SystemPromptSnapshot::new(vec![
+                "You are a helpful assistant.".to_owned(),
+            ]),
             model: Arc::new(model),
             context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: Default::default(),
@@ -386,6 +437,44 @@ mod tests {
             ]
         );
         // 纯文本路径不产生任何落账增量（最终消息 Core 不落账）。
+        assert!(recorder.deltas.lock().expect("lock deltas").is_empty());
+    }
+
+    #[tokio::test]
+    async fn establishment_retry_remains_one_core_model_step() {
+        let inner = Arc::new(FailOnceThenCompleteModel {
+            capabilities: capabilities(),
+            message: text_message("recovered"),
+            calls: AtomicUsize::new(0),
+        });
+        let retrying = RetryingModelService::new(
+            inner.clone(),
+            ModelRetryPolicy::new(
+                BTreeSet::from([ModelRetryReason::Connection]),
+                vec![Duration::ZERO],
+                Duration::ZERO,
+            ),
+        );
+        let (context, recorder) = context(CancellationToken::new());
+        let execution = AgentExecution::start(spec(retrying), input(), context);
+
+        let outcome = execution.completion.await;
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::Completed(text_message("recovered"))
+        );
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            collect_events(execution.events).await,
+            vec![
+                AgentEvent::ExecutionStarted,
+                AgentEvent::StepStarted { step: 1 },
+                AgentEvent::ExecutionCompleted {
+                    message: text_message("recovered"),
+                    dropped_events: 0,
+                },
+            ]
+        );
         assert!(recorder.deltas.lock().expect("lock deltas").is_empty());
     }
 

@@ -12,8 +12,12 @@
 //!   [`ModelStreamFuture`] 返回 `Err`；流建立后的失败以 `TurnFailed` 受控终态结束。
 //! - [`LifecycleValidator`]：强制执行 Part 生命周期配对与唯一终态，
 //!   不依赖任何具体 Provider。
-//! - [`ModelError`]：配置、认证、Transport、Provider、限流、Context Overflow、
-//!   协议、Tool arguments 和取消的分类，只携带脱敏诊断信息。
+//! - [`ModelError`]：配置、认证、结构化 Transport、Provider、限流、暂时不可用、
+//!   Context Overflow、协议、Tool arguments 和取消的分类，只携带脱敏诊断信息。
+//! - [`TraceContext`]：用 correlation ID 和可选的 1-based attempt 串联跨层诊断，
+//!   不代表业务 Run，也不进入 Provider HTTP 字段。
+//! - [`RetryingModelService`]：按显式有限策略重试建流前瞬态错误，并报告 attempt
+//!   事实；一旦获得事件流便停止介入，Core 始终只看到一个 Model Step。
 //!
 //! 最小调用示例见 `service.rs` 内联测试：`FakeModelService` 演示了通过
 //! [`ModelService`] SPI 完成一次 Turn 的完整路径；真实 Adapter 的端到端调用见
@@ -25,16 +29,24 @@ mod error;
 mod event;
 mod lifecycle;
 mod request;
+mod retry;
 mod service;
+
+#[cfg(test)]
+mod retry_tests;
 
 pub use capabilities::ModelCapabilities;
 pub use context::{ModelCallContext, TraceContext};
-pub use error::ModelError;
+pub use error::{ModelError, ModelTransportErrorKind};
 pub use event::ModelEvent;
 pub use lifecycle::LifecycleValidator;
 pub use request::{
     GenerationConfig, ModelRequest, ProviderOptions, ProviderOptionsError, ReasoningConfig,
-    ReasoningEffort,
+    ReasoningEffort, SystemPromptSnapshot,
+};
+pub use retry::{
+    ModelAttemptEvent, ModelAttemptObserver, ModelRetryPolicy, ModelRetryReason,
+    RetryingModelService,
 };
 pub use service::{ModelEventStream, ModelService, ModelStreamFuture};
 

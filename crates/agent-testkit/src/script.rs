@@ -271,7 +271,7 @@ mod tests {
 
     fn sample_request() -> ModelRequest {
         ModelRequest {
-            system: vec![],
+            system: agent_model::SystemPromptSnapshot::default(),
             conversation: ConversationSnapshot::new(vec![]),
             tools: vec![],
             tool_choice: ToolChoice::Auto,
@@ -309,7 +309,10 @@ mod tests {
                         ),
                     },
                     ModelEvent::TurnFailed {
-                        error: ModelError::RateLimited("slow down".to_owned()),
+                        error: ModelError::RateLimited {
+                            message: "slow down".to_owned(),
+                            retry_after_ms: None,
+                        },
                     },
                 ]),
             ],
@@ -328,7 +331,10 @@ mod tests {
         let collected = EventCollector::collect(stream).await;
         assert_eq!(
             collected.assert_failed(),
-            &ModelError::RateLimited("slow down".to_owned())
+            &ModelError::RateLimited {
+                message: "slow down".to_owned(),
+                retry_after_ms: None,
+            }
         );
         // 两次调用的请求都被记录。
         assert_eq!(service.take_requests().len(), 2);

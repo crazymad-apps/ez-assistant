@@ -4,6 +4,8 @@
 //! 注入的能力实现；本地、远程或测试实现都可以实现同一能力契约。
 
 pub mod fs;
+pub mod pinned_memory;
+pub mod recall_memory;
 pub mod shell;
 
 /// 标准工具实例配置不自洽，无法形成稳定模型定义或 resolved 请求。

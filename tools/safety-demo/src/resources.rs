@@ -13,6 +13,7 @@ use agent_core::{
 };
 use agent_model::{
     ModelCallContext, ModelError, ModelRequest, ModelService, ModelStreamFuture, ReasoningConfig,
+    SystemPromptSnapshot,
 };
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
@@ -158,12 +159,12 @@ impl DemoResources {
 
     pub(crate) fn spec(&self) -> ExecutionSpec {
         ExecutionSpec {
-            instructions: vec![
+            system_prompt: SystemPromptSnapshot::new(vec![
                 "You are running inside the ez-assistant Safety Demo.".to_owned(),
                 "Use the dedicated file tools for file operations and shell only when a shell \
                  command is actually needed. Tool authorization is enforced by the host."
                     .to_owned(),
-            ],
+            ]),
             model: self.model.clone(),
             context_window: self.context_window.clone(),
             tools: self.tools.clone(),
@@ -284,7 +285,9 @@ pub(crate) enum ResourceError {
 
 #[cfg(test)]
 mod tests {
-    use agent_model::{GenerationConfig, ModelCapabilities, ProviderOptions};
+    use agent_model::{
+        GenerationConfig, ModelCapabilities, ModelTransportErrorKind, ProviderOptions,
+    };
     use agent_testkit::{ModelScript, ScriptedModelService};
     use agent_types::{ConversationSnapshot, ToolChoice};
 
@@ -292,7 +295,7 @@ mod tests {
 
     fn request() -> ModelRequest {
         ModelRequest {
-            system: vec![],
+            system: SystemPromptSnapshot::default(),
             conversation: ConversationSnapshot::new(vec![]),
             tools: vec![],
             tool_choice: ToolChoice::Auto,
@@ -348,15 +351,16 @@ mod tests {
                 streaming: true,
             },
             128_000,
-            [ModelScript::FailEstablishment(ModelError::Transport(
-                "offline fixture".to_owned(),
-            ))],
+            [ModelScript::FailEstablishment(ModelError::Transport {
+                kind: ModelTransportErrorKind::Connection,
+                message: "offline fixture".to_owned(),
+            })],
         ));
         let model = DeepSeekThinkingModel::new(inner.clone());
 
         assert!(matches!(
             model.stream(request(), ModelCallContext::default()).await,
-            Err(ModelError::Transport(message)) if message == "offline fixture"
+            Err(ModelError::Transport { message, .. }) if message == "offline fixture"
         ));
         let requests = inner.take_requests();
         assert_eq!(requests.len(), 1);

@@ -5,6 +5,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+/// 已完成渲染并按顺序冻结的 System Prompt Parts。
+///
+/// 本类型只保存模型可见的最终文本，不保存构建配置或结构化业务数据。公开接口只允许
+/// 读取、克隆或消费整个快照，避免执行期间原地修改其中的 Part。
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SystemPromptSnapshot {
+    parts: Vec<String>,
+}
+
+impl SystemPromptSnapshot {
+    /// 使用已经按最终顺序渲染完成的 Parts 创建快照。
+    pub fn new(parts: Vec<String>) -> Self {
+        Self { parts }
+    }
+
+    /// 按冻结顺序只读访问全部 Parts。
+    pub fn parts(&self) -> &[String] {
+        &self.parts
+    }
+
+    /// 消费快照并取回其中的 Parts。
+    pub fn into_parts(self) -> Vec<String> {
+        self.parts
+    }
+
+    /// 快照是否不包含任何 System Prompt Part。
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// 一次 Provider Turn 的完整规范请求。
 ///
@@ -13,8 +45,8 @@ use thiserror::Error;
 /// 这里，它们属于 Adapter 构造参数或 [`crate::ModelCallContext`]。请求交给哪个
 /// 服务实例，由调用方按配置编译结果直接决定，请求自身不携带路由信息。
 pub struct ModelRequest {
-    /// 有序 system 指令文本。
-    pub system: Vec<String>,
+    /// 有序且冻结的 System Prompt。
+    pub system: SystemPromptSnapshot,
     /// 规范历史对话。
     pub conversation: ConversationSnapshot,
     /// 模型可见的工具定义。
@@ -156,7 +188,7 @@ mod tests {
             )
             .expect("valid provider options");
         ModelRequest {
-            system: vec!["You are a helpful assistant.".to_owned()],
+            system: SystemPromptSnapshot::new(vec!["You are a helpful assistant.".to_owned()]),
             conversation,
             tools: vec![ToolDefinition {
                 name: ToolName::new("get_date").expect("valid tool name"),
@@ -185,6 +217,37 @@ mod tests {
             serde_json::from_str::<ModelRequest>(&json).expect("deserialize request"),
             request
         );
+    }
+
+    #[test]
+    fn system_prompt_snapshot_is_ordered_transparent_and_read_only() {
+        let snapshot = SystemPromptSnapshot::new(vec![
+            "base instructions".to_owned(),
+            "pinned memory".to_owned(),
+        ]);
+
+        assert_eq!(
+            snapshot.parts(),
+            &["base instructions".to_owned(), "pinned memory".to_owned()]
+        );
+        assert!(!snapshot.is_empty());
+        assert_eq!(
+            serde_json::to_value(&snapshot).expect("serialize snapshot"),
+            serde_json::json!(["base instructions", "pinned memory"])
+        );
+        assert_eq!(
+            serde_json::from_value::<SystemPromptSnapshot>(serde_json::json!([
+                "base instructions",
+                "pinned memory"
+            ]))
+            .expect("deserialize snapshot"),
+            snapshot
+        );
+        assert_eq!(
+            snapshot.clone().into_parts(),
+            vec!["base instructions".to_owned(), "pinned memory".to_owned()]
+        );
+        assert!(SystemPromptSnapshot::default().is_empty());
     }
 
     #[test]

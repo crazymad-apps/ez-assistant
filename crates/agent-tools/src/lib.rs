@@ -46,6 +46,12 @@ pub use standard::{
         FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ListDirectoryInput, ReadFileInput,
         ReadFileToolConfig, SearchContentInput, SearchFilesToolConfig, WriteFileInput,
     },
+    pinned_memory::{
+        ListPinnedMemoriesInput, ListPinnedMemoriesTool, PinMemoryInput, PinMemoryTool,
+        ResolvedUpdatePinnedMemoryInput, UnpinMemoryInput, UnpinMemoryTool,
+        UpdatePinnedMemoryInput, UpdatePinnedMemoryTool,
+    },
+    recall_memory::{RecallMemoryInput, RecallMemoryTool, RecallMemoryToolConfig},
     shell::{ResolvedShellInput, ShellExecTool, ShellExecToolConfig, ShellInput},
 };
 pub use tool::{

@@ -20,7 +20,7 @@
   `context_window_tokens`。达到压缩阈值或 Provider 报告 Context Overflow 时，以
   可靠终态交回 Runtime。
 - 与执行逻辑直接相关的 token、轮次和工具调用限制。
-- 规范对话、Provider Codec、Memory/Safety/Recorder/Authorizer 等稳定能力接口。
+- 规范对话、Provider Codec、Safety/Recorder/Authorizer 等稳定能力接口。
 
 Tool 抽象、注册表、派发器与文件/Shell 能力契约归 [`agent-tools`](agent-tools.md)；Core 只消费 `ToolSetSnapshot` 与派发结果。
 
@@ -33,6 +33,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - Core 不直接调用 `std::fs`、`tokio::fs`、`Command`、HTTP 工具或桌面 API；所有副作用通过注入的模型/工具 trait。
 - Core 处理一个 `AgentExecution`，不持有 `RunId`，不负责跨会话排队和全局并发。
 - `ExecutionSpec` 是已经由 Runtime 解析完成的不可变执行事实源；Core 不再维护 `AgentProfile`、配置默认值或覆盖顺序。
+- `ExecutionSpec` 只消费冻结的完整 System Prompt；同一次执行的所有 Model Step 和压缩
+  交接均复用该快照，Core 不读取或刷新 Pinned Memory Store。
 - 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛前为批次内未结算调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange。
 - 资源预算使用显式 `Option`；Core 不注入隐藏的最大轮次、超时或输出限制；预算是副作用前硬边界（`max_steps` 模型调用前预检、`max_tool_calls` dispatch 前预检）。
 - 启发式 Guardrail 检测器必须支持未配置、`Observe`、`Enforce`；未配置表示关闭，
@@ -90,9 +92,10 @@ Context Window Evaluator、历史布局和 replacement 校验归
 
 ## Memory 与 Provider 边界
 
-- Core 只依赖稳定 `MemoryService`，不依赖本地数据库、远程协议或具体记忆算法。
-- `MemoryPlugin` 由外部 Orchestrator 组合，支持本地、远程、混合、多来源和 No-op 实现。
-- 记忆插件提供模型工具时走普通 Tool Contribution，禁止 Memory SPI 直接依赖 Tool SPI。
+- Core 不定义或调用 MemoryService、PinnedMemoryStore、MemoryRecall 或 RecallSource。
+- Pinned Memory 在进入 Core 前已经成为冻结 System Prompt Part；Core 只机械传递快照。
+- Pinned 修改和 Memory Recall 都通过普通 Tool Call/Result 工作，与其他标准工具无差别。
+- Source 选择、协调、失败降级和 Store 持久化都属于工具能力实现及上层装配。
 - Model Provider 一次只完成一个模型 Turn；工具继续循环属于 Agent Engine。
 - reasoning、tool call、tool result 和 Provider continuation state 必须进入规范对话；不能只依赖流式事件恢复。
 
@@ -111,7 +114,9 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - 引擎 Harness 宿主在 `agent-testkit/tests/`（`agent-core` 被 testkit 依赖，不反向 dev-depend）。
 - Agent Loop 使用 fake model 和 fake tool 覆盖：纯文本结束、工具调用、多轮工具、模型失败、工具失败和取消。
 - 覆盖有限/无限预算与 Guardrail 三种模式，不假定固定最大轮次。
-- 覆盖 Memory Plugin 聚合、Recorder begin/complete 失败与 pending 恢复、Authorizer Allow/Deny、授权等待中的取消 race、工具取消清理完成、Provider reasoning/tool-call 往返保真。
+- 覆盖 Recorder begin/complete 失败与 pending 恢复、Authorizer Allow/Deny、授权等待中的
+  取消 race、普通记忆工具多轮调用、工具取消清理完成和 Provider reasoning/tool-call
+  往返保真。
 - 事件顺序必须可断言，不依赖真实模型网络。
 - 可运行效果演示位于 `crates/agent-testkit/examples/engine_demo.rs`。
 

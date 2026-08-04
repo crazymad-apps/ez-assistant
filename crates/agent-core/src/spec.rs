@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use agent_context::ContextWindowEvaluator;
-use agent_model::ModelService;
+use agent_model::{ModelService, SystemPromptSnapshot};
 use agent_tools::ToolSetSnapshot;
 
 use crate::GuardrailConfig;
@@ -15,11 +15,11 @@ use crate::GuardrailConfig;
 /// 一次 Agent 执行的不可变规格（事实源）。
 ///
 /// 执行上下文组装保持纯机械投影
-/// （instructions→system、输入快照→conversation、工具快照→tools）；共享
+/// （system_prompt→system、输入快照→conversation、工具快照→tools）；共享
 /// Evaluator 只负责每个 Model Step 前的窗口预检，不在 Core 内发起压缩。
 pub struct ExecutionSpec {
-    /// 系统指令列表，直接映射 `ModelRequest.system`。
-    pub instructions: Vec<String>,
+    /// 已完成渲染的冻结 System Prompt，直接映射 `ModelRequest.system`。
+    pub system_prompt: SystemPromptSnapshot,
     /// 已绑定的模型服务实例（构造期含 endpoint/credential/model）。
     pub model: Arc<dyn ModelService>,
     /// 每个 Model Step 前使用的共享上下文窗口判断入口。
@@ -128,7 +128,9 @@ mod tests {
     #[test]
     fn spec_assembles_with_empty_tool_snapshot() {
         let spec = ExecutionSpec {
-            instructions: vec!["You are a helpful assistant.".to_owned()],
+            system_prompt: SystemPromptSnapshot::new(vec![
+                "You are a helpful assistant.".to_owned(),
+            ]),
             model: Arc::new(NoopModel {
                 capabilities: ModelCapabilities {
                     reasoning: false,
@@ -141,7 +143,7 @@ mod tests {
             budget: ExecutionBudget::default(),
             guardrails: None,
         };
-        assert_eq!(spec.instructions.len(), 1);
+        assert_eq!(spec.system_prompt.parts().len(), 1);
         // 空快照合法：最小可执行 Agent 不含任何工具。
         assert!(spec.tools.is_empty());
         assert!(spec.model.capabilities().tool_calls);

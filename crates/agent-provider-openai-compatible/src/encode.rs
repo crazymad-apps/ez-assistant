@@ -58,7 +58,7 @@ pub fn encode_request(
         .map_err(|error| ModelError::Config(error.to_string()))?;
     let mut messages = Vec::new();
     // 每条 system 指令按序生成一个 system 消息，置于对话消息之前。
-    for system in &request.system {
+    for system in request.system.parts() {
         messages.push(ChatMessage::System(ChatSystemMessage {
             content: system.clone(),
         }));

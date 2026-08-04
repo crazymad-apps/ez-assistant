@@ -14,8 +14,13 @@
 - Session、Message、Run 的生命周期和查询。
 - 多会话并发、同会话串行、全局模型/工具限流。
 - Agent Core 实例管理和事件持久化/广播。
+- 为完整 Trace 关联 Session、Run、AgentExecution、逻辑模型调用和 attempt，并负责录制模式、
+  持久化、访问权限、保留、删除和 Complete/Incomplete 状态。
 - 将配置、Agent 模板、用户偏好和会话覆盖编译成唯一不可变的 `ExecutionSpec`。
-- 为每个 Runtime Run 创建绑定 `RunId`/`SessionId` 的 Recorder、Memory、Approval 和 Event Adapter。
+- 为每个 Runtime Run 创建绑定 `RunId`/`SessionId` 的 Recorder、Authorizer 和 Event Adapter。
+- 在新建 Session 时读取 Pinned Memory Store、渲染并持久化冻结 System Prompt Snapshot；
+  恢复、继续、压缩续接和分支复用原快照。
+- 按应用配置装配 PinnedMemoryStore、MemoryRecall 与 RecallSource，并通过普通工具注册给 Core。
 - 定时任务、配置加载、后台任务与恢复。
 - 装配真实文件/Shell Adapter，并负责授权、确认、环境策略与审计。
 - Repository/持久化边界和应用级错误。
@@ -38,6 +43,8 @@ Tauri 进程
 - 客户端窗口销毁或事件订阅断开不得自动取消 Run。
 - 广播事件前后要有明确持久化策略，保证 UI 重建后能以快照恢复；不能依赖 WebView 永久在线。
 - 模型、工具、Shell 和阻塞任务分别设置并发上限。
+- Full Trace Collector 与普通 UI/调试广播分离；记录失败只标记 Incomplete，不得改变 Run 的
+  模型或 Agent 结果，Conversation Journal 失败仍按权威业务错误处理。
 
 ## 文件能力
 
@@ -87,6 +94,26 @@ Tauri 进程
   内存审计类型均不是正式 Runtime 契约，不得直接复制到本 crate。
 - v0.4.0 的本地 Adapter 不承诺事务或原子文件替换；正式产品接入若需要更强写入
   保障，应在后续 Runtime 总体设计中明确能力要求和恢复语义。
+
+## v0.5.0 设计边界
+
+- v0.5.0 不修改 `assistant-runtime` 代码、依赖、Session/Run 类型或产品协议。
+- `agent-memory` 只提供实现无关的 Pinned Memory 与 RecallSource 契约；标准记忆工具壳
+  通过普通 Tool Loop 工作，Core 不增加 Memory 专用阶段。
+- 未来 Runtime 负责选择 Store/RecallSource Adapter、编译 Source 可见性和授权规则、
+  创建冻结 Session Prompt Snapshot，并持久化其成品状态。
+- `tools/memory-demo` 在 v0.5.0 中私有验证 JSON Store、RecallSource、Session、Journal
+  和 CLI 行为，这些类型、文件格式和命令不得直接复制为正式 Runtime 契约。
+
+## v0.6.0 设计边界
+
+- v0.6.0 不修改 `assistant-runtime` 代码、依赖、Session/Run 类型或产品协议。
+- Model/Provider 只增加结构化错误、attempt、wire 观察和有限建立重试；正式 Runtime 未来负责
+  是否装配、如何关联和持久化，不把 Trace 生命周期下推给 Core 或 Adapter。
+- `tools/reliability-demo` 私有验证完整 Trace、JSONL、Complete/Incomplete、Wire/Model Replay
+  和 Timeline；这些文件、metadata、宿主事件和 CLI 不得直接复制为正式 Runtime 契约。
+- 流建立后失败、Context Overflow、Length 或任务未完成后的续跑仍需未来 Runtime 显式启动新的
+  AgentExecution，不与本版本的同一步建立重试混同。
 
 ## Harness 验证
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelError, ModelEvent, ModelRequest, ModelService,
-    ProviderOptions, ReasoningConfig, ReasoningEffort,
+    ProviderOptions, ReasoningConfig, ReasoningEffort, SystemPromptSnapshot,
 };
 use agent_testkit::{
     EventCollector, RecordedRequest, RecordedResponse, RecordedTransport, validate_request,
@@ -128,7 +128,7 @@ fn thinking_options() -> ProviderOptions {
 
 fn turn_1_request() -> ModelRequest {
     ModelRequest {
-        system: vec![],
+        system: SystemPromptSnapshot::default(),
         conversation: ConversationSnapshot::new(vec![user_message(
             "message_1",
             "How is the weather in Paris today?",
@@ -150,6 +150,7 @@ fn service_with(transport: &Arc<RecordedTransport>) -> OpenAiCompatibleService {
         Profile::deepseek(),
         transport.clone(),
     )
+    .expect("test base URL should be valid")
 }
 
 #[test]
@@ -295,7 +296,7 @@ async fn turn_2_request_round_trips_reasoning_tool_calls_and_thinking() {
 
     // 第二轮：user + 第一轮 AssistantMessage + ToolResult，thinking 开关随请求下发。
     let turn_2_request = ModelRequest {
-        system: vec![],
+        system: SystemPromptSnapshot::default(),
         conversation: ConversationSnapshot::new(vec![
             user_message("message_1", "How is the weather in Paris today?"),
             ConversationMessage::Assistant(assistant),

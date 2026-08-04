@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+agent-memory.path = "../agent-memory"
 agent-types.path = "../agent-types"
 path-absolutize.workspace = true
 schemars.workspace = true

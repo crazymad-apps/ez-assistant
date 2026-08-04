@@ -461,7 +461,7 @@ mod tests {
 
     fn request() -> ModelRequest {
         ModelRequest {
-            system: vec![],
+            system: agent_model::SystemPromptSnapshot::default(),
             conversation: ConversationSnapshot::new(vec![]),
             tools: vec![],
             tool_choice: ToolChoice::Auto,
@@ -880,7 +880,7 @@ mod tests {
             assistant(),
         )));
         let spec = ExecutionSpec {
-            instructions: vec![],
+            system_prompt: agent_model::SystemPromptSnapshot::default(),
             model,
             context_window: Arc::new(
                 agent_context::ContextWindowEvaluator::new(0.8).expect("valid test threshold"),

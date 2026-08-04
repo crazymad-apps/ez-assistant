@@ -40,6 +40,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-memory"
+version = "0.1.0"
+dependencies = [
+ "agent-types",
+ "futures-util",
+ "quick-xml",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "agent-model"
 version = "0.1.0"
 dependencies = [
@@ -49,6 +64,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tokio-util",
 ]
 
@@ -60,6 +76,7 @@ dependencies = [
  "agent-testkit",
  "agent-types",
  "async-stream",
+ "base64 0.22.1",
  "debug-viewer",
  "dotenvy",
  "futures-core",
@@ -78,6 +95,7 @@ version = "0.1.0"
 dependencies = [
  "agent-context",
  "agent-core",
+ "agent-memory",
  "agent-model",
  "agent-tools",
  "agent-types",
@@ -91,6 +109,7 @@ dependencies = [
 name = "agent-tools"
 version = "0.1.0"
 dependencies = [
+ "agent-memory",
  "agent-types",
  "path-absolutize",
  "schemars 1.2.1",
@@ -2110,6 +2129,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-demo"
+version = "0.1.0"
+dependencies = [
+ "agent-context",
+ "agent-core",
+ "agent-memory",
+ "agent-model",
+ "agent-provider-openai-compatible",
+ "agent-testkit",
+ "agent-tools",
+ "agent-types",
+ "dotenvy",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2915,6 +2956,28 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "reliability-demo"
+version = "0.1.0"
+dependencies = [
+ "agent-context",
+ "agent-core",
+ "agent-model",
+ "agent-provider-openai-compatible",
+ "agent-testkit",
+ "agent-tools",
+ "agent-types",
+ "dotenvy",
+ "futures-util",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "reqwest"
