@@ -886,6 +886,7 @@ mod tests {
                 agent_context::ContextWindowEvaluator::new(0.8).expect("valid test threshold"),
             ),
             tools: ToolRegistry::new().snapshot(),
+            model_request: agent_core::ModelRequestConfig::default(),
             budget: ExecutionBudget::default(),
             guardrails: None,
         };

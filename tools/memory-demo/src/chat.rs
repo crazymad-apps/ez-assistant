@@ -491,6 +491,7 @@ mod tests {
             context_window: Arc::new(
                 ContextWindowEvaluator::new(1.0).expect("valid context threshold"),
             ),
+            model_request: agent_core::ModelRequestConfig::default(),
         };
         let sessions = directory.path().join(SESSIONS_DIR);
         let session = create_session(&sessions, &resources)
@@ -578,6 +579,7 @@ mod tests {
             context_window: Arc::new(
                 ContextWindowEvaluator::new(1.0).expect("valid context threshold"),
             ),
+            model_request: agent_core::ModelRequestConfig::default(),
         };
         let session = create_session(&directory.path().join(SESSIONS_DIR), &resources)
             .await

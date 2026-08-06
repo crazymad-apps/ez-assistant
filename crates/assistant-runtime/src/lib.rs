@@ -1,9 +1,18 @@
 //! Assistant 应用运行时。
 //!
-//! Runtime 持有业务状态，并负责协调多会话、Agent Run、定时任务和配置。
-//! 第一阶段它将直接运行在 Tauri 主进程内。
+//! Runtime 持有业务权威状态，并负责协调多会话、Agent Run 和配置。正式产品由独立
+//! Runtime Host 进程装配本 crate；本 crate 不依赖 Tauri 或具体进程通信方式。
 
 pub mod config;
-pub mod run;
-pub mod scheduler;
-pub mod session;
+mod error;
+mod factory;
+mod id;
+mod journal;
+mod run;
+mod runtime;
+mod session;
+
+pub use config::RuntimeConfig;
+pub use error::{RuntimeError, RuntimeResult};
+pub use factory::{AgentFactoryError, SessionAgentFactory};
+pub use runtime::AssistantRuntime;

@@ -9,5 +9,18 @@ workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+agent-sdk = { path = "../agent-sdk" }
+agent-tools = { path = "../agent-tools" }
+agent-types = { path = "../agent-types" }
 assistant-protocol = { path = "../assistant-protocol" }
+base64.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
+[dev-dependencies]
+agent-model = { path = "../agent-model" }
+agent-testkit = { path = "../agent-testkit" }
+serde_json.workspace = true

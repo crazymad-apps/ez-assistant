@@ -1,0 +1,23 @@
+[package]
+name = "agent-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-context = { path = "../agent-context" }
+agent-core = { path = "../agent-core" }
+agent-model = { path = "../agent-model" }
+agent-tools = { path = "../agent-tools" }
+agent-types = { path = "../agent-types" }
+thiserror.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+agent-testkit = { path = "../agent-testkit" }
+futures-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

@@ -1,19 +1,22 @@
 # ez-assistant
 
-本地优先的桌面 AI 助手 Monorepo。桌面端基于 Tauri 2，Agent Core 与应用 Runtime 使用 Rust 重写并运行在同一个 Tauri 进程内。
+本地优先的桌面 AI 助手 Monorepo。桌面端基于 Tauri 2；正式 Assistant Runtime 作为独立
+产品进程承载核心业务，Tauri 通过本地应用协议作为它的桌面客户端。
 
 ## 一、项目结构
 
 ```text
 .
 ├── apps/
-│   └── desktop/                 # Tauri 桌面应用（Vanilla TypeScript + Vite + Rust）
+│   ├── desktop/                 # Tauri 桌面应用（Vanilla TypeScript + Vite + Rust）
+│   └── runtime-host/            # 正式 Assistant Runtime 产品进程入口
 ├── crates/
 │   ├── agent-core/              # Agent 推理循环、模型与工具抽象
 │   ├── agent-context/           # 共享上下文窗口判断、布局、校验与压缩策略
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
 │   ├── agent-memory/            # Pinned Memory、RecallSource 与协调契约
 │   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
+│   ├── agent-sdk/               # Agent Core 候选便利装配 Facade
 │   ├── agent-testkit/           # Agent 确定性测试支持
 │   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与标准工具壳
 │   ├── agent-tools-local/       # 真实本地文件与 Shell 基础设施 Adapter
@@ -21,6 +24,7 @@
 │   ├── assistant-protocol/      # 跨层共享 DTO、事件与标识类型
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
 ├── tools/
+│   ├── core-demo/               # SDK 与完整 Core 能力的独立 B/S 验证宿主
 │   ├── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
 │   ├── memory-demo/             # 记忆能力与私有本地实现的独立验证宿主
 │   ├── reliability-demo/        # 完整录制、有限重试与分层回放的独立验证宿主
@@ -52,17 +56,20 @@
 | --- | --- | --- |
 | `apps/desktop/src/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/desktop/src-tauri/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
+| `apps/runtime-host/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-host.md`](docs/modules/runtime-host.md) |
 | `crates/agent-core/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-core.md`](docs/modules/agent-core.md) |
 | `crates/agent-context/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-context.md`](docs/modules/agent-context.md) |
 | `crates/agent-memory/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-memory.md`](docs/modules/agent-memory.md) |
 | `crates/agent-types/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-types.md`](docs/modules/agent-types.md) |
 | `crates/agent-model/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-model.md`](docs/modules/agent-model.md) |
 | `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
+| `crates/agent-sdk/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-sdk.md`](docs/modules/agent-sdk.md) |
 | `crates/agent-testkit/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-testkit.md`](docs/modules/agent-testkit.md) |
 | `crates/agent-tools/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools.md`](docs/modules/agent-tools.md) |
 | `crates/agent-tools-local/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools-local.md`](docs/modules/agent-tools-local.md) |
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
+| `tools/core-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`core-demo.md`](docs/modules/core-demo.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
 | `tools/memory-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`memory-demo.md`](docs/modules/memory-demo.md) |
 | `tools/reliability-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`reliability-demo.md`](docs/modules/reliability-demo.md) |
@@ -73,7 +80,13 @@
 
 ## 三、架构硬约束
 
-- 当前采用**单进程模块化架构**。Tauri、Assistant Runtime 和 Agent Core 共同运行于 Tauri Rust 进程；未经明确架构决策，不引入 sidecar、daemon、本地 HTTP 服务或常驻 Worker 进程。
+- 正式产品采用**桌面 UI 与 Runtime 双进程、Runtime 内部模块化**的架构。Tauri 进程只承载
+  WebView、桌面平台适配和 Runtime Client；独立 Runtime Host 进程承载
+  `assistant-runtime`、Agent 装配和业务权威状态。该 Host 是正式产品进程，不是 `tools/*`
+  验证宿主，也不等同于已经实现系统 daemon、常驻 Worker 池或本地 HTTP 服务。
+- Session 不创建会话级操作系统子进程；不同 Session 在同一个 Runtime Host 中使用 Tokio
+  异步并发，同一 Session 中改变上下文的 Run 默认串行。Shell、MCP 等工具按能力需要启动的
+  子进程不改变该产品进程拓扑。
 - `tools/debug-viewer` 是独立开发工具，不属于产品进程；产品进程只向它建立出向连接（POST 推送调试事件），自身不监听调试端口（决策见 `docs/重要决策与变更记录.md`）。
 - `tools/runtime-harness` 是开发者显式启动的版本验证宿主，不属于产品进程或正式 `assistant-runtime`，不得把其临时 Session、Run、Journal 或 CLI 语义视为产品契约。
 - `tools/memory-demo` 是开发者显式启动的记忆验证宿主；其 JSON Store、RecallSource、
@@ -85,19 +98,27 @@
   令牌的临时 HTTP 页面，并通过 Host、Origin 和 POST 来源校验降低跨站误触风险；它不
   属于产品进程、正式 `assistant-runtime`、sidecar 或 daemon，其私有 Session、Run、
   审批、审计和 HTTP DTO 不得成为产品契约。
-- 关闭窗口与退出进程是两个动作；后台任务的生命周期属于 Assistant Runtime，不得绑定 WebView 页面生命周期。
+- `tools/core-demo` 是开发者显式启动的 Core 候选版 B/S 验证宿主；它可在 loopback 上提供
+  私有页面并装配全部 Agent 能力，但不属于产品进程、正式 Runtime、sidecar 或 daemon，
+  其 Session、Run、Journal、Store、策略、HTTP DTO 和 CLI 不得成为产品契约。
+- 关闭窗口、退出桌面客户端和停止 Runtime 是三个动作；后台任务的生命周期属于 Assistant
+  Runtime，不得绑定 WebView 或 Tauri 进程生命周期。系统级自动启动、守护和托盘控制由对应
+  产品版本显式实现，不能从独立进程这一事实中自动推导。
 - UI 只发送用户意图和展示事件，不持有会话、Run、调度或 Agent Loop 的权威业务状态。
 - `assistant-runtime` 持有会话、Run、定时任务、配置、持久化和并发调度；`agent-core` 只负责单次 Agent 执行能力。
 - 不同会话可以并发；同一会话中会改变上下文的 Run 默认串行。使用 Tokio 异步任务，不为历史会话绑定操作系统线程。
 - `assistant-protocol` 必须保持轻量，只承载跨层契约；不得依赖 Tauri、具体模型、数据库或 Runtime 实现。
-- 执行依赖方向保持为：`desktop -> assistant-runtime -> agent-core -> agent-tools -> agent-types`；
-  `agent-core` 与 `assistant-runtime` 可共同向下依赖 `agent-context`，
+- 执行依赖方向保持为：`desktop -> assistant-protocol <- runtime-host -> assistant-runtime -> agent-sdk / agent-core -> agent-tools -> agent-types`；
+  `desktop` 不直接依赖或装配 `assistant-runtime`；Runtime Host 是传输与进程适配层，不持有
+  Session/Run 的第二份权威状态。`agent-core` 与 `assistant-runtime` 可共同向下依赖 `agent-context`，
   `agent-context` 只依赖 `agent-model` 与 `agent-types`。应用协议由 `desktop` 和
   `assistant-runtime` 依赖 `assistant-protocol`。Agent Core 内部模型、对话和执行
   类型不依赖应用协议。`agent-memory` 只承载实现无关的记忆领域与能力契约，
   `agent-tools -> agent-memory` 提供普通记忆工具壳；`agent-tools-local -> agent-tools`。
-  `safety-demo`、`memory-demo` 与 `reliability-demo` 只作为顶层开发工具向下依赖 Agent crate 与所需
-  Adapter；所有依赖禁止反向。
+  `agent-sdk` 只向下依赖 `agent-core`、`agent-context`、`agent-model`、`agent-tools` 和
+  必要的 `agent-types`，不依赖具体 Adapter 或应用层。`core-demo`、`safety-demo`、
+  `memory-demo` 与 `reliability-demo` 只作为顶层开发工具向下依赖 Agent crate 与所需 Adapter；
+  所有依赖禁止反向。
 
 ## 四、Agent 工具边界
 

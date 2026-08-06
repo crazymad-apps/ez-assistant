@@ -33,6 +33,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - Core 不直接调用 `std::fs`、`tokio::fs`、`Command`、HTTP 工具或桌面 API；所有副作用通过注入的模型/工具 trait。
 - Core 处理一个 `AgentExecution`，不持有 `RunId`，不负责跨会话排队和全局并发。
 - `ExecutionSpec` 是已经由 Runtime 解析完成的不可变执行事实源；Core 不再维护 `AgentProfile`、配置默认值或覆盖顺序。
+- `ExecutionSpec.model_request` 冻结 tool choice、generation、reasoning 和命名空间化
+  Provider Options；Core 在每个 Model Step 原样克隆这四项，不按 Provider 名称注入默认值。
 - `ExecutionSpec` 只消费冻结的完整 System Prompt；同一次执行的所有 Model Step 和压缩
   交接均复用该快照，Core 不读取或刷新 Pinned Memory Store。
 - 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛前为批次内未结算调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange。
@@ -97,6 +99,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - Pinned 修改和 Memory Recall 都通过普通 Tool Call/Result 工作，与其他标准工具无差别。
 - Source 选择、协调、失败降级和 Store 持久化都属于工具能力实现及上层装配。
 - Model Provider 一次只完成一个模型 Turn；工具继续循环属于 Agent Engine。
+- endpoint、credential、model 和 context window 属于 ModelService 构造；每次请求的
+  provider-neutral 语义配置属于 `ModelRequestConfig`，Provider 私有内容仍由 Adapter 校验。
 - reasoning、tool call、tool result 和 Provider continuation state 必须进入规范对话；不能只依赖流式事件恢复。
 
 ## 不应放在本模块的内容

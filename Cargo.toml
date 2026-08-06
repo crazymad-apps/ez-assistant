@@ -1,17 +1,20 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
+    "apps/runtime-host",
     "crates/agent-context",
     "crates/agent-core",
     "crates/agent-memory",
     "crates/agent-model",
     "crates/agent-provider-openai-compatible",
+    "crates/agent-sdk",
     "crates/agent-testkit",
     "crates/agent-tools",
     "crates/agent-tools-local",
     "crates/agent-types",
     "crates/assistant-protocol",
     "crates/assistant-runtime",
+    "tools/core-demo",
     "tools/debug-viewer",
     "tools/memory-demo",
     "tools/reliability-demo",
@@ -29,9 +32,12 @@ version = "0.1.0"
 async-stream = "0.3.6"
 axum = "0.8.4"
 base64 = "0.22.1"
+clap = { version = "4.6.5", features = ["derive"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 dotenvy = "0.15.7"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
+getrandom = "0.4.3"
 path-absolutize = "4.0.1"
 process-wrap = { version = "9.1.0", default-features = false, features = [
     "tokio1",
@@ -41,6 +47,7 @@ process-wrap = { version = "9.1.0", default-features = false, features = [
     "kill-on-drop",
 ] }
 quick-xml = "0.41.0"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -50,6 +57,7 @@ tempfile = "3.27.0"
 tokio = { version = "1.52.4", features = ["macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tower-http = { version = "0.6.11", features = ["fs"] }
+tui-input = "0.15.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

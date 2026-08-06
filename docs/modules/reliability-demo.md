@@ -37,6 +37,8 @@ Provider wire 观察、模型建立重试、完整 Trace Collector 和离线分�
 - Wire/Model Replay 与 Timeline 不连接真实工具、Authorizer、Recorder 或 Journal，不执行历史
   文件、Shell、Memory 或其他副作用。
 - 建立重试只包装 `ModelService::stream()` 的直接错误；事件流建立后不透明重试。
+- 真实 DeepSeek record 的 `ExecutionSpec` 显式冻结 reasoning 和
+  `thinking: { type: enabled }`；Observed/Retrying ModelService 不改写请求配置。
 - 自动测试使用 tempfile、scripted model/transport、gate 和暂停时间，不访问用户目录、应用数据
   或真实 Provider。
 - 不新增 HTTP server、前端页面、数据库、正式 Session/Run 类型或后台常驻进程。

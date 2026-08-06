@@ -3,13 +3,15 @@
 use std::{collections::BTreeMap, num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 use agent_context::ContextWindowEvaluator;
-use agent_core::{ExecutionBudget, ExecutionSpec};
+use agent_core::{ExecutionBudget, ExecutionSpec, ModelRequestConfig};
 use agent_memory::{
     CoordinatedMemoryRecall, CoordinatedMemoryRecallConfig, MemoryPropertyValue, MemoryRecall,
     PinnedMemoryLimits, PinnedMemoryStore, RecallSource, RecallSourceError, RecallSourceFuture,
     RecallSourceId, RecallSourceRequest, RecallSourceResponse,
 };
-use agent_model::{ModelService, SystemPromptSnapshot};
+use agent_model::{
+    GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
+};
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
 };
@@ -17,6 +19,7 @@ use agent_tools::{
     ListPinnedMemoriesTool, PinMemoryTool, RecallMemoryTool, RecallMemoryToolConfig, ToolRegistry,
     ToolSetSnapshot, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
+use agent_types::ToolChoice;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -43,6 +46,7 @@ pub(crate) struct ChatResources {
     pub(crate) memory: DemoMemoryResources,
     pub(crate) model: Arc<dyn ModelService>,
     pub(crate) context_window: Arc<ContextWindowEvaluator>,
+    pub(crate) model_request: ModelRequestConfig,
 }
 
 impl ChatResources {
@@ -52,6 +56,7 @@ impl ChatResources {
             model: Arc::clone(&self.model),
             context_window: Arc::clone(&self.context_window),
             tools: self.memory.tools.clone(),
+            model_request: self.model_request.clone(),
             budget: ExecutionBudget {
                 max_steps: Some(12),
                 max_tool_calls: Some(24),
@@ -82,7 +87,24 @@ pub(crate) async fn build_chat_resources(
             ContextWindowEvaluator::new(1.0)
                 .map_err(|error| DemoError::Config(error.to_string()))?,
         ),
+        model_request: deepseek_model_request_config(),
     })
+}
+
+fn deepseek_model_request_config() -> ModelRequestConfig {
+    let mut provider_options = ProviderOptions::new();
+    provider_options
+        .insert(
+            "deepseek",
+            serde_json::json!({"thinking": {"type": "enabled"}}),
+        )
+        .expect("static DeepSeek provider options are valid");
+    ModelRequestConfig {
+        tool_choice: ToolChoice::Auto,
+        generation: GenerationConfig::default(),
+        reasoning: Some(ReasoningConfig { effort: None }),
+        provider_options,
+    }
 }
 
 pub(crate) async fn build_memory_resources(
@@ -283,6 +305,16 @@ mod tests {
     use agent_memory::{MemoryRecallRequest, RecallFailureKind};
 
     use super::*;
+
+    #[test]
+    fn chat_uses_explicit_deepseek_thinking_request_config() {
+        let config = deepseek_model_request_config();
+        assert_eq!(config.reasoning, Some(ReasoningConfig { effort: None }));
+        assert_eq!(
+            config.provider_options.get("deepseek"),
+            Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
+        );
+    }
 
     #[tokio::test]
     async fn initialization_creates_examples_once_and_registers_fixed_tools() {

@@ -51,6 +51,8 @@ Agent Core、标准记忆工具以及私有本地 Store/RecallSource，但不属
   System Prompt，不动态修改 `recall_memory` Schema。
 - 五个标准记忆工具通过普通 Registry、AllowAllAuthorizer、ExecutionRecorder 和 Agent Loop
   工作；AllowAll 只是 Demo 的明确装配选择。
+- 真实 DeepSeek Chat 的 `ExecutionSpec` 显式冻结 reasoning 和
+  `thinking: { type: enabled }`；不依赖 Provider 默认模式或模型包装器。
 - `/state` 是唯一主动展示完整冻结 Pinned Part 与最新 Store 正文的观察入口；默认活动日志
   不打印工具参数、reasoning 正文或完整记忆内容。
 - `/new` 只在无活动 Run 时创建读取最新 Store 的 Session；`/quit` 在活动 Run 中先取消并

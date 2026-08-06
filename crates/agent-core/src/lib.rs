@@ -17,9 +17,10 @@
 //! - [`AgentEvent`] / [`AgentEventStream`]：普通观察事件使用 bounded mpsc
 //!   （容量 256）+ `try_send`，唯一终态使用独立 oneshot 可靠交付；订阅断开
 //!   不影响执行。
-//! - [`ExecutionError`] / [`ExecutionBudget`] / [`GuardrailConfig`]：受控终止分类、
-//!   显式资源预算与可选启发式检测；工具失败与授权 `Deny` 不是执行错误，预算是
-//!   副作用前硬边界，Guardrail 只在显式配置后启用。
+//! - [`ModelRequestConfig`] / [`ExecutionError`] / [`ExecutionBudget`] /
+//!   [`GuardrailConfig`]：每 Step 复用的模型请求配置、受控终止分类、显式资源预算与
+//!   可选启发式检测；工具失败与授权 `Deny` 不是执行错误，预算是副作用前硬边界，
+//!   Guardrail 只在显式配置后启用。
 
 mod authorizer;
 mod context;
@@ -49,7 +50,7 @@ pub use policy::{
 pub use recorder::{
     ConversationDelta, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
 };
-pub use spec::{ExecutionBudget, ExecutionSpec};
+pub use spec::{ExecutionBudget, ExecutionSpec, ModelRequestConfig};
 
 #[cfg(test)]
 pub(crate) mod testutil {

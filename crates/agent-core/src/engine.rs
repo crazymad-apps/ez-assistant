@@ -29,17 +29,14 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use agent_context::ContextWindowDecision;
-use agent_model::{
-    GenerationConfig, LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest,
-    ProviderOptions,
-};
+use agent_model::{LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest};
 use agent_tools::{
     Dispatcher, ResolvedBatchItemRef, ResolvedToolBatch, ToolContext, ToolOutputChunk,
     ToolOutputSink,
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
-    ToolCall, ToolCallId, ToolChoice, ToolMessage, ToolResult, ToolResultContent, ToolResultStatus,
+    ToolCall, ToolCallId, ToolMessage, ToolResult, ToolResultContent, ToolResultStatus,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -189,10 +186,10 @@ impl Engine {
             system: self.spec.system_prompt.clone(),
             conversation: ConversationSnapshot::new(self.projection.clone()),
             tools: self.spec.tools.definitions().to_vec(),
-            tool_choice: ToolChoice::Auto,
-            generation: GenerationConfig::default(),
-            reasoning: None,
-            provider_options: ProviderOptions::new(),
+            tool_choice: self.spec.model_request.tool_choice.clone(),
+            generation: self.spec.model_request.generation.clone(),
+            reasoning: self.spec.model_request.reasoning.clone(),
+            provider_options: self.spec.model_request.provider_options.clone(),
         }
     }
 

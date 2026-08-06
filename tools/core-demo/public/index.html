@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Core Demo</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">EZ-ASSISTANT · V0.7.0</p>
+        <h1>Core Demo</h1>
+        <p class="subtitle">候选 Agent SDK、本地工具与安全策略验证宿主</p>
+      </div>
+      <div class="connection-block">
+        <span id="connection-indicator" class="status-dot" aria-hidden="true"></span>
+        <span id="connection-status">正在连接</span>
+      </div>
+      <div id="config-summary" class="config-summary"></div>
+    </header>
+
+    <div class="notice" role="note">
+      M7 使用真实 DeepSeek、显式 thinking/有限重试、上下文交接、真实本地工具和 Demo 私有 JSON 记忆。Shell 以当前用户权限运行，workdir 不是系统沙盒；
+      detached 进程不会因 Run 取消、Session 结束或页面关闭而停止，必须显式终止。
+    </div>
+
+    <main class="workspace">
+      <aside class="panel sessions-panel" aria-label="Sessions">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">SESSIONS</p>
+            <h2>临时会话</h2>
+          </div>
+          <button id="create-session" type="button">新建</button>
+        </div>
+        <div id="session-list" class="session-list"></div>
+        <section class="memory-panel" aria-label="Pinned memory management">
+          <div class="memory-heading">
+            <div>
+              <p class="eyebrow">PINNED MEMORY</p>
+              <h3 id="memory-summary">Store 加载中</h3>
+            </div>
+          </div>
+          <div id="memory-list" class="memory-list"></div>
+          <form id="memory-form" class="memory-form">
+            <label>
+              归类
+              <input id="memory-category" maxlength="64" value="preference" required />
+            </label>
+            <label>
+              正文
+              <textarea id="memory-content" rows="2" maxlength="4096" required></textarea>
+            </label>
+            <label>
+              属性 JSON
+              <input id="memory-attributes" value="{}" required />
+            </label>
+            <button id="add-memory" type="submit">添加到最新 Store</button>
+          </form>
+        </section>
+      </aside>
+
+      <section class="panel conversation-panel" aria-label="Conversation journal">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">AUTHORITATIVE SNAPSHOT</p>
+            <h2 id="session-title">请选择 Session</h2>
+          </div>
+          <span id="session-sequence" class="sequence">seq —</span>
+        </div>
+        <div id="message-list" class="message-list" aria-live="polite"></div>
+        <div id="streaming-card" class="streaming-card" hidden>
+          <p class="eyebrow">RUNNING PROJECTION</p>
+          <details open>
+            <summary>Reasoning</summary>
+            <pre id="streaming-reasoning"></pre>
+          </details>
+          <p id="streaming-text" class="streaming-text"></p>
+        </div>
+        <form id="run-form" class="composer">
+          <div class="mode-row">
+            <label>
+              执行模式
+              <select id="execution-mode">
+                <option value="plan">Plan</option>
+                <option value="build">Build</option>
+              </select>
+            </label>
+            <label>
+              审批模式
+              <select id="approval-mode">
+                <option value="ask">Ask</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+          </div>
+          <label for="message-input" class="sr-only">任务内容</label>
+          <textarea
+            id="message-input"
+            rows="3"
+            maxlength="16000"
+            placeholder="用自然语言描述任务，例如：创建 demo.txt 并写入 hello"
+          ></textarea>
+          <div class="composer-actions">
+            <span id="action-error" role="alert"></span>
+            <button id="submit-run" type="submit">运行</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="panel inspector-panel" aria-label="Run inspector">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">RUN INSPECTOR</p>
+            <h2>执行状态</h2>
+          </div>
+          <button id="cancel-run" type="button" class="danger">取消</button>
+        </div>
+        <div class="inspector-scroll">
+          <dl id="run-inspector" class="inspector-list"></dl>
+          <section id="approval-card" class="approval-card" hidden></section>
+          <section class="inspector-section">
+            <h3>工具输出</h3>
+            <div id="tool-activity"></div>
+          </section>
+          <section class="inspector-section">
+            <h3>安全审计</h3>
+            <div id="audit-list"></div>
+          </section>
+          <div class="explanation">
+            <h3>验证提示</h3>
+            <p>当前使用真实 DeepSeek。请用自然语言要求模型读取、修改文件或执行 Shell；工具调用由模型自主决定。</p>
+            <p><code>pin_memory</code> 等工具修改最新 Store，但当前 Session 的冻结 Prompt 不会变化；新建 Session 才读取最新内容。</p>
+            <p><code>recall_memory</code> 默认查询 <code>demo_records</code>；同时指定 <code>failing_demo</code> 可观察部分失败。</p>
+            <p>Plan 只读 workdir、可写 Session 临时工作区且拒绝 Shell；Build 未命中规则时 Ask 审批、Auto 放行。</p>
+            <p>SSE 只携带失效通知；刷新页面不会取消后台 Run。</p>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

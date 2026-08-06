@@ -23,8 +23,9 @@ use agent_memory::{
     PinnedMemoryDraft, PinnedMemoryLimits, RecallItem, RecallOrigin, RecallSourceId,
 };
 use agent_model::{
-    ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelRequest,
-    ModelService, ModelStreamFuture, SystemPromptSnapshot,
+    GenerationConfig, ModelCallContext, ModelCapabilities, ModelError, ModelEvent,
+    ModelEventStream, ModelRequest, ModelService, ModelStreamFuture, ProviderOptions,
+    ReasoningConfig, ReasoningEffort, SystemPromptSnapshot,
 };
 use agent_testkit::{
     AuthorizeGate, FakePinnedMemoryStore, FakeShellCompletion, FakeShellScript, FakeShellTool,
@@ -39,8 +40,8 @@ use agent_tools::{
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
     OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage,
-    ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
-    UserMessage, UserPart,
+    ToolCall, ToolCallId, ToolChoice, ToolMessage, ToolName, ToolResult, ToolResultContent,
+    ToolResultStatus, UserMessage, UserPart,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -223,6 +224,7 @@ fn make_spec_with_threshold(
             ContextWindowEvaluator::new(threshold).expect("valid test threshold"),
         ),
         tools,
+        model_request: agent_core::ModelRequestConfig::default(),
         budget,
         guardrails: None,
     }
@@ -385,10 +387,78 @@ async fn plain_text_completes_with_empty_tool_set() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].system, system_prompt());
     assert!(requests[0].tools.is_empty());
+    assert_eq!(requests[0].tool_choice, ToolChoice::Auto);
+    assert_eq!(requests[0].generation, GenerationConfig::default());
+    assert_eq!(requests[0].reasoning, None);
+    assert!(requests[0].provider_options.is_empty());
     assert_eq!(
         requests[0].conversation.messages,
         vec![ConversationMessage::User(user_input)]
     );
+}
+
+#[tokio::test]
+async fn model_request_config_is_reused_across_every_tool_loop_step() {
+    let log = OrderLog::new();
+    let tool_name = tool_name("configured_tool");
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&calls_message(
+                "message_config_tool",
+                vec![call("call_config", tool_name.as_str(), json!({"value": 1}))],
+            ))),
+            ModelScript::Events(message_events(&text_message(
+                "message_config_final",
+                "configured",
+            ))),
+        ],
+    ));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        tool_name.as_str(),
+        json!({"ok": true}),
+        log.clone(),
+    )]);
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log));
+    let mut provider_options = ProviderOptions::new();
+    provider_options
+        .insert("fixture", json!({"mode": "strict"}))
+        .expect("valid fixture options");
+    let expected_config = agent_core::ModelRequestConfig {
+        tool_choice: ToolChoice::Named(tool_name),
+        generation: GenerationConfig {
+            temperature: Some(0.25),
+            top_p: Some(0.8),
+            max_output_tokens: Some(512),
+            stop: vec!["done".to_owned()],
+        },
+        reasoning: Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+        }),
+        provider_options,
+    };
+    let mut spec = make_spec(model.clone(), tools, ExecutionBudget::default());
+    spec.model_request = expected_config.clone();
+    let (input, _) = make_input(vec![]);
+
+    let (outcome, _) = finish(AgentExecution::start(
+        spec,
+        input,
+        make_context(recorder, authorizer),
+    ))
+    .await;
+    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_eq!(request.tool_choice, expected_config.tool_choice);
+        assert_eq!(request.generation, expected_config.generation);
+        assert_eq!(request.reasoning, expected_config.reasoning);
+        assert_eq!(request.provider_options, expected_config.provider_options);
+    }
 }
 
 #[tokio::test]

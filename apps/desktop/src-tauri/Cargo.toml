@@ -15,5 +15,5 @@ workspace = true
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-assistant-runtime = { path = "../../../crates/assistant-runtime" }
+assistant-protocol = { path = "../../../crates/assistant-protocol" }
 tauri = { version = "2.11.5", features = [] }

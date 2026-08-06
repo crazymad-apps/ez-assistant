@@ -13,11 +13,13 @@ use std::{
 use agent_context::ContextWindowEvaluator;
 use agent_core::{
     AgentExecution, AllowAllAuthorizer, ExchangeReceipt, ExecutionBudget, ExecutionContext,
-    ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec, RecordError, RecordFuture,
+    ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec, ModelRequestConfig,
+    RecordError, RecordFuture,
 };
 use agent_model::{
-    ModelCallContext, ModelCapabilities, ModelEventStream, ModelRequest, ModelRetryPolicy,
-    ModelService, ModelStreamFuture, RetryingModelService, SystemPromptSnapshot, TraceContext,
+    GenerationConfig, ModelCallContext, ModelCapabilities, ModelEventStream, ModelRequest,
+    ModelRetryPolicy, ModelService, ModelStreamFuture, ProviderOptions, ReasoningConfig,
+    RetryingModelService, SystemPromptSnapshot, TraceContext,
 };
 use agent_provider_openai_compatible::{
     BearerCredential, ObservedTransport, OpenAiCompatibleService, Profile, ReqwestTransport,
@@ -25,8 +27,8 @@ use agent_provider_openai_compatible::{
 };
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolRegistry, ToolResolution};
 use agent_types::{
-    ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart, ToolName, UserMessage,
-    UserPart,
+    ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart, ToolChoice, ToolName,
+    UserMessage, UserPart,
 };
 use futures_util::StreamExt;
 use schemars::JsonSchema;
@@ -55,6 +57,22 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 const SYSTEM_PROMPT: &str = "You are the reliability demo agent. Before answering the user, call \
 reliability_probe exactly once with a short non-sensitive label describing the request. Then answer \
 concisely. The probe is deterministic and has no external side effects.";
+
+fn deepseek_model_request_config() -> ModelRequestConfig {
+    let mut provider_options = ProviderOptions::new();
+    provider_options
+        .insert(
+            "deepseek",
+            serde_json::json!({"thinking": {"type": "enabled"}}),
+        )
+        .expect("static DeepSeek provider options are valid");
+    ModelRequestConfig {
+        tool_choice: ToolChoice::Auto,
+        generation: GenerationConfig::default(),
+        reasoning: Some(ReasoningConfig { effort: None }),
+        provider_options,
+    }
+}
 
 /// `record` 命令已经完成语法校验的显式参数。
 pub(crate) struct RecordOptions {
@@ -184,6 +202,7 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
         model,
         context_window,
         tools,
+        model_request: deepseek_model_request_config(),
         // Demo 用显式小边界限制真实费用和重复工具调用，不属于 Core 隐藏默认。
         budget: ExecutionBudget {
             max_steps: Some(4),
@@ -660,6 +679,16 @@ mod tests {
         events: Vec<ModelEvent>,
     }
 
+    #[test]
+    fn record_uses_explicit_deepseek_thinking_request_config() {
+        let config = deepseek_model_request_config();
+        assert_eq!(config.reasoning, Some(ReasoningConfig { effort: None }));
+        assert_eq!(
+            config.provider_options.get("deepseek"),
+            Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
+        );
+    }
+
     impl ModelService for ImmediateModel {
         fn capabilities(&self) -> &ModelCapabilities {
             &self.capabilities
@@ -891,6 +920,7 @@ mod tests {
                     ContextWindowEvaluator::new(0.8).expect("valid threshold"),
                 ),
                 tools: tool_snapshot().expect("fixed tool"),
+                model_request: agent_core::ModelRequestConfig::default(),
                 budget: ExecutionBudget {
                     max_steps: Some(4),
                     max_tool_calls: Some(1),

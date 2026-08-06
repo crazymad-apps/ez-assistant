@@ -1,0 +1,44 @@
+[package]
+name = "assistant-runtime-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.89"
+
+[[bin]]
+name = "ez-assistant-runtime"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+demo-client = ["dep:crossterm", "dep:futures-util", "dep:ratatui", "dep:tui-input"]
+
+[dependencies]
+agent-context = { path = "../../crates/agent-context" }
+agent-core = { path = "../../crates/agent-core" }
+agent-model = { path = "../../crates/agent-model" }
+agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
+agent-sdk = { path = "../../crates/agent-sdk" }
+agent-tools = { path = "../../crates/agent-tools" }
+agent-types = { path = "../../crates/agent-types" }
+assistant-protocol = { path = "../../crates/assistant-protocol" }
+assistant-runtime = { path = "../../crates/assistant-runtime" }
+clap.workspace = true
+crossterm = { workspace = true, optional = true }
+dotenvy.workspace = true
+futures-util = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true, features = ["unstable-rendered-line-info"] }
+schemars = "1.2.1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "rt-multi-thread", "signal"] }
+tokio-util.workspace = true
+tui-input = { workspace = true, optional = true }
+
+[dev-dependencies]
+agent-testkit = { path = "../../crates/agent-testkit" }
+tempfile.workspace = true

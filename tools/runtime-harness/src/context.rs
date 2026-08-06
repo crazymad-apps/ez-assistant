@@ -433,6 +433,7 @@ mod tests {
                 ContextWindowEvaluator::new(threshold).expect("valid threshold"),
             ),
             tools: Default::default(),
+            model_request: agent_core::ModelRequestConfig::default(),
             budget: ExecutionBudget::default(),
             guardrails: None,
         })

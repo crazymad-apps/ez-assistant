@@ -92,6 +92,10 @@ pub struct AgentExecution {
 
 impl AgentExecution {
     /// 启动一次 Agent 执行：冻结规格与输入，spawn 唯一驱动任务后立即返回。
+    ///
+    /// # Panics
+    ///
+    /// 当前线程不在可用于 [`tokio::spawn`] 的 Tokio Runtime 中时会 panic。
     pub fn start(
         spec: ExecutionSpec,
         input: ExecutionInput,
@@ -158,7 +162,7 @@ mod tests {
     use super::*;
     use crate::{
         AgentEvent, AllowAllAuthorizer, BudgetKind, ConversationDelta, ExchangeReceipt,
-        ExecutionBudget, ExecutionRecorder, RecordFuture,
+        ExecutionBudget, ExecutionRecorder, ModelRequestConfig, RecordFuture,
     };
 
     /// 记录 delta 的最小 Recorder（agent-core 不允许依赖 agent-testkit）。
@@ -346,6 +350,7 @@ mod tests {
             model: Arc::new(model),
             context_window: Arc::new(ContextWindowEvaluator::new(0.8).expect("valid threshold")),
             tools: Default::default(),
+            model_request: ModelRequestConfig::default(),
             budget: ExecutionBudget::default(),
             guardrails: None,
         }

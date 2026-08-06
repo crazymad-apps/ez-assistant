@@ -19,13 +19,16 @@ use agent_context::{
 };
 use agent_core::{
     AgentEventStream, AgentExecution, CompletionFuture, ExecutionBudget, ExecutionOutcome,
-    ExecutionSpec,
+    ExecutionSpec, ModelRequestConfig,
 };
-use agent_model::{ModelService, SystemPromptSnapshot};
+use agent_model::{
+    GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
+};
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
 };
 use agent_tools::{ToolRegistry, ToolSetSnapshot};
+use agent_types::ToolChoice;
 use futures_util::StreamExt;
 use thiserror::Error;
 
@@ -129,6 +132,7 @@ struct ChatResources {
     context_window: Arc<ContextWindowEvaluator>,
     strategy: Arc<dyn CompressionStrategy>,
     tools: ToolSetSnapshot,
+    model_request: ModelRequestConfig,
     endpoint: String,
     configured_model: String,
 }
@@ -149,6 +153,7 @@ impl ChatResources {
             model,
             context_window: Arc::clone(&self.context_window),
             tools: self.tools.clone(),
+            model_request: self.model_request.clone(),
             budget: ExecutionBudget {
                 max_steps: Some(8),
                 max_tool_calls: Some(8),
@@ -190,6 +195,22 @@ enum ChatSignal {
     Outcome(ExecutionOutcome),
 }
 
+fn deepseek_model_request_config() -> ModelRequestConfig {
+    let mut provider_options = ProviderOptions::new();
+    provider_options
+        .insert(
+            "deepseek",
+            serde_json::json!({"thinking": {"type": "enabled"}}),
+        )
+        .expect("static DeepSeek provider options are valid");
+    ModelRequestConfig {
+        tool_choice: ToolChoice::Auto,
+        generation: GenerationConfig::default(),
+        reasoning: Some(ReasoningConfig { effort: None }),
+        provider_options,
+    }
+}
+
 async fn run_chat(
     debug_url: Option<String>,
     debug_layer: cli::DebugLayerSelection,
@@ -225,6 +246,7 @@ async fn run_chat(
             .map_err(|error| HarnessError::Config(error.to_string()))?,
         )),
         tools: demo_tools()?,
+        model_request: deepseek_model_request_config(),
         endpoint,
         configured_model: config.model.clone(),
     };
@@ -739,6 +761,16 @@ fn sanitized_url(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_uses_explicit_deepseek_thinking_request_config() {
+        let config = deepseek_model_request_config();
+        assert_eq!(config.reasoning, Some(ReasoningConfig { effort: None }));
+        assert_eq!(
+            config.provider_options.get("deepseek"),
+            Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
+        );
+    }
 
     #[test]
     fn cli_and_config_errors_use_exit_code_two() {

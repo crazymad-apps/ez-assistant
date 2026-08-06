@@ -10,10 +10,10 @@ use std::{
 use agent_context::ContextWindowEvaluator;
 use agent_core::{
     ActiveGuardrailMode, ExecutionBudget, ExecutionSpec, GuardrailCheckConfig, GuardrailConfig,
+    ModelRequestConfig,
 };
 use agent_model::{
-    ModelCallContext, ModelError, ModelRequest, ModelService, ModelStreamFuture, ReasoningConfig,
-    SystemPromptSnapshot,
+    GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
@@ -26,6 +26,7 @@ use agent_tools::{
 use agent_tools_local::{
     EnvironmentPolicy, LocalFileSystem, LocalFileSystemConfig, LocalShell, LocalShellConfig,
 };
+use agent_types::ToolChoice;
 use thiserror::Error;
 
 const CONTEXT_THRESHOLD: f64 = 0.8;
@@ -41,66 +42,24 @@ pub(crate) struct DemoResources {
     model: Arc<dyn ModelService>,
     context_window: Arc<ContextWindowEvaluator>,
     tools: ToolSetSnapshot,
+    model_request: ModelRequestConfig,
 }
 
-/// 为 Safety Demo 的 DeepSeek 服务冻结 thinking 模式请求配置。
-///
-/// Core 保持 Provider-neutral，不按 Provider 名称注入私有参数；Demo 在装配真实服务时
-/// 用该薄包装器保证每个模型 Step 都显式携带 `thinking.type = enabled`。
-struct DeepSeekThinkingModel {
-    inner: Arc<dyn ModelService>,
-}
-
-impl DeepSeekThinkingModel {
-    fn new(inner: Arc<dyn ModelService>) -> Self {
-        Self { inner }
+/// 为真实 DeepSeek 会话冻结每个 Model Step 复用的显式 thinking 配置。
+fn deepseek_model_request_config() -> ModelRequestConfig {
+    let mut provider_options = ProviderOptions::new();
+    provider_options
+        .insert(
+            "deepseek",
+            serde_json::json!({"thinking": {"type": "enabled"}}),
+        )
+        .expect("static DeepSeek provider options are valid");
+    ModelRequestConfig {
+        tool_choice: ToolChoice::Auto,
+        generation: GenerationConfig::default(),
+        reasoning: Some(ReasoningConfig { effort: None }),
+        provider_options,
     }
-}
-
-impl ModelService for DeepSeekThinkingModel {
-    fn capabilities(&self) -> &agent_model::ModelCapabilities {
-        self.inner.capabilities()
-    }
-
-    fn context_window_tokens(&self) -> u64 {
-        self.inner.context_window_tokens()
-    }
-
-    fn stream(
-        &self,
-        mut request: ModelRequest,
-        context: ModelCallContext,
-    ) -> ModelStreamFuture<'_> {
-        if let Err(error) = configure_deepseek_thinking(&mut request) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.inner.stream(request, context)
-    }
-}
-
-fn configure_deepseek_thinking(request: &mut ModelRequest) -> Result<(), ModelError> {
-    let mut options = request
-        .provider_options
-        .get("deepseek")
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let enabled = serde_json::json!({"type": "enabled"});
-    if let Some(existing) = options.get("thinking")
-        && existing != &enabled
-    {
-        return Err(ModelError::Config(
-            "Safety Demo requires DeepSeek thinking mode to remain enabled".to_owned(),
-        ));
-    }
-    options.insert("thinking".to_owned(), enabled);
-    request
-        .reasoning
-        .get_or_insert(ReasoningConfig { effort: None });
-    request
-        .provider_options
-        .insert("deepseek", serde_json::Value::Object(options))
-        .map_err(|error| ModelError::Config(error.to_string()))
 }
 
 impl DemoResources {
@@ -136,14 +95,25 @@ impl DemoResources {
             TransportTimeouts::default(),
         )
         .map_err(|error| ResourceError::Provider(error.to_string()))?;
-        let service = Arc::new(service) as Arc<dyn ModelService>;
-        let model = Arc::new(DeepSeekThinkingModel::new(service));
-        Self::with_model(session_workdir, model)
+        Self::with_model_and_request(
+            session_workdir,
+            Arc::new(service),
+            deepseek_model_request_config(),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_model(
         session_workdir: &AbsolutePath,
         model: Arc<dyn ModelService>,
+    ) -> Result<Arc<Self>, ResourceError> {
+        Self::with_model_and_request(session_workdir, model, ModelRequestConfig::default())
+    }
+
+    fn with_model_and_request(
+        session_workdir: &AbsolutePath,
+        model: Arc<dyn ModelService>,
+        model_request: ModelRequestConfig,
     ) -> Result<Arc<Self>, ResourceError> {
         let context_window = Arc::new(
             ContextWindowEvaluator::new(CONTEXT_THRESHOLD)
@@ -154,6 +124,7 @@ impl DemoResources {
             model,
             context_window,
             tools,
+            model_request,
         }))
     }
 
@@ -168,6 +139,7 @@ impl DemoResources {
             model: self.model.clone(),
             context_window: self.context_window.clone(),
             tools: self.tools.clone(),
+            model_request: self.model_request.clone(),
             budget: ExecutionBudget::default(),
             guardrails: Some(GuardrailConfig {
                 repeated_invocation: Some(GuardrailCheckConfig {
@@ -285,92 +257,17 @@ pub(crate) enum ResourceError {
 
 #[cfg(test)]
 mod tests {
-    use agent_model::{
-        GenerationConfig, ModelCapabilities, ModelTransportErrorKind, ProviderOptions,
-    };
-    use agent_testkit::{ModelScript, ScriptedModelService};
-    use agent_types::{ConversationSnapshot, ToolChoice};
-
     use super::*;
 
-    fn request() -> ModelRequest {
-        ModelRequest {
-            system: SystemPromptSnapshot::default(),
-            conversation: ConversationSnapshot::new(vec![]),
-            tools: vec![],
-            tool_choice: ToolChoice::Auto,
-            generation: GenerationConfig::default(),
-            reasoning: None,
-            provider_options: ProviderOptions::new(),
-        }
-    }
-
     #[test]
-    fn deepseek_demo_explicitly_enables_thinking_and_preserves_other_options() {
-        let mut request = request();
-        request
-            .provider_options
-            .insert("deepseek", serde_json::json!({"demo_marker": true}))
-            .expect("valid provider options");
-
-        configure_deepseek_thinking(&mut request).expect("configure thinking");
-
-        assert_eq!(request.reasoning, Some(ReasoningConfig { effort: None }));
+    fn deepseek_demo_freezes_explicit_thinking_request_config() {
+        let config = deepseek_model_request_config();
+        assert_eq!(config.tool_choice, ToolChoice::Auto);
+        assert_eq!(config.generation, GenerationConfig::default());
+        assert_eq!(config.reasoning, Some(ReasoningConfig { effort: None }));
         assert_eq!(
-            request.provider_options.get("deepseek"),
-            Some(&serde_json::json!({
-                "demo_marker": true,
-                "thinking": {"type": "enabled"}
-            }))
-        );
-    }
-
-    #[test]
-    fn deepseek_demo_rejects_a_conflicting_thinking_mode() {
-        let mut request = request();
-        request
-            .provider_options
-            .insert(
-                "deepseek",
-                serde_json::json!({"thinking": {"type": "disabled"}}),
-            )
-            .expect("valid provider options");
-
-        assert!(matches!(
-            configure_deepseek_thinking(&mut request),
-            Err(ModelError::Config(message)) if message.contains("remain enabled")
-        ));
-    }
-
-    #[tokio::test]
-    async fn deepseek_wrapper_configures_every_delegated_request() {
-        let inner = Arc::new(ScriptedModelService::new(
-            ModelCapabilities {
-                reasoning: true,
-                tool_calls: true,
-                streaming: true,
-            },
-            128_000,
-            [ModelScript::FailEstablishment(ModelError::Transport {
-                kind: ModelTransportErrorKind::Connection,
-                message: "offline fixture".to_owned(),
-            })],
-        ));
-        let model = DeepSeekThinkingModel::new(inner.clone());
-
-        assert!(matches!(
-            model.stream(request(), ModelCallContext::default()).await,
-            Err(ModelError::Transport { message, .. }) if message == "offline fixture"
-        ));
-        let requests = inner.take_requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].provider_options.get("deepseek"),
+            config.provider_options.get("deepseek"),
             Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
-        );
-        assert_eq!(
-            requests[0].reasoning,
-            Some(ReasoningConfig { effort: None })
         );
     }
 }

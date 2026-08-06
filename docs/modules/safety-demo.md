@@ -84,8 +84,9 @@ scripted Provider、Agent Core、`agent-tools-local`、内存 Session/Run/Journa
 - `--workdir` 必传且启动时冻结；Web API 不允许修改。
 - `--port` 缺省 `0`；非 loopback 地址不能由公开构造或 CLI 表达。
 - 只有真实对话入口加载 `.env` 和 Provider credential；测试与静态验证保持离线。
-- 真实 DeepSeek 服务由 Demo 装配层为每个 Model Step 显式注入
-  `thinking: { type: enabled }`，不依赖 Provider 默认模式，也不把该私有参数写进 Core。
+- 真实 DeepSeek 服务由 Demo 装配层构造显式 `ModelRequestConfig`，冻结 reasoning 和
+  `thinking: { type: enabled }`；Core 只逐 Step 机械投影配置，不依赖 Provider 默认模式或
+  DeepSeek 名称分支。
 - 配置错误尽早失败且脱敏，不能打印 API Key 或带 credential 的环境摘要。
 - Session 临时工作区在 reset/shutdown 时显式 close；异常 drop 只承诺尽力清理。
 

@@ -33,6 +33,21 @@
 - 可选字段必须区分“未知/未提供”和真实空值语义。
 - 错误对外提供稳定代码和安全消息，内部错误链不直接序列化给 UI。
 
+## v0.8.0 初始化契约
+
+- `PROTOCOL_VERSION = 1` 只供 Runtime Host 私有握手比较应用契约版本，不表示 HTTP、WebSocket
+  或其他传输协议。
+- 公共 ID 包含 Session、Run、Message、Part 和 ToolCall；均为经过非空校验的透明字符串
+  newtype，具体生成格式不构成契约。
+- 公共命令只包含 create/list/get Session、start/get/cancel Run 和 shutdown；成功结果与事件使用
+  显式 serde tag，失败使用稳定 `RuntimeErrorCode` 和脱敏消息。
+- 公共快照只表达 Session 摘要以及 Run/Tool 的当前观察投影。完整规范 Conversation、pending
+  exchange、Core/Provider 原始对象均不进入本 crate。
+- request correlation ID、握手 envelope、Unix Socket、length-prefixed JSON frame 和 Demo 私有
+  Conversation 查询属于 `apps/runtime-host`，不得因当前实现方便提升为公共 Protocol。
+- 本版本不定义事件 sequence、replay cursor、持久化、Plan/Build、审批、Workspace、上传或记忆
+  DTO。
+
 ## Harness 验证
 
 - 序列化 round-trip。

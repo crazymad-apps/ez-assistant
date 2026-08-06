@@ -47,6 +47,19 @@ Agent Engine
 
 依赖只能由上向下；Agent Engine 及其能力接口不得反向依赖 Runtime 或应用层。
 
+正式产品的物理运行形态为：
+
+```text
+Tauri Desktop 进程
+        │ assistant-protocol / local Runtime Client
+        ▼
+Runtime Host 进程
+        └── assistant-runtime → agent-sdk / agent-core
+```
+
+Runtime Host 是正式产品进程；Session 是该进程内的逻辑单元，不创建会话级操作系统子进程。
+系统 daemon、开机启动和崩溃拉起是后续平台生命周期能力，不能与独立 Runtime 进程混为一谈。
+
 窗口判断、规范历史布局、replacement 校验和压缩策略边界位于共享
 `agent-context` crate。v0.3.0 的正式调用方是 `agent-core`，临时
 `runtime-harness` 直接装配其余能力完成版本验证；正式 `assistant-runtime` 是否以及
@@ -94,12 +107,18 @@ pub struct ExecutionSpec {
     pub model: Arc<dyn ModelService>,
     pub tools: ToolSetSnapshot,
     pub context_window: Arc<ContextWindowEvaluator>,
+    pub model_request: ModelRequestConfig,
     pub budget: ExecutionBudget,
     pub guardrails: Option<GuardrailConfig>,
 }
 ```
 
 Core 不定义 `AgentProfile`。配置文件、用户偏好、Agent 模板、会话覆盖和临时参数均由 Runtime 合并；`ExecutionSpec` 是执行时唯一事实源。
+
+`ModelRequestConfig` 只冻结 `tool_choice`、generation、reasoning 和命名空间化
+Provider Options，并在同一 AgentExecution 的每个 Model Step 原样复用。endpoint、credential、
+model 和 context window 仍属于 ModelService 构造；Core 不按 Provider 名称分支或自动启用
+DeepSeek thinking。
 
 ### 5.2 执行输入与控制
 
@@ -496,6 +515,25 @@ v0.6.0 不新建 recording 或 replay 公共 crate：Provider wire 事件归具�
 事件与建立重试归 `agent-model`；正式持久化编排未来归 Runtime。`tools/reliability-demo` 是顶层
 验证调用方，私有实现 Trace 文件、Loader、ReplayTransport、ReplayModelService、Timeline 和
 宿主事件，不得把这些临时类型上提为 Runtime 或应用协议。
+
+v0.7.0 新增 `agent-sdk` 作为 `agent-core` 的薄 Facade：一个 Agent 对应一个会话内冻结的
+Model、System Prompt、Context Window、ToolSet、请求配置、Budget 和 Guardrail 装配，最终仍
+调用唯一的 `AgentExecution::start`。SDK 不持有动态 Conversation、Session、Run、Journal、
+审批、Store 或调度状态，也不依赖具体 Provider、本地 Adapter 或应用层。同一会话的执行串行由
+上层保证，不同 Agent 可以共享线程安全的底层服务并由 Tokio 异步并发。
+普通入口、扩展 SPI 与高级 Adapter API 的候选分层记录在
+[`Agent SDK 导读`](../Agent-SDK导读.md)；SDK 只精选重导普通启动路径直接
+需要的类型，不隐藏底层扩展边界。
+
+`tools/core-demo` 是 v0.7.0 的顶层 B/S 验证宿主，可以私有实现多 Session、内存 Journal、
+安全/审批、JSON Memory Store、Context continuation 和 HTTP/SSE 页面，并装配真实 Provider 与
+本地 Adapter。它不属于正式 Runtime、Protocol、Desktop、sidecar 或 daemon；这些私有类型、
+文件格式和 HTTP 契约均不得上提为产品或 SDK API。
+
+v0.8.0 开始建立正式 `assistant-runtime` 与 `apps/runtime-host`：Runtime library 持有内存 Session、
+Conversation、Run 和执行监督的权威状态，Host 只负责进程入口、具体资源装配与私有本地通信。
+本版本的 Host 是手动启动的正式产品进程，不是 `tools/*` Demo，也不等同于已经实现系统 daemon；
+Unix Socket wire 和命令行验证客户端不构成公共应用协议。
 
 ## 十四、Harness 验证
 

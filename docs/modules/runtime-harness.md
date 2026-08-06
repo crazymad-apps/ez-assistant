@@ -30,6 +30,8 @@
   数据库或真实 Shell。
 - 真实 Provider 只由显式 `chat` 模式启用；credential 只用于 service 构造，不进入
   请求 DTO、事件、错误、控制台或调试 payload。
+- 真实 DeepSeek Chat 的正常 AgentExecution 显式冻结 reasoning 和
+  `thinking: { type: enabled }`；调试观察装饰器只透传该配置，不负责注入或改写。
 - 调试推送只建立到 debug-viewer 的出向连接；viewer 不可用不得影响执行。
 - stdin 阻塞只允许在专用线程中；Tokio 执行线程不得被阻塞。
 - 不为临时 Harness 提前实现正式 Runtime 的持久化、恢复、调度、多 Session 并发、

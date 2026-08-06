@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model: model.clone(),
             context_window: Arc::new(ContextWindowEvaluator::new(0.8)?),
             tools: registry.snapshot(),
+            model_request: agent_core::ModelRequestConfig::default(),
             budget: ExecutionBudget {
                 max_steps: Some(4),
                 max_tool_calls: Some(2),

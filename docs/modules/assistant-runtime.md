@@ -2,7 +2,8 @@
 
 ## 模块定位
 
-`crates/assistant-runtime` 是应用业务运行时和权威状态所有者。第一阶段直接运行在 Tauri Rust 进程内，不是 sidecar 或本地服务。
+`crates/assistant-runtime` 是应用业务运行时和权威状态所有者。正式产品由独立 Runtime Host
+进程承载本 crate；Tauri 只通过应用协议连接，不直接嵌入或装配 Runtime。
 
 修改前必须阅读：
 
@@ -28,7 +29,7 @@
 ## 并发模型
 
 ```text
-Tauri 进程
+Runtime Host 进程
 └── Tokio Runtime
     ├── Session A：Run 串行
     ├── Session B：Run 串行
@@ -114,6 +115,16 @@ Tauri 进程
   和 Timeline；这些文件、metadata、宿主事件和 CLI 不得直接复制为正式 Runtime 契约。
 - 流建立后失败、Context Overflow、Length 或任务未完成后的续跑仍需未来 Runtime 显式启动新的
   AgentExecution，不与本版本的同一步建立重试混同。
+
+## v0.8.0 初始化边界
+
+- 正式 Runtime 由 `apps/runtime-host` 独立产品进程装配，不再直接嵌入 Tauri 进程。
+- `v0.8.0` 只实现内存 Session、Conversation、Run、事件、取消和受控关闭；不实现 Repository、
+  Scheduler、Plan/Build、审批、Workspace、记忆或系统后台托管。
+- 同一 Session 活动 Run 未结束时返回 `SessionBusy`，不隐藏排队；不同 Session 使用 Tokio 任务
+  并发，不绑定永久线程或永久 actor task。
+- Runtime 事件允许丢失，Conversation 与 Run 快照是查询依据；本版本不提供事件回放。
+- Runtime Host 的 Unix Socket、私有 wire、Demo 和具体 Provider/工具装配不得进入本 crate。
 
 ## Harness 验证
 

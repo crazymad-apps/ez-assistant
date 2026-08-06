@@ -483,6 +483,7 @@ fn make_spec(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> ExecutionS
             ContextWindowEvaluator::new(0.8).expect("valid scenario threshold"),
         ),
         tools,
+        model_request: agent_core::ModelRequestConfig::default(),
         budget: ExecutionBudget {
             max_steps: Some(8),
             max_tool_calls: Some(8),
