@@ -1,9 +1,12 @@
 //! Runtime library 的结构化错误及应用协议映射。
 
-use assistant_protocol::{RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle, SessionId};
+use agent_sdk::AgentBuildError;
+use assistant_protocol::{
+    ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle, SessionId,
+};
 use thiserror::Error;
 
-use crate::AgentFactoryError;
+use crate::{ModelServiceFactoryError, SystemPromptFactoryError};
 
 /// Runtime 操作失败。
 #[derive(Debug, Error)]
@@ -46,12 +49,32 @@ pub enum RuntimeError {
         /// 发生内部故障的 Session。
         session_id: SessionId,
     },
-    /// Session Agent 构造失败，未插入半成品 Session。
-    #[error("session agent could not be created")]
-    AgentBuildFailed {
-        /// Host/Factory 保留的底层错误链。
+    /// 当前配置没有可供业务使用的 active 快照。
+    #[error("runtime configuration is unavailable")]
+    ConfigurationUnavailable,
+    /// 用户指定的模型 key 不存在。
+    #[error("model `{model_key}` was not found")]
+    ModelNotFound { model_key: ModelKey },
+    /// 模型条目存在但当前静态配置无效。
+    #[error("model `{model_key}` is unavailable")]
+    ModelUnavailable { model_key: ModelKey },
+    /// Host 无法从已校验配置构造具体模型服务。
+    #[error("model service could not be created")]
+    ModelBuildFailed {
         #[source]
-        source: AgentFactoryError,
+        source: ModelServiceFactoryError,
+    },
+    /// System Prompt 在 Session 入库前构造失败。
+    #[error("system prompt could not be created")]
+    SystemPromptBuildFailed {
+        #[source]
+        source: SystemPromptFactoryError,
+    },
+    /// Run Agent 构造失败，UserMessage 尚未写入。
+    #[error("run agent could not be created")]
+    AgentBuildFailed {
+        #[source]
+        source: AgentBuildError,
     },
     /// 锁中毒、标识耗尽或其他不应向客户端暴露细节的内部错误。
     #[error("runtime internal state is unavailable: {component}")]
@@ -89,9 +112,24 @@ impl RuntimeError {
                 RuntimeErrorCode::Internal,
                 "session internal state is unavailable",
             ),
-            Self::AgentBuildFailed { .. } => RuntimeErrorInfo::new(
+            Self::ConfigurationUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ConfigurationUnavailable,
+                "runtime configuration is unavailable",
+            ),
+            Self::ModelNotFound { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::ModelNotFound, "model was not found")
+            }
+            Self::ModelUnavailable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ModelUnavailable,
+                "model configuration is unavailable",
+            ),
+            Self::ModelBuildFailed { .. } | Self::AgentBuildFailed { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ModelBuildFailed,
+                "model could not be prepared for this run",
+            ),
+            Self::SystemPromptBuildFailed { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::AgentBuildFailed,
-                "session agent could not be created",
+                "system prompt could not be created",
             ),
             Self::InternalStateUnavailable { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
@@ -117,11 +155,11 @@ mod tests {
         assert_eq!(info.code, RuntimeErrorCode::Internal);
         assert!(!info.message.contains("sessions lock"));
 
-        let factory = RuntimeError::AgentBuildFailed {
-            source: AgentFactoryError::new("credential sk-private was invalid"),
+        let factory = RuntimeError::ModelBuildFailed {
+            source: ModelServiceFactoryError::new("model fixture failed"),
         };
         let info = factory.to_protocol_info();
-        assert_eq!(info.code, RuntimeErrorCode::AgentBuildFailed);
+        assert_eq!(info.code, RuntimeErrorCode::ModelBuildFailed);
         assert!(!info.message.contains("sk-private"));
     }
 }

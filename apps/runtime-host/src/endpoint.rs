@@ -106,7 +106,8 @@ fn prepare_parent(path: &Path) -> Result<(), EndpointError> {
                 source,
             }),
         Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::metadata(parent).map_err(|source| EndpointError::Io {
+            // 不跟随 symlink；`run/` 是 Runtime Home 内的私有通信目录。
+            let metadata = fs::symlink_metadata(parent).map_err(|source| EndpointError::Io {
                 path: parent.to_owned(),
                 source,
             })?;

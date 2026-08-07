@@ -16,8 +16,16 @@ pub enum RuntimeErrorCode {
     RunNotFound,
     /// Runtime 已开始关闭，不再接受新的变更操作。
     RuntimeShuttingDown,
-    /// 创建 Session Agent 失败。
+    /// 为一次 Run 构造 Agent 失败。
     AgentBuildFailed,
+    /// 当前配置无法提供模型快照。
+    ConfigurationUnavailable,
+    /// 指定模型 key 不存在。
+    ModelNotFound,
+    /// 指定模型条目存在但当前无效。
+    ModelUnavailable,
+    /// 已校验模型无法构造为本次 Run 的服务或 Agent。
+    ModelBuildFailed,
     /// 不应向客户端暴露内部细节的故障。
     Internal,
 }
@@ -57,6 +65,13 @@ mod tests {
                 "runtime_shutting_down",
             ),
             (RuntimeErrorCode::AgentBuildFailed, "agent_build_failed"),
+            (
+                RuntimeErrorCode::ConfigurationUnavailable,
+                "configuration_unavailable",
+            ),
+            (RuntimeErrorCode::ModelNotFound, "model_not_found"),
+            (RuntimeErrorCode::ModelUnavailable, "model_unavailable"),
+            (RuntimeErrorCode::ModelBuildFailed, "model_build_failed"),
             (RuntimeErrorCode::Internal, "internal"),
         ];
 

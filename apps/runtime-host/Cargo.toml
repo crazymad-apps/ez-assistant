@@ -28,7 +28,8 @@ assistant-protocol = { path = "../../crates/assistant-protocol" }
 assistant-runtime = { path = "../../crates/assistant-runtime" }
 clap.workspace = true
 crossterm = { workspace = true, optional = true }
-dotenvy.workspace = true
+dirs.workspace = true
+libc.workspace = true
 futures-util = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true, features = ["unstable-rendered-line-info"] }
 schemars = "1.2.1"

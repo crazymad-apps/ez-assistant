@@ -153,6 +153,11 @@ pub struct AgentExecution {
 
 Runtime 为每个 `AgentExecution` 单独消费事件，再附加自己的 `RunId` 和 `SessionId`。Core 事件不得为了方便 Runtime 合流而携带业务 ID。
 
+Runtime 必须显式持有消费事件和等待完成结果的 Run supervisor。受控关闭先传播取消并在
+有限时间内等待 supervisor；超过上限后可终止 supervisor，并由 Runtime 将仍处于活动态的业务
+Run 强制结算为内部失败。该兜底只保证 Runtime Host 不会无限等待，不代表 Core 已完整观察其
+内部执行 task 的 panic/JoinError；Core 自身的完成句柄契约需要单独演进。
+
 ## 六、执行状态机
 
 ```text
@@ -343,7 +348,7 @@ v0.6.0 不修改正式 Runtime，由顶层 `tools/reliability-demo` 私有验证
 `SystemPromptSnapshot`。修改 Store 不刷新当前 Session；恢复、继续、压缩续接和分支
 必须复用原快照，不能读取最新 Store 重建。
 
-最终 Session 只需保存渲染完成的 Prompt 状态。结构化条目、容量规则和 Store Adapter
+最终 Session 只需保存渲染完成的 System Prompt 状态。结构化条目、容量规则和 Store Adapter
 属于初始化输入与能力装配，不进入 Core 执行状态机。
 
 ### 9.2 Memory Recall
@@ -516,7 +521,7 @@ v0.6.0 不新建 recording 或 replay 公共 crate：Provider wire 事件归具�
 验证调用方，私有实现 Trace 文件、Loader、ReplayTransport、ReplayModelService、Timeline 和
 宿主事件，不得把这些临时类型上提为 Runtime 或应用协议。
 
-v0.7.0 新增 `agent-sdk` 作为 `agent-core` 的薄 Facade：一个 Agent 对应一个会话内冻结的
+v0.7.0 新增 `agent-sdk` 作为 `agent-core` 的薄 Facade：一个 Agent 对应一份冻结的
 Model、System Prompt、Context Window、ToolSet、请求配置、Budget 和 Guardrail 装配，最终仍
 调用唯一的 `AgentExecution::start`。SDK 不持有动态 Conversation、Session、Run、Journal、
 审批、Store 或调度状态，也不依赖具体 Provider、本地 Adapter 或应用层。同一会话的执行串行由
@@ -534,6 +539,12 @@ v0.8.0 开始建立正式 `assistant-runtime` 与 `apps/runtime-host`：Runtime 
 Conversation、Run 和执行监督的权威状态，Host 只负责进程入口、具体资源装配与私有本地通信。
 本版本的 Host 是手动启动的正式产品进程，不是 `tools/*` Demo，也不等同于已经实现系统 daemon；
 Unix Socket wire 和命令行验证客户端不构成公共应用协议。
+
+v0.9.0 由 Runtime 接管 Runtime Home 配置、脱敏诊断、model key 和 reload：Session 只冻结
+model key 与已渲染 System Prompt，每个 Run 按开始时取得的同一配置快照构造完整 Agent 和
+ModelService。Host 不保存第二份配置状态；reload 只影响后续 Run。Runtime 同时采用有界关闭并
+持有 Run supervisor 的终止能力，Host 显式观察连接子任务故障；Core 内部执行 task 的完整
+JoinError 所有权留到 v0.10.0。
 
 ## 十四、Harness 验证
 

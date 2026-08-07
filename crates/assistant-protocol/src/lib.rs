@@ -3,20 +3,31 @@
 //! 该 crate 应保持轻量，避免依赖具体 UI、存储或模型实现。
 
 mod command;
+mod config;
 mod error;
 mod event;
 mod id;
 mod snapshot;
 
 pub use command::{
-    CancelRunRequest, CancelRunResult, CreateSessionRequest, CreateSessionResult, GetRunRequest,
-    GetRunResult, GetSessionRequest, GetSessionResult, ListSessionsRequest, ListSessionsResult,
-    RuntimeCommand, RuntimeCommandResult, ShutdownRuntimeRequest, ShutdownRuntimeResult,
-    StartRunRequest, StartRunResult,
+    CancelRunRequest, CancelRunResult, ConnectionValidationFailure,
+    ConnectionValidationFailureKind, ConnectionValidationOutcome, CreateSessionRequest,
+    CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
+    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
+    ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
+    ReloadConfigRequest, ReloadConfigResult, RuntimeCommand, RuntimeCommandResult,
+    ShutdownRuntimeRequest, ShutdownRuntimeResult, StartRunRequest, StartRunResult,
+    ValidateModelConnectionRequest, ValidateModelConnectionResult,
+};
+pub use config::{
+    ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
+    ModelConfiguration,
 };
 pub use error::{RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::RuntimeEvent;
-pub use id::{IdentifierError, MessageId, PartId, RunId, SessionId, ToolCallId};
+pub use id::{
+    IdentifierError, MessageId, ModelKey, ModelKeyError, PartId, RunId, SessionId, ToolCallId,
+};
 pub use snapshot::{
     RunSnapshot, RunStatus, RuntimeLifecycle, SessionSummary, ToolActivitySnapshot,
     ToolActivityStatus, ToolOutputChannel,

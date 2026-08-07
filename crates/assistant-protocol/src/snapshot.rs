@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RunId, RuntimeErrorInfo, SessionId, ToolCallId};
+use crate::{ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId};
 
 /// Runtime 对外可见的生命周期状态。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -77,6 +77,8 @@ pub struct SessionSummary {
     pub session_id: SessionId,
     /// 创建 Session 时确定的展示标题。
     pub title: String,
+    /// Session 创建时冻结的用户模型 key。
+    pub model_key: ModelKey,
     /// 当前活动 Run；Session 空闲时为 `None`。
     pub active_run_id: Option<RunId>,
     /// 规范 Conversation 中已经完整提交的消息数量。

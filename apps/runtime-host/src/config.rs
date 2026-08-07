@@ -1,20 +1,17 @@
-//! Runtime Host 的显式 CLI 与环境配置。
+//! Runtime Host 的非敏感 bootstrap 参数与 Runtime Home 路径解析。
 
-use std::{
-    ffi::OsString,
-    num::{NonZeroU64, NonZeroUsize},
-    path::PathBuf,
-};
+use std::{ffi::OsString, num::NonZeroUsize, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
-const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
-const DEFAULT_MODEL: &str = "deepseek-chat";
-const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
-const DEFAULT_EVENT_CAPACITY: usize = 256;
-const DEFAULT_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+const DEFAULT_RUNTIME_HOME_DIRECTORY: &str = ".ez-assistant";
+const CONFIG_FILE: &str = "config.toml";
+const RUN_DIRECTORY: &str = "run";
 const SOCKET_FILE: &str = "runtime.sock";
+const DEFAULT_EVENT_CAPACITY: usize = 256;
+/// `sockaddr_un.sun_path` 在目标 Unix 平台上的保守可用字节数（包含末尾 NUL）。
+const MAX_SOCKET_PATH_BYTES_WITH_NUL: usize = 104;
 
 /// Runtime Host 的进程级命令行入口。
 #[derive(Debug, Parser)]
@@ -40,48 +37,34 @@ pub(crate) enum CliAction {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
 pub(crate) struct ServeArguments {
-    /// Runtime directory; defaults to OS temp/ez-assistant-runtime.
+    /// Absolute Runtime Home override; defaults to ~/.ez-assistant.
     #[arg(long, value_name = "PATH")]
-    runtime_dir: Option<PathBuf>,
-    /// Explicit Unix socket path; overrides --runtime-dir.
+    runtime_home: Option<PathBuf>,
+    /// Explicit absolute Unix socket path; independent from Runtime Home.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
-    /// Provider base URL; falls back to DEEPSEEK_BASE_URL, then <https://api.deepseek.com>.
-    #[arg(long, value_name = "URL")]
-    base_url: Option<String>,
-    /// Provider model; falls back to DEEPSEEK_MODEL, then deepseek-chat.
-    #[arg(long, value_name = "NAME")]
-    model: Option<String>,
-    /// Positive context-window tokens; falls back to DEEPSEEK_CONTEXT_WINDOW_TOKENS, then 128000.
-    #[arg(long, value_name = "TOKENS")]
-    context_window: Option<NonZeroU64>,
     /// Positive Runtime event buffer capacity; defaults to 256.
     #[arg(long, value_name = "COUNT")]
     event_capacity: Option<NonZeroUsize>,
-    /// Provider credential variable name; defaults to DEEPSEEK_API_KEY.
-    #[arg(long, value_name = "NAME")]
-    api_key_env: Option<String>,
 }
 
 #[cfg(feature = "demo-client")]
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
 pub(crate) struct DemoArguments {
-    /// Must resolve to the Host runtime directory.
+    /// Absolute Runtime Home override; defaults to ~/.ez-assistant.
     #[arg(long, value_name = "PATH")]
-    runtime_dir: Option<PathBuf>,
-    /// Explicit Unix socket path.
+    runtime_home: Option<PathBuf>,
+    /// Explicit absolute Unix socket path.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServeConfig {
+    pub(crate) runtime_home: PathBuf,
+    pub(crate) config_path: PathBuf,
     pub(crate) socket_path: PathBuf,
-    pub(crate) base_url: String,
-    pub(crate) model: String,
-    pub(crate) context_window_tokens: u64,
     pub(crate) event_capacity: NonZeroUsize,
-    pub(crate) api_key_env: String,
 }
 
 #[cfg(feature = "demo-client")]
@@ -92,10 +75,14 @@ pub(crate) struct DemoConfig {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub(crate) enum ConfigError {
-    #[error("environment variable `{0}` must be a positive integer")]
-    InvalidEnvironmentInteger(&'static str),
+    #[error("the user home directory is unavailable; use --runtime-home")]
+    HomeDirectoryUnavailable,
+    #[error("Runtime Home must be absolute")]
+    RelativeRuntimeHome,
     #[error("runtime socket path must be absolute")]
     RelativeSocketPath,
+    #[error("runtime socket path is too long; use --socket with a shorter absolute path")]
+    SocketPathTooLong,
 }
 
 pub(crate) fn parse_cli(
@@ -111,40 +98,15 @@ pub(crate) fn parse_cli(
 
 impl ServeConfig {
     pub(crate) fn resolve(arguments: ServeArguments) -> Result<Self, ConfigError> {
-        let socket_path = resolve_socket(arguments.runtime_dir, arguments.socket)?;
-        let base_url = arguments
-            .base_url
-            .or_else(|| optional_env("DEEPSEEK_BASE_URL"))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-        let model = arguments
-            .model
-            .or_else(|| optional_env("DEEPSEEK_MODEL"))
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let context_window_tokens = match arguments.context_window {
-            Some(value) => value.get(),
-            None => optional_env("DEEPSEEK_CONTEXT_WINDOW_TOKENS")
-                .map(|value| {
-                    value
-                        .parse::<NonZeroU64>()
-                        .map(NonZeroU64::get)
-                        .map_err(|_| {
-                            ConfigError::InvalidEnvironmentInteger("DEEPSEEK_CONTEXT_WINDOW_TOKENS")
-                        })
-                })
-                .transpose()?
-                .unwrap_or(DEFAULT_CONTEXT_WINDOW),
-        };
+        let runtime_home = resolve_runtime_home(arguments.runtime_home)?;
+        let socket_path = resolve_socket(&runtime_home, arguments.socket)?;
         Ok(Self {
+            config_path: runtime_home.join(CONFIG_FILE),
+            runtime_home,
             socket_path,
-            base_url,
-            model,
-            context_window_tokens,
             event_capacity: arguments.event_capacity.unwrap_or_else(|| {
                 NonZeroUsize::new(DEFAULT_EVENT_CAPACITY).expect("static capacity is non-zero")
             }),
-            api_key_env: arguments
-                .api_key_env
-                .unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_owned()),
         })
     }
 }
@@ -152,32 +114,48 @@ impl ServeConfig {
 #[cfg(feature = "demo-client")]
 impl DemoConfig {
     pub(crate) fn resolve(arguments: DemoArguments) -> Result<Self, ConfigError> {
+        let runtime_home = resolve_runtime_home(arguments.runtime_home)?;
         Ok(Self {
-            socket_path: resolve_socket(arguments.runtime_dir, arguments.socket)?,
+            socket_path: resolve_socket(&runtime_home, arguments.socket)?,
         })
     }
 }
 
-fn resolve_socket(
-    runtime_dir: Option<PathBuf>,
-    socket: Option<PathBuf>,
-) -> Result<PathBuf, ConfigError> {
-    let path = socket.unwrap_or_else(|| {
-        runtime_dir
-            .unwrap_or_else(|| std::env::temp_dir().join("ez-assistant-runtime"))
-            .join(SOCKET_FILE)
-    });
+fn resolve_runtime_home(override_path: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
+    let path = match override_path {
+        Some(path) => path,
+        None => default_runtime_home(dirs::home_dir())?,
+    };
     if path.is_absolute() {
         Ok(path)
     } else {
-        Err(ConfigError::RelativeSocketPath)
+        Err(ConfigError::RelativeRuntimeHome)
     }
 }
 
-fn optional_env(name: &'static str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+/// 只在 bootstrap 边界把 `~` 解析为绝对路径；后续代码始终持有完整路径。
+fn default_runtime_home(home: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
+    home.map(|path| path.join(DEFAULT_RUNTIME_HOME_DIRECTORY))
+        .ok_or(ConfigError::HomeDirectoryUnavailable)
+}
+
+fn resolve_socket(
+    runtime_home: &std::path::Path,
+    socket: Option<PathBuf>,
+) -> Result<PathBuf, ConfigError> {
+    let path = socket.unwrap_or_else(|| runtime_home.join(RUN_DIRECTORY).join(SOCKET_FILE));
+    if !path.is_absolute() {
+        return Err(ConfigError::RelativeSocketPath);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if path.as_os_str().as_bytes().len() + 1 > MAX_SOCKET_PATH_BYTES_WITH_NUL {
+            return Err(ConfigError::SocketPathTooLong);
+        }
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -186,17 +164,19 @@ mod tests {
 
     use super::*;
 
+    fn expect_serve(action: CliAction) -> ServeArguments {
+        match action {
+            CliAction::Serve(arguments) => arguments,
+            #[cfg(feature = "demo-client")]
+            CliAction::Demo(_) => panic!("serve action"),
+        }
+    }
+
     #[test]
     fn clap_generates_help_and_rejects_unknown_subcommands() {
         assert_eq!(
             parse_cli(Vec::<OsString>::new())
                 .expect_err("missing command")
-                .kind(),
-            ErrorKind::DisplayHelp
-        );
-        assert_eq!(
-            parse_cli([OsString::from("--help")])
-                .expect_err("help")
                 .kind(),
             ErrorKind::DisplayHelp
         );
@@ -209,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn clap_requires_positive_numbers_and_config_requires_absolute_socket() {
+    fn serve_requires_absolute_paths_and_positive_capacity() {
         assert_eq!(
             parse_cli([
                 OsString::from("serve"),
@@ -220,35 +200,79 @@ mod tests {
             .kind(),
             ErrorKind::ValueValidation
         );
-        let action = parse_cli([
-            OsString::from("serve"),
-            OsString::from("--socket"),
-            OsString::from("relative.sock"),
-        ])
-        .expect("parse");
-        let arguments = match action {
-            CliAction::Serve(arguments) => arguments,
-            #[cfg(feature = "demo-client")]
-            CliAction::Demo(_) => panic!("serve action"),
-        };
+        let arguments = expect_serve(
+            parse_cli([
+                OsString::from("serve"),
+                OsString::from("--runtime-home"),
+                OsString::from("relative"),
+            ])
+            .expect("parse"),
+        );
         assert_eq!(
             ServeConfig::resolve(arguments),
-            Err(ConfigError::RelativeSocketPath)
+            Err(ConfigError::RelativeRuntimeHome)
+        );
+    }
+
+    #[test]
+    fn serve_derives_config_and_socket_from_runtime_home() {
+        let home = std::env::temp_dir().join("runtime-host-config-test");
+        let arguments = expect_serve(
+            parse_cli([
+                OsString::from("serve"),
+                OsString::from("--runtime-home"),
+                home.clone().into_os_string(),
+            ])
+            .expect("parse"),
+        );
+        let config = ServeConfig::resolve(arguments).expect("config");
+        assert_eq!(config.runtime_home, home);
+        assert_eq!(config.config_path, home.join(CONFIG_FILE));
+        assert_eq!(
+            config.socket_path,
+            home.join(RUN_DIRECTORY).join(SOCKET_FILE)
+        );
+    }
+
+    #[test]
+    fn default_runtime_home_is_a_single_user_visible_root() {
+        let home = PathBuf::from("/Users/example");
+        assert_eq!(
+            default_runtime_home(Some(home.clone())),
+            Ok(home.join(".ez-assistant"))
+        );
+        assert_eq!(
+            default_runtime_home(None),
+            Err(ConfigError::HomeDirectoryUnavailable)
+        );
+    }
+
+    #[test]
+    fn rejects_overlong_socket_path() {
+        let home = PathBuf::from("/").join("x".repeat(MAX_SOCKET_PATH_BYTES_WITH_NUL));
+        assert_eq!(
+            resolve_socket(&home, None),
+            Err(ConfigError::SocketPathTooLong)
         );
     }
 
     #[cfg(feature = "demo-client")]
     #[test]
     fn demo_and_serve_resolve_the_same_explicit_socket() {
+        let home = std::env::temp_dir().join("runtime-host-config-test");
         let path = std::env::temp_dir().join("runtime-host-config-test.sock");
         let serve = parse_cli([
             OsString::from("serve"),
+            OsString::from("--runtime-home"),
+            home.clone().into_os_string(),
             OsString::from("--socket"),
             path.clone().into_os_string(),
         ])
         .expect("serve");
         let demo = parse_cli([
             OsString::from("demo"),
+            OsString::from("--runtime-home"),
+            home.into_os_string(),
             OsString::from("--socket"),
             path.clone().into_os_string(),
         ])

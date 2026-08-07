@@ -2,10 +2,12 @@
 
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    CancelRunRequest, CreateSessionRequest, GetRunRequest, GetSessionRequest, ListSessionsRequest,
-    RunId, RunSnapshot, RunStatus, RuntimeCommand, RuntimeCommandResult, RuntimeEvent, SessionId,
-    SessionSummary, ShutdownRuntimeRequest, StartRunRequest, ToolActivitySnapshot,
-    ToolActivityStatus, ToolCallId, ToolOutputChannel,
+    CancelRunRequest, ConfigurationState, ConfigurationStatus, CreateSessionRequest,
+    GetConfigStatusRequest, GetRunRequest, GetSessionRequest, ListModelsRequest,
+    ListSessionsRequest, ModelConfiguration, ModelKey, ReloadConfigRequest, RunId, RunSnapshot,
+    RunStatus, RuntimeCommand, RuntimeCommandResult, RuntimeEvent, SessionId, SessionSummary,
+    ShutdownRuntimeRequest, StartRunRequest, ToolActivitySnapshot, ToolActivityStatus, ToolCallId,
+    ToolOutputChannel, ValidateModelConnectionRequest,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -43,6 +45,9 @@ pub(crate) enum ConnectionStatus {
 #[derive(Debug, Default)]
 pub(crate) struct DemoApp {
     pub(crate) connection: ConnectionStatus,
+    pub(crate) configuration_status: Option<ConfigurationStatus>,
+    pub(crate) models: Vec<ModelConfiguration>,
+    pub(crate) selected_model_key: Option<ModelKey>,
     pub(crate) sessions: Vec<SessionSummary>,
     pub(crate) selected_session_id: Option<SessionId>,
     pub(crate) conversation: ConversationSnapshot,
@@ -50,6 +55,7 @@ pub(crate) struct DemoApp {
     pub(crate) input: Input,
     pub(crate) focus: Focus,
     pub(crate) shutdown_confirmation: bool,
+    pub(crate) model_validation_confirmation: bool,
     pub(crate) status_message: String,
     /// 从底部向上回看的视觉行数；0 表示始终跟随最新内容。
     pub(crate) scroll_from_bottom: u16,
@@ -61,9 +67,13 @@ impl DemoApp {
             runtime_version: runtime_version.clone(),
         };
         self.status_message = format!("Connected to Runtime {runtime_version}");
-        vec![send_runtime(RuntimeCommand::ListSessions(
-            ListSessionsRequest::default(),
-        ))]
+        vec![
+            send_runtime(RuntimeCommand::GetConfigStatus(
+                GetConfigStatusRequest::default(),
+            )),
+            send_runtime(RuntimeCommand::ListModels(ListModelsRequest::default())),
+            send_runtime(RuntimeCommand::ListSessions(ListSessionsRequest::default())),
+        ]
     }
 
     pub(crate) fn connecting(&mut self) {
@@ -112,6 +122,21 @@ impl DemoApp {
             };
         }
 
+        if self.model_validation_confirmation {
+            return match key.code {
+                KeyCode::Enter => {
+                    self.model_validation_confirmation = false;
+                    self.send_model_validation()
+                }
+                KeyCode::Esc => {
+                    self.model_validation_confirmation = false;
+                    self.status_message = "Model validation cancelled".to_owned();
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('q') => {
@@ -121,6 +146,17 @@ impl DemoApp {
                 KeyCode::Char('c') => return self.cancel_active_run(),
                 _ => {}
             }
+        }
+
+        if key.code == KeyCode::F(5) {
+            if self.is_connected() {
+                self.status_message = "Reloading configuration…".to_owned();
+                return vec![send_runtime(RuntimeCommand::ReloadConfig(
+                    ReloadConfigRequest::default(),
+                ))];
+            }
+            self.status_message = "Reconnect before reloading configuration".to_owned();
+            return Vec::new();
         }
 
         match key.code {
@@ -162,10 +198,15 @@ impl DemoApp {
                     Vec::new()
                 } else {
                     vec![send_runtime(RuntimeCommand::CreateSession(
-                        CreateSessionRequest::default(),
+                        CreateSessionRequest {
+                            title: None,
+                            model_key: self.selected_model_key.clone(),
+                        },
                     ))]
                 }
             }
+            KeyCode::Char('m' | 'M') => self.select_next_model(),
+            KeyCode::Char('v' | 'V') => self.request_model_validation(),
             KeyCode::Char('r' | 'R') => {
                 if matches!(self.connection, ConnectionStatus::Disconnected { .. }) {
                     vec![DemoEffect::Reconnect]
@@ -285,15 +326,67 @@ impl DemoApp {
                 Vec::new()
             }
             HostCommandResult::Runtime(result) => match result {
+                RuntimeCommandResult::GetConfigStatus(result) => {
+                    let state = result.status.state;
+                    self.configuration_status = Some(result.status);
+                    self.status_message = format!("Configuration: {state:?}");
+                    Vec::new()
+                }
+                RuntimeCommandResult::ListModels(result) => {
+                    let previous = self.selected_model_key.clone();
+                    self.models = result.models;
+                    self.selected_model_key = previous
+                        .filter(|selected| self.has_model_key(selected))
+                        .or_else(|| {
+                            self.models
+                                .iter()
+                                .find(|model| model.is_default)
+                                .and_then(|model| model.model_key.clone())
+                        })
+                        .or_else(|| self.models.iter().find_map(|model| model.model_key.clone()));
+                    Vec::new()
+                }
+                RuntimeCommandResult::GetModel(result) => {
+                    self.upsert_model(result.model);
+                    Vec::new()
+                }
+                RuntimeCommandResult::ReloadConfig(result) => {
+                    let state = result.status.state;
+                    self.configuration_status = Some(result.status);
+                    self.status_message = format!("Configuration reloaded: {state:?}");
+                    vec![send_runtime(RuntimeCommand::ListModels(
+                        ListModelsRequest::default(),
+                    ))]
+                }
+                RuntimeCommandResult::ValidateModelConnection(result) => {
+                    self.status_message = match result.outcome {
+                        assistant_protocol::ConnectionValidationOutcome::Succeeded => {
+                            format!("Model {} connection succeeded", result.model_key)
+                        }
+                        assistant_protocol::ConnectionValidationOutcome::Failed(failure) => {
+                            format!(
+                                "Model {} connection failed: {:?}: {}",
+                                result.model_key, failure.kind, failure.message
+                            )
+                        }
+                    };
+                    Vec::new()
+                }
                 RuntimeCommandResult::ListSessions(result) => {
                     let previous = self.selected_session_id.clone();
                     self.sessions = result.sessions;
-                    if self.sessions.is_empty() {
+                    if self.sessions.is_empty() && self.can_create_default_session() {
                         self.selected_session_id = None;
                         self.status_message = "Creating the first Session…".to_owned();
                         vec![send_runtime(RuntimeCommand::CreateSession(
                             CreateSessionRequest::default(),
                         ))]
+                    } else if self.sessions.is_empty() {
+                        self.selected_session_id = None;
+                        self.status_message =
+                            "No Sessions; fix or reload configuration before creating one"
+                                .to_owned();
+                        Vec::new()
                     } else {
                         let selected = previous
                             .filter(|id| {
@@ -528,6 +621,70 @@ impl DemoApp {
         }
     }
 
+    fn upsert_model(&mut self, model: ModelConfiguration) {
+        if let Some(existing) = self
+            .models
+            .iter_mut()
+            .find(|existing| existing.model_key == model.model_key)
+        {
+            *existing = model;
+        } else {
+            self.models.push(model);
+        }
+    }
+
+    fn select_next_model(&mut self) -> Vec<DemoEffect> {
+        let keys: Vec<_> = self
+            .models
+            .iter()
+            .filter_map(|model| model.model_key.clone())
+            .collect();
+        if keys.is_empty() {
+            self.status_message = "No model configuration is available".to_owned();
+            return Vec::new();
+        }
+        let next = self
+            .selected_model_key
+            .as_ref()
+            .and_then(|selected| keys.iter().position(|key| key == selected))
+            .map_or(0, |index| (index + 1) % keys.len());
+        let selected = keys[next].clone();
+        self.status_message = format!("Selected model {selected}");
+        self.selected_model_key = Some(selected);
+        Vec::new()
+    }
+
+    fn request_model_validation(&mut self) -> Vec<DemoEffect> {
+        if !self.is_connected() {
+            self.status_message = "Reconnect before validating a model".to_owned();
+            return Vec::new();
+        }
+        let Some(model_key) = self.selected_model_key.clone() else {
+            self.status_message = "Select a model before validation".to_owned();
+            return Vec::new();
+        };
+        self.model_validation_confirmation = true;
+        self.status_message = format!("Confirm validation for model {model_key}");
+        Vec::new()
+    }
+
+    fn send_model_validation(&mut self) -> Vec<DemoEffect> {
+        let Some(model_key) = self.selected_model_key.clone() else {
+            self.status_message = "Selected model is no longer available".to_owned();
+            return Vec::new();
+        };
+        self.status_message = format!("Validating model {model_key}…");
+        vec![send_runtime(RuntimeCommand::ValidateModelConnection(
+            ValidateModelConnectionRequest { model_key },
+        ))]
+    }
+
+    fn has_model_key(&self, model_key: &ModelKey) -> bool {
+        self.models
+            .iter()
+            .any(|model| model.model_key.as_ref() == Some(model_key))
+    }
+
     fn set_session_active_run(&mut self, session_id: &SessionId, run_id: Option<RunId>) {
         if let Some(session) = self
             .sessions
@@ -540,6 +697,17 @@ impl DemoApp {
 
     fn is_connected(&self) -> bool {
         matches!(self.connection, ConnectionStatus::Connected { .. })
+    }
+
+    fn can_create_default_session(&self) -> bool {
+        self.configuration_status.as_ref().is_some_and(|status| {
+            status.state == ConfigurationState::Ready
+                || (status.state == ConfigurationState::Degraded
+                    && self
+                        .models
+                        .iter()
+                        .any(|model| model.is_default && model.is_valid))
+        })
     }
 }
 
@@ -577,7 +745,8 @@ fn ensure_tool(run: &mut RunSnapshot, call_id: ToolCallId) -> &mut ToolActivityS
 #[cfg(test)]
 mod tests {
     use assistant_protocol::{
-        CreateSessionResult, ListSessionsResult, RuntimeErrorCode, RuntimeErrorInfo, StartRunResult,
+        CreateSessionResult, ListSessionsResult, ModelKey, RuntimeErrorCode, RuntimeErrorInfo,
+        StartRunResult,
     };
     use crossterm::event::KeyEvent;
 
@@ -587,6 +756,7 @@ mod tests {
         SessionSummary {
             session_id: SessionId::new(id).expect("session id"),
             title: title.to_owned(),
+            model_key: ModelKey::new("model-1").expect("model key"),
             active_run_id: None,
             message_count: 0,
         }
@@ -603,9 +773,41 @@ mod tests {
         }
     }
 
+    fn configuration_status(state: ConfigurationState) -> ConfigurationStatus {
+        ConfigurationStatus {
+            config_path: Some("/private/runtime/config.toml".to_owned()),
+            state,
+            schema_version: Some(1),
+            default_model: Some(ModelKey::new("model-1").expect("model key")),
+            issues: Vec::new(),
+        }
+    }
+
+    fn model(key: &str, is_default: bool, is_valid: bool) -> ModelConfiguration {
+        ModelConfiguration {
+            model_key: Some(ModelKey::new(key).expect("model key")),
+            display_name: key.to_owned(),
+            protocol: Some("chat_completions".to_owned()),
+            provider: Some("fixture".to_owned()),
+            endpoint: Some("https://api.example.test/v1".to_owned()),
+            model: Some(format!("{key}-model")),
+            context_window_tokens: Some(8_192),
+            max_output_tokens: Some(4_096),
+            agent_max_output_tokens: None,
+            effective_max_output_tokens: Some(4_096),
+            api_key_configured: true,
+            is_default,
+            is_valid,
+            issues: Vec::new(),
+        }
+    }
+
     #[test]
     fn empty_runtime_creates_a_session_and_nonempty_list_selects_without_manual_ids() {
-        let mut app = DemoApp::default();
+        let mut app = DemoApp {
+            configuration_status: Some(configuration_status(ConfigurationState::Ready)),
+            ..DemoApp::default()
+        };
         let effects = app.handle_server_frame(response(RuntimeCommandResult::ListSessions(
             ListSessionsResult { sessions: vec![] },
         )));
@@ -633,6 +835,98 @@ mod tests {
         assert!(matches!(
             effects[1],
             DemoEffect::Send(HostCommand::ConversationSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn connection_queries_configuration_and_f5_explicitly_reloads_it() {
+        let mut app = DemoApp::default();
+        let effects = app.connected("0.1.0".to_owned());
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::GetConfigStatus(_))),
+                DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListModels(_))),
+                DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListSessions(_)))
+            ]
+        ));
+
+        let effects = app.handle_terminal_event(&key(KeyCode::F(5), KeyModifiers::NONE));
+        assert!(matches!(
+            effects.as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(
+                RuntimeCommand::ReloadConfig(_)
+            ))]
+        ));
+        let effects = app.handle_server_frame(response(RuntimeCommandResult::ReloadConfig(
+            assistant_protocol::ReloadConfigResult {
+                status: configuration_status(ConfigurationState::Degraded),
+            },
+        )));
+        assert_eq!(
+            app.configuration_status.as_ref().map(|status| status.state),
+            Some(ConfigurationState::Degraded)
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(
+                RuntimeCommand::ListModels(_)
+            ))]
+        ));
+    }
+
+    #[test]
+    fn model_selection_drives_explicit_session_creation_and_confirmed_validation() {
+        let mut app = DemoApp {
+            connection: ConnectionStatus::Connected {
+                runtime_version: "0.1.0".to_owned(),
+            },
+            focus: Focus::Sessions,
+            ..DemoApp::default()
+        };
+        app.handle_server_frame(response(RuntimeCommandResult::ListModels(
+            assistant_protocol::ListModelsResult {
+                models: vec![model("model-1", true, true), model("model-2", false, true)],
+            },
+        )));
+        assert_eq!(
+            app.selected_model_key.as_ref().map(ToString::to_string),
+            Some("model-1".to_owned())
+        );
+
+        assert!(
+            app.handle_terminal_event(&key(KeyCode::Char('m'), KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert_eq!(
+            app.selected_model_key.as_ref().map(ToString::to_string),
+            Some("model-2".to_owned())
+        );
+
+        assert!(
+            app.handle_terminal_event(&key(KeyCode::Char('v'), KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(app.model_validation_confirmation);
+        let effects = app.handle_terminal_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            effects.as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(
+                RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
+                    model_key
+                })
+            ))] if model_key.as_str() == "model-2"
+        ));
+
+        let effects = app.handle_terminal_event(&key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(
+            effects.as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::CreateSession(
+                CreateSessionRequest {
+                    model_key: Some(model_key),
+                    ..
+                }
+            )))] if model_key.as_str() == "model-2"
         ));
     }
 

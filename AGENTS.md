@@ -50,6 +50,10 @@
 2. 对应语言规范。
 3. 对应模块约束。
 
+涉及任何 Rust 代码时，除下表中的 [`Rust编程规范.md`](docs/specs/Rust编程规范.md) 外，
+还必须读取 [`Rust架构设计规范.md`](docs/specs/Rust架构设计规范.md)；前者约束编码与验证，
+后者约束 crate/module 边界、依赖、状态所有权和异步生命周期。
+
 涉及 Agent 执行、模型、工具、记忆、安全、上下文、Run 或会话持久化时，还必须读取 [`Agent 系统技术架构`](docs/modules/agent-system.md)。
 
 | 改动范围 | 语言规范 | 模块约束 |

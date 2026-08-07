@@ -12,7 +12,15 @@ mod run;
 mod runtime;
 mod session;
 
-pub use config::RuntimeConfig;
+pub use config::{
+    ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigSourceFailure,
+    ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad, ConfigState,
+    ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig, RuntimeConfig,
+    RuntimeConfigSource, RuntimeModelTransportConfig, compile_runtime_config,
+};
 pub use error::{RuntimeError, RuntimeResult};
-pub use factory::{AgentFactoryError, SessionAgentFactory};
+pub use factory::{
+    ModelCompatibilityProfile, ModelServiceFactory, ModelServiceFactoryError,
+    ModelServiceFactoryRequest, SystemPromptFactory, SystemPromptFactoryError,
+};
 pub use runtime::AssistantRuntime;

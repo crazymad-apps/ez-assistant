@@ -35,8 +35,10 @@ Demo/Adapter 调用点和 Rustdoc。首次候选审查结论是：现有底层�
 - `completion`：可靠返回唯一 `ExecutionOutcome`；
 - `control`：只取消本次执行。
 
-一个 `Agent` 可以被同一会话顺序复用。不同会话应各自创建 Agent，但可以共享线程安全的
-`Arc<dyn ModelService>`、Transport 和底层能力。
+一个 `Agent` 可以被同一会话顺序复用，具体生命周期由上层宿主决定。正式
+`assistant-runtime` 自 v0.9.0 起不会在 Session 中长期保存完整 Agent，而是冻结 model key 与
+System Prompt，在每个 Run 开始前按当前配置快照构造独立 Agent。不同 Agent 仍可共享线程安全的
+Transport 和底层能力。
 
 ### `AgentEvent`
 

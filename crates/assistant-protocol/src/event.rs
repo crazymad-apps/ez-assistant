@@ -125,6 +125,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::ModelKey;
 
     fn session_id() -> SessionId {
         SessionId::new("session-1").expect("session id")
@@ -185,6 +186,7 @@ mod tests {
                     session: SessionSummary {
                         session_id: session_id(),
                         title: "Session 1".to_owned(),
+                        model_key: ModelKey::new("model-1").expect("model key"),
                         active_run_id: None,
                         message_count: 0,
                     },

@@ -3,6 +3,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 const RANDOM_ID_BYTES: usize = 9;
+pub(crate) const GENERATION_ATTEMPTS: usize = 16;
 
 /// 生成 `<prefix>_<12 chars>` 形式的 URL-safe 不透明标识。
 pub(crate) fn generate(prefix: &str) -> Result<String, getrandom::Error> {

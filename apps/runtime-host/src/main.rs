@@ -1,6 +1,8 @@
 //! EZ Assistant 正式 Runtime Host 进程入口。
 
 mod config;
+#[cfg(unix)]
+mod config_source;
 #[cfg(all(feature = "demo-client", unix))]
 mod demo;
 #[cfg(unix)]
@@ -15,6 +17,8 @@ use std::error::Error;
 use std::sync::Arc;
 
 #[cfg(unix)]
+use assistant_protocol::ReloadConfigRequest;
+#[cfg(unix)]
 use assistant_runtime::{AssistantRuntime, RuntimeConfig};
 #[cfg(not(unix))]
 use thiserror::Error;
@@ -22,7 +26,11 @@ use thiserror::Error;
 use crate::config::{CliAction, parse_cli};
 #[cfg(unix)]
 use crate::{
-    config::ServeConfig, endpoint::OwnedEndpoint, resources::HostResources, server::RuntimeServer,
+    config::ServeConfig,
+    config_source::{LocalConfigSource, prepare_runtime_home},
+    endpoint::OwnedEndpoint,
+    resources::HostResources,
+    server::RuntimeServer,
 };
 
 #[tokio::main]
@@ -42,15 +50,21 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
         CliAction::Serve(arguments) => {
             #[cfg(unix)]
             {
-                dotenvy::dotenv().ok();
                 let config = ServeConfig::resolve(arguments)?;
-                let resources = HostResources::from_config(&config)?;
+                prepare_runtime_home(&config.runtime_home)?;
+                let endpoint = OwnedEndpoint::bind(config.socket_path.clone())?;
+                let resources = HostResources::new()?;
                 let runtime = Arc::new(AssistantRuntime::new(
                     RuntimeConfig::new(config.event_capacity),
-                    resources.factory,
+                    Arc::new(LocalConfigSource::new(config.config_path)),
+                    resources.model_factory,
+                    resources.system_prompt_factory,
+                    resources.tools,
                     resources.default_authorizer,
                 ));
-                let endpoint = OwnedEndpoint::bind(config.socket_path.clone())?;
+                runtime
+                    .reload_config(ReloadConfigRequest::default())
+                    .await?;
                 println!(
                     "EZ Assistant Runtime is listening at {}",
                     endpoint.path().display()

@@ -70,7 +70,7 @@ async fn run_tui(
                     Some(ConnectionUpdate::Connected(runtime_version)) => {
                         app.connected(runtime_version)
                     }
-                    Some(ConnectionUpdate::Frame(frame)) => app.handle_server_frame(frame),
+                    Some(ConnectionUpdate::Frame(frame)) => app.handle_server_frame(*frame),
                     Some(ConnectionUpdate::Disconnected(reason)) => {
                         app.disconnected(reason);
                         connection = None;
@@ -165,7 +165,7 @@ impl Drop for ConnectionRuntime {
 #[derive(Debug)]
 enum ConnectionUpdate {
     Connected(String),
-    Frame(ServerFrame),
+    Frame(Box<ServerFrame>),
     Disconnected(String),
 }
 
@@ -252,10 +252,10 @@ async fn connection_session(
                 ) {
                     // 高频增量允许因在线背压丢失；终态等控制事件仍可靠送入展示层，
                     // 随后的快照查询会校准增量投影。
-                    let _ = updates.try_send(ConnectionUpdate::Frame(frame));
+                    let _ = updates.try_send(ConnectionUpdate::Frame(Box::new(frame)));
                 } else {
                     updates
-                        .send(ConnectionUpdate::Frame(frame))
+                        .send(ConnectionUpdate::Frame(Box::new(frame)))
                         .await
                         .map_err(|_| "TUI update channel closed".to_owned())?;
                 }

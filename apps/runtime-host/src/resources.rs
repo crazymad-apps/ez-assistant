@@ -1,98 +1,89 @@
-//! 正式 Host 的 Provider、Agent Factory、验证工具与 fail-closed Authorizer 装配。
+//! 正式 Host 的 Provider 工厂、System Prompt、工具与 fail-closed Authorizer 装配。
 
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
-use agent_context::ContextWindowEvaluator;
 use agent_core::{AuthorizationFuture, ToolAuthorization, ToolAuthorizer};
 use agent_model::{ModelService, SystemPromptSnapshot};
 use agent_provider_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
 };
-use agent_sdk::{Agent, AgentBuilder};
 use agent_tools::{
     ResolvedToolBatch, ResolvedToolInvocation, Tool, ToolContext, ToolError, ToolExecuteFuture,
     ToolRegistry, ToolResolution, ToolSetSnapshot,
 };
 use agent_types::ToolName;
-use assistant_runtime::{AgentFactoryError, SessionAgentFactory};
+use assistant_runtime::{
+    ModelCompatibilityProfile, ModelServiceFactory, ModelServiceFactoryError,
+    ModelServiceFactoryRequest, SystemPromptFactory, SystemPromptFactoryError,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::ServeConfig;
-
 const ECHO_TOOL_NAME: &str = "echo_text";
-const CONTEXT_THRESHOLD: f64 = 0.8;
 
 pub(crate) struct HostResources {
-    pub(crate) factory: Arc<dyn SessionAgentFactory>,
-    /// v0.8.0 尚未引入工作模式时，由 Host 显式提供的安全默认授权器。
+    pub(crate) model_factory: Arc<dyn ModelServiceFactory>,
+    pub(crate) system_prompt_factory: Arc<dyn SystemPromptFactory>,
+    pub(crate) tools: ToolSetSnapshot,
+    /// 尚未引入工作模式时，由 Host 显式提供的安全默认授权器。
     pub(crate) default_authorizer: Arc<dyn ToolAuthorizer>,
 }
 
 impl HostResources {
-    pub(crate) fn from_config(config: &ServeConfig) -> Result<Self, ResourceError> {
-        let credential = env::var(&config.api_key_env)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| ResourceError::MissingCredential {
-                variable: config.api_key_env.clone(),
-            })?;
-        let model: Arc<dyn ModelService> = Arc::new(
-            OpenAiCompatibleService::new(
-                config.base_url.clone(),
-                BearerCredential::new(credential),
-                config.model.clone(),
-                config.context_window_tokens,
-                Profile::deepseek(),
-                TransportTimeouts::default(),
-            )
-            .map_err(|error| ResourceError::Provider(error.to_string()))?,
-        );
+    pub(crate) fn new() -> Result<Self, ResourceError> {
         let mut registry = ToolRegistry::new();
         registry
             .register(EchoTextTool)
             .map_err(|error| ResourceError::Tool(error.to_string()))?;
-        let factory = HostAgentFactory::new(model, registry.snapshot())?;
         Ok(Self {
-            factory: Arc::new(factory),
+            model_factory: Arc::new(HostModelServiceFactory),
+            system_prompt_factory: Arc::new(HostSystemPromptFactory),
+            tools: registry.snapshot(),
             default_authorizer: Arc::new(EchoOnlyAuthorizer),
         })
     }
 }
 
-pub(crate) struct HostAgentFactory {
-    model: Arc<dyn ModelService>,
-    tools: ToolSetSnapshot,
-    context_window: Arc<ContextWindowEvaluator>,
-    system_prompt: SystemPromptSnapshot,
-}
+struct HostModelServiceFactory;
 
-impl HostAgentFactory {
-    fn new(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> Result<Self, ResourceError> {
-        let context_window = ContextWindowEvaluator::new(CONTEXT_THRESHOLD)
-            .map_err(|_| ResourceError::ContextThreshold)?;
-        Ok(Self {
-            model,
-            tools,
-            context_window: Arc::new(context_window),
-            system_prompt: SystemPromptSnapshot::new(vec![
-                "You are the EZ Assistant Runtime initialization demo. Use echo_text only when the user explicitly asks you to echo text.".to_owned(),
-            ]),
-        })
+impl ModelServiceFactory for HostModelServiceFactory {
+    fn create_model(
+        &self,
+        request: ModelServiceFactoryRequest<'_>,
+    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError> {
+        let profile = match request.profile {
+            ModelCompatibilityProfile::DeepSeek => Profile::deepseek(),
+            ModelCompatibilityProfile::Standard => {
+                Profile::openai_compatible(request.provider.clone())
+            }
+        };
+        let service = OpenAiCompatibleService::new(
+            request.endpoint,
+            BearerCredential::new(request.api_key.to_owned()),
+            request.model,
+            request.context_window_tokens,
+            profile,
+            TransportTimeouts {
+                connect: request.connect_timeout,
+                request: request.request_timeout,
+            },
+        )
+        .map_err(|source| {
+            ModelServiceFactoryError::with_source("model service could not be created", source)
+        })?;
+        Ok(Arc::new(service))
     }
 }
 
-impl SessionAgentFactory for HostAgentFactory {
-    fn create_agent(&self) -> Result<Agent, AgentFactoryError> {
-        AgentBuilder::new(
-            self.model.clone(),
-            self.system_prompt.clone(),
-            self.context_window.clone(),
-        )
-        .tools(self.tools.clone())
-        .build()
-        .map_err(|source| AgentFactoryError::with_source("host agent build failed", source))
+struct HostSystemPromptFactory;
+
+impl SystemPromptFactory for HostSystemPromptFactory {
+    fn create_system_prompt(&self) -> Result<SystemPromptSnapshot, SystemPromptFactoryError> {
+        Ok(SystemPromptSnapshot::new(vec![
+            "You are EZ Assistant. Use echo_text only when the user explicitly asks you to echo text."
+                .to_owned(),
+        ]))
     }
 }
 
@@ -160,14 +151,8 @@ impl Tool for EchoTextTool {
 
 #[derive(Debug, Error)]
 pub(crate) enum ResourceError {
-    #[error("required credential environment variable `{variable}` is missing or empty")]
-    MissingCredential { variable: String },
-    #[error("OpenAI-compatible Provider configuration is invalid: {0}")]
-    Provider(String),
     #[error("echo_text tool registration failed: {0}")]
     Tool(String),
-    #[error("static context threshold is invalid")]
-    ContextThreshold,
 }
 
 #[cfg(test)]

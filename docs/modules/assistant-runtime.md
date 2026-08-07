@@ -42,6 +42,9 @@ Runtime Host 进程
 - 每个 Run 有 `RunId`、状态、取消令牌和最终落盘结果。
 - `RunId` 不传入 Agent Core；Runtime 将独立 `AgentExecution` 的输出关联回对应 Run。
 - 客户端窗口销毁或事件订阅断开不得自动取消 Run。
+- Runtime 必须显式持有每个 Run supervisor 的任务句柄。受控关闭先停止接收新工作并传播取消，
+  只在配置的等待上限内等待；超时后终止仍未退出的 supervisor，并把仍处于活动态的 Run
+  结算为脱敏的内部失败，不能让 Host 无期等待。
 - 广播事件前后要有明确持久化策略，保证 UI 重建后能以快照恢复；不能依赖 WebView 永久在线。
 - 模型、工具、Shell 和阻塞任务分别设置并发上限。
 - Full Trace Collector 与普通 UI/调试广播分离；记录失败只标记 Incomplete，不得改变 Run 的
@@ -125,6 +128,18 @@ Runtime Host 进程
   并发，不绑定永久线程或永久 actor task。
 - Runtime 事件允许丢失，Conversation 与 Run 快照是查询依据；本版本不提供事件回放。
 - Runtime Host 的 Unix Socket、私有 wire、Demo 和具体 Provider/工具装配不得进入本 crate。
+
+## v0.9.0 配置与模型装配边界
+
+- Runtime 持有唯一配置源与当前有效快照；Host 只提供 Runtime Home 文件读取和具体 Provider
+  构造能力。配置缺失或顶层无效时保持可诊断但 fail-closed，不回退旧 credential。
+- Session 冻结用户 model key 和渲染完成的 System Prompt；每个 Run 从同一份配置快照编译
+  ModelService、请求限制和 Agent。reload 只影响之后开始的 Run，不改变活动 Run。
+- 连接验证复用 Run 的模型编译链，但不创建 Session、RunRecord、Conversation 或 Journal；
+  对外只返回稳定的脱敏结果分类。
+- Runtime 关闭等待上限属于进程装配参数，不属于模型 TOML。当前实现超时后中止 Runtime
+  supervisor 并强制结算业务 Run；Core 内部执行任务的 panic/JoinError 所有权仍由后续版本
+  单独收紧，不能把当前 Runtime 兜底解释为 Core 已具备相同保证。
 
 ## Harness 验证
 

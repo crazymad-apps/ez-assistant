@@ -49,6 +49,8 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &DemoApp) {
 
     if app.shutdown_confirmation {
         render_shutdown_confirmation(frame, area);
+    } else if app.model_validation_confirmation {
+        render_model_validation_confirmation(frame, app, area);
     }
 }
 
@@ -58,7 +60,7 @@ fn render_sessions(frame: &mut Frame<'_>, app: &DemoApp, area: Rect) {
     let items = app.sessions.iter().map(|session| {
         let activity = session.active_run_id.as_ref().map_or("", |_| " ●");
         ListItem::new(Line::from(vec![
-            Span::raw(session.title.clone()),
+            Span::raw(format!("{} [{}]", session.title, session.model_key)),
             Span::styled(activity, Style::default().fg(Color::Yellow)),
         ]))
     });
@@ -281,16 +283,25 @@ fn render_status(frame: &mut Frame<'_>, app: &DemoApp, area: Rect) {
         || "idle".to_owned(),
         |run| format!("{} {:?}", run.run_id, run.status),
     );
+    let model = app
+        .selected_model_key
+        .as_ref()
+        .map_or_else(|| "no model".to_owned(), ToString::to_string);
     let help = match app.focus {
-        Focus::Sessions => "↑/↓ select  N new  R reconnect  Tab input  Q quit  Ctrl+Q stop Runtime",
+        Focus::Sessions => {
+            "↑/↓ session  M model  V validate  N new  F5 reload  R reconnect  Tab input  Q quit  Ctrl+Q stop"
+        }
         Focus::Input => {
-            "Enter send  Tab sessions  PgUp/PgDn scroll  Ctrl+C cancel  Ctrl+Q stop Runtime"
+            "Enter send  F5 reload config  Tab sessions  PgUp/PgDn scroll  Ctrl+C cancel  Ctrl+Q stop Runtime"
         }
     };
     let text = Text::from(vec![
         Line::from(vec![
             Span::styled(connection, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(" · {selected} · {run} · {}", app.status_message)),
+            Span::raw(format!(
+                " · model {model} · {selected} · {run} · {}",
+                app.status_message
+            )),
         ]),
         Line::styled(help, Style::default().fg(Color::DarkGray)),
     ]);
@@ -312,6 +323,34 @@ fn render_shutdown_confirmation(frame: &mut Frame<'_>, area: Rect) {
         .block(
             Block::default()
                 .title(" Confirm shutdown ")
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
+}
+
+fn render_model_validation_confirmation(frame: &mut Frame<'_>, app: &DemoApp, area: Rect) {
+    let popup = centered_rect(70, 6, area);
+    let model = app
+        .selected_model_key
+        .as_ref()
+        .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::styled(
+                format!("Validate model {model}?"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw("This sends a minimal real request and may incur a small charge."),
+            Line::raw("Enter confirms · Esc cancels"),
+        ]))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .title(" Confirm model validation ")
                 .borders(Borders::ALL),
         ),
         popup,
@@ -362,6 +401,22 @@ mod tests {
                 .to_string()
                 .contains("Terminal too small")
         );
+    }
+
+    #[test]
+    fn model_validation_confirmation_discloses_real_request_and_cost() {
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let app = DemoApp {
+            selected_model_key: Some(assistant_protocol::ModelKey::new("model-1").expect("model")),
+            model_validation_confirmation: true,
+            ..DemoApp::default()
+        };
+        terminal.draw(|frame| render(frame, &app)).expect("draw");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Validate model model-1?"));
+        assert!(screen.contains("minimal real request"));
+        assert!(screen.contains("small charge"));
     }
 
     #[test]

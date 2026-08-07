@@ -38,6 +38,8 @@ Worker 池。
 - `v0.8.0` 采用 macOS-first Unix Domain Socket，不监听本地 HTTP/TCP 端口。
 - 传输任务使用有界队列并明确背压；慢客户端不得反压 Provider、AgentExecution 或 Runtime
   supervisor。
+- 每条连接拥有的 reader/writer/event 子任务必须被显式观察；正常取消是连接清理，意外
+  `JoinError`/panic 必须上报为 Host 连接错误，不能用忽略返回值的方式静默吞掉。
 - Host 只负责连接并发，Session 内串行和跨 Session 并发由 Runtime 保证。
 - socket 的创建、权限、所有权、stale endpoint 和删除规则以当前版本技术方案为准。
 
@@ -69,6 +71,19 @@ Worker 池。
   保留普通文件、目录、符号链接等未知类型；退出时只清理 inode 仍匹配本实例的 socket。
 - M5 只装配 `echo_text`，其余已注册或未来工具默认拒绝；未引入文件、Shell、持久化、daemon、
   自动重连或事件回放。
+
+## v0.9.0 配置装配边界
+
+- 默认 Runtime Home 是当前用户主目录下的 `~/.ez-assistant`；Host 在 bootstrap 时将其解析为
+  绝对路径。`--runtime-home` 仍只接受绝对路径，不建立旧目录回退或并行配置源。
+- Host 从 Runtime Home 安全读取唯一 `config.toml`，将解析结果交给 Runtime；不再从环境变量、
+  `.env` 或模型 CLI 参数读取 endpoint、model 和 credential。
+- Host 的 ModelServiceFactory 根据 Runtime 已编译的 provider/profile、endpoint、credential 和
+  transport 构造具体 OpenAI-compatible 服务，不自行保存第二份模型配置或选择状态。
+- 私有 Ratatui Demo 可以查询/reload 配置、选择 model key、创建 Session 和显式触发连接验证；
+  连接验证必须先提示真实请求与可能费用。该状态只服务交互，不成为 Runtime 业务事实源。
+- 进程关闭由 Runtime 的有界受控关闭保证最终返回；Host 同时观察信号任务与连接子任务，
+  区分预期取消和异常退出。
 
 ## 验证
 

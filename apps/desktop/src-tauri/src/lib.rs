@@ -1,3 +1,8 @@
+//! EZ Assistant 桌面进程入口。
+//!
+//! 本 crate 只负责 Tauri/WebView 与桌面平台适配；Session、Run 和 Agent 权威状态属于
+//! 独立 Assistant Runtime Host。
+
 #[tauri::command]
 fn health() -> &'static str {
     "Rust runtime connected"

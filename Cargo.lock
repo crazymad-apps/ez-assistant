@@ -284,10 +284,13 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
@@ -306,8 +309,9 @@ dependencies = [
  "assistant-runtime",
  "clap",
  "crossterm",
- "dotenvy",
+ "dirs",
  "futures-util",
+ "libc",
  "ratatui",
  "schemars 1.2.1",
  "serde",

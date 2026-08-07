@@ -48,6 +48,19 @@
 - 本版本不定义事件 sequence、replay cursor、持久化、Plan/Build、审批、Workspace、上传或记忆
   DTO。
 
+## v0.9.0 配置与模型契约
+
+- 项目仍处早期阶段，`PROTOCOL_VERSION` 保持 `1`，在当前 DTO 上直接演进；这里不存在所谓
+  “V2 协议”或并行兼容代际。
+- `ModelKey` 是用户配置 key，不是 Runtime 分配的 ID。创建 Session 可显式传入 key，未传时
+  使用当前有效配置的默认 key；Session 摘要返回其冻结 key。
+- 公共命令增加配置状态、模型列表/详情、显式 reload 和模型连接验证。所有配置投影均脱敏，
+  credential 只能表示为 `api_key_configured`，不得进入响应、事件或错误。
+- reload 的 Missing/Invalid/Degraded/Ready 是可诊断业务结果；连接验证返回稳定失败分类，
+  原始 Provider body、认证 header 和内部错误链不进入协议。
+- Runtime Home 文件路径可以作为本机诊断信息返回，但私有 wire、Demo 交互、模型 Profile 和
+  Runtime 内部配置对象仍不属于公共协议。
+
 ## Harness 验证
 
 - 序列化 round-trip。
