@@ -155,8 +155,9 @@ Runtime 为每个 `AgentExecution` 单独消费事件，再附加自己的 `RunI
 
 Runtime 必须显式持有消费事件和等待完成结果的 Run supervisor。受控关闭先传播取消并在
 有限时间内等待 supervisor；超过上限后可终止 supervisor，并由 Runtime 将仍处于活动态的业务
-Run 强制结算为内部失败。该兜底只保证 Runtime Host 不会无限等待，不代表 Core 已完整观察其
-内部执行 task 的 panic/JoinError；Core 自身的完成句柄契约需要单独演进。
+Run 强制结算为内部失败。Core 的 execution-owned observer 必须持有 engine task 的 JoinHandle；
+正常结果、取消和 panic/JoinError 都通过 CompletionFuture 收敛，异常结果使用不含 panic payload
+的 `ExecutionError::Internal`，不能让 completion 二次 panic。
 
 ## 六、执行状态机
 
@@ -544,7 +545,18 @@ v0.9.0 由 Runtime 接管 Runtime Home 配置、脱敏诊断、model key 和 rel
 model key 与已渲染 System Prompt，每个 Run 按开始时取得的同一配置快照构造完整 Agent 和
 ModelService。Host 不保存第二份配置状态；reload 只影响后续 Run。Runtime 同时采用有界关闭并
 持有 Run supervisor 的终止能力，Host 显式观察连接子任务故障；Core 内部执行 task 的完整
-JoinError 所有权留到 v0.10.0。
+JoinError 所有权随后已在 v0.10.0 完成。
+
+v0.10.0 由 `assistant-runtime` 定义基础设施中立的 RuntimeStore 业务端口，Runtime Host 以私有
+SQLite 与每 Session Conversation JSONL Adapter 实现它。M2 的 Input 先持久化再唤醒；每个
+Session 由单一异步队列执行器串行领取，不同 Session 继续共享同一 Host 并发执行。重启只恢复
+持久化事实，不自动续跑 queued Input 或 interrupted Run。M3 已接入 begun/ready pending tool
+exchange、整批正文提交与 outcome unknown 恢复，并由 Core execution observer、RuntimeTasks、
+Host storage worker/connection owner 分别观察本层 task 的 panic/JoinError。
+
+M4 在该持久化闭环上增加 Session 生命周期和破坏性历史替换：归档只改变结构化生命周期并保留
+只读事实；model key 只在 active/idle 状态下切换，已渲染 System Prompt 不变；从历史 User
+Message 重新输入通过完整新 generation 与 SQLite 单事务销毁目标及尾段关联，不产生隐式分支。
 
 ## 十四、Harness 验证
 

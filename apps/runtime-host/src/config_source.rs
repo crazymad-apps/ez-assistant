@@ -36,7 +36,7 @@ pub(crate) fn prepare_runtime_home(path: &Path) -> Result<(), RuntimeHomeError> 
     prepare_private_directory(&path.join(RUN_DIRECTORY))
 }
 
-fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeError> {
+pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeError> {
     let initial = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {

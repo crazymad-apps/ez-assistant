@@ -2,12 +2,14 @@
 
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    CancelRunRequest, ConfigurationState, ConfigurationStatus, CreateSessionRequest,
-    GetConfigStatusRequest, GetRunRequest, GetSessionRequest, ListModelsRequest,
-    ListSessionsRequest, ModelConfiguration, ModelKey, ReloadConfigRequest, RunId, RunSnapshot,
-    RunStatus, RuntimeCommand, RuntimeCommandResult, RuntimeEvent, SessionId, SessionSummary,
-    ShutdownRuntimeRequest, StartRunRequest, ToolActivitySnapshot, ToolActivityStatus, ToolCallId,
-    ToolOutputChannel, ValidateModelConnectionRequest,
+    ArchiveSessionRequest, CancelRunRequest, ConfigurationState, ConfigurationStatus,
+    CreateSessionRequest, GetConfigStatusRequest, GetRunRequest, GetSessionRequest,
+    ListModelsRequest, ListRunsRequest, ListSessionsRequest, ModelConfiguration, ModelKey,
+    ReloadConfigRequest, RestoreSessionRequest, RunId, RunSnapshot, RunStatus, RuntimeCommand,
+    RuntimeCommandResult, RuntimeEvent, SessionId, SessionLifecycle, SessionListFilter,
+    SessionSummary, SetSessionModelRequest, ShutdownRuntimeRequest, SubmitInputRequest,
+    ToolActivitySnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel,
+    ValidateModelConnectionRequest,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -72,7 +74,10 @@ impl DemoApp {
                 GetConfigStatusRequest::default(),
             )),
             send_runtime(RuntimeCommand::ListModels(ListModelsRequest::default())),
-            send_runtime(RuntimeCommand::ListSessions(ListSessionsRequest::default())),
+            // Demo 同时承担归档/恢复的人工验证，因此连接后需要保留归档 Session 的入口。
+            send_runtime(RuntimeCommand::ListSessions(ListSessionsRequest {
+                filter: SessionListFilter::All,
+            })),
         ]
     }
 
@@ -206,6 +211,8 @@ impl DemoApp {
                 }
             }
             KeyCode::Char('m' | 'M') => self.select_next_model(),
+            KeyCode::Char('s' | 'S') => self.apply_selected_model(),
+            KeyCode::Char('a' | 'A') => self.toggle_session_archive(),
             KeyCode::Char('v' | 'V') => self.request_model_validation(),
             KeyCode::Char('r' | 'R') => {
                 if matches!(self.connection, ConnectionStatus::Disconnected { .. }) {
@@ -241,10 +248,13 @@ impl DemoApp {
         self.input.reset();
         self.scroll_from_bottom = 0;
         self.status_message = "Starting Run…".to_owned();
-        vec![send_runtime(RuntimeCommand::StartRun(StartRunRequest {
-            session_id,
-            message,
-        }))]
+        vec![send_runtime(RuntimeCommand::SubmitInput(
+            SubmitInputRequest {
+                session_id,
+                message,
+                idempotency_key: None,
+            },
+        ))]
     }
 
     fn cancel_active_run(&mut self) -> Vec<DemoEffect> {
@@ -299,6 +309,9 @@ impl DemoApp {
         };
         vec![
             send_runtime(RuntimeCommand::GetSession(GetSessionRequest {
+                session_id: session_id.clone(),
+            })),
+            send_runtime(RuntimeCommand::ListRuns(ListRunsRequest {
                 session_id: session_id.clone(),
             })),
             DemoEffect::Send(HostCommand::ConversationSnapshot { session_id }),
@@ -407,10 +420,12 @@ impl DemoApp {
                 RuntimeCommandResult::GetSession(result) => {
                     let active_run_id = result.session.active_run_id.clone();
                     let session_id = result.session.session_id.clone();
+                    let model_key = result.session.model_key.clone();
                     self.upsert_session(result.session);
                     if self.selected_session_id.as_ref() != Some(&session_id) {
                         return Vec::new();
                     }
+                    self.selected_model_key = Some(model_key);
                     active_run_id.map_or_else(Vec::new, |run_id| {
                         vec![send_runtime(RuntimeCommand::GetRun(GetRunRequest {
                             session_id,
@@ -418,11 +433,7 @@ impl DemoApp {
                         }))]
                     })
                 }
-                RuntimeCommandResult::StartRun(result) => {
-                    self.set_session_active_run(
-                        &result.run.session_id,
-                        Some(result.run.run_id.clone()),
-                    );
+                RuntimeCommandResult::SubmitInput(result) => {
                     self.status_message = format!("Run {} accepted", result.run.run_id);
                     self.accept_run_snapshot(result.run);
                     self.selected_session_id
@@ -433,8 +444,48 @@ impl DemoApp {
                             })]
                         })
                 }
+                RuntimeCommandResult::CancelQueuedInput(result) => {
+                    self.status_message = format!("Input {} cancelled", result.input_id);
+                    Vec::new()
+                }
+                RuntimeCommandResult::ResumeSession(result) => {
+                    self.upsert_session(result.session);
+                    self.status_message = "Session queue resumed".to_owned();
+                    Vec::new()
+                }
+                RuntimeCommandResult::RetryRun(result) => {
+                    self.status_message = format!("Run {} accepted", result.run.run_id);
+                    self.accept_run_snapshot(result.run);
+                    Vec::new()
+                }
                 RuntimeCommandResult::GetRun(result) => {
                     self.status_message = format!("Run status: {:?}", result.run.status);
+                    self.accept_run_snapshot(result.run);
+                    Vec::new()
+                }
+                RuntimeCommandResult::ListRuns(result) => {
+                    for run in result.runs {
+                        self.accept_run_snapshot(run);
+                    }
+                    Vec::new()
+                }
+                RuntimeCommandResult::ArchiveSession(result) => {
+                    self.upsert_session(result.session);
+                    self.status_message = "Session archived".to_owned();
+                    Vec::new()
+                }
+                RuntimeCommandResult::RestoreSession(result) => {
+                    self.upsert_session(result.session);
+                    self.status_message = "Session restored".to_owned();
+                    Vec::new()
+                }
+                RuntimeCommandResult::SetSessionModel(result) => {
+                    self.upsert_session(result.session);
+                    self.status_message = "Session model changed".to_owned();
+                    Vec::new()
+                }
+                RuntimeCommandResult::ReenterFromUserMessage(result) => {
+                    self.status_message = format!("Run {} accepted", result.run.run_id);
                     self.accept_run_snapshot(result.run);
                     Vec::new()
                 }
@@ -462,13 +513,13 @@ impl DemoApp {
                 Vec::new()
             }
             RuntimeEvent::RunAccepted { session_id, run_id } => {
-                self.set_session_active_run(&session_id, Some(run_id.clone()));
                 if let Some(run) = self.selected_run_mut(session_id, run_id) {
                     run.status = RunStatus::Accepted;
                 }
                 Vec::new()
             }
             RuntimeEvent::RunStarted { session_id, run_id } => {
+                self.set_session_active_run(&session_id, Some(run_id.clone()));
                 if let Some(run) = self.selected_run_mut(session_id, run_id) {
                     run.status = RunStatus::Running;
                 }
@@ -654,6 +705,54 @@ impl DemoApp {
         Vec::new()
     }
 
+    fn apply_selected_model(&mut self) -> Vec<DemoEffect> {
+        if !self.is_connected() {
+            self.status_message = "Reconnect before changing the Session model".to_owned();
+            return Vec::new();
+        }
+        let Some(session_id) = self.selected_session_id.clone() else {
+            self.status_message = "Create or select a Session first".to_owned();
+            return Vec::new();
+        };
+        let Some(model_key) = self.selected_model_key.clone() else {
+            self.status_message = "Select a model first".to_owned();
+            return Vec::new();
+        };
+        self.status_message = format!("Changing Session model to {model_key}…");
+        vec![send_runtime(RuntimeCommand::SetSessionModel(
+            SetSessionModelRequest {
+                session_id,
+                model_key,
+            },
+        ))]
+    }
+
+    fn toggle_session_archive(&mut self) -> Vec<DemoEffect> {
+        if !self.is_connected() {
+            self.status_message = "Reconnect before changing Session lifecycle".to_owned();
+            return Vec::new();
+        }
+        let Some(session) = self.selected_session() else {
+            self.status_message = "Create or select a Session first".to_owned();
+            return Vec::new();
+        };
+        let session_id = session.session_id.clone();
+        match session.lifecycle {
+            SessionLifecycle::Active => {
+                self.status_message = "Archiving Session…".to_owned();
+                vec![send_runtime(RuntimeCommand::ArchiveSession(
+                    ArchiveSessionRequest { session_id },
+                ))]
+            }
+            SessionLifecycle::Archived => {
+                self.status_message = "Restoring Session…".to_owned();
+                vec![send_runtime(RuntimeCommand::RestoreSession(
+                    RestoreSessionRequest { session_id },
+                ))]
+            }
+        }
+    }
+
     fn request_model_validation(&mut self) -> Vec<DemoEffect> {
         if !self.is_connected() {
             self.status_message = "Reconnect before validating a model".to_owned();
@@ -719,6 +818,8 @@ fn empty_run(session_id: SessionId, run_id: RunId) -> RunSnapshot {
     RunSnapshot {
         run_id,
         session_id,
+        input_id: assistant_protocol::InputId::new("i_1").expect("input"),
+        attempt: 1,
         status: RunStatus::Accepted,
         cancel_requested: false,
         reasoning: String::new(),
@@ -746,7 +847,7 @@ fn ensure_tool(run: &mut RunSnapshot, call_id: ToolCallId) -> &mut ToolActivityS
 mod tests {
     use assistant_protocol::{
         CreateSessionResult, ListSessionsResult, ModelKey, RuntimeErrorCode, RuntimeErrorInfo,
-        StartRunResult,
+        SubmitInputResult,
     };
     use crossterm::event::KeyEvent;
 
@@ -757,7 +858,10 @@ mod tests {
             session_id: SessionId::new(id).expect("session id"),
             title: title.to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
+            lifecycle: assistant_protocol::SessionLifecycle::Active,
             active_run_id: None,
+            queued_input_count: 0,
+            resume_required: false,
             message_count: 0,
         }
     }
@@ -827,13 +931,17 @@ mod tests {
             app.selected_session_id.as_ref().map(ToString::to_string),
             Some("s_1".to_owned())
         );
-        assert_eq!(effects.len(), 2);
+        assert_eq!(effects.len(), 3);
         assert!(matches!(
             effects[0],
             DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::GetSession(_)))
         ));
         assert!(matches!(
             effects[1],
+            DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListRuns(_)))
+        ));
+        assert!(matches!(
+            effects[2],
             DemoEffect::Send(HostCommand::ConversationSnapshot { .. })
         ));
     }
@@ -847,7 +955,11 @@ mod tests {
             [
                 DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::GetConfigStatus(_))),
                 DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListModels(_))),
-                DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListSessions(_)))
+                DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::ListSessions(
+                    ListSessionsRequest {
+                        filter: SessionListFilter::All
+                    }
+                )))
             ]
         ));
 
@@ -950,11 +1062,49 @@ mod tests {
         let effects = app.handle_terminal_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
             effects.as_slice(),
-            [DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::StartRun(
-                StartRunRequest { message, .. }
+            [DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::SubmitInput(
+                SubmitInputRequest { message, .. }
             )))] if message == "你q"
         ));
         assert!(app.input.value().is_empty());
+    }
+
+    #[test]
+    fn navigation_can_apply_model_and_toggle_archive_state() {
+        let mut app = DemoApp {
+            connection: ConnectionStatus::Connected {
+                runtime_version: "0.1.0".to_owned(),
+            },
+            focus: Focus::Sessions,
+            sessions: vec![session("s_1", "First")],
+            selected_session_id: Some(SessionId::new("s_1").expect("session")),
+            selected_model_key: Some(ModelKey::new("model-2").expect("model")),
+            ..DemoApp::default()
+        };
+
+        assert!(matches!(
+            app.handle_terminal_event(&key(KeyCode::Char('s'), KeyModifiers::NONE))
+                .as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(RuntimeCommand::SetSessionModel(
+                SetSessionModelRequest { model_key, .. }
+            )))] if model_key.as_str() == "model-2"
+        ));
+        assert!(matches!(
+            app.handle_terminal_event(&key(KeyCode::Char('a'), KeyModifiers::NONE))
+                .as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(
+                RuntimeCommand::ArchiveSession(_)
+            ))]
+        ));
+
+        app.sessions[0].lifecycle = SessionLifecycle::Archived;
+        assert!(matches!(
+            app.handle_terminal_event(&key(KeyCode::Char('a'), KeyModifiers::NONE))
+                .as_slice(),
+            [DemoEffect::Send(HostCommand::Runtime(
+                RuntimeCommand::RestoreSession(_)
+            ))]
+        ));
     }
 
     #[test]
@@ -1005,9 +1155,12 @@ mod tests {
         let session_id = app.sessions[0].session_id.clone();
         let run_id = RunId::new("r_1").expect("run");
         let run = empty_run(session_id.clone(), run_id.clone());
-        app.handle_server_frame(response(RuntimeCommandResult::StartRun(StartRunResult {
-            run,
-        })));
+        app.handle_server_frame(response(RuntimeCommandResult::SubmitInput(
+            SubmitInputResult {
+                input_id: run.input_id.clone(),
+                run,
+            },
+        )));
         app.handle_server_frame(ServerFrame::Event {
             event: RuntimeEvent::TextDelta {
                 session_id: session_id.clone(),
@@ -1083,6 +1236,6 @@ mod tests {
             app.selected_session_id.as_ref().map(ToString::to_string),
             Some("s_1".to_owned())
         );
-        assert_eq!(effects.len(), 2);
+        assert_eq!(effects.len(), 3);
     }
 }

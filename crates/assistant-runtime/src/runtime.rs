@@ -1,46 +1,58 @@
 //! AssistantRuntime 生命周期门禁和 Session Registry。
 
 mod connection_validation;
+mod input;
 mod model;
+mod recovery;
+mod session_management;
+mod shutdown;
 mod tasks;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
-    panic::AssertUnwindSafe,
     sync::{Arc, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use agent_core::{AgentExecution, ExecutionContext, ExecutionInput, ToolAuthorizer};
+use agent_core::ToolAuthorizer;
 use agent_sdk::ContextWindowEvaluator;
 use agent_tools::ToolSetSnapshot;
-use agent_types::{ConversationMessage, ConversationSnapshot};
+use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     CancelRunRequest, CancelRunResult, ConfigurationStatus, CreateSessionRequest,
     CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
     GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
     ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
     ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeLifecycle, SessionId,
-    SessionSummary, ShutdownRuntimeRequest, ShutdownRuntimeResult, StartRunRequest, StartRunResult,
+    SessionSummary,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use self::model::resolve_session_model_key;
+use self::recovery::recover_sessions;
 use self::tasks::RuntimeTasks;
 use crate::{
-    ModelServiceFactory, RuntimeConfig, RuntimeConfigSource, RuntimeError, RuntimeResult,
-    SystemPromptFactory,
+    ModelServiceFactory, NewStoredSession, RecoveredRuntime, RuntimeConfig, RuntimeConfigSource,
+    RuntimeError, RuntimeResult, RuntimeStore, SystemPromptFactory,
     config::{
         ConfigRegistry, ConfigSnapshot, project_model_by_key, project_models, project_status,
-    },
-    run::{
-        ActiveRun, RunRecord, RuntimeRecorder, allocate_run_id, create_user_message,
-        finished_event, settle_run, supervise_run,
     },
     session::{SessionController, allocate_session_id},
 };
 
 const CONTEXT_WINDOW_THRESHOLD: f64 = 0.8;
+
+pub(crate) fn now_ms() -> RuntimeResult<i64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+        RuntimeError::InternalStateUnavailable {
+            component: "system clock",
+        }
+    })?;
+    i64::try_from(duration.as_millis()).map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "system clock range",
+    })
+}
 
 /// 应用业务 Runtime 的进程内权威入口。
 ///
@@ -49,7 +61,9 @@ pub struct AssistantRuntime {
     config: RuntimeConfig,
     lifecycle: RwLock<RuntimeLifecycle>,
     sessions: RwLock<BTreeMap<SessionId, Arc<SessionController>>>,
-    config_registry: ConfigRegistry,
+    store: Arc<dyn RuntimeStore>,
+    operation_gate: AsyncRwLock<()>,
+    config_registry: Arc<ConfigRegistry>,
     model_factory: Arc<dyn ModelServiceFactory>,
     system_prompt_factory: Arc<dyn SystemPromptFactory>,
     tools: ToolSetSnapshot,
@@ -61,7 +75,9 @@ pub struct AssistantRuntime {
 }
 
 impl AssistantRuntime {
-    /// 使用显式 bootstrap 配置、配置源、装配工厂和默认授权闸创建 Running Runtime。
+    /// 创建不跨进程保留数据的易失 Runtime，供无 Host 的嵌入式调用与单元测试使用。
+    ///
+    /// 正式 Runtime Host 必须使用 [`Self::open`] 注入产品 Store 并先完成启动恢复。
     pub fn new(
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
@@ -70,12 +86,66 @@ impl AssistantRuntime {
         tools: ToolSetSnapshot,
         default_authorizer: Arc<dyn ToolAuthorizer>,
     ) -> Self {
+        Self::from_recovered(
+            config,
+            config_source,
+            model_factory,
+            system_prompt_factory,
+            tools,
+            default_authorizer,
+            Arc::new(crate::storage::VolatileRuntimeStore::default()),
+            RecoveredRuntime::default(),
+        )
+        .expect("empty volatile runtime state is valid")
+    }
+
+    /// 恢复 Store 后创建 Running Runtime；返回前不会开放任何客户端业务入口。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open(
+        config: RuntimeConfig,
+        config_source: Arc<dyn RuntimeConfigSource>,
+        model_factory: Arc<dyn ModelServiceFactory>,
+        system_prompt_factory: Arc<dyn SystemPromptFactory>,
+        tools: ToolSetSnapshot,
+        default_authorizer: Arc<dyn ToolAuthorizer>,
+        store: Arc<dyn RuntimeStore>,
+    ) -> RuntimeResult<Self> {
+        let recovered = store
+            .load_runtime()
+            .await
+            .map_err(|source| RuntimeError::from_store("recover runtime", source))?;
+        Self::from_recovered(
+            config,
+            config_source,
+            model_factory,
+            system_prompt_factory,
+            tools,
+            default_authorizer,
+            store,
+            recovered,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_recovered(
+        config: RuntimeConfig,
+        config_source: Arc<dyn RuntimeConfigSource>,
+        model_factory: Arc<dyn ModelServiceFactory>,
+        system_prompt_factory: Arc<dyn SystemPromptFactory>,
+        tools: ToolSetSnapshot,
+        default_authorizer: Arc<dyn ToolAuthorizer>,
+        store: Arc<dyn RuntimeStore>,
+        recovered: RecoveredRuntime,
+    ) -> RuntimeResult<Self> {
         let (event_sender, _) = broadcast::channel(config.event_capacity.get());
-        Self {
+        let sessions = recover_sessions(recovered)?;
+        Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
-            sessions: RwLock::new(BTreeMap::new()),
-            config_registry: ConfigRegistry::new(config_source),
+            sessions: RwLock::new(sessions),
+            store,
+            operation_gate: AsyncRwLock::new(()),
+            config_registry: Arc::new(ConfigRegistry::new(config_source)),
             model_factory,
             system_prompt_factory,
             tools,
@@ -87,7 +157,7 @@ impl AssistantRuntime {
             event_sender,
             root_cancellation: CancellationToken::new(),
             tasks: RuntimeTasks::new(),
-        }
+        })
     }
 
     /// 返回构造时已经校验的 Runtime 配置。
@@ -153,11 +223,12 @@ impl AssistantRuntime {
         })
     }
 
-    /// 创建一个冻结 model key、System Prompt 和空 Conversation 的 Session。
-    pub fn create_session(
+    /// 创建一个带初始 model key、冻结 System Prompt 和空 Conversation 的 Session。
+    pub async fn create_session(
         &self,
         request: CreateSessionRequest,
     ) -> RuntimeResult<CreateSessionResult> {
+        let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
 
         let title = request.title.unwrap_or_else(|| "New Session".to_owned());
@@ -168,26 +239,34 @@ impl AssistantRuntime {
             .create_system_prompt()
             .map_err(|source| RuntimeError::SystemPromptBuildFailed { source })?;
 
-        let lifecycle = self.read_lifecycle()?;
-        if *lifecycle != RuntimeLifecycle::Running {
-            return Err(RuntimeError::RuntimeNotRunning {
-                lifecycle: *lifecycle,
-            });
-        }
+        let session_id = {
+            let sessions =
+                self.sessions
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "session registry",
+                    })?;
+            allocate_session_id(&sessions)?
+        };
+        let stored = self
+            .store
+            .create_session(NewStoredSession {
+                session_id: session_id.clone(),
+                title,
+                model_key,
+                system_prompt,
+                created_at_ms: now_ms()?,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("create session", source))?;
+        let session = Arc::new(SessionController::new(stored));
         let mut sessions =
             self.sessions
                 .write()
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "session registry",
                 })?;
-        let session_id = allocate_session_id(&sessions)?;
-        let session = Arc::new(SessionController::new(
-            session_id.clone(),
-            title,
-            model_key,
-            system_prompt,
-        ));
-        match sessions.entry(session_id) {
+        match sessions.entry(session_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(session.clone());
             }
@@ -198,7 +277,6 @@ impl AssistantRuntime {
             }
         }
         drop(sessions);
-        drop(lifecycle);
 
         let summary = session.summary()?;
         self.publish(RuntimeEvent::SessionCreated {
@@ -208,10 +286,7 @@ impl AssistantRuntime {
     }
 
     /// 按 SessionId 的确定性顺序列出当前进程内 Session。
-    pub fn list_sessions(
-        &self,
-        _request: ListSessionsRequest,
-    ) -> RuntimeResult<ListSessionsResult> {
+    pub fn list_sessions(&self, request: ListSessionsRequest) -> RuntimeResult<ListSessionsResult> {
         let sessions: Vec<_> = self
             .sessions
             .read()
@@ -224,7 +299,18 @@ impl AssistantRuntime {
         let summaries = sessions
             .into_iter()
             .map(|session| session.summary())
-            .collect::<RuntimeResult<Vec<SessionSummary>>>()?;
+            .collect::<RuntimeResult<Vec<SessionSummary>>>()?
+            .into_iter()
+            .filter(|session| match request.filter {
+                assistant_protocol::SessionListFilter::Active => {
+                    session.lifecycle == assistant_protocol::SessionLifecycle::Active
+                }
+                assistant_protocol::SessionListFilter::Archived => {
+                    session.lifecycle == assistant_protocol::SessionLifecycle::Archived
+                }
+                assistant_protocol::SessionListFilter::All => true,
+            })
+            .collect();
         Ok(ListSessionsResult {
             sessions: summaries,
         })
@@ -241,233 +327,84 @@ impl AssistantRuntime {
     ///
     /// 该返回值属于 Runtime library 能力，不进入 `assistant-protocol` 公共 DTO；Host 的完整
     /// Conversation 验证命令保持私有。
-    pub fn conversation_snapshot(
+    pub async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
     ) -> RuntimeResult<ConversationSnapshot> {
-        self.session(session_id)?.conversation_snapshot()
-    }
-
-    /// 向空闲 Session 原子追加用户消息并启动一次 AgentExecution。
-    ///
-    /// 调用线程必须位于可执行 `tokio::spawn` 的 Tokio Runtime 中。
-    pub fn start_run(&self, request: StartRunRequest) -> RuntimeResult<StartRunResult> {
-        // 读门禁一直持有到 supervisor 已登记进 TaskTracker，确保 shutdown 不会漏掉新任务。
-        let lifecycle = self.read_lifecycle()?;
-        if *lifecycle != RuntimeLifecycle::Running {
-            return Err(RuntimeError::RuntimeNotRunning {
-                lifecycle: *lifecycle,
-            });
-        }
-        if request.message.trim().is_empty() {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "message must not be blank",
-            });
-        }
-
-        let session = self.session(&request.session_id)?;
-        {
-            let state = session.lock_state()?;
-            state.ensure_can_start(session.id())?;
-        }
-        let config_snapshot = self.config_registry.snapshot()?;
-        let agent = self.compile_run_agent(&session, &config_snapshot)?;
-        let user_message = create_user_message(request.message)?;
-        let cancellation = self.root_cancellation.child_token();
-        let (run_id, accepted, input) = {
-            let mut state = session.lock_state()?;
-            state.ensure_can_start(session.id())?;
-            let run_id = allocate_run_id(&state)?;
-            state
-                .journal
-                .append_completed(ConversationMessage::User(user_message))
-                .map_err(|_| RuntimeError::InternalStateUnavailable {
-                    component: "user message commit",
-                })?;
-            let input = ExecutionInput {
-                conversation: state.journal.snapshot(),
-            };
-            let record = RunRecord::accepted(run_id.clone(), session.id().clone());
-            let accepted = record.snapshot();
-            state.runs.insert(run_id.clone(), record);
-            state.active_run = Some(ActiveRun {
-                run_id: run_id.clone(),
-                cancellation: cancellation.clone(),
-            });
-            (run_id, accepted, input)
-        };
-
-        self.publish(RuntimeEvent::RunAccepted {
-            session_id: session.id().clone(),
-            run_id: run_id.clone(),
-        });
-
-        let recorder = Arc::new(RuntimeRecorder::new(session.clone(), run_id.clone()));
-        let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            agent.start(
-                input,
-                ExecutionContext {
-                    cancellation,
-                    recorder,
-                    authorizer: self.default_authorizer.clone(),
-                },
-            )
-        }));
-        let AgentExecution {
-            events,
-            completion,
-            control: _,
-        } = match execution {
-            Ok(execution) => execution,
-            Err(_) => {
-                if let Ok(snapshot) = settle_run(&session, &run_id, None) {
-                    self.publish(finished_event(snapshot));
-                }
-                return Err(RuntimeError::InternalStateUnavailable {
-                    component: "agent execution start",
-                });
-            }
-        };
-
-        self.tasks.spawn(supervise_run(
-            session,
-            run_id,
-            events,
-            completion,
-            self.event_sender.clone(),
-        ));
-        drop(lifecycle);
-        Ok(StartRunResult { run: accepted })
+        let session = self.session(session_id)?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        session.conversation_snapshot()
     }
 
     /// 查询指定 Session 中的 Runtime Run 快照。
-    pub fn get_run(&self, request: GetRunRequest) -> RuntimeResult<GetRunResult> {
+    pub async fn get_run(&self, request: GetRunRequest) -> RuntimeResult<GetRunResult> {
+        let session = self.session(&request.session_id)?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
         Ok(GetRunResult {
-            run: self
-                .session(&request.session_id)?
-                .run_snapshot(&request.run_id)?,
+            run: session.run_snapshot(&request.run_id)?,
         })
     }
 
     /// 请求取消一个活动 Run；终态 Run 重复取消会原样返回当前快照。
-    pub fn cancel_run(&self, request: CancelRunRequest) -> RuntimeResult<CancelRunResult> {
+    pub async fn cancel_run(&self, request: CancelRunRequest) -> RuntimeResult<CancelRunResult> {
         let session = self.session(&request.session_id)?;
-        let (snapshot, cancellation) =
-            {
-                let mut state = session.lock_state()?;
-                let record = state.runs.get_mut(&request.run_id).ok_or_else(|| {
-                    RuntimeError::RunNotFound {
+        let _mutation = session.mutation().await;
+        session.ensure_active()?;
+        session.ensure_healthy()?;
+        let (snapshot, cancellation) = {
+            let mut state = session.lock_state()?;
+            let existing =
+                state
+                    .runs
+                    .get(&request.run_id)
+                    .ok_or_else(|| RuntimeError::RunNotFound {
                         session_id: request.session_id.clone(),
                         run_id: request.run_id.clone(),
-                    }
-                })?;
-                if record.snapshot().status.is_terminal() {
-                    return Ok(CancelRunResult {
-                        run: record.snapshot(),
-                    });
-                }
-                let first_request = record.mark_cancelling();
-                let snapshot = record.snapshot();
-                let cancellation = state
-                    .active_run
-                    .as_ref()
-                    .filter(|active| active.run_id == request.run_id)
-                    .map(|active| active.cancellation.clone())
-                    .ok_or(RuntimeError::InternalStateUnavailable {
-                        component: "active run cancellation",
                     })?;
-                if first_request {
-                    self.publish(RuntimeEvent::RunCancelling {
-                        session_id: request.session_id.clone(),
-                        run_id: request.run_id.clone(),
-                    });
-                }
-                (snapshot, cancellation)
-            };
+            if existing.snapshot().status.is_terminal() {
+                return Ok(CancelRunResult {
+                    run: existing.snapshot(),
+                });
+            }
+            if state
+                .active_run
+                .as_ref()
+                .is_none_or(|active| active.run_id != request.run_id)
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "queued input must be cancelled with cancel_queued_input",
+                });
+            }
+            let record = state.runs.get_mut(&request.run_id).ok_or(
+                RuntimeError::InternalStateUnavailable {
+                    component: "active run record",
+                },
+            )?;
+            let first_request = record.mark_cancelling();
+            let snapshot = record.snapshot();
+            let cancellation = state
+                .active_run
+                .as_ref()
+                .filter(|active| active.run_id == request.run_id)
+                .map(|active| active.cancellation.clone())
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "active run cancellation",
+                })?;
+            if first_request {
+                self.publish(RuntimeEvent::RunCancelling {
+                    session_id: request.session_id.clone(),
+                    run_id: request.run_id.clone(),
+                });
+            }
+            (snapshot, cancellation)
+        };
 
         cancellation.cancel();
         Ok(CancelRunResult { run: snapshot })
-    }
-
-    /// 拒绝新工作、取消活动 Run，并等待所有已登记 supervisor 完成结算。
-    pub async fn shutdown(
-        &self,
-        _request: ShutdownRuntimeRequest,
-    ) -> RuntimeResult<ShutdownRuntimeResult> {
-        let cancellations = {
-            let mut lifecycle =
-                self.lifecycle
-                    .write()
-                    .map_err(|_| RuntimeError::InternalStateUnavailable {
-                        component: "runtime lifecycle",
-                    })?;
-            if *lifecycle == RuntimeLifecycle::Stopped {
-                return Ok(ShutdownRuntimeResult {
-                    lifecycle: RuntimeLifecycle::Stopped,
-                });
-            }
-            let first_transition = *lifecycle == RuntimeLifecycle::Running;
-            *lifecycle = RuntimeLifecycle::ShuttingDown;
-            self.tasks.close();
-            if first_transition {
-                self.publish(RuntimeEvent::RuntimeShuttingDown);
-            }
-
-            let sessions: Vec<_> = self
-                .sessions
-                .read()
-                .map_err(|_| RuntimeError::InternalStateUnavailable {
-                    component: "session registry",
-                })?
-                .values()
-                .cloned()
-                .collect();
-            let mut cancellations = Vec::new();
-            for session in sessions {
-                let mut state = session.lock_state()?;
-                let Some((run_id, cancellation)) = state
-                    .active_run
-                    .as_ref()
-                    .map(|active| (active.run_id.clone(), active.cancellation.clone()))
-                else {
-                    continue;
-                };
-                let first_request = state
-                    .runs
-                    .get_mut(&run_id)
-                    .ok_or(RuntimeError::InternalStateUnavailable {
-                        component: "active run record",
-                    })?
-                    .mark_cancelling();
-                if first_request {
-                    self.publish(RuntimeEvent::RunCancelling {
-                        session_id: session.id().clone(),
-                        run_id: run_id.clone(),
-                    });
-                }
-                cancellations.push(cancellation);
-            }
-            cancellations
-        };
-
-        for cancellation in cancellations {
-            cancellation.cancel();
-        }
-        self.root_cancellation.cancel();
-        let graceful = self.tasks.wait_or_abort(self.config.shutdown_timeout).await;
-        if !graceful {
-            self.force_settle_active_runs()?;
-        }
-
-        *self
-            .lifecycle
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "runtime lifecycle",
-            })? = RuntimeLifecycle::Stopped;
-        Ok(ShutdownRuntimeResult {
-            lifecycle: RuntimeLifecycle::Stopped,
-        })
     }
 
     fn ensure_running(&self) -> RuntimeResult<()> {
@@ -477,39 +414,6 @@ impl AssistantRuntime {
         } else {
             Err(RuntimeError::RuntimeNotRunning { lifecycle })
         }
-    }
-
-    /// supervisor 超时被中止后，不将 Cancelling Run 遗留为非终态权威事实。
-    fn force_settle_active_runs(&self) -> RuntimeResult<()> {
-        let sessions: Vec<_> = self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-            .cloned()
-            .collect();
-        for session in sessions {
-            let run_id = session
-                .lock_state()?
-                .active_run
-                .as_ref()
-                .map(|active| active.run_id.clone());
-            if let Some(run_id) = run_id {
-                let snapshot = settle_run(&session, &run_id, None)?;
-                self.publish(finished_event(snapshot));
-            }
-        }
-        Ok(())
-    }
-
-    fn read_lifecycle(&self) -> RuntimeResult<std::sync::RwLockReadGuard<'_, RuntimeLifecycle>> {
-        self.lifecycle
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "runtime lifecycle",
-            })
     }
 
     fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {

@@ -1,24 +1,26 @@
 use super::*;
 
-#[test]
-fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available() {
+#[tokio::test]
+async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available() {
     let runtime = runtime(empty_model());
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
 
     for lifecycle in [RuntimeLifecycle::ShuttingDown, RuntimeLifecycle::Stopped] {
         runtime.set_lifecycle(lifecycle);
         assert!(matches!(
-            runtime.create_session(CreateSessionRequest::default()),
+            runtime.create_session(CreateSessionRequest::default()).await,
             Err(RuntimeError::RuntimeNotRunning { lifecycle: actual }) if actual == lifecycle
         ));
         assert_eq!(runtime.lifecycle().expect("lifecycle"), lifecycle);
         assert!(matches!(
-            runtime.start_run(StartRunRequest {
+            runtime.submit_input(SubmitInputRequest {
                 session_id: session.session.session_id.clone(),
                 message: "must not start".to_owned(),
-            }),
+                idempotency_key: None,
+            }).await,
             Err(RuntimeError::RuntimeNotRunning { lifecycle: actual }) if actual == lifecycle
         ));
         assert_eq!(
@@ -50,13 +52,16 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
     let runtime = runtime(model.clone());
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
 
     let started = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run accepted");
     assert_eq!(started.run.status, assistant_protocol::RunStatus::Accepted);
     assert!(started.run.run_id.as_str().starts_with("r_"));
@@ -75,6 +80,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
     ));
     let conversation = runtime
         .conversation_snapshot(&session.session.session_id)
+        .await
         .expect("conversation");
     assert_eq!(conversation.messages.len(), 2);
     assert!(matches!(
@@ -111,12 +117,15 @@ async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
     drop(dropped);
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
     let started = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run accepted");
 
     let terminal =
@@ -159,12 +168,15 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
     let mut events = runtime.subscribe_events();
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
     let started = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "use echo".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run accepted");
 
     let terminal =
@@ -173,6 +185,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
     assert_eq!(terminal.text, "tool finished");
     let conversation = runtime
         .conversation_snapshot(&session.session.session_id)
+        .await
         .expect("conversation");
     assert_eq!(conversation.messages.len(), 4);
     conversation
@@ -257,7 +270,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
 }
 
 #[tokio::test]
-async fn pending_tool_exchange_is_hidden_and_busy_run_cannot_append_user_message() {
+async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
     let entered = Arc::new(Notify::new());
     let cleanup = Arc::new(Notify::new());
     let log = OrderLog::new();
@@ -276,12 +289,15 @@ async fn pending_tool_exchange_is_hidden_and_busy_run_cannot_append_user_message
     let runtime = runtime_with_tools(model, tools);
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
     let started = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "use the tool".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run accepted");
 
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
@@ -289,32 +305,43 @@ async fn pending_tool_exchange_is_hidden_and_busy_run_cannot_append_user_message
         .expect("tool entered");
     let during = runtime
         .conversation_snapshot(&session.session.session_id)
+        .await
         .expect("conversation during tool");
     assert!(matches!(
         during.messages.as_slice(),
         [ConversationMessage::User(_)]
     ));
-    assert!(matches!(
-        runtime.start_run(StartRunRequest {
+    let queued = runtime
+        .submit_input(assistant_protocol::SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "must not be appended".to_owned(),
-        }),
-        Err(RuntimeError::SessionBusy { .. })
-    ));
+            idempotency_key: None,
+        })
+        .await
+        .expect("second input is queued");
     assert_eq!(
         runtime
             .conversation_snapshot(&session.session.session_id)
+            .await
             .expect("conversation remains unchanged")
             .messages
             .len(),
         1
     );
+    runtime
+        .cancel_queued_input(assistant_protocol::CancelQueuedInputRequest {
+            session_id: session.session.session_id.clone(),
+            input_id: queued.input_id,
+        })
+        .await
+        .expect("cancel queued input");
 
     runtime
         .cancel_run(CancelRunRequest {
             session_id: session.session.session_id.clone(),
             run_id: started.run.run_id.clone(),
         })
+        .await
         .expect("cancel active run");
     tokio::time::timeout(Duration::from_secs(1), cleanup.notified())
         .await
@@ -324,6 +351,7 @@ async fn pending_tool_exchange_is_hidden_and_busy_run_cannot_append_user_message
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Cancelled);
     let completed = runtime
         .conversation_snapshot(&session.session.session_id)
+        .await
         .expect("completed cancellation conversation");
     assert_eq!(completed.messages.len(), 3);
     completed

@@ -18,12 +18,12 @@ use agent_tools::{
     ToolOutputChannel as AgentToolOutputChannel, ToolOutputChunk, ToolRegistry, ToolSetSnapshot,
 };
 use agent_types::{
-    AssistantMessage, AssistantPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId,
-    TextPart, ToolCall, ToolCallId, ToolChoice, ToolName, UserPart,
+    AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
+    PartId, ProviderId, TextPart, ToolCall, ToolCallId, ToolChoice, ToolName, UserPart,
 };
 use assistant_protocol::{
     ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    RunId, ValidateModelConnectionRequest,
+    RunId, ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
 };
 use serde_json::json;
 use tokio::sync::{Barrier, Notify, broadcast::error::RecvError};
@@ -240,7 +240,7 @@ impl ModelService for PanicModel {
     }
 
     fn stream(&self, _request: ModelRequest, _context: ModelCallContext) -> ModelStreamFuture<'_> {
-        panic!("intentional model panic")
+        panic!("private model panic payload")
     }
 }
 
@@ -364,6 +364,28 @@ fn runtime_with_factories_and_config(
     runtime
 }
 
+async fn runtime_with_store(
+    model: Arc<dyn ModelService>,
+    store: Arc<dyn RuntimeStore>,
+    config: RuntimeConfig,
+) -> AssistantRuntime {
+    let runtime = AssistantRuntime::open(
+        config,
+        Arc::new(MissingConfigSource),
+        Arc::new(StaticModelFactory::new(model)),
+        Arc::new(StaticSystemPromptFactory),
+        ToolSetSnapshot::default(),
+        Arc::new(AllowAllAuthorizer),
+        store,
+    )
+    .await
+    .expect("open test runtime");
+    runtime
+        .config_registry
+        .replace_document_for_test(TEST_CONFIG);
+    runtime
+}
+
 fn empty_model() -> Arc<dyn ModelService> {
     Arc::new(ScriptedModelService::new(
         model_capabilities(false),
@@ -461,6 +483,7 @@ async fn wait_for_terminal(
                     session_id: session_id.clone(),
                     run_id: run_id.clone(),
                 })
+                .await
                 .expect("run query")
                 .run;
             if snapshot.status.is_terminal() {
@@ -477,5 +500,8 @@ mod concurrency;
 mod config;
 mod connection_validation;
 mod failures;
+mod input;
 mod runs;
+mod session_management;
 mod sessions;
+mod store;

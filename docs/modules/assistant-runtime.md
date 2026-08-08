@@ -138,8 +138,45 @@ Runtime Host 进程
 - 连接验证复用 Run 的模型编译链，但不创建 Session、RunRecord、Conversation 或 Journal；
   对外只返回稳定的脱敏结果分类。
 - Runtime 关闭等待上限属于进程装配参数，不属于模型 TOML。当前实现超时后中止 Runtime
-  supervisor 并强制结算业务 Run；Core 内部执行任务的 panic/JoinError 所有权仍由后续版本
-  单独收紧，不能把当前 Runtime 兜底解释为 Core 已具备相同保证。
+  supervisor 并强制结算业务 Run；Core 内部执行任务由 execution-owned observer 独立观察并将
+  panic/JoinError 收敛为稳定内部失败，不能用 Runtime 兜底替代 Core 自己的任务所有权。
+
+## v0.10.0 持久化边界
+
+- `assistant-runtime` 定义按业务原子操作表达的 `RuntimeStore` 端口及经过校验的存储 DTO；本 crate
+  不依赖 SQLite、Runtime Home 路径、文件句柄或具体 JSONL 提交算法。
+- SQLite 结构化状态和每 Session Conversation JSONL 共同组成产品数据集，但规范 Conversation
+  仍是正文事实源；流式 RuntimeEvent、pending exchange 和 staged append 不进入规范快照。
+- Runtime 通过异步 `open` 在进入 Running 前恢复 Session 与 Run registry；Conversation 只在首次
+  查询或执行时读取并缓存，单 Session 正文不可用不得回退成第二份空状态。
+- 创建 Session、提交 User Message 与 Run 起始、结算 Run 终态均先完成 Store，再更新内存投影和
+  发布事实事件；`message_count` 是列表派生投影，不替代正文物理顺序。
+- 输入提交先由 Store 原子创建持久 Input 与首次 `Accepted` Run，再更新内存投影、发布事件并唤醒
+  Session 队列；同一 Session 的幂等 key 只返回首次 Input/Run，不比较重复请求正文。
+- queue order 只属于结构化输入状态，不进入 Message 正文。每个 Session 至多存在一个队列执行器，
+  同 Session 按接收顺序领取，不同 Session 可并发。
+- 启动恢复时，尚未开始的 queued Input 保持 `Accepted` 并令 Session 进入 `resume_required`，不自动
+  调用 Provider；已提交 User Message 但未可靠终结的 Run 转为 `Interrupted`。`ResumeSession` 恢复
+  整个队列，`RetryRun` 只放行目标 Input 的新 attempt，不隐式恢复其后的排队输入。
+- M3 由绑定当前 Run 的 Runtime Recorder 在工具副作用前持久化 begun，结果齐备后先转 ready，
+  再把 Assistant Tool Call 与全部 Tool Result 整批提交正文并清除 pending；任一 Store 失败均令
+  Session fail-closed，不允许后续结算越过未修复的工具交换。
+- Runtime 自己的队列/supervisor task 由 RuntimeTasks 观察 panic，并执行 Run 失败收敛；强制关闭
+  遇到 pending 时保留持久恢复事实，不把未知副作用伪装成普通 Failed。queue/supervisor panic
+  后即使当前 Run 已能结算，Session 也保持 fail-closed，不在旧 Core 执行退出尚未被 Runtime
+  重新观察时唤醒下一条输入；下次启动从持久事实恢复。
+- Runtime 关闭分别限制 supervisor 等待、强制结算和 Store shutdown；强制结算失败仍要尝试
+  flush/join Store，任何阶段超时都返回可观察错误，不能让 Host 无限等待。
+- M4 将 Session 的 model key 纳入 mutation gate 保护的可变状态，System Prompt 仍从创建时冻结。
+  只有 active 且完全空闲、无 queued Input 或未终结 Run 的 Session 才能归档或切换模型；归档
+  只改变生命周期并保持所有只读事实，恢复不会自动启动工作。
+- 历史重新输入只定位规范 User Message：先校验新正文并构造 Agent，再由 Store 原子切换完整新
+  generation、删除目标及尾段 Input/Run/引用、创建全新 committed Input 与 Accepted Run。提交后
+  Runtime 同步替换 Journal 和结构化投影，不保留隐式分支或 undo；同一幂等 key 仍返回首次结果。
+- `ListRuns` 按持久 Input 接收顺序和 attempt 返回快照；正文 generation、queue order 和物理删除
+  细节不进入 Runtime 公共协议。
+- 正式本地 Adapter 由 Runtime Host 的单一阻塞 worker 持有；无 Host 的 Runtime 单元测试可使用
+  crate 内易失 Store，但正式产品入口不得绕过本地 Adapter。
 
 ## Harness 验证
 

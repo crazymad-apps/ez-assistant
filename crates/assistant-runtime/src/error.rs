@@ -2,11 +2,11 @@
 
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
-    ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle, SessionId,
+    InputId, ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle, SessionId,
 };
 use thiserror::Error;
 
-use crate::{ModelServiceFactoryError, SystemPromptFactoryError};
+use crate::{ModelServiceFactoryError, StoreError, SystemPromptFactoryError};
 
 /// Runtime 操作失败。
 #[derive(Debug, Error)]
@@ -35,6 +35,12 @@ pub enum RuntimeError {
         /// 当前无法接受新 Run 的 Session。
         session_id: SessionId,
     },
+    /// 归档 Session 只允许只读查询。
+    #[error("session `{session_id}` is archived")]
+    SessionArchived { session_id: SessionId },
+    /// Session 尚有活动、排队或未终结 Run。
+    #[error("session `{session_id}` is not idle")]
+    SessionNotIdle { session_id: SessionId },
     /// 目标 Run 不存在于指定 Session。
     #[error("run `{run_id}` was not found in session `{session_id}`")]
     RunNotFound {
@@ -43,11 +49,30 @@ pub enum RuntimeError {
         /// 未找到的 Run。
         run_id: RunId,
     },
+    #[error("input `{input_id}` was not found in session `{session_id}`")]
+    InputNotFound {
+        session_id: SessionId,
+        input_id: InputId,
+    },
+    #[error("run `{run_id}` is not retryable in session `{session_id}`")]
+    RunNotRetryable {
+        session_id: SessionId,
+        run_id: RunId,
+    },
     /// Session 内部结算不变量已被破坏，后续变更被拒绝。
     #[error("session `{session_id}` is faulted")]
     SessionFaulted {
         /// 发生内部故障的 Session。
         session_id: SessionId,
+    },
+    /// Runtime 的权威存储无法完成本次业务操作。
+    #[error("runtime storage is unavailable while attempting to {operation}")]
+    StorageUnavailable {
+        /// 不包含路径、正文或凭证的稳定操作名称。
+        operation: &'static str,
+        /// Host Store 保留的进程内诊断来源。
+        #[source]
+        source: Option<StoreError>,
     },
     /// 当前配置没有可供业务使用的 active 快照。
     #[error("runtime configuration is unavailable")]
@@ -85,6 +110,13 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    pub(crate) fn from_store(operation: &'static str, source: StoreError) -> Self {
+        Self::StorageUnavailable {
+            operation,
+            source: Some(source),
+        }
+    }
+
     /// 转换为 Host 可以安全发送给客户端的稳定错误信息。
     pub fn to_protocol_info(&self) -> RuntimeErrorInfo {
         match self {
@@ -105,12 +137,28 @@ impl RuntimeError {
             Self::SessionBusy { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::SessionBusy, "session is busy")
             }
+            Self::SessionArchived { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::SessionArchived, "session is archived")
+            }
+            Self::SessionNotIdle { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::SessionNotIdle, "session is not idle")
+            }
             Self::RunNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::RunNotFound, "run was not found")
+            }
+            Self::InputNotFound { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::InputNotFound, "input was not found")
+            }
+            Self::RunNotRetryable { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::RunNotRetryable, "run is not retryable")
             }
             Self::SessionFaulted { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
                 "session internal state is unavailable",
+            ),
+            Self::StorageUnavailable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::StorageUnavailable,
+                "runtime storage is unavailable",
             ),
             Self::ConfigurationUnavailable => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ConfigurationUnavailable,

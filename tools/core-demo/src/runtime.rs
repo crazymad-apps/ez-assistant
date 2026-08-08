@@ -1367,7 +1367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_panic_fails_run_and_releases_session_gate() {
+    async fn core_task_panic_fails_run_and_releases_session_gate() {
         let model: Arc<dyn ModelService> = Arc::new(PanicModel::new());
         let (runtime, _root) = runtime_with_model(model).await;
         let session = runtime
@@ -1390,7 +1390,15 @@ mod tests {
             .expect("session snapshot");
         let run = snapshot.run.expect("run snapshot");
         assert_eq!(run.status, RunStatus::Failed);
-        assert_eq!(run.last_error.as_deref(), Some("run supervisor panicked"));
+        assert_eq!(
+            run.last_error.as_deref(),
+            Some("agent execution task terminated unexpectedly")
+        );
+        assert!(
+            !run.last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("intentional model panic"))
+        );
         assert!(
             !runtime
                 .session(&session.session_id)

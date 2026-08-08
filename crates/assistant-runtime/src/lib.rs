@@ -11,6 +11,7 @@ mod journal;
 mod run;
 mod runtime;
 mod session;
+mod storage;
 
 pub use config::{
     ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigSourceFailure,
@@ -24,3 +25,10 @@ pub use factory::{
     ModelServiceFactoryRequest, SystemPromptFactory, SystemPromptFactoryError,
 };
 pub use runtime::AssistantRuntime;
+pub use storage::{
+    AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSession, PendingToolExchange, RecoveredRuntime,
+    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredConversationState,
+    StoredInput, StoredInputState, StoredRun, StoredRunSettlement, StoredSession,
+    StoredSessionLifecycle, UserMessageCommit,
+};

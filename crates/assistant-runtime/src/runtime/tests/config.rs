@@ -33,9 +33,11 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         .replace_document_for_test(&config_with_api_key("old-key"));
     let before_reload = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("old session");
     let after_reload = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("new session");
 
     let reload_runtime = runtime.clone();
@@ -47,10 +49,12 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
     entered.notified().await;
 
     let old_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: before_reload.session.session_id.clone(),
             message: "race before swap".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run from old snapshot");
     assert_eq!(
         wait_for_terminal(
@@ -74,10 +78,12 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         assistant_protocol::ConfigurationState::Ready
     );
     let new_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: after_reload.session.session_id.clone(),
             message: "run after swap".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run from new snapshot");
     assert_eq!(
         wait_for_terminal(
@@ -139,16 +145,20 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     let first = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("first session");
     let second = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("second session");
 
     let first_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("first run");
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
@@ -165,10 +175,12 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         assistant_protocol::ConfigurationState::Ready
     );
     let second_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("second run");
     assert_eq!(
         wait_for_terminal(&runtime, &second.session.session_id, &second_run.run.run_id)
@@ -189,13 +201,20 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             .state,
         assistant_protocol::ConfigurationState::Missing
     );
-    assert!(matches!(
-        runtime.start_run(StartRunRequest {
+    let rejected = runtime
+        .submit_input(SubmitInputRequest {
             session_id: second.session.session_id.clone(),
             message: "must not use stale key".to_owned(),
-        }),
-        Err(RuntimeError::ConfigurationUnavailable)
-    ));
+            idempotency_key: None,
+        })
+        .await
+        .expect("input acceptance does not require an active model configuration");
+    assert_eq!(
+        wait_for_terminal(&runtime, &second.session.session_id, &rejected.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
     assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
 
     runtime
@@ -203,6 +222,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             session_id: first.session.session_id.clone(),
             run_id: first_run.run.run_id.clone(),
         })
+        .await
         .expect("cancel first run");
     tokio::time::timeout(Duration::from_secs(1), cleanup.notified())
         .await

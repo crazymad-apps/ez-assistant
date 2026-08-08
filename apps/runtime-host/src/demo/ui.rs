@@ -59,9 +59,14 @@ fn render_sessions(frame: &mut Frame<'_>, app: &DemoApp, area: Rect) {
     let border_style = focused.then_some(Style::default().fg(Color::Cyan));
     let items = app.sessions.iter().map(|session| {
         let activity = session.active_run_id.as_ref().map_or("", |_| " ●");
+        let lifecycle = match session.lifecycle {
+            assistant_protocol::SessionLifecycle::Active => "",
+            assistant_protocol::SessionLifecycle::Archived => " ◇",
+        };
         ListItem::new(Line::from(vec![
             Span::raw(format!("{} [{}]", session.title, session.model_key)),
             Span::styled(activity, Style::default().fg(Color::Yellow)),
+            Span::styled(lifecycle, Style::default().fg(Color::DarkGray)),
         ]))
     });
     let list = List::new(items)
@@ -289,7 +294,7 @@ fn render_status(frame: &mut Frame<'_>, app: &DemoApp, area: Rect) {
         .map_or_else(|| "no model".to_owned(), ToString::to_string);
     let help = match app.focus {
         Focus::Sessions => {
-            "↑/↓ session  M model  V validate  N new  F5 reload  R reconnect  Tab input  Q quit  Ctrl+Q stop"
+            "↑/↓ session  M model  S apply  A archive/restore  V validate  N new  Tab input  Q quit"
         }
         Focus::Input => {
             "Enter send  F5 reload config  Tab sessions  PgUp/PgDn scroll  Ctrl+C cancel  Ctrl+Q stop Runtime"
@@ -450,6 +455,8 @@ mod tests {
             current_run: Some(RunSnapshot {
                 run_id: RunId::new("run-scroll").expect("run id"),
                 session_id: SessionId::new("session-scroll").expect("session id"),
+                input_id: assistant_protocol::InputId::new("input-scroll").expect("input id"),
+                attempt: 1,
                 status: RunStatus::Completed,
                 cancel_requested: false,
                 reasoning: String::new(),

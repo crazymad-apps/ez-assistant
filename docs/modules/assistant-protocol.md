@@ -61,6 +61,23 @@
 - Runtime Home 文件路径可以作为本机诊断信息返回，但私有 wire、Demo 交互、模型 Profile 和
   Runtime 内部配置对象仍不属于公共协议。
 
+## v0.10.0 可靠输入契约
+
+- 项目仍处早期阶段，直接以 `SubmitInput`、`CancelQueuedInput`、`ResumeSession` 和 `RetryRun`
+  替换旧 `StartRun` 提交入口，不保留双轨协议；`PROTOCOL_VERSION` 仍为 `1`。
+- `IdempotencyKey` 是客户端生成的非空有界 opaque key，只表达同一 Session 内提交意图幂等；协议
+  不定义正文摘要、全局去重或模型 credential 语义。
+- `RunSnapshot` 通过 `input_id` 和 `attempt` 表达同一输入的多次执行尝试；`SessionSummary` 只公开
+  `queued_input_count` 与 `resume_required` 投影，不公开 queue order 或存储表结构。
+- `Accepted` 只表示输入与首次 Run 已持久化，不表示 Run 已经活动；只有 `RunStarted` 才表示该 Run
+  被 Session 执行器领取。重启后的队列必须经显式 `ResumeSession` 才整体继续。
+- `SessionLifecycle` 区分 active 与 archived；`ListSessions` 缺省只返回 active，并可显式筛选
+  archived/all。归档 Session 的详情、Conversation 和 Run 历史仍可查询。
+- 公共命令增加 `ListRuns`、归档/恢复、空闲模型切换与从历史 User Message 重新输入；历史重新输入
+  只接受应用层 MessageId、新正文和可选幂等 key，不暴露 generation、文件路径或被删除表行。
+- `SessionArchived` 与 `SessionNotIdle` 是不同的稳定错误：前者表示只读生命周期，后者表示活动、
+  排队或未结算事实阻止当前变更。
+
 ## Harness 验证
 
 - 序列化 round-trip。

@@ -113,6 +113,15 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - 真实文件权限、Shell 确认界面和审计存储。
 - Tauri event/channel 与前端 DTO 转换。
 
+## v0.10.0 任务退出边界
+
+- 一个 engine task 驱动 Agent Loop；execution-owned observer 持有其 JoinHandle，并通过
+  CompletionFuture 交付唯一结果。调用方 drop CompletionFuture 不取消执行或异常观察。
+- engine panic/JoinError 映射为不含 panic payload 的 `ExecutionError::Internal`，同时尽力发送
+  `ExecutionFailed` 终态事件；CompletionFuture 自身不得因内部 task 退出再次 panic。
+- 该观察只收敛 Core 内部任务；Runtime Run 的状态、持久化和关闭兜底仍由 Runtime supervisor
+  独立负责。
+
 ## Harness 验证
 
 - 引擎 Harness 宿主在 `agent-testkit/tests/`（`agent-core` 被 testkit 依赖，不反向 dev-depend）。

@@ -14,6 +14,9 @@ use crate::{GuardrailKind, RecordError};
 #[derive(Clone, Debug, Error, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "error", rename_all = "snake_case")]
 pub enum ExecutionError {
+    /// 引擎任务异常退出；不携带 panic payload 或其他内部实现细节。
+    #[error("agent execution task terminated unexpectedly")]
+    Internal,
     /// 模型调用失败（建立前失败或流中受控失败）。
     #[error(transparent)]
     Model(#[from] ModelError),
@@ -60,6 +63,7 @@ mod tests {
     #[test]
     fn execution_error_round_trips_serde() {
         let errors = vec![
+            ExecutionError::Internal,
             ExecutionError::Model(ModelError::Cancelled),
             ExecutionError::Model(ModelError::Provider {
                 message: "upstream rejected the request".to_owned(),

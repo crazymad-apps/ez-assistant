@@ -26,71 +26,80 @@ pub(super) struct CompiledModelService {
 }
 
 impl AssistantRuntime {
-    /// 使用一次配置快照和 Session 冻结的 System Prompt 构造本 Run 独享的 Agent。
-    pub(super) fn compile_run_agent(
-        &self,
-        session: &SessionController,
-        snapshot: &ConfigSnapshot,
-    ) -> RuntimeResult<Agent> {
-        let active = snapshot
-            .active()
-            .ok_or(RuntimeError::ConfigurationUnavailable)?;
-        let model_config = resolve_model(snapshot, session.model_key())?;
-        let compiled = self.compile_model_service(snapshot, session.model_key())?;
-        let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
-
-        AgentBuilder::new(
-            compiled.model,
-            session.system_prompt().clone(),
-            self.context_window.clone(),
-        )
-        .tools(self.tools.clone())
-        .model_request(agent_core::ModelRequestConfig {
-            tool_choice: ToolChoice::Auto,
-            generation: model_config.generation().clone(),
-            reasoning,
-            provider_options,
-        })
-        .budget(active.budget().clone())
-        .build()
-        .map_err(|source| RuntimeError::AgentBuildFailed { source })
-    }
-
     /// 从同一配置快照构造 Run 和连接验证共用的冻结 ModelService。
     pub(super) fn compile_model_service(
         &self,
         snapshot: &ConfigSnapshot,
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<CompiledModelService> {
-        let active = snapshot
-            .active()
-            .ok_or(RuntimeError::ConfigurationUnavailable)?;
-        let model_config = resolve_model(snapshot, model_key)?;
-        let transport = active.transport();
-        let profile = model_config.compatibility_profile();
-        let base_model = self
-            .model_factory
-            .create_model(ModelServiceFactoryRequest {
-                provider: model_config.provider(),
-                profile,
-                endpoint: model_config.endpoint(),
-                model: model_config.model(),
-                api_key: model_config.api_key(),
-                context_window_tokens: model_config.context_window_tokens(),
-                connect_timeout: transport.connect_timeout(),
-                request_timeout: transport.request_timeout(),
-            })
-            .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
-        let model = active.retry_policy().map_or(base_model.clone(), |policy| {
-            Arc::new(RetryingModelService::new(base_model, policy.clone())) as Arc<dyn ModelService>
-        });
-        Ok(CompiledModelService {
-            model,
+        compile_model_service(snapshot, model_key, self.model_factory.as_ref())
+    }
+}
+
+pub(super) fn compile_run_agent(
+    session: &SessionController,
+    snapshot: &ConfigSnapshot,
+    model_factory: &dyn crate::ModelServiceFactory,
+    context_window: Arc<agent_sdk::ContextWindowEvaluator>,
+    tools: agent_tools::ToolSetSnapshot,
+) -> RuntimeResult<Agent> {
+    let active = snapshot
+        .active()
+        .ok_or(RuntimeError::ConfigurationUnavailable)?;
+    let model_key = session.model_key()?;
+    let model_config = resolve_model(snapshot, &model_key)?;
+    let compiled = compile_model_service(snapshot, &model_key, model_factory)?;
+    let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
+
+    AgentBuilder::new(
+        compiled.model,
+        session.system_prompt().clone(),
+        context_window,
+    )
+    .tools(tools)
+    .model_request(agent_core::ModelRequestConfig {
+        tool_choice: ToolChoice::Auto,
+        generation: model_config.generation().clone(),
+        reasoning,
+        provider_options,
+    })
+    .budget(active.budget().clone())
+    .build()
+    .map_err(|source| RuntimeError::AgentBuildFailed { source })
+}
+
+pub(super) fn compile_model_service(
+    snapshot: &ConfigSnapshot,
+    model_key: &assistant_protocol::ModelKey,
+    model_factory: &dyn crate::ModelServiceFactory,
+) -> RuntimeResult<CompiledModelService> {
+    let active = snapshot
+        .active()
+        .ok_or(RuntimeError::ConfigurationUnavailable)?;
+    let model_config = resolve_model(snapshot, model_key)?;
+    let transport = active.transport();
+    let profile = model_config.compatibility_profile();
+    let base_model = model_factory
+        .create_model(ModelServiceFactoryRequest {
+            provider: model_config.provider(),
             profile,
-            max_output_tokens: model_config.max_output_tokens(),
+            endpoint: model_config.endpoint(),
+            model: model_config.model(),
+            api_key: model_config.api_key(),
+            context_window_tokens: model_config.context_window_tokens(),
+            connect_timeout: transport.connect_timeout(),
             request_timeout: transport.request_timeout(),
         })
-    }
+        .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
+    let model = active.retry_policy().map_or(base_model.clone(), |policy| {
+        Arc::new(RetryingModelService::new(base_model, policy.clone())) as Arc<dyn ModelService>
+    });
+    Ok(CompiledModelService {
+        model,
+        profile,
+        max_output_tokens: model_config.max_output_tokens(),
+        request_timeout: transport.request_timeout(),
+    })
 }
 
 /// 按 Profile 编译业务请求必需的 reasoning 和 Provider Options。

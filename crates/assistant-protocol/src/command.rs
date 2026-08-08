@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ConfigurationStatus, ModelConfiguration, ModelKey, RunId, RunSnapshot, RuntimeLifecycle,
-    SessionId, SessionSummary,
+    ConfigurationStatus, IdempotencyKey, InputId, ModelConfiguration, ModelKey, RunId, RunSnapshot,
+    RuntimeLifecycle, SessionId, SessionListFilter, SessionSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -132,9 +132,12 @@ pub struct CreateSessionResult {
     pub session: SessionSummary,
 }
 
-/// 列出当前进程内所有 Session。
+/// 按生命周期列出 Session；缺省只返回活动 Session。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ListSessionsRequest {}
+pub struct ListSessionsRequest {
+    #[serde(default)]
+    pub filter: SessionListFilter,
+}
 
 /// 列出 Session 的成功结果。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,19 +160,57 @@ pub struct GetSessionResult {
     pub session: SessionSummary,
 }
 
-/// 向一个空闲 Session 提交用户消息并启动 Run。
+/// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StartRunRequest {
+pub struct SubmitInputRequest {
     /// 目标 Session。
     pub session_id: SessionId,
     /// 原样进入规范 UserMessage 的文本；Runtime 负责非空白校验。
     pub message: String,
+    /// 可选的不透明请求身份；重复 key 直接返回首次结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
 }
 
-/// 启动 Run 的成功结果。
+/// 输入已持久化接受的结果。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StartRunResult {
-    /// 已被 Runtime 接受的 Run 快照。
+pub struct SubmitInputResult {
+    pub input_id: InputId,
+    pub run: RunSnapshot,
+}
+
+/// 取消尚未进入 Conversation 的排队输入。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CancelQueuedInputRequest {
+    pub session_id: SessionId,
+    pub input_id: InputId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CancelQueuedInputResult {
+    pub input_id: InputId,
+}
+
+/// 显式恢复重启后暂停的 Session 队列。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResumeSessionRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResumeSessionResult {
+    pub session: SessionSummary,
+}
+
+/// 为可重试的失败或中断 Run 创建新 attempt。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetryRunRequest {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetryRunResult {
     pub run: RunSnapshot,
 }
 
@@ -186,6 +227,67 @@ pub struct GetRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GetRunResult {
     /// 当前 Run 快照。
+    pub run: RunSnapshot,
+}
+
+/// 查询指定 Session 的全部 Run。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRunsRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRunsResult {
+    pub runs: Vec<RunSnapshot>,
+}
+
+/// 把完全空闲的活动 Session 转为只读归档状态。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArchiveSessionRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArchiveSessionResult {
+    pub session: SessionSummary,
+}
+
+/// 恢复一个归档 Session；不会自动启动任何 Run。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RestoreSessionRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RestoreSessionResult {
+    pub session: SessionSummary,
+}
+
+/// 切换 Session 后续 Run 使用的模型 key。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionModelRequest {
+    pub session_id: SessionId,
+    pub model_key: ModelKey,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionModelResult {
+    pub session: SessionSummary,
+}
+
+/// 从历史 User Message 位置提交一条全新输入并销毁原目标及尾段。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReenterFromUserMessageRequest {
+    pub session_id: SessionId,
+    pub message_id: crate::MessageId,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReenterFromUserMessageResult {
+    pub input_id: InputId,
     pub run: RunSnapshot,
 }
 
@@ -236,10 +338,26 @@ pub enum RuntimeCommand {
     ListSessions(ListSessionsRequest),
     /// 查询 Session。
     GetSession(GetSessionRequest),
-    /// 启动 Run。
-    StartRun(StartRunRequest),
+    /// 提交持久化输入。
+    SubmitInput(SubmitInputRequest),
+    /// 取消排队输入。
+    CancelQueuedInput(CancelQueuedInputRequest),
+    /// 恢复重启后暂停的队列。
+    ResumeSession(ResumeSessionRequest),
+    /// 重试失败或中断 Run。
+    RetryRun(RetryRunRequest),
     /// 查询 Run。
     GetRun(GetRunRequest),
+    /// 列出 Session 的全部 Run。
+    ListRuns(ListRunsRequest),
+    /// 归档 Session。
+    ArchiveSession(ArchiveSessionRequest),
+    /// 恢复归档 Session。
+    RestoreSession(RestoreSessionRequest),
+    /// 切换 Session 模型。
+    SetSessionModel(SetSessionModelRequest),
+    /// 从历史 User Message 重新输入。
+    ReenterFromUserMessage(ReenterFromUserMessageRequest),
     /// 取消 Run。
     CancelRun(CancelRunRequest),
     /// 关闭 Runtime。
@@ -266,10 +384,26 @@ pub enum RuntimeCommandResult {
     ListSessions(ListSessionsResult),
     /// Session 查询已返回。
     GetSession(GetSessionResult),
-    /// Run 已接受。
-    StartRun(StartRunResult),
+    /// 输入已接受。
+    SubmitInput(SubmitInputResult),
+    /// 排队输入已取消。
+    CancelQueuedInput(CancelQueuedInputResult),
+    /// Session 队列已恢复。
+    ResumeSession(ResumeSessionResult),
+    /// 新 Run attempt 已创建。
+    RetryRun(RetryRunResult),
     /// Run 查询已返回。
     GetRun(GetRunResult),
+    /// Run 列表已返回。
+    ListRuns(ListRunsResult),
+    /// Session 已归档。
+    ArchiveSession(ArchiveSessionResult),
+    /// Session 已恢复。
+    RestoreSession(RestoreSessionResult),
+    /// Session 模型已切换。
+    SetSessionModel(SetSessionModelResult),
+    /// 历史重新输入已接受。
+    ReenterFromUserMessage(ReenterFromUserMessageResult),
     /// 取消请求已接受。
     CancelRun(CancelRunResult),
     /// Runtime 关闭请求已接受。
@@ -287,8 +421,11 @@ mod tests {
             session_id: SessionId::new("session-1").expect("session id"),
             title: "Session 1".to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
+            lifecycle: crate::SessionLifecycle::Active,
             active_run_id: None,
             message_count: 0,
+            queued_input_count: 0,
+            resume_required: false,
         }
     }
 
@@ -296,6 +433,8 @@ mod tests {
         RunSnapshot {
             run_id: RunId::new("run-1").expect("run id"),
             session_id: SessionId::new("session-1").expect("session id"),
+            input_id: InputId::new("input-1").expect("input id"),
+            attempt: 1,
             status: crate::RunStatus::Accepted,
             cancel_requested: false,
             reasoning: String::new(),
@@ -336,16 +475,17 @@ mod tests {
 
     #[test]
     fn command_uses_explicit_type_and_payload_tags() {
-        let command = RuntimeCommand::StartRun(StartRunRequest {
+        let command = RuntimeCommand::SubmitInput(SubmitInputRequest {
             session_id: SessionId::new("session-1").expect("session id"),
             message: "hello".to_owned(),
+            idempotency_key: None,
         });
         let value = serde_json::to_value(&command).expect("serialize command");
 
         assert_eq!(
             value,
             json!({
-                "type": "start_run",
+                "type": "submit_input",
                 "payload": {
                     "session_id": "session-1",
                     "message": "hello"
@@ -422,11 +562,32 @@ mod tests {
                 "get_session",
             ),
             (
-                RuntimeCommand::StartRun(StartRunRequest {
+                RuntimeCommand::SubmitInput(SubmitInputRequest {
                     session_id: session_id.clone(),
                     message: "hello".to_owned(),
+                    idempotency_key: None,
                 }),
-                "start_run",
+                "submit_input",
+            ),
+            (
+                RuntimeCommand::CancelQueuedInput(CancelQueuedInputRequest {
+                    session_id: session_id.clone(),
+                    input_id: InputId::new("input-1").expect("input id"),
+                }),
+                "cancel_queued_input",
+            ),
+            (
+                RuntimeCommand::ResumeSession(ResumeSessionRequest {
+                    session_id: session_id.clone(),
+                }),
+                "resume_session",
+            ),
+            (
+                RuntimeCommand::RetryRun(RetryRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                }),
+                "retry_run",
             ),
             (
                 RuntimeCommand::GetRun(GetRunRequest {
@@ -434,6 +595,42 @@ mod tests {
                     run_id: run_id.clone(),
                 }),
                 "get_run",
+            ),
+            (
+                RuntimeCommand::ListRuns(ListRunsRequest {
+                    session_id: session_id.clone(),
+                }),
+                "list_runs",
+            ),
+            (
+                RuntimeCommand::ArchiveSession(ArchiveSessionRequest {
+                    session_id: session_id.clone(),
+                }),
+                "archive_session",
+            ),
+            (
+                RuntimeCommand::RestoreSession(RestoreSessionRequest {
+                    session_id: session_id.clone(),
+                }),
+                "restore_session",
+            ),
+            (
+                RuntimeCommand::SetSessionModel(SetSessionModelRequest {
+                    session_id: session_id.clone(),
+                    model_key: ModelKey::new("model-2").expect("model key"),
+                }),
+                "set_session_model",
+            ),
+            (
+                RuntimeCommand::ReenterFromUserMessage(ReenterFromUserMessageRequest {
+                    session_id: session_id.clone(),
+                    message_id: crate::MessageId::new("message-1").expect("message id"),
+                    message: "replacement".to_owned(),
+                    idempotency_key: Some(
+                        IdempotencyKey::new("replace-1").expect("idempotency key"),
+                    ),
+                }),
+                "reenter_from_user_message",
             ),
             (
                 RuntimeCommand::CancelRun(CancelRunRequest { session_id, run_id }),
@@ -507,16 +704,66 @@ mod tests {
                 "get_session",
             ),
             (
-                RuntimeCommandResult::StartRun(StartRunResult {
+                RuntimeCommandResult::SubmitInput(SubmitInputResult {
+                    input_id: InputId::new("input-1").expect("input id"),
                     run: run_snapshot(),
                 }),
-                "start_run",
+                "submit_input",
+            ),
+            (
+                RuntimeCommandResult::CancelQueuedInput(CancelQueuedInputResult {
+                    input_id: InputId::new("input-1").expect("input id"),
+                }),
+                "cancel_queued_input",
+            ),
+            (
+                RuntimeCommandResult::ResumeSession(ResumeSessionResult {
+                    session: session_summary(),
+                }),
+                "resume_session",
+            ),
+            (
+                RuntimeCommandResult::RetryRun(RetryRunResult {
+                    run: run_snapshot(),
+                }),
+                "retry_run",
             ),
             (
                 RuntimeCommandResult::GetRun(GetRunResult {
                     run: run_snapshot(),
                 }),
                 "get_run",
+            ),
+            (
+                RuntimeCommandResult::ListRuns(ListRunsResult {
+                    runs: vec![run_snapshot()],
+                }),
+                "list_runs",
+            ),
+            (
+                RuntimeCommandResult::ArchiveSession(ArchiveSessionResult {
+                    session: session_summary(),
+                }),
+                "archive_session",
+            ),
+            (
+                RuntimeCommandResult::RestoreSession(RestoreSessionResult {
+                    session: session_summary(),
+                }),
+                "restore_session",
+            ),
+            (
+                RuntimeCommandResult::SetSessionModel(SetSessionModelResult {
+                    session: session_summary(),
+                }),
+                "set_session_model",
+            ),
+            (
+                RuntimeCommandResult::ReenterFromUserMessage(ReenterFromUserMessageResult {
+                    input_id: InputId::new("input-1").expect("input id"),
+                    run: run_snapshot(),
+                }),
+                "reenter_from_user_message",
             ),
             (
                 RuntimeCommandResult::CancelRun(CancelRunResult {

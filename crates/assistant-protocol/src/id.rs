@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 const MAX_MODEL_KEY_BYTES: usize = 64;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
 /// 应用层标识为空或只包含空白字符。
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -105,6 +106,11 @@ define_identifier!(
     "run_id"
 );
 define_identifier!(
+    /// Runtime 中一次已接受用户输入的不透明标识。
+    InputId,
+    "input_id"
+);
+define_identifier!(
     /// 应用层规范消息的不透明标识。
     MessageId,
     "message_id"
@@ -119,6 +125,44 @@ define_identifier!(
     ToolCallId,
     "tool_call_id"
 );
+
+/// 客户端提交输入时使用的不透明请求身份；只在同一 Session 内比较。
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    /// 校验非空且不超过 128 字节；原始内容不做归一化。
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let value = validate(value.into(), "idempotency_key")?;
+        if value.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(IdentifierError {
+                kind: "idempotency_key",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for IdempotencyKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for IdempotencyKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
 
 /// 用户配置中模型条目的稳定 key 校验错误。
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -235,6 +279,21 @@ mod tests {
     }
 
     #[test]
+    fn idempotency_key_is_nonempty_bounded_and_opaque() {
+        let key = IdempotencyKey::new(" request-1 ").expect("key");
+        assert_eq!(key.as_str(), " request-1 ");
+        assert!(IdempotencyKey::new(" ").is_err());
+        assert!(IdempotencyKey::new("x".repeat(MAX_IDEMPOTENCY_KEY_BYTES + 1)).is_err());
+        assert_eq!(
+            serde_json::from_str::<IdempotencyKey>(
+                &serde_json::to_string(&key).expect("serialize")
+            )
+            .expect("deserialize"),
+            key
+        );
+    }
+
+    #[test]
     fn every_identifier_rejects_empty_or_whitespace_only_values() {
         assert_eq!(
             SessionId::new(" ")
@@ -243,6 +302,7 @@ mod tests {
             "session_id"
         );
         assert!(RunId::new("").is_err());
+        assert!(InputId::new(" ").is_err());
         assert!(MessageId::new("\n").is_err());
         assert!(PartId::new("\t").is_err());
         assert!(ToolCallId::new("  ").is_err());
@@ -259,6 +319,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RunId::new("run-1").expect("run id")).expect("serialize run id"),
             "run-1"
+        );
+        assert_eq!(
+            serde_json::to_value(InputId::new("input-1").expect("input id"))
+                .expect("serialize input id"),
+            "input-1"
         );
         assert_eq!(
             serde_json::to_value(MessageId::new("message-1").expect("message id"))

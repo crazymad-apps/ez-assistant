@@ -10,14 +10,18 @@ mod id;
 mod snapshot;
 
 pub use command::{
+    ArchiveSessionRequest, ArchiveSessionResult, CancelQueuedInputRequest, CancelQueuedInputResult,
     CancelRunRequest, CancelRunResult, ConnectionValidationFailure,
     ConnectionValidationFailureKind, ConnectionValidationOutcome, CreateSessionRequest,
     CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
     GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
-    ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
-    ReloadConfigRequest, ReloadConfigResult, RuntimeCommand, RuntimeCommandResult,
-    ShutdownRuntimeRequest, ShutdownRuntimeResult, StartRunRequest, StartRunResult,
-    ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    ListModelsRequest, ListModelsResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
+    ListSessionsResult, ReenterFromUserMessageRequest, ReenterFromUserMessageResult,
+    ReloadConfigRequest, ReloadConfigResult, RestoreSessionRequest, RestoreSessionResult,
+    ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
+    RuntimeCommandResult, SetSessionModelRequest, SetSessionModelResult, ShutdownRuntimeRequest,
+    ShutdownRuntimeResult, SubmitInputRequest, SubmitInputResult, ValidateModelConnectionRequest,
+    ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
@@ -26,11 +30,12 @@ pub use config::{
 pub use error::{RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::RuntimeEvent;
 pub use id::{
-    IdentifierError, MessageId, ModelKey, ModelKeyError, PartId, RunId, SessionId, ToolCallId,
+    IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId, RunId,
+    SessionId, ToolCallId,
 };
 pub use snapshot::{
-    RunSnapshot, RunStatus, RuntimeLifecycle, SessionSummary, ToolActivitySnapshot,
-    ToolActivityStatus, ToolOutputChannel,
+    RunSnapshot, RunStatus, RuntimeLifecycle, SessionLifecycle, SessionListFilter, SessionSummary,
+    ToolActivitySnapshot, ToolActivityStatus, ToolOutputChannel,
 };
 
 /// Runtime Host 私有握手所使用的当前应用协议版本。

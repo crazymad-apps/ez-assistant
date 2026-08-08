@@ -1,5 +1,6 @@
 use std::{
     num::NonZeroUsize,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,17 +10,20 @@ use agent_sdk::AllowAllAuthorizer;
 use agent_testkit::{ModelScript, OrderLog, ScriptedModelService, ScriptedTool, message_events};
 use agent_tools::{ToolRegistry, ToolSetSnapshot};
 use agent_types::{
-    AssistantMessage, AssistantPart, FinishReason, MessageId, ModelIdentity, ProviderId, TextPart,
-    ToolCall, ToolCallId, ToolName,
+    AssistantMessage, AssistantPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId,
+    TextPart, ToolCall, ToolCallId, ToolName, UserMessage, UserPart,
 };
 use assistant_protocol::{
-    CancelRunRequest, CreateSessionRequest, GetRunRequest, PROTOCOL_VERSION, RunStatus,
-    RuntimeCommand, RuntimeCommandResult, ShutdownRuntimeRequest, StartRunRequest,
+    CancelRunRequest, CreateSessionRequest, GetRunRequest, GetSessionRequest, IdempotencyKey,
+    InputId, ListSessionsRequest, ModelKey, PROTOCOL_VERSION, ResumeSessionRequest,
+    RetryRunRequest, RunId, RunStatus, RuntimeCommand, RuntimeCommandResult, RuntimeErrorCode,
+    SessionId, ShutdownRuntimeRequest, SubmitInputRequest,
 };
 use assistant_runtime::{
     AssistantRuntime, ConfigSourceFuture, ConfigSourceLoad, ModelServiceFactory,
-    ModelServiceFactoryError, ModelServiceFactoryRequest, RuntimeConfig, RuntimeConfigSource,
-    SystemPromptFactory, SystemPromptFactoryError,
+    ModelServiceFactoryError, ModelServiceFactoryRequest, NewStoredInput, NewStoredSession,
+    RuntimeConfig, RuntimeConfigSource, RuntimeStore, SystemPromptFactory,
+    SystemPromptFactoryError, UserMessageCommit,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -29,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use super::{RuntimeServer, ServerError};
 use crate::{
     endpoint::{EndpointError, OwnedEndpoint},
+    storage::LocalRuntimeStore,
     wire::{
         ClientFrame, HostCommand, HostCommandResult, MAX_FRAME_BYTES, ServerFrame, read_frame,
         write_frame,
@@ -137,6 +142,36 @@ async fn empty_runtime() -> Arc<AssistantRuntime> {
         ToolSetSnapshot::default(),
     )
     .await
+}
+
+async fn persistent_runtime(
+    runtime_home: &Path,
+    model: Arc<dyn ModelService>,
+) -> Arc<AssistantRuntime> {
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG));
+    let store = Arc::new(
+        LocalRuntimeStore::open(runtime_home, 8)
+            .await
+            .expect("open persistent store"),
+    );
+    let runtime = Arc::new(
+        AssistantRuntime::open(
+            RuntimeConfig::new(NonZeroUsize::new(64).expect("capacity")),
+            source,
+            Arc::new(StaticModelFactory { model }),
+            Arc::new(StaticSystemPromptFactory),
+            ToolSetSnapshot::default(),
+            Arc::new(AllowAllAuthorizer),
+            store,
+        )
+        .await
+        .expect("recover persistent runtime"),
+    );
+    runtime
+        .reload_config(assistant_protocol::ReloadConfigRequest::default())
+        .await
+        .expect("load config");
+    runtime
 }
 
 fn tool_message() -> AssistantMessage {
@@ -584,12 +619,13 @@ async fn client_disconnect_does_not_cancel_run_and_reconnect_can_query_and_cance
         panic!("create result");
     };
     let session_id = created.session.session_id;
-    let HostCommandResult::Runtime(RuntimeCommandResult::StartRun(started)) = request(
+    let HostCommandResult::Runtime(RuntimeCommandResult::SubmitInput(started)) = request(
         &mut first,
         "start",
-        HostCommand::Runtime(RuntimeCommand::StartRun(StartRunRequest {
+        HostCommand::Runtime(RuntimeCommand::SubmitInput(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "use the slow tool".to_owned(),
+            idempotency_key: None,
         })),
     )
     .await
@@ -682,4 +718,428 @@ async fn client_disconnect_does_not_cancel_run_and_reconnect_can_query_and_cance
     )
     .await;
     server.await.expect("server task").expect("server result");
+}
+
+#[tokio::test]
+async fn runtime_reopens_persisted_session_conversation_and_terminal_run() {
+    let root = tempdir().expect("tempdir");
+    let final_message = text_message("assistant-persisted", "persisted answer");
+    let first_model = Arc::new(ScriptedModelService::completing(
+        capabilities(false),
+        8_192,
+        final_message.clone(),
+    ));
+    let first = persistent_runtime(root.path(), first_model).await;
+    let created = first
+        .create_session(CreateSessionRequest {
+            title: Some("Persistent Session".to_owned()),
+            model_key: None,
+        })
+        .await
+        .expect("create persisted session");
+    let started = first
+        .submit_input(SubmitInputRequest {
+            session_id: created.session.session_id.clone(),
+            message: "persist this".to_owned(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("start persisted run");
+    let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let run = first
+                .get_run(GetRunRequest {
+                    session_id: created.session.session_id.clone(),
+                    run_id: started.run.run_id.clone(),
+                })
+                .await
+                .expect("query persisted run")
+                .run;
+            if run.status.is_terminal() {
+                break run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("run reaches terminal state");
+    assert_eq!(terminal.status, RunStatus::Completed);
+    assert_eq!(terminal.text, "persisted answer");
+    first
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown first runtime");
+    drop(first);
+
+    let unused_model = Arc::new(ScriptedModelService::new(capabilities(false), 8_192, []));
+    let reopened = persistent_runtime(root.path(), unused_model.clone()).await;
+    let listed = reopened
+        .list_sessions(ListSessionsRequest::default())
+        .expect("list recovered sessions");
+    assert_eq!(listed.sessions.len(), 1);
+    assert_eq!(listed.sessions[0].session_id, created.session.session_id);
+    assert_eq!(listed.sessions[0].message_count, 2);
+    assert_eq!(
+        reopened
+            .get_session(GetSessionRequest {
+                session_id: created.session.session_id.clone(),
+            })
+            .expect("get recovered session")
+            .session
+            .title,
+        "Persistent Session"
+    );
+    let conversation = reopened
+        .conversation_snapshot(&created.session.session_id)
+        .await
+        .expect("load recovered conversation");
+    assert_eq!(conversation.messages.len(), 2);
+    assert_eq!(
+        conversation.messages[1],
+        agent_types::ConversationMessage::Assistant(final_message)
+    );
+    let recovered_run = reopened
+        .get_run(GetRunRequest {
+            session_id: created.session.session_id.clone(),
+            run_id: started.run.run_id,
+        })
+        .await
+        .expect("get recovered run")
+        .run;
+    assert_eq!(recovered_run.status, RunStatus::Completed);
+    assert_eq!(recovered_run.text, "persisted answer");
+    assert!(unused_model.take_requests().is_empty());
+    reopened
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown reopened runtime");
+}
+
+#[tokio::test]
+async fn recovered_queued_input_waits_for_explicit_resume() {
+    let root = tempdir().expect("tempdir");
+    let store = LocalRuntimeStore::open(root.path(), 4)
+        .await
+        .expect("open seed store");
+    let session_id = SessionId::new("s-resume").expect("session id");
+    store
+        .create_session(NewStoredSession {
+            session_id: session_id.clone(),
+            title: "Resume Session".to_owned(),
+            model_key: ModelKey::new("fixture").expect("model key"),
+            system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
+            created_at_ms: 1_000,
+        })
+        .await
+        .expect("seed session");
+    let input_id = InputId::new("i-resume").expect("input id");
+    let run_id = RunId::new("r-resume").expect("run id");
+    store
+        .accept_input(NewStoredInput {
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            idempotency_key: Some(IdempotencyKey::new("resume-key").expect("key")),
+            message: UserMessage {
+                id: MessageId::new("m-resume").expect("message id"),
+                parts: vec![UserPart::Text(TextPart {
+                    id: PartId::new("p-resume").expect("part id"),
+                    text: "resume me".to_owned(),
+                })],
+            },
+            accepted_at_ms: 2_000,
+        })
+        .await
+        .expect("seed queued input");
+    store.shutdown().await.expect("close seed store");
+
+    let model = Arc::new(ScriptedModelService::completing(
+        capabilities(false),
+        8_192,
+        text_message("a-resume", "resumed"),
+    ));
+    let runtime = persistent_runtime(root.path(), model.clone()).await;
+    let summary = runtime
+        .get_session(GetSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .expect("recovered session")
+        .session;
+    assert!(summary.resume_required);
+    assert_eq!(summary.queued_input_count, 1);
+    assert!(model.take_requests().is_empty());
+    assert!(
+        runtime
+            .conversation_snapshot(&session_id)
+            .await
+            .expect("empty conversation")
+            .messages
+            .is_empty()
+    );
+    let repeated = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "ignored retry payload".to_owned(),
+            idempotency_key: Some(IdempotencyKey::new("resume-key").expect("key")),
+        })
+        .await
+        .expect("idempotent retry");
+    assert_eq!(repeated.input_id, input_id);
+    assert_eq!(repeated.run.run_id, run_id);
+    assert!(model.take_requests().is_empty());
+
+    runtime
+        .resume_session(ResumeSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("resume session");
+    let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let run = runtime
+                .get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                })
+                .await
+                .expect("run")
+                .run;
+            if run.status.is_terminal() {
+                break run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resumed run finishes");
+    assert_eq!(terminal.status, RunStatus::Completed);
+    assert_eq!(
+        runtime
+            .conversation_snapshot(&session_id)
+            .await
+            .expect("conversation")
+            .messages
+            .len(),
+        2
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown runtime");
+}
+
+#[tokio::test]
+async fn retrying_a_recovered_interrupted_run_does_not_duplicate_the_user_message() {
+    let root = tempdir().expect("tempdir");
+    let store = LocalRuntimeStore::open(root.path(), 4)
+        .await
+        .expect("open seed store");
+    let session_id = SessionId::new("s-retry").expect("session id");
+    let input_id = InputId::new("i-retry").expect("input id");
+    let run_id = RunId::new("r-retry-1").expect("run id");
+    let message = UserMessage {
+        id: MessageId::new("m-retry").expect("message id"),
+        parts: vec![UserPart::Text(TextPart {
+            id: PartId::new("p-retry").expect("part id"),
+            text: "retry after restart".to_owned(),
+        })],
+    };
+    store
+        .create_session(NewStoredSession {
+            session_id: session_id.clone(),
+            title: "Retry Session".to_owned(),
+            model_key: ModelKey::new("fixture").expect("model key"),
+            system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
+            created_at_ms: 1_000,
+        })
+        .await
+        .expect("seed session");
+    store
+        .accept_input(NewStoredInput {
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            idempotency_key: None,
+            message: message.clone(),
+            accepted_at_ms: 2_000,
+        })
+        .await
+        .expect("accept input");
+    store
+        .commit_user_message(UserMessageCommit {
+            operation_id: "append-retry".to_owned(),
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            message: Some(message),
+            created_at_ms: 3_000,
+        })
+        .await
+        .expect("start run durably");
+    let queued_input_id = InputId::new("i-still-queued").expect("input id");
+    let queued_run_id = RunId::new("r-still-queued").expect("run id");
+    store
+        .accept_input(NewStoredInput {
+            input_id: queued_input_id.clone(),
+            run_id: queued_run_id.clone(),
+            session_id: session_id.clone(),
+            idempotency_key: None,
+            message: UserMessage {
+                id: MessageId::new("m-still-queued").expect("message id"),
+                parts: vec![UserPart::Text(TextPart {
+                    id: PartId::new("p-still-queued").expect("part id"),
+                    text: "do not resume me".to_owned(),
+                })],
+            },
+            accepted_at_ms: 4_000,
+        })
+        .await
+        .expect("accept later queued input");
+    store.shutdown().await.expect("close seed store");
+
+    let model = Arc::new(ScriptedModelService::completing(
+        capabilities(false),
+        8_192,
+        text_message("a-retry", "retried"),
+    ));
+    let runtime = persistent_runtime(root.path(), model.clone()).await;
+    assert_eq!(
+        runtime
+            .get_run(GetRunRequest {
+                session_id: session_id.clone(),
+                run_id: run_id.clone()
+            })
+            .await
+            .expect("interrupted run")
+            .run
+            .status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(
+        runtime
+            .conversation_snapshot(&session_id)
+            .await
+            .expect("conversation")
+            .messages
+            .len(),
+        1
+    );
+    let retry = runtime
+        .retry_run(RetryRunRequest {
+            session_id: session_id.clone(),
+            run_id,
+        })
+        .await
+        .expect("retry interrupted run");
+    assert_eq!(retry.run.input_id, input_id);
+    assert_eq!(retry.run.attempt, 2);
+    let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let run = runtime
+                .get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: retry.run.run_id.clone(),
+                })
+                .await
+                .expect("retry run")
+                .run;
+            if run.status.is_terminal() {
+                break run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry finishes");
+    assert_eq!(terminal.status, RunStatus::Completed);
+    assert_eq!(model.take_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .get_run(GetRunRequest {
+                session_id: session_id.clone(),
+                run_id: queued_run_id,
+            })
+            .await
+            .expect("later queued run")
+            .run
+            .status,
+        RunStatus::Accepted
+    );
+    let summary = runtime
+        .get_session(GetSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .expect("session")
+        .session;
+    assert!(summary.resume_required);
+    assert_eq!(summary.queued_input_count, 1);
+    assert_eq!(
+        runtime
+            .conversation_snapshot(&session_id)
+            .await
+            .expect("conversation")
+            .messages
+            .len(),
+        2
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown runtime");
+}
+
+#[tokio::test]
+async fn corrupt_conversation_is_isolated_and_never_replaced_with_empty_state() {
+    let root = tempdir().expect("tempdir");
+    let store = LocalRuntimeStore::open(root.path(), 4)
+        .await
+        .expect("open seed store");
+    let session_id = SessionId::new("s-unavailable").expect("session id");
+    store
+        .create_session(NewStoredSession {
+            session_id: session_id.clone(),
+            title: "Unavailable Session".to_owned(),
+            model_key: ModelKey::new("fixture").expect("model key"),
+            system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
+            created_at_ms: 1_000,
+        })
+        .await
+        .expect("seed session");
+    store.shutdown().await.expect("close seed store");
+    let body = root
+        .path()
+        .join("data/sessions/s-unavailable/conversation.1.jsonl");
+    std::fs::write(&body, b"not-json\n").expect("corrupt conversation fixture");
+
+    let runtime = persistent_runtime(
+        root.path(),
+        Arc::new(ScriptedModelService::new(capabilities(false), 8_192, [])),
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .list_sessions(ListSessionsRequest::default())
+            .expect("list recovered session")
+            .sessions[0]
+            .message_count,
+        0
+    );
+    for _ in 0..2 {
+        let error = runtime
+            .conversation_snapshot(&session_id)
+            .await
+            .expect_err("corrupt conversation remains unavailable");
+        assert_eq!(
+            error.to_protocol_info().code,
+            RuntimeErrorCode::StorageUnavailable
+        );
+    }
+    assert_eq!(
+        std::fs::read(&body).expect("read corrupt fixture"),
+        b"not-json\n"
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown runtime");
 }

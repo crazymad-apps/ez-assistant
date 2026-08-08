@@ -30,6 +30,7 @@ pub(crate) enum JournalError {
     #[error("journal receipt does not match the pending exchange")]
     ExchangeMismatch,
     /// Journal 内部的交换序号已经耗尽。
+    #[cfg(test)]
     #[error("journal exchange id sequence is exhausted")]
     ExchangeIdExhausted,
     /// begin 收到的 AssistantMessage 没有 Tool Call。
@@ -48,6 +49,7 @@ pub(crate) enum JournalError {
 pub(crate) struct InMemoryJournal {
     completed: Vec<ConversationMessage>,
     pending: Option<PendingExchange>,
+    #[cfg(test)]
     next_exchange: u64,
 }
 
@@ -56,8 +58,19 @@ impl InMemoryJournal {
         Self {
             completed: Vec::new(),
             pending: None,
+            #[cfg(test)]
             next_exchange: 1,
         }
+    }
+
+    pub(crate) fn from_snapshot(snapshot: ConversationSnapshot) -> Result<Self, JournalError> {
+        validate(&snapshot.messages)?;
+        Ok(Self {
+            completed: snapshot.messages,
+            pending: None,
+            #[cfg(test)]
+            next_exchange: 1,
+        })
     }
 
     pub(crate) fn message_count(&self) -> usize {
@@ -66,6 +79,18 @@ impl InMemoryJournal {
 
     pub(crate) fn snapshot(&self) -> ConversationSnapshot {
         ConversationSnapshot::new(self.completed.clone())
+    }
+
+    pub(crate) fn replace_completed(
+        &mut self,
+        snapshot: ConversationSnapshot,
+    ) -> Result<(), JournalError> {
+        if self.pending.is_some() {
+            return Err(JournalError::PendingExchangeExists);
+        }
+        validate(&snapshot.messages)?;
+        self.completed = snapshot.messages;
+        Ok(())
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -86,11 +111,44 @@ impl InMemoryJournal {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_tool_exchange(
         &mut self,
         run_id: &RunId,
         assistant: AssistantMessage,
     ) -> Result<ExchangeReceipt, JournalError> {
+        self.validate_tool_exchange_begin(&assistant)?;
+        let receipt = ExchangeReceipt::new(format!("exchange-{}", self.next_exchange))
+            .map_err(|_| JournalError::ExchangeIdExhausted)?;
+        self.next_exchange = self
+            .next_exchange
+            .checked_add(1)
+            .ok_or(JournalError::ExchangeIdExhausted)?;
+        self.begin_tool_exchange_with_receipt(run_id, receipt.clone(), assistant)?;
+        Ok(receipt)
+    }
+
+    /// 以 Runtime 已可靠持久化的 receipt 建立内存 pending 投影。
+    pub(crate) fn begin_tool_exchange_with_receipt(
+        &mut self,
+        run_id: &RunId,
+        receipt: ExchangeReceipt,
+        assistant: AssistantMessage,
+    ) -> Result<(), JournalError> {
+        self.validate_tool_exchange_begin(&assistant)?;
+        self.pending = Some(PendingExchange {
+            run_id: run_id.clone(),
+            receipt,
+            assistant,
+        });
+        Ok(())
+    }
+
+    /// 在 Store await 前只检查内存前置条件，不产生规范或 pending 状态变化。
+    pub(crate) fn validate_tool_exchange_begin(
+        &self,
+        assistant: &AssistantMessage,
+    ) -> Result<(), JournalError> {
         if self.pending.is_some() {
             return Err(JournalError::PendingExchangeExists);
         }
@@ -101,18 +159,23 @@ impl InMemoryJournal {
         {
             return Err(JournalError::AssistantHasNoToolCalls);
         }
-        let receipt = ExchangeReceipt::new(format!("exchange-{}", self.next_exchange))
-            .map_err(|_| JournalError::ExchangeIdExhausted)?;
-        self.next_exchange = self
-            .next_exchange
-            .checked_add(1)
-            .ok_or(JournalError::ExchangeIdExhausted)?;
-        self.pending = Some(PendingExchange {
-            run_id: run_id.clone(),
-            receipt: receipt.clone(),
-            assistant,
-        });
-        Ok(receipt)
+        Ok(())
+    }
+
+    /// 构造 complete 将提交的完整批次并验证配对，但不提前清除 pending。
+    pub(crate) fn tool_exchange_batch(
+        &self,
+        run_id: &RunId,
+        receipt: &ExchangeReceipt,
+        results: &[ToolMessage],
+    ) -> Result<Vec<ConversationMessage>, JournalError> {
+        let pending = self.pending(run_id, receipt)?;
+        let mut batch = vec![ConversationMessage::Assistant(pending.assistant.clone())];
+        batch.extend(results.iter().cloned().map(ConversationMessage::Tool));
+        let mut candidate = self.completed.clone();
+        candidate.extend(batch.iter().cloned());
+        validate(&candidate)?;
+        Ok(batch)
     }
 
     pub(crate) fn complete_tool_exchange(
@@ -121,6 +184,17 @@ impl InMemoryJournal {
         receipt: &ExchangeReceipt,
         results: Vec<ToolMessage>,
     ) -> Result<(), JournalError> {
+        let batch = self.tool_exchange_batch(run_id, receipt, &results)?;
+        self.completed.extend(batch);
+        self.pending = None;
+        Ok(())
+    }
+
+    fn pending(
+        &self,
+        run_id: &RunId,
+        receipt: &ExchangeReceipt,
+    ) -> Result<&PendingExchange, JournalError> {
         let pending = self
             .pending
             .as_ref()
@@ -131,15 +205,7 @@ impl InMemoryJournal {
         if &pending.receipt != receipt {
             return Err(JournalError::ExchangeMismatch);
         }
-
-        let mut candidate = self.completed.clone();
-        candidate.push(ConversationMessage::Assistant(pending.assistant.clone()));
-        candidate.extend(results.into_iter().map(ConversationMessage::Tool));
-        validate(&candidate)?;
-
-        self.completed = candidate;
-        self.pending = None;
-        Ok(())
+        Ok(pending)
     }
 }
 

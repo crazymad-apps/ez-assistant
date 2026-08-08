@@ -1,49 +1,116 @@
 //! Runtime Run 领域状态、标识分配与子模块入口。
 
 mod recorder;
+mod settlement;
 mod supervisor;
 
 pub(crate) use recorder::RuntimeRecorder;
-pub(crate) use supervisor::{settle_run, supervise_run};
+pub(crate) use settlement::settle_run;
+pub(crate) use supervisor::supervise_run;
 
-use agent_types::{MessageId, PartId, TextPart, UserMessage, UserPart};
+use agent_types::{
+    AssistantPart, ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart,
+    UserMessage, UserPart,
+};
 use assistant_protocol::{
-    RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeEvent, SessionId, ToolActivitySnapshot,
+    InputId, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeEvent, SessionId,
+    ToolActivitySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{RuntimeError, RuntimeResult, id, session::SessionState};
+use crate::{RuntimeError, RuntimeResult, StoredRun, id, session::SessionState};
+
+use self::settlement::RunSettlement;
 
 /// Session 内保存的 Runtime Run 权威记录。
 pub(crate) struct RunRecord {
     run_id: RunId,
     session_id: SessionId,
+    input_id: InputId,
+    attempt: u32,
     status: RunStatus,
     cancel_requested: bool,
     reasoning: String,
     text: String,
     tools: Vec<ToolActivitySnapshot>,
     error: Option<RuntimeErrorInfo>,
+    message_ids: Vec<MessageId>,
 }
 
 impl RunRecord {
-    pub(crate) fn accepted(run_id: RunId, session_id: SessionId) -> Self {
+    pub(crate) fn accepted(
+        run_id: RunId,
+        session_id: SessionId,
+        input_id: InputId,
+        attempt: u32,
+        message_ids: Vec<MessageId>,
+    ) -> Self {
         Self {
             run_id,
             session_id,
+            input_id,
+            attempt,
             status: RunStatus::Accepted,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,
+            message_ids,
         }
+    }
+
+    pub(crate) fn recovered(run: StoredRun) -> Self {
+        Self {
+            run_id: run.run_id,
+            session_id: run.session_id,
+            input_id: run.input_id,
+            attempt: run.attempt,
+            status: run.status,
+            cancel_requested: run.cancel_requested,
+            reasoning: String::new(),
+            text: String::new(),
+            tools: Vec::new(),
+            error: run.error,
+            message_ids: run.message_ids,
+        }
+    }
+
+    /// 从规范正文恢复可派生的终态文本；流式观察字段不单独持久化。
+    pub(crate) fn hydrate(&mut self, conversation: &ConversationSnapshot) {
+        let final_assistant = conversation.messages.iter().rev().find_map(|message| {
+            let ConversationMessage::Assistant(message) = message else {
+                return None;
+            };
+            self.message_ids
+                .iter()
+                .any(|message_id| message_id == &message.id)
+                .then_some(message)
+        });
+        let Some(message) = final_assistant else {
+            return;
+        };
+        self.reasoning.clear();
+        self.text.clear();
+        for part in &message.parts {
+            match part {
+                AssistantPart::Reasoning(part) => self.reasoning.push_str(&part.text),
+                AssistantPart::Text(part) => self.text.push_str(&part.text),
+                AssistantPart::ToolCall(_) | AssistantPart::ProviderState(_) => {}
+            }
+        }
+    }
+
+    pub(crate) fn extend_message_ids(&mut self, messages: impl IntoIterator<Item = MessageId>) {
+        self.message_ids.extend(messages);
     }
 
     pub(crate) fn snapshot(&self) -> RunSnapshot {
         RunSnapshot {
             run_id: self.run_id.clone(),
             session_id: self.session_id.clone(),
+            input_id: self.input_id.clone(),
+            attempt: self.attempt,
             status: self.status,
             cancel_requested: self.cancel_requested,
             reasoning: self.reasoning.clone(),
@@ -69,6 +136,20 @@ impl RunRecord {
         self.status = RunStatus::Cancelling;
         self.cancel_requested = true;
         true
+    }
+
+    pub(crate) fn input_id(&self) -> &InputId {
+        &self.input_id
+    }
+    pub(crate) fn attempt(&self) -> u32 {
+        self.attempt
+    }
+    pub(crate) fn status(&self) -> RunStatus {
+        self.status
+    }
+    pub(crate) fn fail_before_start(&mut self, error: RuntimeErrorInfo) {
+        self.status = RunStatus::Failed;
+        self.error = Some(error);
     }
 
     fn settle(&mut self, settlement: RunSettlement) {
@@ -117,7 +198,7 @@ pub(crate) fn allocate_run_id(state: &SessionState) -> RuntimeResult<RunId> {
     })
 }
 
-/// 将已校验的 StartRun 文本封装为新的规范 UserMessage。
+/// 将已校验的提交文本封装为新的规范 UserMessage。
 pub(crate) fn create_user_message(text: String) -> RuntimeResult<UserMessage> {
     let message_id = id::generate("m")
         .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -148,22 +229,4 @@ fn is_active_run(state: &SessionState, run_id: &RunId) -> bool {
         .active_run
         .as_ref()
         .is_some_and(|active| &active.run_id == run_id)
-}
-
-struct RunSettlement {
-    status: RunStatus,
-    reasoning: Option<String>,
-    text: Option<String>,
-    error: Option<RuntimeErrorInfo>,
-}
-
-impl RunSettlement {
-    fn terminal(status: RunStatus) -> Self {
-        Self {
-            status,
-            reasoning: None,
-            text: None,
-            error: None,
-        }
-    }
 }

@@ -1,4 +1,4 @@
-use super::*;
+use super::{store::FaultInjectingStore, *};
 
 #[tokio::test]
 async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent() {
@@ -8,25 +8,31 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
     let mut events = runtime.subscribe_events();
     let first = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("first session");
     let second = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("second session");
 
     let first_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: first.session.session_id.clone(),
             message: "first".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("first run");
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
         .expect("first run entered tool");
     let second_run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: second.session.session_id.clone(),
             message: "second".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("second run while first remains active");
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
@@ -37,6 +43,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: first.session.session_id.clone(),
             run_id: first_run.run.run_id.clone(),
         })
+        .await
         .expect("first cancellation");
     assert_eq!(
         first_cancel.run.status,
@@ -47,6 +54,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: first.session.session_id.clone(),
             run_id: first_run.run.run_id.clone(),
         })
+        .await
         .expect("repeated cancellation");
     assert_eq!(repeated.run, first_cancel.run);
     let first_terminal =
@@ -61,6 +69,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
                 session_id: first.session.session_id.clone(),
                 run_id: first_run.run.run_id.clone(),
             })
+            .await
             .expect("terminal cancellation is idempotent")
             .run,
         first_terminal
@@ -71,6 +80,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
                 session_id: second.session.session_id.clone(),
                 run_id: second_run.run.run_id.clone(),
             })
+            .await
             .expect("second run query")
             .run
             .status,
@@ -78,10 +88,12 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
     );
 
     let reused = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: first.session.session_id.clone(),
             message: "reuse first session".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("cancelled session is reusable while another session runs");
     assert_eq!(
         wait_for_terminal(&runtime, &first.session.session_id, &reused.run.run_id)
@@ -94,6 +106,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: second.session.session_id.clone(),
             run_id: second_run.run.run_id.clone(),
         })
+        .await
         .expect("second run cleanup cancellation");
     assert_eq!(
         wait_for_terminal(&runtime, &second.session.session_id, &second_run.run.run_id)
@@ -141,7 +154,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
         runtime.cancel_run(CancelRunRequest {
             session_id: first.session.session_id,
             run_id: missing.clone(),
-        }),
+        }).await,
         Err(RuntimeError::RunNotFound { run_id, .. }) if run_id == missing
     ));
 }
@@ -153,17 +166,21 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
     let runtime = hanging_runtime(2, None, entered.clone(), cleanup);
     let first = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("first session");
     let second = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("second session");
     let mut runs = Vec::new();
     for session_id in [&first.session.session_id, &second.session.session_id] {
         let run = runtime
-            .start_run(StartRunRequest {
+            .submit_input(SubmitInputRequest {
                 session_id: session_id.clone(),
                 message: "hang".to_owned(),
+                idempotency_key: None,
             })
+            .await
             .expect("run accepted");
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
@@ -189,6 +206,7 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
             })
+            .await
             .expect("settled run")
             .run;
         assert_eq!(snapshot.status, assistant_protocol::RunStatus::Cancelled);
@@ -204,7 +222,9 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
         );
     }
     assert!(matches!(
-        runtime.create_session(CreateSessionRequest::default()),
+        runtime
+            .create_session(CreateSessionRequest::default())
+            .await,
         Err(RuntimeError::RuntimeNotRunning {
             lifecycle: RuntimeLifecycle::Stopped
         })
@@ -235,12 +255,15 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
     );
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
     let run = runtime
-        .start_run(StartRunRequest {
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "never completes".to_owned(),
+            idempotency_key: None,
         })
+        .await
         .expect("run");
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
@@ -260,6 +283,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
             session_id: session.session.session_id.clone(),
             run_id: run.run.run_id,
         })
+        .await
         .expect("forced settlement")
         .run;
     assert_eq!(snapshot.status, assistant_protocol::RunStatus::Failed);
@@ -280,6 +304,74 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
 }
 
 #[tokio::test]
+async fn storage_shutdown_timeout_is_bounded_and_observable() {
+    let store = Arc::new(FaultInjectingStore::hang_shutdown());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity"))
+            .with_shutdown_timeout(Duration::from_millis(10)),
+    )
+    .await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.shutdown(ShutdownRuntimeRequest::default()),
+    )
+    .await
+    .expect("shutdown timeout is bounded")
+    .expect_err("hanging store must fail shutdown");
+    assert!(matches!(result, RuntimeError::StorageUnavailable { .. }));
+    assert!(store.shutdown_called());
+    assert_eq!(
+        runtime.lifecycle().expect("lifecycle"),
+        RuntimeLifecycle::ShuttingDown
+    );
+}
+
+#[tokio::test]
+async fn force_settlement_failure_still_shuts_down_store() {
+    let entered = Arc::new(Notify::new());
+    let model = Arc::new(EnteredNeverModel {
+        capabilities: model_capabilities(false),
+        entered: entered.clone(),
+    });
+    let store = Arc::new(FaultInjectingStore::fail_settlement());
+    let runtime = runtime_with_store(
+        model,
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity"))
+            .with_shutdown_timeout(Duration::from_millis(10)),
+    )
+    .await;
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session.session_id,
+            message: "never completes".to_owned(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("run");
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("model entered");
+
+    assert!(matches!(
+        runtime.shutdown(ShutdownRuntimeRequest::default()).await,
+        Err(RuntimeError::StorageUnavailable { .. })
+    ));
+    assert!(store.shutdown_called());
+    assert_eq!(
+        runtime.lifecycle().expect("lifecycle"),
+        RuntimeLifecycle::Stopped
+    );
+}
+
+#[tokio::test]
 async fn start_and_shutdown_race_has_no_untracked_active_run() {
     let final_message = assistant_text("assistant-final", "done");
     let model = Arc::new(ScriptedModelService::completing(
@@ -290,6 +382,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
     let runtime = Arc::new(runtime(model));
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
     let barrier = Arc::new(Barrier::new(3));
     let start_runtime = runtime.clone();
@@ -297,10 +390,13 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
     let session_id = session.session.session_id.clone();
     let start = tokio::spawn(async move {
         start_barrier.wait().await;
-        start_runtime.start_run(StartRunRequest {
-            session_id,
-            message: "race".to_owned(),
-        })
+        start_runtime
+            .submit_input(SubmitInputRequest {
+                session_id,
+                message: "race".to_owned(),
+                idempotency_key: None,
+            })
+            .await
     });
     let shutdown_runtime = runtime.clone();
     let shutdown_barrier = barrier.clone();
@@ -329,6 +425,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
                         session_id: session.session.session_id.clone(),
                         run_id: started.run.run_id,
                     })
+                    .await
                     .expect("accepted run was tracked")
                     .run
                     .status

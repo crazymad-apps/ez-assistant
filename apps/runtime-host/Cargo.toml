@@ -32,6 +32,7 @@ dirs.workspace = true
 libc.workspace = true
 futures-util = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true, features = ["unstable-rendered-line-info"] }
+rusqlite = { version = "0.40.1", features = ["bundled"], default-features = false }
 schemars = "1.2.1"
 serde.workspace = true
 serde_json.workspace = true
@@ -42,4 +43,5 @@ tui-input = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit = { path = "../../crates/agent-testkit" }
+axum.workspace = true
 tempfile.workspace = true

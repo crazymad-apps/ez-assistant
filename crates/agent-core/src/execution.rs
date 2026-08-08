@@ -1,11 +1,13 @@
 //! 执行句柄与启动入口。
 //!
-//! [`AgentExecution::start`] 后由**单一 `tokio` 任务**驱动状态机（[`crate::engine`]），
-//! 无后台辅助任务。调用方得到事件流、完成结果与取消控制三个独立句柄：
+//! [`AgentExecution::start`] 后由**单一 engine task**驱动状态机（[`crate::engine`]），
+//! 另有一个只观察其 [`tokio::task::JoinHandle`] 的轻量完成任务。调用方得到事件流、
+//! 完成结果与取消控制三个独立句柄：
 //!
 //! - 事件流：普通事件使用 bounded mpsc + `try_send`，唯一终态由独立 oneshot
 //!   可靠交付；订阅断开不影响执行；
-//! - 完成结果：oneshot 接收端 Future，drop 接收端不影响执行；
+//! - 完成结果：由观察任务通过 oneshot 可靠交付；观察任务持有 engine JoinHandle，
+//!   正常结果、取消和 `JoinError` 都收敛为领域结果；drop 不会中止执行；
 //! - 取消控制：只取消本次执行（`start` 内创建 `context.cancellation` 的
 //!   子令牌，父级取消自动传播到本执行，反向不成立）。
 
@@ -22,8 +24,7 @@ use crate::{
 
 /// 一次执行的完成 Future；解析为 [`ExecutionOutcome`]。
 ///
-/// 语义上是 oneshot 接收端：引擎任务结束时恰好发送一次结果；drop 本 Future
-/// 不影响执行本身。
+/// engine task 的观察者通过 oneshot 交付结果；drop 不会取消观察者或引擎任务。
 pub type CompletionFuture = Pin<Box<dyn Future<Output = ExecutionOutcome> + Send>>;
 
 /// 请求 Runtime 执行上下文压缩的原因。
@@ -107,20 +108,31 @@ impl AgentExecution {
         let control = ExecutionControl {
             cancellation: cancellation.clone(),
         };
-        let (completion_tx, completion_rx) = oneshot::channel::<ExecutionOutcome>();
+        // 观察任务是有意独立于 completion receiver 的：调用方即使只消费事件并 drop
+        // completion，engine panic 仍会产生终态事件，且 engine JoinHandle 始终被观察。
+        let failure_events = sender.clone();
+        let engine_task =
+            tokio::spawn(Engine::new(spec, input, context, cancellation, sender).run());
+        let (completion_tx, completion_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let outcome = Engine::new(spec, input, context, cancellation, sender)
-                .run()
-                .await;
-            // 接收端被 drop 时发送失败；执行已结束，丢弃结果即可。
+            let outcome = match engine_task.await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    let error = ExecutionError::Internal;
+                    failure_events.send(crate::AgentEvent::ExecutionFailed {
+                        error: error.clone(),
+                        dropped_events: failure_events.dropped_events(),
+                    });
+                    ExecutionOutcome::Failed(error)
+                }
+            };
+            // receiver 被 drop 只表示调用方不再查询结果；事件与执行仍已完整收敛。
             let _ = completion_tx.send(outcome);
         });
         let completion = Box::pin(async move {
-            // 结构不变量：状态机收敛到唯一终态后必先发送结果再退出任务；
-            // 发送失败的唯一原因（接收端 drop）不会导致接收端 await 出错。
             completion_rx
                 .await
-                .expect("engine task always resolves an outcome before exiting")
+                .unwrap_or(ExecutionOutcome::Failed(ExecutionError::Internal))
         });
         AgentExecution {
             events,
@@ -222,6 +234,7 @@ mod tests {
     enum StubBehavior {
         Complete(AssistantMessage),
         FailEstablishment(ModelError),
+        Panic,
     }
 
     impl ModelService for StubModel {
@@ -249,6 +262,7 @@ mod tests {
                     },
                 ]),
                 StubBehavior::FailEstablishment(error) => Err(error.clone()),
+                StubBehavior::Panic => panic!("private provider panic payload"),
             };
             Box::pin(async move {
                 if context.cancellation.is_cancelled() {
@@ -511,6 +525,52 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn engine_task_panic_resolves_to_internal_failure() {
+        let model = StubModel {
+            capabilities: capabilities(),
+            behavior: StubBehavior::Panic,
+        };
+        let (context, _) = context(CancellationToken::new());
+        let execution = AgentExecution::start(spec(model), input(), context);
+
+        assert_eq!(
+            execution.completion.await,
+            ExecutionOutcome::Failed(ExecutionError::Internal)
+        );
+        assert_eq!(
+            collect_events(execution.events).await,
+            vec![
+                AgentEvent::ExecutionStarted,
+                AgentEvent::StepStarted { step: 1 },
+                AgentEvent::ExecutionFailed {
+                    error: ExecutionError::Internal,
+                    dropped_events: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_panic_still_terminates_events_when_completion_is_dropped() {
+        let model = StubModel {
+            capabilities: capabilities(),
+            behavior: StubBehavior::Panic,
+        };
+        let (context, _) = context(CancellationToken::new());
+        let execution = AgentExecution::start(spec(model), input(), context);
+        drop(execution.completion);
+
+        let events = collect_events(execution.events).await;
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::ExecutionFailed {
+                error: ExecutionError::Internal,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

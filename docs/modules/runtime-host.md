@@ -57,7 +57,8 @@ Worker 池。
 - Session/Run 的权威业务状态、Conversation Journal 或 Agent Loop。
 - Tauri command、WebView 状态、窗口、托盘和桌面展示逻辑。
 - Provider Codec、工具 Dispatcher、Context 算法或 Core Guardrail 实现。
-- 数据库实体、正式持久化格式或只为 Demo 服务的公共 Client crate。
+- Runtime 业务数据库实体、跨层暴露的持久化记录类型或只为 Demo 服务的公共 Client crate。Host
+  可以私有实现 RuntimeStore 的 SQLite/文件 Adapter，但不得因此持有第二份 Session/Run 状态机。
 - 系统开机启动、崩溃拉起和 daemon 管理；这些能力需由后续平台版本明确设计。
 
 ## v0.8.0 实现边界
@@ -81,9 +82,39 @@ Worker 池。
 - Host 的 ModelServiceFactory 根据 Runtime 已编译的 provider/profile、endpoint、credential 和
   transport 构造具体 OpenAI-compatible 服务，不自行保存第二份模型配置或选择状态。
 - 私有 Ratatui Demo 可以查询/reload 配置、选择 model key、创建 Session 和显式触发连接验证；
-  连接验证必须先提示真实请求与可能费用。该状态只服务交互，不成为 Runtime 业务事实源。
+  v0.10.0 又增加全部 Session 列表、持久化 Run 查询、应用选中模型和归档/恢复入口。连接验证
+  必须先提示真实请求与可能费用。该状态只服务交互，不成为 Runtime 业务事实源。
 - 进程关闭由 Runtime 的有界受控关闭保证最终返回；Host 同时观察信号任务与连接子任务，
   区分预期取消和异常退出。
+
+## v0.10.0 本地存储装配边界
+
+- Host 私有 `storage` 模块实现 SQLite 与每 Session Conversation JSONL 的物理格式、一致提交和
+  启动恢复；这些路径、表、offset、generation 和 worker 命令不进入应用协议。
+- 单一命名阻塞线程从打开到关闭独占 `rusqlite::Connection` 和文件 I/O；Tokio 侧通过有界命令
+  队列等待结果，不能直接执行阻塞数据库操作。
+- `rusqlite` 只属于 Host，并使用关闭默认 feature 的 `bundled` SQLite；`assistant-runtime` 只依赖
+  RuntimeStore 端口。
+- Serve 启动先取得 endpoint 单实例所有权，再打开 Store 并等待 Runtime 完成结构化恢复；只有
+  `AssistantRuntime::open` 和配置加载成功后才进入 accept loop，因此客户端不会观察半恢复状态。
+- Runtime Host 把同一个 `LocalRuntimeStore` 注入 Runtime。受控关闭先等待 Run supervisor 结算，
+  再由 Runtime flush 并 join 存储 worker；bootstrap 失败也显式关闭已经启动的 worker。
+- M2 已由私有 `input_state` 与 `run_state` 模块接管 Input 准入、Session 内幂等 key、持久 queue
+  order、Run attempt 和重启投影；Host 仍只实现 RuntimeStore，不持有第二份队列执行状态。
+- M3 的私有 `tool_exchange` 模块实现 begun/ready、整批 staged append 和启动修复；begun 恢复生成
+  outcome unknown 错误结果，ready 恢复保留已记录结果，完成正文提交后立即删除 pending，且从不
+  自动重新执行工具。存储 worker panic、reply channel 关闭、join 失败与 Runtime 侧关闭超时统一
+  表现为可观察错误；只有 Shutdown 命令进入 worker 队列后才关闭后续 Store 准入。
+- M4 的私有 `session_management` 模块实现归档/恢复、模型 key 更新和历史重新输入：归档及模型切换
+  在 SQLite 写入时再次复核 lifecycle、queued Input、非终结 Run 和 pending exchange；历史重新
+  输入先写完整新 generation，再在单一 SQLite 事务中 CAS 切换正文、级联删除尾段 Input/Run/引用
+  并创建新的 committed Input/Accepted Run。事务提交后旧 generation 只做 best-effort 清理，清理
+  失败不能把已经成功的权威切换回报成业务失败。
+- v0.10.0 人工验收继续复用 Host 现有私有 Ratatui Demo；自动化验收客户端只驱动正式 Host 与临时
+  loopback fake Provider。不得为验收另建第二套 Runtime、Session/Run 状态机或产品 fake 模式。
+- 离线端到端回归使用 `tempfile` Runtime Home、临时 loopback Provider 和两次真实 Host
+  进程；客户端只使用现有私有 frame 协议。验收结束后以只读方式核对 SQLite 与权威 JSONL，
+  不读写 `~/.ez-assistant`，也不连接真实 Provider。
 
 ## 验证
 

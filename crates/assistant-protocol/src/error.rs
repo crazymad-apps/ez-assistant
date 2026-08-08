@@ -12,8 +12,18 @@ pub enum RuntimeErrorCode {
     SessionNotFound,
     /// 指定 Session 已有活动 Run 或未完成结算。
     SessionBusy,
+    /// Session 已归档，只允许查询。
+    SessionArchived,
+    /// Session 尚未达到归档、模型切换或历史重新输入要求的完全空闲状态。
+    SessionNotIdle,
     /// 指定 Run 不存在。
     RunNotFound,
+    /// 指定持久化输入不存在。
+    InputNotFound,
+    /// 指定 Run 的状态不允许创建新的执行尝试。
+    RunNotRetryable,
+    /// Runtime 的权威存储当前不可用或拒绝了业务提交。
+    StorageUnavailable,
     /// Runtime 已开始关闭，不再接受新的变更操作。
     RuntimeShuttingDown,
     /// 为一次 Run 构造 Agent 失败。
@@ -59,7 +69,12 @@ mod tests {
             (RuntimeErrorCode::InvalidRequest, "invalid_request"),
             (RuntimeErrorCode::SessionNotFound, "session_not_found"),
             (RuntimeErrorCode::SessionBusy, "session_busy"),
+            (RuntimeErrorCode::SessionArchived, "session_archived"),
+            (RuntimeErrorCode::SessionNotIdle, "session_not_idle"),
             (RuntimeErrorCode::RunNotFound, "run_not_found"),
+            (RuntimeErrorCode::InputNotFound, "input_not_found"),
+            (RuntimeErrorCode::RunNotRetryable, "run_not_retryable"),
+            (RuntimeErrorCode::StorageUnavailable, "storage_unavailable"),
             (
                 RuntimeErrorCode::RuntimeShuttingDown,
                 "runtime_shutting_down",

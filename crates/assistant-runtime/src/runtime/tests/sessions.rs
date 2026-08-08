@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
+#[tokio::test]
+async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     let system_prompt_factory = Arc::new(CountingSystemPromptFactory::new());
     let runtime = runtime_with_factories(
         Arc::new(StaticModelFactory::new(empty_model())),
@@ -14,9 +14,11 @@ fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
             title: Some("First".to_owned()),
             model_key: None,
         })
+        .await
         .expect("first session");
     let second = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("second session");
 
     assert_eq!(system_prompt_factory.created(), 2);
@@ -32,6 +34,7 @@ fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     assert!(
         runtime
             .conversation_snapshot(&first.session.session_id)
+            .await
             .expect("first conversation")
             .messages
             .is_empty()
@@ -39,6 +42,7 @@ fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     assert!(
         runtime
             .conversation_snapshot(&second.session.session_id)
+            .await
             .expect("second conversation")
             .messages
             .is_empty()
@@ -56,14 +60,16 @@ fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     assert_eq!(first.session.model_key.as_str(), "fixture");
 }
 
-#[test]
-fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
+#[tokio::test]
+async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
     let runtime = runtime(empty_model());
     let first = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("first session");
     let second = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("second session");
 
     let listed = runtime
@@ -99,8 +105,8 @@ fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
     ));
 }
 
-#[test]
-fn model_factory_failure_does_not_append_a_user_message_or_run() {
+#[tokio::test]
+async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_message() {
     let runtime = runtime_with_factories(
         Arc::new(FailingModelFactory),
         Arc::new(StaticSystemPromptFactory),
@@ -109,19 +115,38 @@ fn model_factory_failure_does_not_append_a_user_message_or_run() {
     );
     let session = runtime
         .create_session(CreateSessionRequest::default())
+        .await
         .expect("session");
-    assert!(matches!(
-        runtime.start_run(StartRunRequest {
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "must not commit".to_owned(),
-        }),
-        Err(RuntimeError::ModelBuildFailed { .. })
-    ));
+            idempotency_key: None,
+        })
+        .await
+        .expect("input is durably accepted before model compilation");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session.session_id, &submitted.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
     assert!(
         runtime
             .conversation_snapshot(&session.session.session_id)
+            .await
             .expect("conversation")
             .messages
             .is_empty()
+    );
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session.session_id
+            })
+            .expect("session")
+            .session
+            .queued_input_count,
+        1
     );
 }

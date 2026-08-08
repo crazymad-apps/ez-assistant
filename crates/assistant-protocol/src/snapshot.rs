@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId};
+use crate::{InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId};
 
 /// Runtime 对外可见的生命周期状态。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -14,6 +14,29 @@ pub enum RuntimeLifecycle {
     ShuttingDown,
     /// Runtime 已完成受控关闭。
     Stopped,
+}
+
+/// Session 是否仍可接受业务变更。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycle {
+    /// 可提交输入、重试、重新输入和切换模型。
+    Active,
+    /// 只允许查询，等待显式恢复。
+    Archived,
+}
+
+/// Session 列表的生命周期过滤条件。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionListFilter {
+    /// 只返回活动 Session。
+    #[default]
+    Active,
+    /// 只返回归档 Session。
+    Archived,
+    /// 返回全部 Session。
+    All,
 }
 
 /// Runtime 业务 Run 的活动态和终态。
@@ -32,6 +55,8 @@ pub enum RunStatus {
     Failed,
     /// Run 已取消并完成结算。
     Cancelled,
+    /// Runtime 重启前没有可靠终结；不会自动恢复执行。
+    Interrupted,
     /// Core 要求上层进行上下文压缩；本版本不自动续跑。
     CompactionRequired,
 }
@@ -41,7 +66,11 @@ impl RunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::CompactionRequired
+            Self::Completed
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::CompactionRequired
         )
     }
 }
@@ -77,12 +106,18 @@ pub struct SessionSummary {
     pub session_id: SessionId,
     /// 创建 Session 时确定的展示标题。
     pub title: String,
-    /// Session 创建时冻结的用户模型 key。
+    /// Session 后续 Run 当前使用的用户模型 key。
     pub model_key: ModelKey,
+    /// Session 当前是活动还是归档状态。
+    pub lifecycle: SessionLifecycle,
     /// 当前活动 Run；Session 空闲时为 `None`。
     pub active_run_id: Option<RunId>,
     /// 规范 Conversation 中已经完整提交的消息数量。
     pub message_count: u64,
+    /// 尚未进入规范 Conversation 的持久化输入数量。
+    pub queued_input_count: u64,
+    /// 重启恢复后队列是否等待用户显式继续。
+    pub resume_required: bool,
 }
 
 /// Run 中一个工具调用的当前观察快照。
@@ -107,6 +142,10 @@ pub struct RunSnapshot {
     pub run_id: RunId,
     /// Run 所属 Session。
     pub session_id: SessionId,
+    /// 本次 Run 所属的持久化输入。
+    pub input_id: InputId,
+    /// 同一输入的执行尝试序号，从 1 开始。
+    pub attempt: u32,
     /// 当前活动态或终态。
     pub status: RunStatus,
     /// 是否已经接受过取消请求。
@@ -135,6 +174,7 @@ mod tests {
             (RunStatus::Completed, "completed", true),
             (RunStatus::Failed, "failed", true),
             (RunStatus::Cancelled, "cancelled", true),
+            (RunStatus::Interrupted, "interrupted", true),
             (RunStatus::CompactionRequired, "compaction_required", true),
         ];
 
@@ -166,6 +206,18 @@ mod tests {
             );
         }
 
+        let session_lifecycles = [
+            (SessionLifecycle::Active, "active"),
+            (SessionLifecycle::Archived, "archived"),
+        ];
+        for (value, wire) in session_lifecycles {
+            assert_eq!(
+                serde_json::to_string(&value).expect("serialize session lifecycle"),
+                format!("\"{wire}\"")
+            );
+        }
+        assert_eq!(SessionListFilter::default(), SessionListFilter::Active);
+
         let activities = [
             (ToolActivityStatus::Proposed, "proposed"),
             (ToolActivityStatus::Running, "running"),
@@ -194,6 +246,8 @@ mod tests {
         let snapshot = RunSnapshot {
             run_id: RunId::new("run-1").expect("run id"),
             session_id: SessionId::new("session-1").expect("session id"),
+            input_id: InputId::new("input-1").expect("input id"),
+            attempt: 1,
             status: RunStatus::Failed,
             cancel_requested: false,
             reasoning: "checked".to_owned(),

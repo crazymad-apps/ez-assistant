@@ -1,24 +1,19 @@
-//! Core 事件投影、Run 监督与唯一终态结算。
+//! Core 事件投影与 Run completion 监督；可靠终态提交由 settlement 模块负责。
 
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
-use agent_core::{
-    AgentEvent, AgentEventStream, CompletionFuture, ExecutionError, ExecutionOutcome,
-    ToolCompletionStatus,
-};
+use agent_core::{AgentEvent, AgentEventStream, CompletionFuture, ToolCompletionStatus};
 use agent_tools::ToolOutputChannel as AgentToolOutputChannel;
-use agent_types::{AssistantMessage, AssistantPart, ConversationMessage};
 use assistant_protocol::{
-    PartId as ProtocolPartId, RunId, RunSnapshot, RunStatus, RuntimeErrorCode, RuntimeErrorInfo,
-    RuntimeEvent, ToolActivitySnapshot, ToolActivityStatus, ToolCallId as ProtocolToolCallId,
-    ToolOutputChannel,
+    PartId as ProtocolPartId, RunId, RuntimeEvent, ToolActivitySnapshot, ToolActivityStatus,
+    ToolCallId as ProtocolToolCallId, ToolOutputChannel,
 };
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::broadcast;
 
-use crate::{RuntimeError, RuntimeResult, session::SessionController};
+use crate::{RuntimeError, RuntimeResult, RuntimeStore, session::SessionController};
 
-use super::{RunRecord, RunSettlement, is_active_run};
+use super::{RunRecord, is_active_run, settlement::settle_run};
 
 /// 同时排空可用观察事件并等待可靠 completion，随后只结算一次 Runtime Run。
 pub(crate) async fn supervise_run(
@@ -27,6 +22,7 @@ pub(crate) async fn supervise_run(
     mut events: AgentEventStream,
     completion: CompletionFuture,
     event_sender: broadcast::Sender<RuntimeEvent>,
+    store: Arc<dyn RuntimeStore>,
 ) {
     let completion = AssertUnwindSafe(completion).catch_unwind();
     tokio::pin!(completion);
@@ -50,14 +46,20 @@ pub(crate) async fn supervise_run(
     };
     drop(events);
 
-    // 锁中毒时没有安全的内存恢复方式；错误将在后续查询中显式返回。
-    if let Ok(snapshot) = settle_run(&session, &run_id, outcome) {
-        let _ = event_sender.send(RuntimeEvent::RunFinished {
-            session_id: snapshot.session_id,
-            run_id: snapshot.run_id,
-            status: snapshot.status,
-            error: snapshot.error,
-        });
+    match settle_run(&session, &run_id, outcome, store.as_ref()).await {
+        Ok(snapshot) => {
+            let _ = event_sender.send(RuntimeEvent::RunFinished {
+                session_id: snapshot.session_id,
+                run_id: snapshot.run_id,
+                status: snapshot.status,
+                error: snapshot.error,
+            });
+        }
+        Err(_) => {
+            // 结算失败不能被当成正常 supervisor 退出；即使锁已中毒而无法写入，后续
+            // 查询也会显式返回错误，不能让新输入继续修改该 Session。
+            let _ = session.mark_faulted();
+        }
     }
 }
 
@@ -239,107 +241,4 @@ fn find_tool_mut<'a>(
         .tools
         .iter_mut()
         .find(|tool| &tool.call_id == call_id)
-}
-
-pub(crate) fn settle_run(
-    session: &SessionController,
-    run_id: &RunId,
-    outcome: Option<ExecutionOutcome>,
-) -> RuntimeResult<RunSnapshot> {
-    let mut state = session.lock_state()?;
-    if !is_active_run(&state, run_id) {
-        state.is_faulted = true;
-        return Err(RuntimeError::InternalStateUnavailable {
-            component: "run settlement ownership",
-        });
-    }
-    if !state.runs.contains_key(run_id) {
-        state.is_faulted = true;
-        state.active_run = None;
-        return Err(RuntimeError::InternalStateUnavailable {
-            component: "run settlement record",
-        });
-    }
-
-    let mut settlement = match outcome {
-        Some(ExecutionOutcome::Completed(message)) => {
-            match state
-                .journal
-                .append_completed(ConversationMessage::Assistant(message.clone()))
-            {
-                Ok(()) => completed_settlement(&message),
-                Err(_) => {
-                    state.is_faulted = true;
-                    internal_failure("final assistant message could not be committed")
-                }
-            }
-        }
-        Some(ExecutionOutcome::Failed(error)) => failed_settlement(&error),
-        Some(ExecutionOutcome::Cancelled) => RunSettlement::terminal(RunStatus::Cancelled),
-        Some(ExecutionOutcome::CompactionRequired { .. }) => {
-            RunSettlement::terminal(RunStatus::CompactionRequired)
-        }
-        None => internal_failure("agent completion task terminated unexpectedly"),
-    };
-
-    if state.journal.has_pending() {
-        state.is_faulted = true;
-        settlement = internal_failure("run ended with an incomplete tool exchange");
-    }
-
-    state
-        .runs
-        .get_mut(run_id)
-        .expect("run existence checked above")
-        .settle(settlement);
-    let snapshot = state
-        .runs
-        .get(run_id)
-        .expect("run existence checked above")
-        .snapshot();
-    state.active_run = None;
-    Ok(snapshot)
-}
-
-fn completed_settlement(message: &AssistantMessage) -> RunSettlement {
-    let mut reasoning = String::new();
-    let mut text = String::new();
-    for part in &message.parts {
-        match part {
-            AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
-            AssistantPart::Text(part) => text.push_str(&part.text),
-            AssistantPart::ToolCall(_) | AssistantPart::ProviderState(_) => {}
-        }
-    }
-    RunSettlement {
-        status: RunStatus::Completed,
-        reasoning: Some(reasoning),
-        text: Some(text),
-        error: None,
-    }
-}
-
-fn failed_settlement(error: &ExecutionError) -> RunSettlement {
-    let message = match error {
-        ExecutionError::Model(_) => "model execution failed",
-        ExecutionError::ContextWindow(_) => "conversation context is invalid",
-        ExecutionError::Record(_) => "conversation could not be recorded",
-        ExecutionError::BudgetExceeded { .. } => "execution budget was exceeded",
-        ExecutionError::GuardrailTriggered { .. } => "execution guardrail was triggered",
-    };
-    RunSettlement {
-        status: RunStatus::Failed,
-        reasoning: None,
-        text: None,
-        error: Some(RuntimeErrorInfo::new(RuntimeErrorCode::Internal, message)),
-    }
-}
-
-fn internal_failure(message: &'static str) -> RunSettlement {
-    RunSettlement {
-        status: RunStatus::Failed,
-        reasoning: None,
-        text: None,
-        error: Some(RuntimeErrorInfo::new(RuntimeErrorCode::Internal, message)),
-    }
 }
