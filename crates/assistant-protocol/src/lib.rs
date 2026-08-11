@@ -6,6 +6,7 @@ mod command;
 mod config;
 mod error;
 mod event;
+mod host;
 mod id;
 mod snapshot;
 
@@ -13,32 +14,38 @@ pub use command::{
     ArchiveSessionRequest, ArchiveSessionResult, CancelQueuedInputRequest, CancelQueuedInputResult,
     CancelRunRequest, CancelRunResult, ConnectionValidationFailure,
     ConnectionValidationFailureKind, ConnectionValidationOutcome, CreateSessionRequest,
-    CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
-    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
-    ListModelsRequest, ListModelsResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
-    ListSessionsResult, ReenterFromUserMessageRequest, ReenterFromUserMessageResult,
-    ReloadConfigRequest, ReloadConfigResult, RestoreSessionRequest, RestoreSessionResult,
-    ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
-    RuntimeCommandResult, SetSessionModelRequest, SetSessionModelResult, ShutdownRuntimeRequest,
-    ShutdownRuntimeResult, SubmitInputRequest, SubmitInputResult, ValidateModelConnectionRequest,
+    CreateSessionResult, GetAttachmentRequest, GetAttachmentResult, GetConfigStatusRequest,
+    GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest, GetRunResult,
+    GetSessionRequest, GetSessionResult, GetWorkspaceRequest, GetWorkspaceResult,
+    ListAttachmentsRequest, ListAttachmentsResult, ListModelsRequest, ListModelsResult,
+    ListRunsRequest, ListRunsResult, ListSessionsRequest, ListSessionsResult,
+    ListWorkspacesRequest, ListWorkspacesResult, ReenterFromUserMessageRequest,
+    ReenterFromUserMessageResult, RegisterWorkspaceRequest, RegisterWorkspaceResult,
+    ReloadConfigRequest, ReloadConfigResult, RemoveWorkspaceRequest, RemoveWorkspaceResult,
+    RestoreSessionRequest, RestoreSessionResult, ResumeSessionRequest, ResumeSessionResult,
+    RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult, SetSessionModelRequest,
+    SetSessionModelResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, SubmitInputRequest,
+    SubmitInputResult, UploadAttachmentResult, ValidateModelConnectionRequest,
     ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
     ModelConfiguration,
 };
-pub use error::{RuntimeErrorCode, RuntimeErrorInfo};
+pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::RuntimeEvent;
+pub use host::{RuntimeHostCapabilities, RuntimeHostHealth, RuntimeHostHealthStatus};
 pub use id::{
-    IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId, RunId,
-    SessionId, ToolCallId,
+    AttachmentId, IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError,
+    PartId, RunId, SessionId, ToolCallId, WorkspaceId,
 };
 pub use snapshot::{
-    RunSnapshot, RunStatus, RuntimeLifecycle, SessionLifecycle, SessionListFilter, SessionSummary,
-    ToolActivitySnapshot, ToolActivityStatus, ToolOutputChannel,
+    AttachmentState, AttachmentSummary, RunSnapshot, RunStatus, RuntimeLifecycle, SessionLifecycle,
+    SessionListFilter, SessionSummary, TokenUsageSnapshot, ToolActivitySnapshot,
+    ToolActivityStatus, ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
 };
 
-/// Runtime Host 私有握手所使用的当前应用协议版本。
+/// 客户端与 Runtime Host 当前共同理解的应用协议版本。
 ///
-/// 该常量只用于比较双方是否理解同一组业务 DTO，不定义具体传输或 frame 格式。
+/// 该常量通过 Host capabilities 投影，不定义 HTTP 或 SSE 的传输版本。
 pub const PROTOCOL_VERSION: u32 = 1;

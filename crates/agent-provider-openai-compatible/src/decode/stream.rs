@@ -14,10 +14,7 @@ use crate::{
     schema::{ChatChunk, ChatChunkDelta, ChatToolCallDelta},
 };
 
-use super::{
-    map_finish_reason, map_usage, reasoning_field_text,
-    response::validate_required_tool_call_reasoning,
-};
+use super::{map_finish_reason, map_usage, reasoning_field_text};
 
 /// 把流式 chunk 聚合为规范事件的有状态组装器。
 ///
@@ -187,7 +184,6 @@ impl ChunkAssembler {
         let mut events = Vec::new();
         self.close_open_part(&mut events);
         self.complete_tool_calls(.., &mut events)?;
-        validate_required_tool_call_reasoning(&self.parts, &self.profile)?;
         let message = AssistantMessage {
             id: message_id,
             model,

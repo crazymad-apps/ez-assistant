@@ -30,6 +30,9 @@
   错误。
 - 只实现能力 Adapter；Session path resolver、标准工具壳和 Registry 的总装由上层宿主
   负责。
+- 正式产品由 `apps/runtime-host` 在顶层装配本 crate，并按单次 Run 注入已经冻结的
+  `SessionPathResolver` 和 Authorizer；`assistant-runtime` 只依赖抽象端口，不直接依赖
+  本地 Adapter。
 
 ## 路径与文件约束
 

@@ -178,6 +178,43 @@ Runtime Host 进程
 - 正式本地 Adapter 由 Runtime Host 的单一阻塞 worker 持有；无 Host 的 Runtime 单元测试可使用
   crate 内易失 Store，但正式产品入口不得绕过本地 Adapter。
 
+## v0.11.0 Workspace 与附件边界
+
+- M1 由 Runtime 持有按 ID 排序的 Workspace Registry，并通过 `RuntimeStore` 业务端口完成
+  登记和假删持久化；查询与活动列表读取 Runtime Registry。canonical path、SQLite 与 Runtime
+  Home 物理布局只由 Host Adapter 处理。重新登记同一 canonical path 恢复原 Workspace ID。
+- Session 创建可以选择一个 active Workspace；Runtime 在创建事务前通过
+  `SessionEnvironmentFactory` 一次性生成 `SessionExecutionEnvironment` 和
+  `SystemPromptSnapshot`。Session Controller 持有该冻结环境，不提供换绑操作；Workspace
+  假删只阻止新 Session 绑定，既有 Session 保留原绑定。
+- Workspace 私有目录和 Session 私有目录统一属于 Runtime 管理的 Agent 私有目录，但必须保留
+  作用域区分；Session 附件目录承载静态参考文件，不纳入 Agent 私有目录口径。
+- Runtime 持有 Workspace 登记、Session 冻结绑定、Attachment 准入/提交、File References
+  Part 构造和附件内容去重语义。Host 的 HTTP router、multipart parser、SSE、Bearer Token
+  和发现文件不进入本 crate。
+- 附件上传拆成“流式前准入”和“staging 完成后提交”两步 Runtime 业务操作；
+  Host 可以持有短期上传资源，但不得复制 Attachment 状态机。
+- M2 由 Runtime 持有 Attachment Registry，查询与列表不机械下沉到阻塞 Store；Store 只承担
+  上传原子提交和启动恢复。上传只允许 active Session，同一 Session 相同 Blob Hash（同名同内容）返回首次事实。
+- M3 在 Input 持久化前把有序 Attachment ID 整批解析为原始名称与稳定路径，
+  并作为独立 `UserPart::FileReferences` 进入 queued JSON 和 Conversation JSONL。
+- Core 在完整 Model Step 结束后报告的 token usage 由 Runtime 投影为只读实时事件；Runtime
+  不重新估算 Provider total，也不为 Demo 增加独立持久字段。事件断线恢复继续以规范
+  Assistant Message 中已持久化的 usage 为准。
+  重复 ID、跨 Session 引用和 unavailable Attachment 在入库前拒绝；输入幂等命中早于附件重新解析。
+- Runtime 为每个 Run 装配模型 attempt observer，并投影脱敏的 attempt/retry 事件。模型失败
+  结算区分建流前与建流后，记录稳定分类、实际 attempt/retry 数和是否已有可见输出；Provider
+  原始错误文本不进入公共事件、Run 错误或普通日志。最终摘要复用现有 Run 错误持久化字段。
+- 每个 Run 在模型 Agent 构造前，通过 `RunToolFactory` 根据冻结的 Session Environment
+  同时编译 `RunToolBundle` 中的 ToolSet 和 Authorizer；二者在该 Run 内保持不可变，
+  不进入 Protocol、Conversation 或持久化正文。不同 Workspace 不得共用一个可变全局
+  `SessionPathResolver`。
+- Runtime 只定义按 Run 装配端口和脱敏错误映射，不直接依赖 `agent-tools-local`。
+  绑定 Workspace 的工作目录在 Run 前不可用时返回 `WorkspaceUnavailable`；其他工具构造
+  失败按 Agent 构造失败处理，不向客户端泄露路径或底层 Adapter 错误。
+- Workspace 假删只阻止新 Session 绑定；已绑定 Session 继续使用其冻结路径。
+  附件正文不自动进入模型上下文，Agent 通过持久化 File References 和文件工具按需读取。
+
 ## Harness 验证
 
 - 覆盖不同 Session 并发、同 Session 串行、取消、排队、订阅断开、重启恢复和 Scheduler 补跑策略。

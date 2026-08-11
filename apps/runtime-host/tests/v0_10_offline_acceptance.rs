@@ -16,10 +16,9 @@ const TEST_API_KEY: &str = "offline-secret-must-not-leak";
 fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
-    let socket = runtime_home.path().join("acceptance.sock");
     write_config(runtime_home.path(), provider.endpoint(), TEST_API_KEY);
 
-    let first_host = HostProcess::start(runtime_home.path(), &socket);
+    let first_host = HostProcess::start(runtime_home.path());
     let mut first_client = first_host.connect();
     let configuration = first_client.runtime("get_config_status", json!({}));
     assert_eq!(
@@ -73,7 +72,7 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     let first_output = first_host.kill();
     assert_output_is_safe(&first_output);
 
-    let second_host = HostProcess::start(runtime_home.path(), &socket);
+    let second_host = HostProcess::start(runtime_home.path());
     let mut client = second_host.connect();
     let sessions = client.runtime("list_sessions", json!({}));
     assert_eq!(sessions["sessions"].as_array().expect("sessions").len(), 1);

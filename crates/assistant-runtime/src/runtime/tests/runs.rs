@@ -19,6 +19,7 @@ async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available
             runtime.submit_input(SubmitInputRequest {
                 session_id: session.session.session_id.clone(),
                 message: "must not start".to_owned(),
+                attachment_ids: Vec::new(),
                 idempotency_key: None,
             }).await,
             Err(RuntimeError::RuntimeNotRunning { lifecycle: actual }) if actual == lifecycle
@@ -59,6 +60,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -104,6 +106,81 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
 }
 
 #[tokio::test]
+async fn completed_model_usage_is_projected_as_a_runtime_event_and_persisted_in_conversation() {
+    let usage = agent_types::TokenUsage {
+        input_tokens: 1_024,
+        output_tokens: 128,
+        total_tokens: 1_152,
+        cached_input_tokens: Some(768),
+        reasoning_tokens: Some(32),
+    };
+    let mut final_message = assistant_text("assistant-usage", "done");
+    final_message.usage = Some(usage.clone());
+    let model = Arc::new(ScriptedModelService::completing(
+        model_capabilities(false),
+        8_192,
+        final_message,
+    ));
+    let runtime = runtime(model);
+    let mut events = runtime.subscribe_events();
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    let started = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session.session_id.clone(),
+            message: "report usage".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("run accepted");
+
+    let terminal =
+        wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
+
+    let mut projected_usage = None;
+    loop {
+        let event = events.recv().await.expect("runtime event");
+        match event {
+            RuntimeEvent::UsageUpdated {
+                run_id,
+                step,
+                usage,
+                ..
+            } if run_id == started.run.run_id => {
+                projected_usage = Some((step, usage));
+            }
+            RuntimeEvent::RunFinished { run_id, .. } if run_id == started.run.run_id => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        projected_usage,
+        Some((
+            1,
+            assistant_protocol::TokenUsageSnapshot {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+            },
+        ))
+    );
+
+    let conversation = runtime
+        .conversation_snapshot(&session.session.session_id)
+        .await
+        .expect("conversation");
+    let ConversationMessage::Assistant(message) = &conversation.messages[1] else {
+        panic!("final message must be Assistant");
+    };
+    assert_eq!(message.usage.as_ref(), Some(&usage));
+}
+
+#[tokio::test]
 async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
     let final_message = assistant_text("assistant-final", "done");
     let model = Arc::new(ScriptedModelService::completing(
@@ -123,6 +200,7 @@ async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -174,6 +252,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "use echo".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -295,6 +374,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "use the tool".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -315,6 +395,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
         .submit_input(assistant_protocol::SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "must not be appended".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await

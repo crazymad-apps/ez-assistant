@@ -28,6 +28,16 @@
 
 - `src-tauri` 依赖 `assistant-protocol` 和 Runtime Client，不直接依赖或装配
   `assistant-runtime`；Tauri command 必须薄，不实现会话或 Agent Loop。
+- Tauri Rust 启动层从 Runtime Home 私有发现文件取得 loopback 地址和进程级
+  Token，将它们作为启动配置注入受信任 WebView。WebView 内的 HTTP Runtime Client 可
+  直接调用 Runtime Command、Upload 和事件流，不要求每个请求都经 Tauri command 代理。
+- 远程连接是默认关闭的可选能力；后续如显式启用，同一 WebView Runtime Client 改用
+  HTTPS 地址和远程身份，不另造命令、事件或上传客户端。
+- WebView 中的 Runtime Token 只存内存，不进入 URL、`localStorage`、日志或普通前端事件；
+  配套 CSP、受控导航和精确 WebView Origin 白名单。
+- 事件订阅使用能携带 Authorization header 的 `fetch` streaming SSE，不在 URL 中传 Token。
+- 纯浏览器直连本地 Runtime 保留为未来显式开放的可选模式，默认关闭；它可通过
+  独立的 Origin 白名单和授权边界直连，不强制引入 companion bridge。
 - WebView 不直接访问文件系统、模型 API、数据库或 Shell；必须通过受控 Tauri command。
 - 关闭主窗口或退出桌面客户端不得默认终止 Runtime；只有明确的“退出 Assistant”或 Runtime
   管理动作才触发受控关闭流程。

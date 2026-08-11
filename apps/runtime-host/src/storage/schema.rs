@@ -18,6 +18,49 @@ CREATE TABLE IF NOT EXISTS sessions (
     archived_at_ms      INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id       TEXT PRIMARY KEY,
+    user_directory     TEXT NOT NULL UNIQUE,
+    agent_directory    TEXT NOT NULL UNIQUE,
+    lifecycle          TEXT NOT NULL CHECK (lifecycle IN ('active', 'removed')),
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    removed_at_ms      INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS session_resources (
+    session_id             TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    workspace_id           TEXT REFERENCES workspaces(workspace_id),
+    working_directory      TEXT NOT NULL,
+    attachment_directory   TEXT NOT NULL UNIQUE,
+    private_directory      TEXT NOT NULL UNIQUE,
+    created_at_ms          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS session_resources_workspace
+    ON session_resources(workspace_id, session_id);
+
+CREATE TABLE IF NOT EXISTS attachment_blobs (
+    blob_hash          TEXT PRIMARY KEY,
+    size_bytes         INTEGER NOT NULL CHECK (size_bytes >= 0),
+    relative_path      TEXT NOT NULL UNIQUE,
+    created_at_ms      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    attachment_id          TEXT PRIMARY KEY,
+    session_id             TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    blob_hash              TEXT NOT NULL REFERENCES attachment_blobs(blob_hash),
+    original_name          TEXT NOT NULL,
+    agent_readable_path    TEXT NOT NULL UNIQUE,
+    state                  TEXT NOT NULL CHECK (state IN ('ready', 'unavailable')),
+    created_at_ms          INTEGER NOT NULL,
+    UNIQUE (session_id, blob_hash)
+);
+
+CREATE INDEX IF NOT EXISTS attachments_session_order
+    ON attachments(session_id, created_at_ms, attachment_id);
+
 CREATE TABLE IF NOT EXISTS inputs (
     queue_order         INTEGER PRIMARY KEY AUTOINCREMENT,
     input_id            TEXT NOT NULL UNIQUE,
@@ -76,6 +119,10 @@ CREATE TABLE IF NOT EXISTS body_appends (
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, title, model_key, system_prompt_json, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms FROM sessions LIMIT 0",
+    "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
+    "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
+    "SELECT blob_hash, size_bytes, relative_path, created_at_ms FROM attachment_blobs LIMIT 0",
+    "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
     "SELECT queue_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms FROM inputs LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id FROM run_message_refs LIMIT 0",

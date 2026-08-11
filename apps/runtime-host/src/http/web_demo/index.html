@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EZ Assistant Runtime Demo</title>
+    <link rel="stylesheet" href="/demo/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">PRIVATE VALIDATION CLIENT</p>
+        <h1>EZ Assistant Runtime</h1>
+      </div>
+      <span id="status" class="status offline">未连接</span>
+    </header>
+
+    <main>
+      <section class="panel connection">
+        <h2>连接</h2>
+        <p>Token 仅保存在当前页面内存中，可从 Runtime Home 的 <code>run/runtime.json</code> 获取。</p>
+        <div class="row">
+          <label class="grow">
+            Access Token
+            <input id="token" type="password" autocomplete="off" spellcheck="false" />
+          </label>
+          <button id="connect">连接 Runtime</button>
+        </div>
+        <pre id="capabilities" class="compact">等待连接</pre>
+      </section>
+
+      <section class="panel workspaces">
+        <div class="section-title">
+          <h2>Workspaces</h2>
+          <button id="refresh-workspaces" class="secondary" disabled>刷新</button>
+        </div>
+        <div class="row">
+          <label class="grow">
+            本机绝对目录
+            <input id="workspace-path" placeholder="/absolute/path/to/workspace" spellcheck="false" />
+          </label>
+          <button id="register-workspace" disabled>登记 Workspace</button>
+        </div>
+        <div id="workspace-list" class="list empty">暂无 Workspace</div>
+      </section>
+
+      <section class="panel sessions">
+        <div class="section-title">
+          <h2>Sessions</h2>
+          <button id="refresh" class="secondary" disabled>刷新</button>
+        </div>
+        <div class="row">
+          <label class="grow">
+            标题
+            <input id="session-title" value="Web Demo Session" />
+          </label>
+          <label class="grow">
+            Model Key（可选）
+            <input id="model-key" placeholder="使用默认模型" />
+          </label>
+          <label class="grow">
+            Workspace（可选）
+            <select id="workspace-select">
+              <option value="">不绑定 Workspace</option>
+            </select>
+          </label>
+          <button id="create-session" disabled>新建 Session</button>
+        </div>
+        <div id="session-list" class="list empty">暂无 Session</div>
+      </section>
+
+      <section class="panel conversation">
+        <div class="section-title">
+          <div>
+            <h2>消息</h2>
+            <p id="selected-session">尚未选择 Session</p>
+          </div>
+          <div class="actions">
+            <button id="archive-session" class="secondary" disabled>归档</button>
+            <button id="restore-session" class="secondary" disabled>恢复</button>
+            <button id="cancel-run" class="danger" disabled>取消活动 Run</button>
+          </div>
+        </div>
+        <div class="token-usage" aria-live="polite">
+          <div class="token-usage-heading">
+            <span>Token Usage</span>
+            <small id="usage-context">暂无用量</small>
+          </div>
+          <dl>
+            <div><dt>Input</dt><dd id="usage-input">—</dd></div>
+            <div><dt>Output</dt><dd id="usage-output">—</dd></div>
+            <div><dt>Total</dt><dd id="usage-total">—</dd></div>
+            <div><dt>Cached</dt><dd id="usage-cached">—</dd></div>
+          </dl>
+        </div>
+        <div id="message-list" class="message-list empty">请选择 Session 查看历史消息</div>
+        <p id="conversation-status" class="conversation-status"></p>
+        <div class="attachments">
+          <div>
+            <h3>附件</h3>
+            <p>文件会先上传为 Session 静态参考文件；全部上传成功后才提交消息。</p>
+          </div>
+          <label>
+            添加本地文件
+            <input id="attachment-files" type="file" multiple disabled />
+          </label>
+          <div id="pending-files" class="file-list empty">未选择新文件</div>
+          <div id="attachment-list" class="file-list empty">当前 Session 暂无附件</div>
+        </div>
+        <label class="composer">
+          用户输入
+          <textarea id="message" rows="5" placeholder="输入一条用于验证 Runtime 的消息"></textarea>
+        </label>
+        <button id="submit" disabled>提交消息</button>
+      </section>
+    </main>
+
+    <script src="/demo/app.js" defer></script>
+  </body>
+</html>

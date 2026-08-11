@@ -34,13 +34,13 @@ pub struct Profile {
     /// 也不传该参数（<https://api-docs.deepseek.com/guides/thinking_mode/>），
     /// 因此 DeepSeek 方言为 `false`。
     pub supports_tool_choice: bool,
-    /// 带 tool calls 的 assistant 消息是否必须把 reasoning 内容一并回传。
+    /// 带 tool calls 的 assistant 消息是否必须回传 reasoning 字段。
     ///
     /// DeepSeek thinking 模式要求：发生工具调用的轮次，其 `reasoning_content` 必须在
     /// 后续所有请求中完整回传，否则 API 返回 400
-    ///（<https://api-docs.deepseek.com/guides/thinking_mode/>）。为 `true` 时编码器遇到
-    /// “有 tool calls 但无 reasoning 内容”的 assistant 消息返回 `ModelError::Config`，
-    /// 而不是发出一个必然被 Provider 拒绝的请求。
+    ///（<https://api-docs.deepseek.com/guides/thinking_mode/>）。Provider 偶尔会返回
+    /// 不带 reasoning 的合法 tool call；为 `true` 时编码器在回放该轮次时
+    /// 生成仅用于 wire 的占位字段，不伪造规范 reasoning part。
     pub tool_calls_require_reasoning: bool,
     /// Provider usage 中扁平的缓存命中 token 字段名（如 DeepSeek 的
     /// `prompt_cache_hit_tokens`，见

@@ -4,10 +4,10 @@ use agent_model::{
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
-    ConversationSnapshot, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,
-    ToolCallId, ToolChoice, ToolDefinition, ToolMessage, ToolName, ToolResult, ToolResultContent,
-    ToolResultStatus, UserMessage, UserPart,
+    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, MessageId,
+    ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
+    SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition,
+    ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
 };
 use serde_json::{Value, json};
 

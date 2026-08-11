@@ -13,6 +13,7 @@
 
 - `SessionId`、`MessageId`、`RunId` 等应用级 newtype ID；`RunId` 由 Runtime 持有，不进入 Agent Core 执行输入。
 - Command/request、事件、快照和分页查询 DTO。
+- Runtime Host 就绪状态与 capabilities 投影；不得包含地址、Token 或进程私有句柄。
 - 跨层共享的状态 enum、错误码和序列化约定。
 - 文件与 Shell 工具的纯数据请求/响应类型。
 
@@ -35,6 +36,8 @@
 
 ## v0.8.0 初始化契约
 
+- 本节记录 v0.8.0 的历史契约；Unix Socket 握手和私有 frame 已在 v0.11.0 被统一
+  HTTP 协议取代。
 - `PROTOCOL_VERSION = 1` 只供 Runtime Host 私有握手比较应用契约版本，不表示 HTTP、WebSocket
   或其他传输协议。
 - 公共 ID 包含 Session、Run、Message、Part 和 ToolCall；均为经过非空校验的透明字符串
@@ -77,6 +80,34 @@
   只接受应用层 MessageId、新正文和可选幂等 key，不暴露 generation、文件路径或被删除表行。
 - `SessionArchived` 与 `SessionNotIdle` 是不同的稳定错误：前者表示只读生命周期，后者表示活动、
   排队或未结算事实阻止当前变更。
+
+## v0.11.0 Workspace、附件与 HTTP 投影契约
+
+- M1 新增 `WorkspaceId`、Workspace lifecycle/summary、登记/查询/活动列表/假删命令，
+  `CreateSession` 和 `SessionSummary` 通过可选 `workspace_id` 表达创建时冻结绑定；协议不提供
+  Session 换绑命令，也不暴露 `session_resources` 等物理存储结构。
+- `WorkspaceId` 和 `AttachmentId` 是应用层不透明 ID；附件投影只返回客户端需要的
+  原始名称、稳定状态和可展示元数据，不暴露 Blob、staging、SQLite 或客户端源路径。
+- Workspace 意图、Attachment 查询和 Session 绑定进入可序列化
+  `RuntimeCommand`/`RuntimeCommandResult`；`SubmitInput` 和历史重新输入以缺省为空的有序
+  `attachment_ids` 引用 Session Attachment。附件字节流不是命令 DTO，
+  由 Host 的 HTTP 上传路由承载。
+- 默认本地 Host 和后续可选远程 Host 共用 HTTP 路由及业务 DTO；远程能力本身
+  默认关闭。`PROTOCOL_VERSION` 仍保持 `1`，由 `/capabilities` 返回；不保留 Unix Socket
+  握手或并行 V2。
+- `/health` 与 `/capabilities` 使用 `RuntimeHostHealth` 和 `RuntimeHostCapabilities`；
+  后者只表达协议版本、资源上限和当前可用 transport 能力，不携带发现地址或访问 Token。
+- HTTP method/path、Bearer 认证、Host/Origin 校验、multipart 解析和 SSE 连接属于
+  Runtime Host 的 transport adapter。共享 crate 只提供其中稳定的 payload 和错误语义，
+  不依赖 Web framework 或 HTTP client。
+- File References 是持久化 User Message Part，保存 Agent 可见的原始名称和稳定可读
+  路径；附件正文、Base64、自动解析结果和 Workspace 文件列表不进入 Part。
+- `TokenUsageSnapshot` 只投影一次完整模型请求最终确认的 input、output、Provider total 和
+  可选 cached input；`RuntimeEvent::UsageUpdated` 携带所属 Session、Run 和 step。事件允许
+  丢失，客户端重建时从已持久化 Assistant Message usage 恢复最近一次模型请求用量。
+- 模型调用观察新增 attempt 开始、建流前失败、重试等待和建流成功事件；失败只携带
+  `ModelFailureKind`、attempt 和重试决定，不携带 Provider 原始消息。最终 Run 使用
+  `ModelExecutionFailed` 稳定错误码和安全摘要，现有客户端仍可按普通 Run 失败处理。
 
 ## Harness 验证
 

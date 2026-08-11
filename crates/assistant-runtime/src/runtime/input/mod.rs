@@ -6,7 +6,6 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use agent_core::{AgentExecution, ExecutionContext, ExecutionInput};
 use agent_sdk::ContextWindowEvaluator;
-use agent_tools::ToolSetSnapshot;
 use agent_types::ConversationMessage;
 use assistant_protocol::{RunStatus, RuntimeErrorInfo};
 use futures_util::FutureExt;
@@ -17,7 +16,7 @@ use super::{AssistantRuntime, model::compile_run_agent};
 use crate::{
     RuntimeResult, RuntimeStore, StoredInputState, StoredRunSettlement, UserMessageCommit,
     config::ConfigRegistry,
-    run::{ActiveRun, RuntimeRecorder, supervise_run},
+    run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, supervise_run},
     session::SessionController,
 };
 
@@ -25,9 +24,8 @@ use crate::{
 struct QueueDriverContext {
     config_registry: Arc<ConfigRegistry>,
     model_factory: Arc<dyn crate::ModelServiceFactory>,
-    tools: ToolSetSnapshot,
+    run_tool_factory: Arc<dyn crate::RunToolFactory>,
     context_window: Arc<ContextWindowEvaluator>,
-    authorizer: Arc<dyn agent_core::ToolAuthorizer>,
     store: Arc<dyn RuntimeStore>,
     events: broadcast::Sender<assistant_protocol::RuntimeEvent>,
     root_cancellation: CancellationToken,
@@ -64,9 +62,8 @@ impl AssistantRuntime {
         QueueDriverContext {
             config_registry: self.config_registry.clone(),
             model_factory: self.model_factory.clone(),
-            tools: self.tools.clone(),
+            run_tool_factory: self.run_tool_factory.clone(),
             context_window: self.context_window.clone(),
-            authorizer: self.default_authorizer.clone(),
             store: self.store.clone(),
             events: self.event_sender.clone(),
             root_cancellation: self.root_cancellation.clone(),
@@ -102,7 +99,7 @@ async fn recover_panicked_queue_inner(
         return;
     };
     if let Ok(snapshot) =
-        crate::run::settle_run(&session, &run_id, None, context.store.as_ref()).await
+        crate::run::settle_run(&session, &run_id, None, context.store.as_ref(), None).await
     {
         let _ = context.events.send(crate::run::finished_event(snapshot));
     }
@@ -154,16 +151,23 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             };
             (input_id, input, run.snapshot())
         };
+        let model_diagnostics = Arc::new(RunModelDiagnostics::new(
+            session.id().clone(),
+            next.2.run_id.clone(),
+            context.events.clone(),
+        ));
         let start_error = match context.config_registry.snapshot().and_then(|config| {
             compile_run_agent(
                 &session,
                 &config,
                 context.model_factory.as_ref(),
                 context.context_window.clone(),
-                context.tools.clone(),
+                context.run_tool_factory.as_ref(),
+                Some(model_diagnostics.clone()),
             )
         }) {
-            Ok(agent) => {
+            Ok(compiled) => {
+                let (agent, authorizer) = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     next.1.stored.queued_message.clone()
                 } else {
@@ -260,7 +264,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         ExecutionContext {
                             cancellation,
                             recorder,
-                            authorizer: context.authorizer.clone(),
+                            authorizer,
                         },
                     )
                 })) {
@@ -276,6 +280,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             completion,
                             context.events.clone(),
                             context.store.clone(),
+                            model_diagnostics,
                         )
                         .await;
                         continue;
@@ -286,6 +291,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             &next.2.run_id,
                             None,
                             context.store.as_ref(),
+                            None,
                         )
                         .await
                         {

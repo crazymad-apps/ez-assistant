@@ -3,6 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_core::{ExecutionError, ExecutionOutcome};
+use agent_model::ModelError;
 use agent_types::{AssistantMessage, AssistantPart, ConversationMessage};
 use assistant_protocol::{RunId, RunSnapshot, RunStatus, RuntimeErrorCode, RuntimeErrorInfo};
 
@@ -11,7 +12,7 @@ use crate::{
     session::SessionController,
 };
 
-use super::is_active_run;
+use super::{ModelFailureDiagnostics, RunModelDiagnostics, is_active_run};
 
 pub(super) struct RunSettlement {
     pub(super) status: RunStatus,
@@ -26,6 +27,7 @@ pub(crate) async fn settle_run(
     run_id: &RunId,
     outcome: Option<ExecutionOutcome>,
     store: &dyn RuntimeStore,
+    model_diagnostics: Option<&RunModelDiagnostics>,
 ) -> RuntimeResult<RunSnapshot> {
     let _mutation = session.mutation().await;
     let (candidate, messages, settlement, cancel_requested) = {
@@ -69,7 +71,7 @@ pub(crate) async fn settle_run(
                     }
                 }
             }
-            Some(ExecutionOutcome::Failed(error)) => failed_settlement(&error),
+            Some(ExecutionOutcome::Failed(error)) => failed_settlement(&error, model_diagnostics),
             Some(ExecutionOutcome::Cancelled) => RunSettlement::terminal(RunStatus::Cancelled),
             Some(ExecutionOutcome::CompactionRequired { .. }) => {
                 RunSettlement::terminal(RunStatus::CompactionRequired)
@@ -188,20 +190,89 @@ fn completed_settlement(message: &AssistantMessage) -> RunSettlement {
     }
 }
 
-fn failed_settlement(error: &ExecutionError) -> RunSettlement {
-    let message = match error {
-        ExecutionError::Internal => "agent execution task terminated unexpectedly",
-        ExecutionError::Model(_) => "model execution failed",
-        ExecutionError::ContextWindow(_) => "conversation context is invalid",
-        ExecutionError::Record(_) => "conversation could not be recorded",
-        ExecutionError::BudgetExceeded { .. } => "execution budget was exceeded",
-        ExecutionError::GuardrailTriggered { .. } => "execution guardrail was triggered",
+fn failed_settlement(
+    error: &ExecutionError,
+    model_diagnostics: Option<&RunModelDiagnostics>,
+) -> RunSettlement {
+    let (code, message) = match error {
+        ExecutionError::Internal => (
+            RuntimeErrorCode::Internal,
+            "agent execution task terminated unexpectedly".to_owned(),
+        ),
+        ExecutionError::Model(error) => {
+            let diagnostics = model_diagnostics
+                .map(|diagnostics| diagnostics.failure(error))
+                .unwrap_or_else(|| fallback_model_diagnostics(error));
+            (
+                RuntimeErrorCode::ModelExecutionFailed,
+                model_failure_message(diagnostics),
+            )
+        }
+        ExecutionError::ContextWindow(_) => (
+            RuntimeErrorCode::Internal,
+            "conversation context is invalid".to_owned(),
+        ),
+        ExecutionError::Record(_) => (
+            RuntimeErrorCode::Internal,
+            "conversation could not be recorded".to_owned(),
+        ),
+        ExecutionError::BudgetExceeded { .. } => (
+            RuntimeErrorCode::Internal,
+            "execution budget was exceeded".to_owned(),
+        ),
+        ExecutionError::GuardrailTriggered { .. } => (
+            RuntimeErrorCode::Internal,
+            "execution guardrail was triggered".to_owned(),
+        ),
     };
     RunSettlement {
         status: RunStatus::Failed,
         reasoning: None,
         text: None,
-        error: Some(RuntimeErrorInfo::new(RuntimeErrorCode::Internal, message)),
+        error: Some(RuntimeErrorInfo::new(code, message)),
+    }
+}
+
+fn fallback_model_diagnostics(error: &ModelError) -> ModelFailureDiagnostics {
+    ModelFailureDiagnostics {
+        kind: super::model_diagnostics::model_failure_kind(error),
+        attempts: 1,
+        retries: 0,
+        stream_established: false,
+        output_observed: false,
+    }
+}
+
+fn model_failure_message(diagnostics: ModelFailureDiagnostics) -> String {
+    let stage = if diagnostics.stream_established {
+        "after stream establishment"
+    } else {
+        "before stream establishment"
+    };
+    format!(
+        "model execution failed {stage} (kind={}, attempts={}, retries={}, output_observed={})",
+        model_failure_kind_value(diagnostics.kind),
+        diagnostics.attempts,
+        diagnostics.retries,
+        diagnostics.output_observed,
+    )
+}
+
+fn model_failure_kind_value(kind: assistant_protocol::ModelFailureKind) -> &'static str {
+    use assistant_protocol::ModelFailureKind;
+    match kind {
+        ModelFailureKind::Configuration => "configuration",
+        ModelFailureKind::Authentication => "authentication",
+        ModelFailureKind::Connection => "connection",
+        ModelFailureKind::Timeout => "timeout",
+        ModelFailureKind::StreamInterrupted => "stream_interrupted",
+        ModelFailureKind::ProviderRejected => "provider_rejected",
+        ModelFailureKind::RateLimited => "rate_limited",
+        ModelFailureKind::ServiceUnavailable => "service_unavailable",
+        ModelFailureKind::ContextOverflow => "context_overflow",
+        ModelFailureKind::Protocol => "protocol",
+        ModelFailureKind::ToolArguments => "tool_arguments",
+        ModelFailureKind::Cancelled => "cancelled",
     }
 }
 

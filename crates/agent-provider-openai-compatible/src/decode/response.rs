@@ -77,34 +77,7 @@ pub fn decode_assistant_message(
             }));
         }
     }
-    validate_required_tool_call_reasoning(&parts, profile)?;
     Ok(parts)
-}
-
-/// 校验 Provider 响应是否满足 thinking 工具调用轮次的回放前提。
-///
-/// 该检查必须发生在 `TurnFinished` 之前：否则 Core 会把无法再次编码的 Assistant
-/// Tool Call 写入 Journal，并可能在用户已经看到工具副作用后才于下一模型 Step 失败。
-pub(super) fn validate_required_tool_call_reasoning(
-    parts: &[AssistantPart],
-    profile: &Profile,
-) -> Result<(), ModelError> {
-    if !profile.tool_calls_require_reasoning {
-        return Ok(());
-    }
-    let has_tool_call = parts
-        .iter()
-        .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-    let has_reasoning = parts.iter().any(
-        |part| matches!(part, AssistantPart::Reasoning(reasoning) if !reasoning.text.is_empty()),
-    );
-    if has_tool_call && !has_reasoning {
-        return Err(ModelError::Protocol(
-            "assistant response has tool calls but no reasoning content; this profile requires reasoning content for tool-call turns"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 /// 把非流式完整响应解码为规范 [`AssistantMessage`]。

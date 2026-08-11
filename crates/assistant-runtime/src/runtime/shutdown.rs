@@ -169,7 +169,8 @@ impl AssistantRuntime {
                     state.is_faulted = true;
                     continue;
                 }
-                let snapshot = settle_run(&session, &run_id, None, self.store.as_ref()).await?;
+                let snapshot =
+                    settle_run(&session, &run_id, None, self.store.as_ref(), None).await?;
                 self.publish(finished_event(snapshot));
             }
         }

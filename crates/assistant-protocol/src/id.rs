@@ -101,6 +101,16 @@ define_identifier!(
     "session_id"
 );
 define_identifier!(
+    /// Runtime 中一个 Workspace 的不透明标识。
+    WorkspaceId,
+    "workspace_id"
+);
+define_identifier!(
+    /// Runtime 中一个 Session Attachment 的不透明标识。
+    AttachmentId,
+    "attachment_id"
+);
+define_identifier!(
     /// Runtime 中一次业务 Run 的不透明标识。
     RunId,
     "run_id"
@@ -302,6 +312,7 @@ mod tests {
             "session_id"
         );
         assert!(RunId::new("").is_err());
+        assert!(WorkspaceId::new(" ").is_err());
         assert!(InputId::new(" ").is_err());
         assert!(MessageId::new("\n").is_err());
         assert!(PartId::new("\t").is_err());
@@ -319,6 +330,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RunId::new("run-1").expect("run id")).expect("serialize run id"),
             "run-1"
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceId::new("workspace-1").expect("workspace id"))
+                .expect("serialize workspace id"),
+            "workspace-1"
         );
         assert_eq!(
             serde_json::to_value(InputId::new("input-1").expect("input id"))

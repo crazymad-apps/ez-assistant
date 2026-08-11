@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use assistant_protocol::SessionId;
+use assistant_protocol::{AttachmentId, SessionId, WorkspaceId};
 use assistant_runtime::{StoreError, StoreErrorKind};
 use rusqlite::ErrorCode;
 
@@ -82,16 +82,33 @@ pub(super) fn body_path(session_directory: &Path, generation: u64) -> PathBuf {
 }
 
 pub(super) fn validate_session_component(session_id: &SessionId) -> StorageResult<()> {
-    let value = session_id.as_str();
+    validate_identifier_component(
+        session_id.as_str(),
+        "session id cannot be used by local runtime storage",
+    )
+}
+
+pub(super) fn validate_workspace_component(workspace_id: &WorkspaceId) -> StorageResult<()> {
+    validate_identifier_component(
+        workspace_id.as_str(),
+        "workspace id cannot be used by local runtime storage",
+    )
+}
+
+pub(super) fn validate_attachment_component(attachment_id: &AttachmentId) -> StorageResult<()> {
+    validate_identifier_component(
+        attachment_id.as_str(),
+        "attachment id cannot be used by local runtime storage",
+    )
+}
+
+fn validate_identifier_component(value: &str, message: &'static str) -> StorageResult<()> {
     if value.len() > 128
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(StoreError::new(
-            StoreErrorKind::InvalidInput,
-            "session id cannot be used by local runtime storage",
-        ));
+        return Err(StoreError::new(StoreErrorKind::InvalidInput, message));
     }
     Ok(())
 }

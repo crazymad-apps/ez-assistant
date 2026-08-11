@@ -620,7 +620,9 @@ Hermes 展示了大量生产故障的现实复杂度；OpenCode V2 展示了将�
 
 不应照搬：
 
-1. 不照搬 OpenCode 的 V1/V2 双栈或为了本地应用引入本地 HTTP server；
+1. 不照搬 OpenCode 的 V1/V2 双栈；本调研当时不建议只为本地应用引入 HTTP server，
+   但 v0.11.0 为保留可选远程 Runtime 边界，决策将本地改为 loopback HTTP 并删除
+   UDS 双轨。远程 HTTPS 能力默认关闭，如后续显式启用则共用同一套 API。
 2. 不照搬 Hermes 的巨型 `AIAgent`、全局 Registry 和同步/异步/线程多重桥接；
 3. 不在正式 Runtime 完成前扩展二十种 Provider、渠道或插件；
 4. 不把启发式恢复说明当成持久化 Run 状态机；

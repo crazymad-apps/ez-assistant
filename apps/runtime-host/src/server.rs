@@ -1,27 +1,38 @@
-//! 单活动客户端 Unix Socket server 生命周期。
+//! HTTP Host 生命周期与 Runtime 受控关闭编排。
 
-mod connection;
-mod dispatch;
-
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use assistant_protocol::ShutdownRuntimeRequest;
 use assistant_runtime::AssistantRuntime;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use self::connection::{ConnectionEnd, serve_connection};
-use crate::endpoint::OwnedEndpoint;
+use crate::{
+    endpoint::OwnedEndpoint,
+    http::{HttpState, router},
+};
 
-/// 持有监听端点，并将每个活动连接桥接到唯一的 Assistant Runtime。
+/// 持有本实例发现文件和监听端点，并把请求桥接到唯一 Runtime。
 pub(crate) struct RuntimeServer {
     endpoint: OwnedEndpoint,
     runtime: Arc<AssistantRuntime>,
+    runtime_home: PathBuf,
+    web_demo: bool,
 }
 
 impl RuntimeServer {
-    pub(crate) fn new(endpoint: OwnedEndpoint, runtime: Arc<AssistantRuntime>) -> Self {
-        Self { endpoint, runtime }
+    pub(crate) fn new(
+        endpoint: OwnedEndpoint,
+        runtime: Arc<AssistantRuntime>,
+        runtime_home: PathBuf,
+        web_demo: bool,
+    ) -> Self {
+        Self {
+            endpoint,
+            runtime,
+            runtime_home,
+            web_demo,
+        }
     }
 
     /// 使用 Ctrl-C 作为进程级关闭信号运行 Server。
@@ -43,46 +54,42 @@ impl RuntimeServer {
         result
     }
 
-    /// 接受单个活动客户端，直到外部取消或客户端请求关闭 Runtime。
-    pub(crate) async fn serve_until(self, shutdown: CancellationToken) -> Result<(), ServerError> {
-        loop {
-            let accepted = tokio::select! {
-                () = shutdown.cancelled() => break,
-                accepted = self.endpoint.listener().accept() => accepted,
-            };
-            let (stream, _) = accepted.map_err(ServerError::Accept)?;
-            match serve_connection(self.runtime.clone(), stream, shutdown.clone())
-                .await
-                .map_err(|_| ServerError::ConnectionTask)?
-            {
-                ConnectionEnd::Disconnected => {}
-                ConnectionEnd::ShutdownRequested => {
-                    shutdown.cancel();
-                    break;
-                }
-            }
-        }
+    /// 服务到外部取消或关闭命令；网络连接退出不改变业务 Run 生命周期。
+    pub(crate) async fn serve_until(
+        mut self,
+        shutdown: CancellationToken,
+    ) -> Result<(), ServerError> {
+        let listener = self.endpoint.take_listener();
+        let state = HttpState::new(
+            self.runtime.clone(),
+            self.endpoint.access_token(),
+            self.endpoint.authority(),
+            self.endpoint.base_url(),
+            self.runtime_home,
+            shutdown.clone(),
+            self.web_demo,
+        );
+        let serve_result = axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+            .await;
 
-        // Endpoint 停止接收连接后再关闭 Runtime，确保业务生命周期只有一个权威出口。
-        self.runtime
+        // 停止接收连接后再关闭 Runtime；发现文件随 self.endpoint 最后释放。
+        let runtime_result = self
+            .runtime
             .shutdown(ShutdownRuntimeRequest::default())
-            .await
-            .map_err(|error| ServerError::Runtime(error.to_string()))?;
+            .await;
+        serve_result.map_err(ServerError::Serve)?;
+        runtime_result.map_err(|error| ServerError::Runtime(error.to_string()))?;
         Ok(())
     }
 }
 
 #[derive(Debug, Error)]
 pub(crate) enum ServerError {
-    #[error("runtime endpoint accept failed: {0}")]
-    Accept(std::io::Error),
-    #[error("runtime connection task failed")]
-    ConnectionTask,
+    #[error("runtime HTTP server failed: {0}")]
+    Serve(std::io::Error),
     #[error("runtime signal task failed")]
     SignalTask,
     #[error("runtime controlled shutdown failed: {0}")]
     Runtime(String),
 }
-
-#[cfg(test)]
-mod tests;

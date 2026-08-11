@@ -1,22 +1,27 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
 };
 
 use agent_core::ExchangeReceipt;
 use agent_model::SystemPromptSnapshot;
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
-    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
-    TextPart, ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent,
-    ToolResultStatus, UserMessage, UserPart,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
+    FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
+    ProtocolId, ProviderId, ReasoningPart, TextPart, ToolCall, ToolCallId, ToolMessage, ToolName,
+    ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
 };
-use assistant_protocol::{IdempotencyKey, InputId, ModelKey, RunId, RunStatus, SessionId};
+use assistant_protocol::{
+    AttachmentId, IdempotencyKey, InputId, ModelKey, RunId, RunStatus, SessionId, WorkspaceId,
+};
 use assistant_runtime::{
-    ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange, NewStoredInput,
-    NewStoredSession, PendingToolExchange, RuntimeStore, StoreErrorKind, StoredConversationState,
-    StoredRunSettlement, StoredSessionLifecycle, UserMessageCommit,
+    ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange, NewAttachmentUpload,
+    NewStoredInput, NewStoredSession, NewWorkspaceRegistration, PendingToolExchange, RuntimeStore,
+    SessionExecutionEnvironment, StoreErrorKind, StoredAttachmentState, StoredConversationState,
+    StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle, UserMessageCommit,
+    WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -36,12 +41,28 @@ fn run_id(value: &str) -> RunId {
     RunId::new(value).expect("run id")
 }
 
-fn new_session(value: &str) -> NewStoredSession {
+fn workspace_id(value: &str) -> WorkspaceId {
+    WorkspaceId::new(value).expect("workspace id")
+}
+
+fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
+    let session_directory = sessions_directory.join(value);
+    let private_directory = session_directory.join("private");
     NewStoredSession {
         session_id: session_id(value),
         title: format!("Session {value}"),
         model_key: ModelKey::new("fixture-model").expect("model key"),
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
+        environment: SessionExecutionEnvironment {
+            workspace_id: None,
+            working_directory: private_directory.to_string_lossy().into_owned(),
+            workspace_private_directory: None,
+            session_attachment_directory: session_directory
+                .join("attachments")
+                .to_string_lossy()
+                .into_owned(),
+            session_private_directory: private_directory.to_string_lossy().into_owned(),
+        },
         created_at_ms: 1_000,
     }
 }
@@ -154,8 +175,9 @@ fn raw_user_message(value: &str, text: &str) -> UserMessage {
 }
 
 fn seed_session_and_run(engine: &mut StorageEngine, session: &str, run: &str) {
+    let new_session = new_session(session, &engine.sessions_directory);
     engine
-        .create_session(new_session(session))
+        .create_session(new_session)
         .expect("create stored session");
     engine
         .connection
@@ -177,6 +199,32 @@ fn seed_session_and_run(engine: &mut StorageEngine, session: &str, run: &str) {
             params![run, session, format!("input-{run}")],
         )
         .expect("seed run");
+}
+
+#[test]
+fn model_execution_failure_code_round_trips_without_schema_changes() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "session-model-failure", "run-model-failure");
+    let message = "model execution failed before stream establishment (kind=service_unavailable, attempts=4, retries=3, output_observed=false)";
+    engine
+        .connection
+        .execute(
+            "UPDATE runs
+             SET status = 'failed', error_code = 'model_execution_failed', error_message = ?1,
+                 finished_at_ms = 2000
+             WHERE run_id = 'run-model-failure'",
+            [message],
+        )
+        .expect("persist model failure");
+
+    let runs = engine.load_runs().expect("load runs");
+    let error = runs[0].error.as_ref().expect("model failure");
+    assert_eq!(
+        error.code,
+        assistant_protocol::RuntimeErrorCode::ModelExecutionFailed
+    );
+    assert_eq!(error.message, message);
 }
 
 fn append_request(operation: &str, session: &str, run: &str) -> AppendRequest {
@@ -244,13 +292,13 @@ fn initializes_private_database_and_current_schema() {
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type = 'table' AND name IN (
                 'sessions', 'inputs', 'runs', 'run_message_refs',
-                'pending_tool_exchanges', 'body_appends'
+                'pending_tool_exchanges', 'body_appends', 'workspaces', 'session_resources'
              )",
             [],
             |row| row.get(0),
         )
         .expect("table count");
-    assert_eq!(table_count, 6);
+    assert_eq!(table_count, 8);
 
     let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
     assert_eq!(
@@ -271,20 +319,188 @@ fn initializes_private_database_and_current_schema() {
     );
 }
 
+#[test]
+fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_id() {
+    let root = TempDir::new().expect("runtime home");
+    let user_directory = TempDir::new().expect("user workspace");
+    let alias = root.path().join("workspace-alias");
+    symlink(user_directory.path(), &alias).expect("workspace alias");
+    let mut engine = open_engine(&root);
+
+    let first = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-first"),
+            requested_directory: alias.to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register workspace");
+    assert_eq!(
+        first.user_directory,
+        fs::canonicalize(user_directory.path())
+            .expect("canonical workspace")
+            .to_string_lossy()
+    );
+    assert!(Path::new(&first.agent_directory).is_dir());
+
+    let duplicate = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-unused"),
+            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 200,
+        })
+        .expect("idempotent workspace");
+    assert_eq!(duplicate.workspace_id, first.workspace_id);
+
+    let removed = engine
+        .remove_workspace(WorkspaceRemoval {
+            workspace_id: first.workspace_id.clone(),
+            changed_at_ms: 300,
+        })
+        .expect("remove workspace");
+    assert_eq!(removed.lifecycle, StoredWorkspaceLifecycle::Removed);
+    let active_count: i64 = engine
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE lifecycle = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count active workspaces");
+    assert_eq!(active_count, 0);
+    assert!(Path::new(&removed.agent_directory).is_dir());
+    assert!(user_directory.path().is_dir());
+
+    let restored = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-other-unused"),
+            requested_directory: alias.to_string_lossy().into_owned(),
+            changed_at_ms: 400,
+        })
+        .expect("restore workspace");
+    assert_eq!(restored.workspace_id, first.workspace_id);
+    assert_eq!(restored.lifecycle, StoredWorkspaceLifecycle::Active);
+}
+
+#[test]
+fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_prompt_rewrite() {
+    let root = TempDir::new().expect("runtime home");
+    let user_directory = TempDir::new().expect("user workspace");
+    let mut engine = open_engine(&root);
+    let workspace = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-bound"),
+            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register workspace");
+
+    let mut bound = new_session("s-bound", &engine.sessions_directory);
+    bound.environment.workspace_id = Some(workspace.workspace_id.clone());
+    bound.environment.working_directory = workspace.user_directory.clone();
+    bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
+    let created = engine.create_session(bound).expect("create bound session");
+    assert_eq!(
+        created.environment.workspace_id.as_ref(),
+        Some(&workspace.workspace_id)
+    );
+    assert!(Path::new(&created.environment.session_attachment_directory).is_dir());
+    assert!(Path::new(&created.environment.session_private_directory).is_dir());
+
+    let mut second_bound = new_session("s-bound-two", &engine.sessions_directory);
+    second_bound.environment.workspace_id = Some(workspace.workspace_id.clone());
+    second_bound.environment.working_directory = workspace.user_directory.clone();
+    second_bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
+    let second_created = engine
+        .create_session(second_bound)
+        .expect("create second bound session");
+    assert_eq!(
+        created.environment.workspace_private_directory,
+        second_created.environment.workspace_private_directory
+    );
+
+    let legacy = new_session("s-legacy", &engine.sessions_directory);
+    let original_prompt = legacy.system_prompt.clone();
+    engine
+        .create_session(legacy)
+        .expect("create legacy fixture session");
+    engine
+        .connection
+        .execute(
+            "DELETE FROM session_resources WHERE session_id = 's-legacy'",
+            [],
+        )
+        .expect("remove resource row to emulate v0.10");
+    let legacy_body = body_path(
+        &engine
+            .session_directory(&session_id("s-legacy"))
+            .expect("legacy session directory"),
+        1,
+    );
+    let original_body = fs::read(&legacy_body).expect("read legacy body");
+    let original_prompt_json: String = engine
+        .connection
+        .query_row(
+            "SELECT system_prompt_json FROM sessions WHERE session_id = 's-legacy'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read legacy prompt JSON");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    let recovered_bound = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id.as_str() == "s-bound")
+        .expect("bound session");
+    assert_eq!(
+        recovered_bound.environment.workspace_id.as_ref(),
+        Some(&workspace.workspace_id)
+    );
+    let repaired = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id.as_str() == "s-legacy")
+        .expect("legacy session");
+    assert_eq!(repaired.environment.workspace_id, None);
+    assert_eq!(repaired.system_prompt, original_prompt);
+    let repaired_prompt_json: String = reopened
+        .connection
+        .query_row(
+            "SELECT system_prompt_json FROM sessions WHERE session_id = 's-legacy'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read repaired prompt JSON");
+    assert_eq!(repaired_prompt_json, original_prompt_json);
+    assert_eq!(
+        fs::read(legacy_body).expect("read repaired body"),
+        original_body
+    );
+    assert_eq!(
+        repaired.environment.working_directory,
+        repaired.environment.session_private_directory
+    );
+    assert!(Path::new(&repaired.environment.session_attachment_directory).is_dir());
+    assert!(Path::new(&repaired.environment.session_private_directory).is_dir());
+}
+
 #[tokio::test]
 async fn worker_round_trips_session_and_shuts_down_explicitly() {
     let root = tempfile::tempdir().expect("tempdir");
     let store = LocalRuntimeStore::open(root.path(), 4)
         .await
         .expect("open local store");
+    let sessions_directory = root.path().join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY);
     let created = store
-        .create_session(new_session("s-worker"))
+        .create_session(new_session("s-worker", &sessions_directory))
         .await
         .expect("create session");
     assert_eq!(created.message_count, 0);
     assert_eq!(
         store
-            .create_session(new_session("s-worker"))
+            .create_session(new_session("s-worker", &sessions_directory))
             .await
             .expect_err("duplicate session")
             .kind(),
@@ -306,6 +522,83 @@ async fn worker_round_trips_session_and_shuts_down_explicitly() {
     assert_eq!(
         store.load_runtime().await.expect_err("closed store").kind(),
         StoreErrorKind::Unavailable
+    );
+}
+
+#[test]
+fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
+    let root = TempDir::new().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-file-references");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    let message = UserMessage {
+        id: MessageId::new("message-files").expect("message id"),
+        parts: vec![
+            UserPart::Text(TextPart {
+                id: PartId::new("text-files").expect("part id"),
+                text: "compare".to_owned(),
+            }),
+            UserPart::FileReferences(FileReferencesPart {
+                id: PartId::new("references-files").expect("part id"),
+                files: vec![
+                    FileReference {
+                        original_name: "first.pdf".to_owned(),
+                        readable_path: "/stable/first.pdf".to_owned(),
+                    },
+                    FileReference {
+                        original_name: "second.xlsx".to_owned(),
+                        readable_path: "/stable/second.xlsx".to_owned(),
+                    },
+                ],
+            }),
+        ],
+    };
+    engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-files").expect("input id"),
+            run_id: run_id("run-files"),
+            session_id: session.clone(),
+            idempotency_key: None,
+            message: message.clone(),
+            accepted_at_ms: 2_000,
+        })
+        .expect("accept input");
+    assert_eq!(
+        engine.load_inputs().expect("load queued input")[0]
+            .queued_message
+            .as_ref(),
+        Some(&message)
+    );
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "commit-files".to_owned(),
+            input_id: InputId::new("input-files").expect("input id"),
+            run_id: run_id("run-files"),
+            session_id: session.clone(),
+            message: Some(message.clone()),
+            created_at_ms: 2_001,
+        })
+        .expect("commit user message");
+    let queued_json: Option<String> = engine
+        .connection
+        .query_row(
+            "SELECT queued_message_json FROM inputs WHERE input_id = 'input-files'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("queued JSON state");
+    assert_eq!(queued_json, None);
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().expect("recover runtime");
+    assert_eq!(
+        reopened
+            .load_conversation(&session)
+            .expect("load conversation after restart"),
+        ConversationSnapshot::new(vec![ConversationMessage::User(message)])
     );
 }
 
@@ -749,8 +1042,9 @@ fn conflicting_append_tail_isolated_to_its_session() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
     seed_session_and_run(&mut engine, "s-broken", "r-broken");
+    let healthy = new_session("s-healthy", &engine.sessions_directory);
     engine
-        .create_session(new_session("s-healthy"))
+        .create_session(healthy)
         .expect("create healthy session");
     engine
         .stage_append(append_request("operation-broken", "s-broken", "r-broken"))
@@ -903,8 +1197,9 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
     let root = TempDir::new().expect("tempdir");
     let mut engine = open_engine(&root);
     let session = session_id("s-rewrite");
+    let stored_session = new_session(session.as_str(), &engine.sessions_directory);
     engine
-        .create_session(new_session(session.as_str()))
+        .create_session(stored_session)
         .expect("create session");
 
     for (input, run, user, assistant, at) in [
@@ -996,8 +1291,9 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     let root = TempDir::new().expect("tempdir");
     let mut engine = open_engine(&root);
     let session = session_id("s-lifecycle");
+    let stored_session = new_session(session.as_str(), &engine.sessions_directory);
     engine
-        .create_session(new_session(session.as_str()))
+        .create_session(stored_session)
         .expect("create session");
     engine
         .set_session_archive(ArchiveChange {
@@ -1054,4 +1350,148 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         StoredSessionLifecycle::Active
     );
     assert_eq!(recovered.sessions[0].model_key.as_str(), "other-model");
+}
+
+#[test]
+fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_views() {
+    let root = TempDir::new().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-attachment");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    let bytes = b"stable attachment content";
+    let original_name = "需求说明.txt";
+    let hash = crate::attachment_hash::digest_bytes(original_name, bytes);
+    let first_staging = engine.upload_staging_directory.join("first.part");
+    fs::write(&first_staging, bytes).expect("write staging");
+    let first = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-first").expect("attachment id"),
+            session_id: session.clone(),
+            original_name: original_name.to_owned(),
+            staging_path: first_staging.to_string_lossy().into_owned(),
+            blob_hash: hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_000,
+        })
+        .expect("upload attachment");
+    assert_eq!(first.state, StoredAttachmentState::Ready);
+    assert!(
+        fs::symlink_metadata(&first.agent_readable_path)
+            .expect("stable view")
+            .file_type()
+            .is_symlink()
+    );
+
+    let duplicate_staging = engine.upload_staging_directory.join("duplicate.part");
+    fs::write(&duplicate_staging, bytes).expect("write duplicate staging");
+    let duplicate = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-duplicate").expect("attachment id"),
+            session_id: session.clone(),
+            original_name: original_name.to_owned(),
+            staging_path: duplicate_staging.to_string_lossy().into_owned(),
+            blob_hash: hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_001,
+        })
+        .expect("idempotent retry");
+    assert_eq!(duplicate.attachment_id, first.attachment_id);
+    assert!(!duplicate_staging.exists());
+
+    let different_name = "different.txt";
+    let different_hash = crate::attachment_hash::digest_bytes(different_name, bytes);
+    assert_ne!(different_hash, hash);
+    let different_staging = engine.upload_staging_directory.join("different.part");
+    fs::write(&different_staging, bytes).expect("write differently named staging");
+    let differently_named = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-different").expect("attachment id"),
+            session_id: session,
+            original_name: different_name.to_owned(),
+            staging_path: different_staging.to_string_lossy().into_owned(),
+            blob_hash: different_hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_002,
+        })
+        .expect("upload same bytes under another name");
+    assert_ne!(differently_named.attachment_id, first.attachment_id);
+
+    let reused_staging = engine.upload_staging_directory.join("reused.part");
+    fs::write(&reused_staging, bytes).expect("write reused staging");
+    let other_session = session_id("s-attachment-other");
+    engine
+        .create_session(new_session(
+            other_session.as_str(),
+            &engine.sessions_directory,
+        ))
+        .expect("create other session");
+    let reused = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-reused").expect("attachment id"),
+            session_id: other_session,
+            original_name: original_name.to_owned(),
+            staging_path: reused_staging.to_string_lossy().into_owned(),
+            blob_hash: hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_003,
+        })
+        .expect("reuse attachment blob");
+    assert_ne!(reused.attachment_id, first.attachment_id);
+    assert_eq!(
+        engine
+            .connection
+            .query_row("SELECT COUNT(*) FROM attachment_blobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("blob count"),
+        2
+    );
+
+    fs::remove_file(&first.agent_readable_path).expect("remove repairable view");
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover attachments");
+    assert_eq!(recovered.attachments.len(), 3);
+    assert_eq!(recovered.sessions.len(), 2);
+    assert!(
+        recovered
+            .attachments
+            .iter()
+            .all(|attachment| attachment.state == StoredAttachmentState::Ready)
+    );
+    assert!(Path::new(&first.agent_readable_path).is_symlink());
+
+    let blob = root
+        .path()
+        .join("data")
+        .join(super::attachment_io::blob_relative_path(&hash));
+    fs::remove_file(blob).expect("remove blob for unavailable recovery");
+    drop(reopened);
+    let mut reopened = open_engine(&root);
+    let recovered = reopened
+        .load_runtime()
+        .expect("recover unavailable attachment");
+    let unavailable = recovered
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.state == StoredAttachmentState::Unavailable)
+        .count();
+    let ready = recovered
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.state == StoredAttachmentState::Ready)
+        .count();
+    assert_eq!(unavailable, 2);
+    assert_eq!(ready, 1);
+    assert_eq!(
+        recovered
+            .attachments
+            .iter()
+            .find(|attachment| attachment.attachment_id == differently_named.attachment_id)
+            .expect("differently named attachment")
+            .state,
+        StoredAttachmentState::Ready
+    );
 }

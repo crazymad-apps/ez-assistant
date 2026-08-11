@@ -46,6 +46,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；规范快照不得暴露 pending exchange。
+- Core 生成的 `ToolMessage.id` 必须相对输入的完整 Conversation 唯一。每个 Run 都会创建新的
+  Engine，因此不得只依赖执行内从 1 开始的计数器；后续 Run 必须避开历史 Run 已占用的 ID。
 - 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付；终态包括
   Completed、Failed、Cancelled 和 CompactionRequired，均报告丢弃计数。
 - Core 不发起上下文压缩请求、不生成 Context Checkpoint，也不在同一个
@@ -130,6 +132,7 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - 覆盖 Recorder begin/complete 失败与 pending 恢复、Authorizer Allow/Deny、授权等待中的
   取消 race、普通记忆工具多轮调用、工具取消清理完成和 Provider reasoning/tool-call
   往返保真。
+- 覆盖同一 Conversation 的后续执行继续调用工具，并断言新 ToolMessage 不复用历史 ID。
 - 事件顺序必须可断言，不依赖真实模型网络。
 - 可运行效果演示位于 `crates/agent-testkit/examples/engine_demo.rs`。
 

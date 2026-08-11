@@ -15,6 +15,8 @@
   顺序的唯一校验入口；Context、Provider 和 Harness 只能复用，不能各自实现。
 - `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存
   策略、模型或 usage。
+- `UserPart::FileReferences` 是持久化的用户可见 Part，只保存原始文件名与
+  Agent 稳定可读路径；不包含应用层 Attachment ID、文件正文、Base64 或解析结果。
 
 ## 验证
 

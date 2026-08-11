@@ -35,7 +35,8 @@ impl AssistantRuntime {
             return Ok(SubmitInputResult { input_id, run });
         }
         session.ensure_healthy()?;
-        let message = create_user_message(request.message)?;
+        let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
+        let message = create_user_message(request.message, files)?;
         let (input_id, run_id) = {
             let state = session.lock_state()?;
             (self.allocate_input_id(&state)?, allocate_run_id(&state)?)

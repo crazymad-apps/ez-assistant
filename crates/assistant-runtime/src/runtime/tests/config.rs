@@ -25,8 +25,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         source,
         factory.clone(),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
     ));
     runtime
         .config_registry
@@ -52,6 +51,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         .submit_input(SubmitInputRequest {
             session_id: before_reload.session.session_id.clone(),
             message: "race before swap".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -81,6 +81,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         .submit_input(SubmitInputRequest {
             session_id: after_reload.session.session_id.clone(),
             message: "run after swap".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -131,8 +132,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         source.clone(),
         factory.clone(),
         Arc::new(StaticSystemPromptFactory),
-        registry.snapshot(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(registry.snapshot()),
     );
     assert_eq!(
         runtime
@@ -156,6 +156,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         .submit_input(SubmitInputRequest {
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -178,6 +179,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         .submit_input(SubmitInputRequest {
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -205,6 +207,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         .submit_input(SubmitInputRequest {
             session_id: second.session.session_id.clone(),
             message: "must not use stale key".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -255,8 +258,7 @@ max_output_tokens = 4096
         source.clone(),
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
     );
     let reloaded = runtime
         .reload_config(ReloadConfigRequest::default())
@@ -336,8 +338,7 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
         Arc::new(MissingConfigSource),
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
     );
     assert_eq!(
         missing
@@ -362,8 +363,7 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
         Arc::new(UnavailableConfigSource),
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
     );
     let result = unsafe_source
         .reload_config(ReloadConfigRequest::default())

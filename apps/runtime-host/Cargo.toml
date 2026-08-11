@@ -14,7 +14,7 @@ workspace = true
 
 [features]
 default = []
-demo-client = ["dep:crossterm", "dep:futures-util", "dep:ratatui", "dep:tui-input"]
+web-demo = []
 
 [dependencies]
 agent-context = { path = "../../crates/agent-context" }
@@ -23,25 +23,29 @@ agent-model = { path = "../../crates/agent-model" }
 agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
 agent-sdk = { path = "../../crates/agent-sdk" }
 agent-tools = { path = "../../crates/agent-tools" }
+agent-tools-local = { path = "../../crates/agent-tools-local" }
 agent-types = { path = "../../crates/agent-types" }
 assistant-protocol = { path = "../../crates/assistant-protocol" }
 assistant-runtime = { path = "../../crates/assistant-runtime" }
+async-stream.workspace = true
+axum = { workspace = true, features = ["multipart"] }
+base64.workspace = true
 clap.workspace = true
-crossterm = { workspace = true, optional = true }
 dirs.workspace = true
+futures-core.workspace = true
+getrandom.workspace = true
 libc.workspace = true
-futures-util = { workspace = true, optional = true }
-ratatui = { workspace = true, optional = true, features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.40.1", features = ["bundled"], default-features = false }
 schemars = "1.2.1"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "net", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt-multi-thread", "signal"] }
 tokio-util.workspace = true
-tui-input = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit = { path = "../../crates/agent-testkit" }
-axum.workspace = true
+reqwest = { workspace = true, features = ["blocking", "multipart"] }
 tempfile.workspace = true
+toml.workspace = true

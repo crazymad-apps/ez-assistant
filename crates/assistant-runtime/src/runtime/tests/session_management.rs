@@ -1,8 +1,10 @@
 use super::*;
 
+use crate::StagedAttachmentUpload;
 use assistant_protocol::{
-    ArchiveSessionRequest, IdempotencyKey, ListRunsRequest, ReenterFromUserMessageRequest,
-    RestoreSessionRequest, SessionLifecycle, SessionListFilter, SetSessionModelRequest,
+    ArchiveSessionRequest, IdempotencyKey, ListAttachmentsRequest, ListRunsRequest,
+    ReenterFromUserMessageRequest, RestoreSessionRequest, SessionLifecycle, SessionListFilter,
+    SetSessionModelRequest,
 };
 
 #[tokio::test]
@@ -61,6 +63,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
             .submit_input(SubmitInputRequest {
                 session_id: session_id.clone(),
                 message: "not allowed".to_owned(),
+                attachment_ids: Vec::new(),
                 idempotency_key: None,
             })
             .await,
@@ -147,6 +150,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
         .submit_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "active input".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -178,6 +182,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
                 session_id: session_id.clone(),
                 message_id: assistant_protocol::MessageId::new("unknown").expect("message id"),
                 message: "replacement".to_owned(),
+                attachment_ids: Vec::new(),
                 idempotency_key: None,
             })
             .await,
@@ -218,10 +223,33 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .await
         .expect("session");
     let session_id = created.session.session_id;
+    let old_attachment = runtime
+        .finalize_attachment_upload(StagedAttachmentUpload {
+            session_id: session_id.clone(),
+            original_name: "old.txt".to_owned(),
+            staging_path: "/volatile/old.part".to_owned(),
+            blob_hash: "e".repeat(64),
+            size_bytes: 10,
+        })
+        .await
+        .expect("old attachment")
+        .attachment;
+    let replacement_attachment = runtime
+        .finalize_attachment_upload(StagedAttachmentUpload {
+            session_id: session_id.clone(),
+            original_name: "replacement.txt".to_owned(),
+            staging_path: "/volatile/replacement.part".to_owned(),
+            blob_hash: "f".repeat(64),
+            size_bytes: 20,
+        })
+        .await
+        .expect("replacement attachment")
+        .attachment;
     let first = runtime
         .submit_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "first question".to_owned(),
+            attachment_ids: vec![old_attachment.attachment_id.clone()],
             idempotency_key: None,
         })
         .await
@@ -231,6 +259,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .submit_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "second question".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -254,6 +283,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message_id: assistant_protocol::MessageId::new(target.as_str()).expect("message id"),
             message: "replacement question".to_owned(),
+            attachment_ids: vec![replacement_attachment.attachment_id.clone()],
             idempotency_key: Some(IdempotencyKey::new("replace-1").expect("key")),
         })
         .await
@@ -263,6 +293,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message_id: assistant_protocol::MessageId::new("already-removed").expect("message id"),
             message: "different retry payload is ignored".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: Some(IdempotencyKey::new("replace-1").expect("key")),
         })
         .await
@@ -285,7 +316,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .filter_map(|message| match message {
             ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
                 UserPart::Text(text) => Some(text.text.as_str()),
-                UserPart::Injected(_) => None,
+                UserPart::Injected(_) | UserPart::FileReferences(_) => None,
             }),
             ConversationMessage::Assistant(assistant) => {
                 assistant.parts.iter().find_map(|part| match part {
@@ -297,6 +328,32 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         })
         .collect::<Vec<_>>();
     assert_eq!(texts, ["replacement question", "replacement answer"]);
+    let remaining_files = after
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
+                UserPart::FileReferences(files) => Some(&files.files),
+                UserPart::Text(_) | UserPart::Injected(_) => None,
+            }),
+            _ => None,
+        })
+        .expect("replacement file references");
+    assert_eq!(remaining_files.len(), 1);
+    assert_eq!(
+        remaining_files[0].readable_path,
+        replacement_attachment.agent_readable_path
+    );
+    assert_eq!(
+        runtime
+            .list_attachments(ListAttachmentsRequest {
+                session_id: session_id.clone(),
+            })
+            .expect("session attachments")
+            .attachments
+            .len(),
+        2
+    );
     let runs = runtime
         .list_runs(ListRunsRequest {
             session_id: session_id.clone(),

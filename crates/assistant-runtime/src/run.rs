@@ -1,16 +1,18 @@
 //! Runtime Run 领域状态、标识分配与子模块入口。
 
+mod model_diagnostics;
 mod recorder;
 mod settlement;
 mod supervisor;
 
+pub(crate) use model_diagnostics::{ModelFailureDiagnostics, RunModelDiagnostics};
 pub(crate) use recorder::RuntimeRecorder;
 pub(crate) use settlement::settle_run;
 pub(crate) use supervisor::supervise_run;
 
 use agent_types::{
-    AssistantPart, ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart,
-    UserMessage, UserPart,
+    AssistantPart, ConversationMessage, ConversationSnapshot, FileReference, FileReferencesPart,
+    MessageId, PartId, TextPart, UserMessage, UserPart,
 };
 use assistant_protocol::{
     InputId, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeEvent, SessionId,
@@ -198,9 +200,30 @@ pub(crate) fn allocate_run_id(state: &SessionState) -> RuntimeResult<RunId> {
     })
 }
 
-/// 将已校验的提交文本封装为新的规范 UserMessage。
-pub(crate) fn create_user_message(text: String) -> RuntimeResult<UserMessage> {
-    let message_id = id::generate("m")
+/// 将已校验文本和已冻结文件引用封装为新的规范 UserMessage。
+pub(crate) fn create_user_message(
+    text: String,
+    files: Vec<FileReference>,
+) -> RuntimeResult<UserMessage> {
+    let message_id = allocate_message_id()?;
+    let mut parts = vec![UserPart::Text(TextPart {
+        id: allocate_part_id()?,
+        text,
+    })];
+    if !files.is_empty() {
+        parts.push(UserPart::FileReferences(FileReferencesPart {
+            id: allocate_part_id()?,
+            files,
+        }));
+    }
+    Ok(UserMessage {
+        id: message_id,
+        parts,
+    })
+}
+
+fn allocate_message_id() -> RuntimeResult<MessageId> {
+    id::generate("m")
         .map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "message id random source",
         })
@@ -208,8 +231,11 @@ pub(crate) fn create_user_message(text: String) -> RuntimeResult<UserMessage> {
             MessageId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "message id generator",
             })
-        })?;
-    let part_id = id::generate("p")
+        })
+}
+
+fn allocate_part_id() -> RuntimeResult<PartId> {
+    id::generate("p")
         .map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "part id random source",
         })
@@ -217,11 +243,7 @@ pub(crate) fn create_user_message(text: String) -> RuntimeResult<UserMessage> {
             PartId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "part id generator",
             })
-        })?;
-    Ok(UserMessage {
-        id: message_id,
-        parts: vec![UserPart::Text(TextPart { id: part_id, text })],
-    })
+        })
 }
 
 fn is_active_run(state: &SessionState, run_id: &RunId) -> bool {

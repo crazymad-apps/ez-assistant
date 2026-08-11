@@ -14,14 +14,19 @@
 - `OpenAiCompatibleService::new` 与 `with_transport` 都是可失败构造，统一返回
   `OpenAiCompatibleServiceError`；无效 URL 错误不得回显可能包含 credential 的原始 URL。
 - Provider 差异通过显式 Profile 表达，不在 Core 中按名称分支。
-- DeepSeek thinking 工具调用必须完整往返 `reasoning_content`、`tool_calls` 和 `tool_call_id`。
+- DeepSeek thinking 工具调用必须维持可回放的 `reasoning_content`、`tool_calls` 和
+  `tool_call_id`。
 - `Profile::deepseek()` 明确表示 thinking-enabled 形态；经 `provider_options` 关闭
   thinking 不属于该 Profile 的支持范围，不能一边关闭 thinking 一边沿用其 reasoning
   必填校验。
-- 当 Profile 要求工具调用携带 reasoning 时，流式和非流式响应都必须在产出完整
-  `AssistantMessage` / `TurnFinished` 前校验该不变量；缺失时以 Provider 协议错误终止
-  当前 Turn，不能把无法回放的 Tool Call 交给 Core 执行或写入 Journal。
+- DeepSeek 偶发返回不带 `reasoning_content` 的合法 Tool Call 时，解码器保留
+  该 Tool Call，不伪造规范 `ReasoningPart`；后续回放由 DeepSeek Profile 的编码器
+  补入仅用于 wire 的 reasoning 占位字段。该兼容逻辑不得进入 Core、UI 或
+  Journal，也不得应用到不接受 `reasoning_content` 的其他 Profile。
 - Context Summary 编码为带固定派生说明的 system message。
+- User Message 的 `Text`、`Injected` 和 `FileReferences` 按规范 Part 顺序编码为
+  原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
+  不伪造 Tool Call、Tool Result 或已读取文件的事实。
 - `ModelRequest.system` 按 `SystemPromptSnapshot::parts()` 的冻结顺序逐条编码；透明快照
   不改变既有线上 JSON 和 system message 顺序。
 - 请求编码前复用 `ConversationSnapshot` 的严格 Tool Call/Result 双向校验，不在

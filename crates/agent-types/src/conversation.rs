@@ -186,7 +186,7 @@ pub struct ContextSummaryMessage {
 pub struct UserMessage {
     /// 规范消息 ID。
     pub id: MessageId,
-    /// 用户消息的有序内容片段，包含用户真实输入与应用注入文本。
+    /// 用户消息的有序内容片段，包含正文、应用注入文本和可见文件引用。
     pub parts: Vec<UserPart>,
 }
 
@@ -198,6 +198,26 @@ pub enum UserPart {
     Text(TextPart),
     /// 上层应用注入的约束/上下文文本；UI 展示时隐藏，回放时仍进入发给模型的内容。
     Injected(TextPart),
+    /// 用户可见的附件引用；不包含文件正文或应用层 Attachment ID。
+    FileReferences(FileReferencesPart),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// 一组按用户选择顺序保存的文件引用。
+pub struct FileReferencesPart {
+    /// 片段 ID，用于持久化回放与 UI 投影。
+    pub id: PartId,
+    /// Agent 可见的文件名称和稳定可读路径。
+    pub files: Vec<FileReference>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Agent 按需读取文件所需的最小稳定信息。
+pub struct FileReference {
+    /// 上传时保存的原始文件名。
+    pub original_name: String,
+    /// Runtime 分配并持久化的 Agent 可读路径。
+    pub readable_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -616,10 +636,43 @@ mod tests {
             .iter()
             .filter_map(|part| match part {
                 UserPart::Text(text) => Some(text),
-                UserPart::Injected(_) => None,
+                UserPart::Injected(_) | UserPart::FileReferences(_) => None,
             })
             .collect();
         assert_eq!(visible.len(), 1);
+    }
+
+    #[test]
+    fn file_references_round_trip_in_user_part_order() {
+        let turn = UserMessage {
+            id: id("message_1"),
+            parts: vec![
+                UserPart::Text(TextPart {
+                    id: id("text_1"),
+                    text: "Compare the files".to_owned(),
+                }),
+                UserPart::FileReferences(FileReferencesPart {
+                    id: id("files_1"),
+                    files: vec![
+                        FileReference {
+                            original_name: "a.pdf".to_owned(),
+                            readable_path: "/stable/a.pdf".to_owned(),
+                        },
+                        FileReference {
+                            original_name: "b.xlsx".to_owned(),
+                            readable_path: "/stable/b.xlsx".to_owned(),
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        let json = serde_json::to_string(&turn).expect("serialize user turn");
+        assert!(json.contains(r#""type":"file_references""#));
+        let decoded: UserMessage = serde_json::from_str(&json).expect("deserialize user turn");
+        assert_eq!(decoded, turn);
+        assert!(matches!(decoded.parts[0], UserPart::Text(_)));
+        assert!(matches!(decoded.parts[1], UserPart::FileReferences(_)));
     }
 
     #[test]

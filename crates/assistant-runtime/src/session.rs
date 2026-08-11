@@ -14,8 +14,8 @@ use assistant_protocol::{
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, StoredConversationState, StoredInput,
-    StoredInputState, StoredRun, StoredSession, id,
+    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
+    StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredSession, id,
     journal::InMemoryJournal,
     run::{ActiveRun, RunRecord},
 };
@@ -24,6 +24,7 @@ pub(crate) struct SessionController {
     id: SessionId,
     title: String,
     system_prompt: SystemPromptSnapshot,
+    environment: SessionExecutionEnvironment,
     mutation_gate: AsyncMutex<()>,
     state: Mutex<SessionState>,
 }
@@ -79,6 +80,7 @@ impl SessionController {
             id: stored.session_id,
             title: stored.title,
             system_prompt: stored.system_prompt,
+            environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 model_key: stored.model_key,
@@ -140,6 +142,7 @@ impl SessionController {
             id: stored.session_id,
             title: stored.title,
             system_prompt: stored.system_prompt,
+            environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 model_key: stored.model_key,
@@ -167,6 +170,7 @@ impl SessionController {
             title: self.title.clone(),
             model_key: state.model_key.clone(),
             lifecycle: state.lifecycle,
+            workspace_id: self.environment.workspace_id.clone(),
             active_run_id: state
                 .active_run
                 .as_ref()
@@ -277,6 +281,10 @@ impl SessionController {
 
     pub(crate) fn system_prompt(&self) -> &SystemPromptSnapshot {
         &self.system_prompt
+    }
+
+    pub(crate) fn environment(&self) -> &SessionExecutionEnvironment {
+        &self.environment
     }
 
     pub(crate) fn run_snapshots(&self) -> RuntimeResult<Vec<RunSnapshot>> {

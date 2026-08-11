@@ -64,7 +64,7 @@ pub(crate) struct Engine {
     steps: u32,
     /// 已实际 dispatch 的工具调用数（`max_tool_calls` 预检基数；Deny 不计入）。
     dispatched: u32,
-    /// 已产生的 ToolMessage 数（`toolmsg_{n}` 确定性序号基数）。
+    /// 本次执行已尝试的 ToolMessage 序号，用于寻找 Conversation 中未占用的 `toolmsg_{n}`。
     tool_messages: u32,
     /// 仅在当前 AgentExecution 内保留的重复调用与连续失败状态。
     guardrails: GuardrailState,
@@ -528,7 +528,11 @@ impl Engine {
 
     /// 构造完整有序 ToolMessage 批次，原子完成 pending exchange，再追加投影。
     ///
-    /// `ToolMessage.id` 为执行内确定性序号 `toolmsg_{n}`，从 1 开始，跨批次递增。
+    /// `ToolMessage.id` 从 `toolmsg_1` 开始寻找当前完整 Conversation 中未占用的序号。
+    ///
+    /// 每个 Run 都会创建新的 Engine，因此不能只依赖执行内计数器：历史 Run 可能已经
+    /// 持久化同名 ToolMessage。生成前必须对完整投影去重，否则第二个工具 Run 会在
+    /// Store 的 Conversation 全局 Message ID 校验处永久留下 ready exchange。
     async fn complete_tool_results(
         &mut self,
         exchange: &ExchangeReceipt,
@@ -536,10 +540,8 @@ impl Engine {
     ) -> Result<(), RecordError> {
         let mut messages = Vec::with_capacity(results.len());
         for result in results {
-            self.tool_messages += 1;
             messages.push(ToolMessage {
-                id: MessageId::new(format!("toolmsg_{}", self.tool_messages))
-                    .expect("tool message id is never empty"),
+                id: self.next_tool_message_id()?,
                 result,
             });
         }
@@ -551,6 +553,30 @@ impl Engine {
             self.projection.push(ConversationMessage::Tool(message));
         }
         Ok(())
+    }
+
+    fn next_tool_message_id(&mut self) -> Result<MessageId, RecordError> {
+        loop {
+            self.tool_messages = self
+                .tool_messages
+                .checked_add(1)
+                .ok_or_else(|| RecordError {
+                    message: "tool message id sequence is exhausted".to_owned(),
+                })?;
+            let candidate =
+                MessageId::new(format!("toolmsg_{}", self.tool_messages)).map_err(|_| {
+                    RecordError {
+                        message: "tool message id could not be constructed".to_owned(),
+                    }
+                })?;
+            if self
+                .projection
+                .iter()
+                .all(|message| conversation_message_id(message) != &candidate)
+            {
+                return Ok(candidate);
+            }
+        }
     }
 
     /// 工具流式输出桥接：`ToolOutputChunk` → `AgentEvent::ToolOutput`。
@@ -591,6 +617,16 @@ impl Engine {
             dropped_events: self.events.dropped_events(),
         });
         ExecutionOutcome::CompactionRequired { reason, step }
+    }
+}
+
+fn conversation_message_id(message: &ConversationMessage) -> &MessageId {
+    match message {
+        ConversationMessage::System(message) => &message.id,
+        ConversationMessage::ContextSummary(message) => &message.id,
+        ConversationMessage::User(message) => &message.id,
+        ConversationMessage::Assistant(message) => &message.id,
+        ConversationMessage::Tool(message) => &message.id,
     }
 }
 

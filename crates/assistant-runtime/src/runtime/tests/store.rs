@@ -7,9 +7,11 @@ use assistant_protocol::{InputId, SessionId};
 
 use crate::{
     AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, PendingToolExchange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredRun,
-    StoredRunSettlement, StoredSession, UserMessageCommit, storage::VolatileRuntimeStore,
+    NewAttachmentUpload, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingToolExchange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredRun, StoredRunSettlement,
+    StoredSession, StoredWorkspace, UserMessageCommit, WorkspaceRemoval,
+    storage::VolatileRuntimeStore,
 };
 
 pub(super) struct FaultInjectingStore {
@@ -59,6 +61,21 @@ impl FaultInjectingStore {
 impl RuntimeStore for FaultInjectingStore {
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         self.inner.load_runtime()
+    }
+
+    fn register_workspace(
+        &self,
+        registration: NewWorkspaceRegistration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        self.inner.register_workspace(registration)
+    }
+
+    fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace> {
+        self.inner.remove_workspace(removal)
+    }
+
+    fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
+        self.inner.upload_attachment(upload)
     }
 
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession> {

@@ -12,8 +12,11 @@ use agent_types::{
     UserMessage,
 };
 use assistant_protocol::{
-    IdempotencyKey, InputId, ModelKey, RunId, RunStatus, RuntimeErrorInfo, SessionId,
+    AttachmentId, IdempotencyKey, InputId, ModelKey, RunId, RunStatus, RuntimeErrorInfo, SessionId,
+    WorkspaceId,
 };
+
+use crate::SessionExecutionEnvironment;
 
 mod volatile;
 
@@ -34,6 +37,8 @@ pub enum StoreErrorKind {
     Conflict,
     /// 调用方提供的存储命令不满足边界约束。
     InvalidInput,
+    /// Store 管理的外部资源当前不存在或不可访问。
+    ResourceUnavailable,
     /// 本地 I/O 或数据库操作失败。
     Internal,
 }
@@ -112,6 +117,74 @@ pub enum StoredConversationState {
     Unavailable,
 }
 
+/// Workspace 的持久化生命周期。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredWorkspaceLifecycle {
+    Active,
+    Removed,
+}
+
+/// Host Store 恢复或写入完成的 Workspace 投影。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredWorkspace {
+    pub workspace_id: WorkspaceId,
+    pub user_directory: String,
+    pub agent_directory: String,
+    pub lifecycle: StoredWorkspaceLifecycle,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub removed_at_ms: Option<i64>,
+}
+
+/// Attachment 的正文及 Session 稳定视图是否可供 Agent 读取。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredAttachmentState {
+    Ready,
+    Unavailable,
+}
+
+/// Host Store 恢复或写入完成的 Attachment 事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredAttachment {
+    pub attachment_id: AttachmentId,
+    pub session_id: SessionId,
+    pub original_name: String,
+    /// 由原始文件名和文件字节共同计算的 Blob 身份摘要。
+    pub blob_hash: String,
+    pub size_bytes: u64,
+    pub agent_readable_path: String,
+    pub state: StoredAttachmentState,
+    pub created_at_ms: i64,
+}
+
+/// Host 已流式接收并校验、等待 Store 原子完成的 Attachment 上传。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewAttachmentUpload {
+    pub attachment_id: AttachmentId,
+    pub session_id: SessionId,
+    pub original_name: String,
+    pub staging_path: String,
+    /// 由原始文件名和文件字节共同计算的 Blob 身份摘要。
+    pub blob_hash: String,
+    pub size_bytes: u64,
+    pub created_at_ms: i64,
+}
+
+/// Runtime 请求 Store 登记或按 canonical path 恢复 Workspace。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewWorkspaceRegistration {
+    pub workspace_id: WorkspaceId,
+    pub requested_directory: String,
+    pub changed_at_ms: i64,
+}
+
+/// Runtime 请求 Store 假删 Workspace。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceRemoval {
+    pub workspace_id: WorkspaceId,
+    pub changed_at_ms: i64,
+}
+
 /// 创建持久化 Session 所需的完整冻结事实。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewStoredSession {
@@ -119,6 +192,7 @@ pub struct NewStoredSession {
     pub title: String,
     pub model_key: ModelKey,
     pub system_prompt: SystemPromptSnapshot,
+    pub environment: SessionExecutionEnvironment,
     pub created_at_ms: i64,
 }
 
@@ -129,6 +203,7 @@ pub struct StoredSession {
     pub title: String,
     pub model_key: ModelKey,
     pub system_prompt: SystemPromptSnapshot,
+    pub environment: SessionExecutionEnvironment,
     pub lifecycle: StoredSessionLifecycle,
     pub body_generation: u64,
     pub message_count: u64,
@@ -253,6 +328,8 @@ pub struct StoredRun {
 /// Runtime 启动时一次性取得的结构化恢复结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecoveredRuntime {
+    pub workspaces: Vec<StoredWorkspace>,
+    pub attachments: Vec<StoredAttachment>,
     pub sessions: Vec<StoredSession>,
     pub inputs: Vec<StoredInput>,
     pub runs: Vec<StoredRun>,
@@ -298,6 +375,18 @@ pub struct RewriteResult {
 pub trait RuntimeStore: Send + Sync {
     /// 恢复未完成提交并加载 Runtime 的结构化启动投影。
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime>;
+
+    /// 按 canonical path 幂等登记或恢复 Workspace。
+    fn register_workspace(
+        &self,
+        registration: NewWorkspaceRegistration,
+    ) -> StoreFuture<'_, StoredWorkspace>;
+
+    /// 假删 Workspace，不删除任何目录或历史绑定。
+    fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace>;
+
+    /// 完成已流式接收到 staging 的上传；同 Session、同 Blob Hash 返回首次结果。
+    fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment>;
 
     /// 创建 Session 稳定事实及其空 Conversation。
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;

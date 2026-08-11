@@ -5,14 +5,16 @@ use std::{collections::BTreeMap, sync::Mutex};
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
 };
-use assistant_protocol::{InputId, RunId, RunStatus, SessionId};
+use assistant_protocol::{AttachmentId, InputId, RunId, RunStatus, SessionId, WorkspaceId};
 
 use super::{
     AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, PendingToolExchange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredConversationState,
-    StoredInput, StoredInputState, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionLifecycle, UserMessageCommit,
+    NewAttachmentUpload, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingToolExchange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
+    StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredRunSettlement,
+    StoredSession, StoredSessionLifecycle, StoredWorkspace, StoredWorkspaceLifecycle,
+    UserMessageCommit, WorkspaceRemoval,
 };
 
 struct VolatilePendingExchange {
@@ -23,6 +25,8 @@ struct VolatilePendingExchange {
 
 #[derive(Default)]
 struct State {
+    workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
+    attachments: BTreeMap<AttachmentId, StoredAttachment>,
     sessions: BTreeMap<SessionId, StoredSession>,
     conversations: BTreeMap<SessionId, ConversationSnapshot>,
     inputs: BTreeMap<InputId, StoredInput>,
@@ -42,10 +46,104 @@ impl RuntimeStore for VolatileRuntimeStore {
         Box::pin(async move {
             let state = self.lock()?;
             Ok(RecoveredRuntime {
+                workspaces: state.workspaces.values().cloned().collect(),
+                attachments: state.attachments.values().cloned().collect(),
                 sessions: state.sessions.values().cloned().collect(),
                 inputs: state.inputs.values().cloned().collect(),
                 runs: state.runs.values().cloned().collect(),
             })
+        })
+    }
+
+    fn register_workspace(
+        &self,
+        registration: NewWorkspaceRegistration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if let Some(existing) = state
+                .workspaces
+                .values_mut()
+                .find(|workspace| workspace.user_directory == registration.requested_directory)
+            {
+                existing.lifecycle = StoredWorkspaceLifecycle::Active;
+                existing.updated_at_ms = registration.changed_at_ms;
+                existing.removed_at_ms = None;
+                return Ok(existing.clone());
+            }
+            let stored = StoredWorkspace {
+                workspace_id: registration.workspace_id.clone(),
+                user_directory: registration.requested_directory,
+                agent_directory: format!(
+                    "/volatile/workspaces/{}/agent",
+                    registration.workspace_id
+                ),
+                lifecycle: StoredWorkspaceLifecycle::Active,
+                created_at_ms: registration.changed_at_ms,
+                updated_at_ms: registration.changed_at_ms,
+                removed_at_ms: None,
+            };
+            if state
+                .workspaces
+                .insert(registration.workspace_id, stored.clone())
+                .is_some()
+            {
+                return Err(conflict("workspace already exists in runtime storage"));
+            }
+            Ok(stored)
+        })
+    }
+
+    fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let workspace = state
+                .workspaces
+                .get_mut(&removal.workspace_id)
+                .ok_or_else(|| conflict("workspace does not exist in runtime storage"))?;
+            if workspace.lifecycle == StoredWorkspaceLifecycle::Active {
+                workspace.lifecycle = StoredWorkspaceLifecycle::Removed;
+                workspace.updated_at_ms = removal.changed_at_ms;
+                workspace.removed_at_ms = Some(removal.changed_at_ms);
+            }
+            Ok(workspace.clone())
+        })
+    }
+
+    fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if let Some(existing) = state.attachments.values().find(|attachment| {
+                attachment.session_id == upload.session_id
+                    && attachment.blob_hash == upload.blob_hash
+            }) {
+                return Ok(existing.clone());
+            }
+            if !state.sessions.contains_key(&upload.session_id) {
+                return Err(conflict("attachment session does not exist"));
+            }
+            let agent_readable_path = format!(
+                "/volatile/sessions/{}/attachments/{}/file",
+                upload.session_id, upload.attachment_id
+            );
+            let stored = StoredAttachment {
+                attachment_id: upload.attachment_id.clone(),
+                session_id: upload.session_id,
+                original_name: upload.original_name,
+                blob_hash: upload.blob_hash,
+                size_bytes: upload.size_bytes,
+                agent_readable_path,
+                state: StoredAttachmentState::Ready,
+                created_at_ms: upload.created_at_ms,
+            };
+            if state
+                .attachments
+                .insert(upload.attachment_id, stored.clone())
+                .is_some()
+            {
+                return Err(conflict("attachment already exists"));
+            }
+            Ok(stored)
         })
     }
 
@@ -178,6 +276,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 title: session.title,
                 model_key: session.model_key,
                 system_prompt: session.system_prompt,
+                environment: session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 body_generation: 1,
                 message_count: 0,

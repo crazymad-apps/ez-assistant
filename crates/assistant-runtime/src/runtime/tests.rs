@@ -34,8 +34,9 @@ use super::connection_validation::{
 use super::*;
 use crate::{
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    ModelServiceFactoryError, ModelServiceFactoryRequest, RuntimeConfigSource,
-    SystemPromptFactoryError,
+    ModelServiceFactoryError, ModelServiceFactoryRequest, PreparedSessionEnvironment,
+    RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
+    RuntimeConfigSource, SessionEnvironmentFactoryError, SessionExecutionEnvironment,
 };
 
 const TEST_CONFIG: &str = r#"
@@ -53,6 +54,26 @@ max_output_tokens = 4096
 "#;
 
 struct MissingConfigSource;
+
+struct StaticRunToolFactory {
+    tools: ToolSetSnapshot,
+}
+
+impl RunToolFactory for StaticRunToolFactory {
+    fn compile(
+        &self,
+        _environment: &SessionExecutionEnvironment,
+    ) -> Result<RunToolBundle, RunToolFactoryError> {
+        Ok(RunToolBundle::new(
+            self.tools.clone(),
+            Arc::new(AllowAllAuthorizer),
+        ))
+    }
+}
+
+fn static_run_tool_factory(tools: ToolSetSnapshot) -> Arc<dyn RunToolFactory> {
+    Arc::new(StaticRunToolFactory { tools })
+}
 
 impl RuntimeConfigSource for MissingConfigSource {
     fn load(&self) -> ConfigSourceFuture<'_> {
@@ -142,22 +163,56 @@ impl CountingSystemPromptFactory {
     }
 }
 
-impl SystemPromptFactory for CountingSystemPromptFactory {
-    fn create_system_prompt(&self) -> Result<SystemPromptSnapshot, SystemPromptFactoryError> {
+impl SessionEnvironmentFactory for CountingSystemPromptFactory {
+    fn create_environment(
+        &self,
+        request: SessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
         let sequence = self.created.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(SystemPromptSnapshot::new(vec![format!(
-            "Session prompt {sequence}"
-        )]))
+        Ok(test_environment(
+            request,
+            SystemPromptSnapshot::new(vec![format!("Session prompt {sequence}")]),
+        ))
     }
 }
 
 struct StaticSystemPromptFactory;
 
-impl SystemPromptFactory for StaticSystemPromptFactory {
-    fn create_system_prompt(&self) -> Result<SystemPromptSnapshot, SystemPromptFactoryError> {
-        Ok(SystemPromptSnapshot::new(vec![
-            "Runtime test agent".to_owned(),
-        ]))
+impl SessionEnvironmentFactory for StaticSystemPromptFactory {
+    fn create_environment(
+        &self,
+        request: SessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
+        Ok(test_environment(
+            request,
+            SystemPromptSnapshot::new(vec!["Runtime test agent".to_owned()]),
+        ))
+    }
+}
+
+fn test_environment(
+    request: SessionEnvironmentFactoryRequest<'_>,
+    system_prompt: SystemPromptSnapshot,
+) -> PreparedSessionEnvironment {
+    let private = format!("/runtime/sessions/{}/private", request.session_id);
+    let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
+    let (workspace_id, working_directory, workspace_private_directory) = match request.workspace {
+        Some(workspace) => (
+            Some(workspace.workspace_id.clone()),
+            workspace.user_directory.to_owned(),
+            Some(workspace.agent_directory.to_owned()),
+        ),
+        None => (None, private.clone(), None),
+    };
+    PreparedSessionEnvironment {
+        system_prompt,
+        environment: SessionExecutionEnvironment {
+            workspace_id,
+            working_directory,
+            workspace_private_directory,
+            session_attachment_directory: attachment,
+            session_private_directory: private,
+        },
     }
 }
 
@@ -317,6 +372,23 @@ fn runtime_with_tools(model: Arc<dyn ModelService>, tools: ToolSetSnapshot) -> A
     runtime_with_tools_and_capacity(model, tools, 32)
 }
 
+fn runtime_with_run_tool_factory(
+    model: Arc<dyn ModelService>,
+    run_tool_factory: Arc<dyn RunToolFactory>,
+) -> AssistantRuntime {
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("non-zero")),
+        Arc::new(MissingConfigSource),
+        Arc::new(StaticModelFactory::new(model)),
+        Arc::new(StaticSystemPromptFactory),
+        run_tool_factory,
+    );
+    runtime
+        .config_registry
+        .replace_document_for_test(TEST_CONFIG);
+    runtime
+}
+
 fn runtime_with_tools_and_capacity(
     model: Arc<dyn ModelService>,
     tools: ToolSetSnapshot,
@@ -332,7 +404,7 @@ fn runtime_with_tools_and_capacity(
 
 fn runtime_with_factories(
     model_factory: Arc<dyn ModelServiceFactory>,
-    system_prompt_factory: Arc<dyn SystemPromptFactory>,
+    system_prompt_factory: Arc<dyn SessionEnvironmentFactory>,
     tools: ToolSetSnapshot,
     event_capacity: usize,
 ) -> AssistantRuntime {
@@ -346,7 +418,7 @@ fn runtime_with_factories(
 
 fn runtime_with_factories_and_config(
     model_factory: Arc<dyn ModelServiceFactory>,
-    system_prompt_factory: Arc<dyn SystemPromptFactory>,
+    system_prompt_factory: Arc<dyn SessionEnvironmentFactory>,
     tools: ToolSetSnapshot,
     config: RuntimeConfig,
 ) -> AssistantRuntime {
@@ -355,8 +427,7 @@ fn runtime_with_factories_and_config(
         Arc::new(MissingConfigSource),
         model_factory,
         system_prompt_factory,
-        tools,
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(tools),
     );
     runtime
         .config_registry
@@ -374,8 +445,7 @@ async fn runtime_with_store(
         Arc::new(MissingConfigSource),
         Arc::new(StaticModelFactory::new(model)),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
         store,
     )
     .await
@@ -496,6 +566,7 @@ async fn wait_for_terminal(
     .expect("run reaches terminal state")
 }
 
+mod attachment;
 mod concurrency;
 mod config;
 mod connection_validation;
@@ -505,3 +576,4 @@ mod runs;
 mod session_management;
 mod sessions;
 mod store;
+mod workspace;

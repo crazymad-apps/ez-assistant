@@ -9,9 +9,10 @@ use std::{
 use assistant_protocol::{InputId, SessionId};
 use assistant_runtime::{
     AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, PendingToolExchange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredRun,
-    StoredRunSettlement, StoredSession, UserMessageCommit,
+    NewAttachmentUpload, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingToolExchange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredRun, StoredRunSettlement,
+    StoredSession, StoredWorkspace, UserMessageCommit, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -26,6 +27,18 @@ enum Command {
     },
     LoadRuntime {
         reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,
+    },
+    RegisterWorkspace {
+        registration: NewWorkspaceRegistration,
+        reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
+    },
+    RemoveWorkspace {
+        removal: WorkspaceRemoval,
+        reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
+    },
+    UploadAttachment {
+        upload: NewAttachmentUpload,
+        reply: oneshot::Sender<Result<StoredAttachment, StoreError>>,
     },
     CreateSession {
         session: NewStoredSession,
@@ -184,6 +197,39 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::LoadRuntime { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn register_workspace(
+        &self,
+        registration: NewWorkspaceRegistration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::RegisterWorkspace {
+                registration,
+                reply,
+            })
+            .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::RemoveWorkspace { removal, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::UploadAttachment { upload, reply })
+                .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -351,6 +397,18 @@ fn run_worker(
             }
             Command::LoadRuntime { reply } => {
                 let _ = reply.send(engine.load_runtime());
+            }
+            Command::RegisterWorkspace {
+                registration,
+                reply,
+            } => {
+                let _ = reply.send(engine.register_workspace(registration));
+            }
+            Command::RemoveWorkspace { removal, reply } => {
+                let _ = reply.send(engine.remove_workspace(removal));
+            }
+            Command::UploadAttachment { upload, reply } => {
+                let _ = reply.send(engine.upload_attachment(upload));
             }
             Command::CreateSession { session, reply } => {
                 let _ = reply.send(engine.create_session(session));

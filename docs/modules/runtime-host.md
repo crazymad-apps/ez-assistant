@@ -3,7 +3,7 @@
 ## 模块定位
 
 `apps/runtime-host` 是 EZ Assistant 正式产品的 Runtime Host 进程入口。它装配
-`assistant-runtime`、具体 Agent/Provider/Tool 能力和本地进程通信，但不持有 Session、Run 或
+`assistant-runtime`、具体 Agent/Provider/Tool 能力和 HTTP 应用协议，但不持有 Session、Run 或
 Conversation 的第二份权威状态。
 
 本模块不是 `tools/*` 验证宿主，也不因独立进程形态自动成为系统 daemon、LaunchAgent 或常驻
@@ -20,7 +20,7 @@ Worker 池。
 
 - 解析并校验进程级启动配置，构造正式 `AssistantRuntime`。
 - 装配具体 Provider、Agent Factory、工具 Adapter、Authorizer 和 Runtime 依赖。
-- 承载平台相关的本地进程通信、连接生命周期、协议适配和安全边界。
+- 承载 HTTP 路由、连接生命周期、流式上传、SSE 事件投影和安全边界。
 - 把跨进程 Command 转交 Runtime，把 Runtime 快照、响应和事件投影到连接。
 - 处理进程信号、停止接收新连接、调用 Runtime 受控关闭并清理自己拥有的 endpoint。
 - 输出脱敏的启动、关联 ID、状态、耗时和错误信息。
@@ -29,28 +29,36 @@ Worker 池。
 
 - Session、Conversation、Run、Journal、取消和调度状态只存在于 `assistant-runtime`。
 - Host 可以持有连接、传输缓冲、进程配置和具体资源句柄，但不能复制 Runtime 业务状态机。
-- 跨层稳定语义使用 `assistant-protocol`；Unix Socket frame、握手 envelope 和 Demo 命令属于 Host
-  私有 wire，不进入公共 Protocol。
+- 跨层稳定语义使用 `assistant-protocol`；HTTP 路由、认证、请求体限制和 SSE 编码
+  属于 Host 适配，不把 Web framework 类型或连接对象提升为公共 Protocol。
 - 客户端连接断开只结束连接相关任务，不默认取消 Runtime Run 或关闭 Runtime。
 
 ## 传输与并发
 
-- `v0.8.0` 采用 macOS-first Unix Domain Socket，不监听本地 HTTP/TCP 端口。
+- 当前产品通信统一为 HTTP：默认只启用本地 Host，并只绑定 IPv4 loopback 动态端口。
+  后续可选远程 Host 默认关闭；如显式启用，必须使用 HTTPS 并复用同一组
+  Command、SSE、Streaming Upload 路由与业务 DTO。
 - 传输任务使用有界队列并明确背压；慢客户端不得反压 Provider、AgentExecution 或 Runtime
   supervisor。
+- SSE 订阅者落后于有界 Runtime 广播时，Host 必须显式发送 `stream_gap` 控制事件并关闭
+  当前流；客户端重新连接后从 Conversation、Run、Session 等权威快照恢复，不能在丢失事件后
+  继续假装增量连续。该连接恢复不得取消业务 Run。
 - 每条连接拥有的 reader/writer/event 子任务必须被显式观察；正常取消是连接清理，意外
   `JoinError`/panic 必须上报为 Host 连接错误，不能用忽略返回值的方式静默吞掉。
 - Host 只负责连接并发，Session 内串行和跨 Session 并发由 Runtime 保证。
-- socket 的创建、权限、所有权、stale endpoint 和删除规则以当前版本技术方案为准。
+- 本地地址、访问 Token 和实例身份通过 Runtime Home 私有发现文件交付；其创建、
+  权限、stale endpoint 和所有权判断以当前版本技术方案为准。
 
 ## 安全与日志
 
 - credential 只用于构造具体 Provider，不进入应用协议、普通日志、Demo 输出或子进程环境。
+- 本地 HTTP 请求必须通过每进程高强度 Bearer Token、Host/Origin 校验和精确
+  CORS 白名单收窄边界。Tauri Rust 可将 Token 注入受信任 WebView，由 WebView Runtime Client
+  直连 Host；Token 不进入 URL、持久前端存储、事件或日志。
 - 普通日志不得记录完整 prompt、模型响应、文件内容、Shell 输出或工具参数。
-- 工具默认权限由 Host 显式装配的 v0.8.0 `default_authorizer` 决定；未知或未匹配能力不得隐式
-  放行。后续工作模式必须从单次 Run 的不可变模式快照同时生成模型提示与该 Run 的 Authorizer，
-  不能把此默认值扩展成全局产品策略。
-- `v0.8.0` 的私有 Demo 只允许低风险 `echo_text`，不得因此引入通用 Allow All 产品默认值。
+- Host 通过 `RunToolFactory` 为每个 Run 同时冻结工具集和 Authorizer；未知或未匹配能力不得
+  隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
+- 默认 Host 只允许低风险 `echo_text`，不得因验证模式引入通用 Allow All 产品默认值。
 
 ## 不应放在本模块的内容
 
@@ -63,6 +71,8 @@ Worker 池。
 
 ## v0.8.0 实现边界
 
+- 本节记录 v0.8.0 的历史实现事实；其 Unix Socket 传输已由 v0.11.0 统一 HTTP
+  决策替代，不再是当前新增功能的约束。
 - M0 只建立 package、无副作用 `--help`、依赖方向和本文档。
 - M5 实现 macOS-first Unix Domain Socket、私有 frame/握手、单活动客户端、命令/实时事件转发、
   owned endpoint、单实例识别、受控关闭和 feature-gated Ratatui Demo。TUI 只持有选择、输入、
@@ -110,11 +120,70 @@ Worker 池。
   输入先写完整新 generation，再在单一 SQLite 事务中 CAS 切换正文、级联删除尾段 Input/Run/引用
   并创建新的 committed Input/Accepted Run。事务提交后旧 generation 只做 best-effort 清理，清理
   失败不能把已经成功的权威切换回报成业务失败。
-- v0.10.0 人工验收继续复用 Host 现有私有 Ratatui Demo；自动化验收客户端只驱动正式 Host 与临时
-  loopback fake Provider。不得为验收另建第二套 Runtime、Session/Run 状态机或产品 fake 模式。
-- 离线端到端回归使用 `tempfile` Runtime Home、临时 loopback Provider 和两次真实 Host
-  进程；客户端只使用现有私有 frame 协议。验收结束后以只读方式核对 SQLite 与权威 JSONL，
+- v0.10.0 自动化回归继续驱动正式 Host 与临时 loopback fake Provider；v0.11.0 已用默认关闭的
+  私有 Web Demo 取代 Ratatui Demo。不得为验收另建第二套 Runtime、Session/Run 状态机或产品 fake 模式。
+- 离线端到端回归使用 `tempfile` Runtime Home、临时 loopback Provider 和真实 Host
+  进程；客户端只使用正式 HTTP Command/SSE/Streaming Upload 入口。验收结束后以只读方式核对 SQLite 与权威 JSONL，
   不读写 `~/.ez-assistant`，也不连接真实 Provider。
+
+## v0.11.0 HTTP 与附件入口边界
+
+- 删除 Unix Socket、自定义 length-prefixed frame 和握手双轨；项目尚未对外稳定发布，
+  不为旧 wire 保留兼容 server/client。
+- `POST /commands` 承载有界 JSON 命令，`GET /events` 使用 SSE，附件路由使用
+  multipart 流式请求体；禁止把附件 Base64 或本地源路径塞进 Command。
+- Host 在流式接收前调用 Runtime 准入，完成 staging 后再调用 Runtime 提交；Host 不持有
+  Attachment 的第二份业务状态。
+- 本地只绑定 `127.0.0.1:0`，所有路由都需进程级 Token。发现文件必须原子更新，
+  退出时只清理仍属于本 `instance_id` 的文件。
+- 默认只允许无 Origin 的原生客户端和精确登记的 Tauri WebView Origin，不允许通配符 CORS。
+  纯浏览器本地直连是后续显式开启的可选能力，需独立授权和 Origin 配置。
+- `serve` 删除 `--socket`，不提供任意 `--listen` 或公网绑定开关；本地客户端和验证客户端
+  都从 Runtime Home `run/runtime.json` 发现地址与 Token。
+- v0.11.0 用默认关闭的 feature-gated 私有 Web Demo 替代继续迁移 Ratatui Demo。Web Demo
+  只在显式启动时由当前 loopback Host 提供简单静态页面，直接调用正式 HTTP API，
+  不持有 Session/Run 第二份状态，不进入公共协议，也不引入前端框架或单独服务进程。
+- v0.11.0 只实现本地 Host；远程能力默认关闭，其 TLS、用户认证、多租户和运维
+  不在本版本范围。后续如实现可选远程 Runtime，不得另造一套业务 API。
+- M1 的本地 Store 以用户目录 canonical path 作为 Workspace 身份，SQLite 保存 Workspace
+  与 Session 绑定，Runtime Home 保存 Workspace 私有目录、Session 私有目录和 Session
+  附件目录。Workspace 假删不得删除上述目录或用户目录；同一 canonical path 再次登记时
+  恢复原记录。
+- Host 的 `SessionEnvironmentFactory` 是稳定目录到冻结 `SystemPromptSnapshot` 的唯一
+  装配点，只注入目录信息，不枚举 Workspace 文件。启动时在开放 HTTP 前为旧 Session 幂等
+  补建 unbound 资源行和目录，不改写既有 Prompt、Conversation、model 或 lifecycle。
+- M2 的存储 worker 串行提交 staging、内容 Blob、Session 稳定附件视图和 SQLite 元数据；
+  Host 启动开放 HTTP 前修复缺失的已知视图，并把无法安全修复的附件标记为 `unavailable`。
+- M3 不增加 Message/Part 表；File References 直接随完整 User Message 进入既有
+  `queued_message_json` 和 Conversation JSONL，Host Store 只沿用现有原子提交与 generation 切换语义。
+- M4 由 Host 顶层直接装配 `agent-tools-local`。默认 `serve` 仍只提供 `echo_text` 并
+  fail-closed；只有显式 `--unsafe-unrestricted-local-tools` 才为每个 Run 注册标准文件工具
+  和 Shell，且启动帮助和 stderr 必须说明 Shell 使用当前用户权限、Workspace 不是沙箱。
+- 显式验证模式中的相对路径固定解析到该 Session 冻结工作目录；绝对附件路径可供文件工具
+  按需读取。结构化文件 Authorizer 对 Runtime Home 下任意 Session 的附件目录执行
+  Write/Edit/Delete 均拒绝，但允许 Read/List/Search。该逻辑路径规则不能阻止 Shell、同一
+  OS 用户或 symlink 目标绕过，因此不得描述为不可绕过的附件隔离。
+- 新 Session 的基础 System Prompt 只要求按需使用本 Run 可用工具，不把某一种 Host 模式或
+  工具名单冻结进正文；旧 Session 已持久化的 Prompt 不在恢复时改写。
+- M5 扩展私有 Web Demo，覆盖 Workspace 登记与选择、Session 创建、附件先上传后提交、
+  历史 File References 可见投影、流式 Assistant 消息以及 Session 归档恢复。Demo 只读取
+  正式 HTTP 快照和 SSE，不持有第二份业务状态。
+- Web Demo 展示当前 Session 最近一次完整模型请求的 Input、Output、Provider Total 和
+  Cached Input token：在线时读取 usage SSE，选择 Session、刷新或断线恢复时从权威
+  Conversation 中最近的 Assistant usage 重建，不在页面自行估算或累计。
+- Web Demo 按 `call_id` 实时投影 Tool proposed/running/output/completed 事件；每个模型 Step
+  的临时 Assistant 输出在进入工具阶段后关闭，下一 Step 使用新的临时消息。Run 终结后仍以
+  权威 Conversation 覆盖临时投影。Reasoning 使用独立可见区域消费实时 `reasoning_delta`，
+  并从权威 Assistant Reasoning Part 恢复历史内容；模型 attempt/retry 状态和最终脱敏失败
+  摘要同步展示。
+- v0.11.0 正式端到端验收必须至少启动两次产品 Host，通过正式 HTTP 接口完成 Workspace、
+  Attachment、File References、真实文件工具和归档恢复，并在关闭进程后只读核对 SQLite、
+  Conversation JSONL、Blob 与稳定视图。不得用 Demo 私有状态替代该证据。
+- 正式端到端验收必须在同一 Session 连续完成至少两次工具 Run，并核对 Conversation 中所有
+  Message ID 唯一，防止只覆盖首个工具 Run 而遗漏跨 Run 的持久化冲突。
+- 默认忽略的真实 LLM smoke 可以只读使用用户显式提供或 Runtime Home 中的模型配置，但所有
+  Runtime 数据、Workspace 和测试文件必须位于临时目录；错误与 Host 输出不得包含配置源文本、
+  API Key、访问 Token、测试文件内容、Prompt 或完整模型回复。
 
 ## 验证
 

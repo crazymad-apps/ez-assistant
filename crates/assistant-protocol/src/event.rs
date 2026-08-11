@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    PartId, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary, ToolActivityStatus,
-    ToolCallId, ToolOutputChannel,
+    ModelFailureKind, PartId, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
+    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel,
 };
 
 /// Runtime 向在线客户端发布的产品层观察事件。
@@ -41,6 +41,35 @@ pub enum RuntimeEvent {
         /// 正在取消的 Run。
         run_id: RunId,
     },
+    /// 一次真实模型请求 attempt 即将开始。
+    ModelAttemptStarted {
+        session_id: SessionId,
+        run_id: RunId,
+        /// 当前逻辑模型调用内从 1 开始的 attempt。
+        attempt: u32,
+    },
+    /// 一次模型请求 attempt 在建立事件流前失败。
+    ModelAttemptFailed {
+        session_id: SessionId,
+        run_id: RunId,
+        attempt: u32,
+        kind: ModelFailureKind,
+        /// 当前冻结策略是否已经安排后续 attempt。
+        will_retry: bool,
+    },
+    /// 模型服务已经确定下一 attempt 及等待时间。
+    ModelRetryScheduled {
+        session_id: SessionId,
+        run_id: RunId,
+        next_attempt: u32,
+        delay_ms: u64,
+    },
+    /// 当前 attempt 已经取得 Provider 事件流；透明重试边界到此结束。
+    ModelStreamEstablished {
+        session_id: SessionId,
+        run_id: RunId,
+        attempt: u32,
+    },
     /// Run 产生正文文本增量。
     TextDelta {
         /// Run 所属 Session。
@@ -62,6 +91,17 @@ pub enum RuntimeEvent {
         part_id: PartId,
         /// 本次增量内容。
         delta: String,
+    },
+    /// 一个完整模型请求最终确认了 token 用量。
+    UsageUpdated {
+        /// Run 所属 Session。
+        session_id: SessionId,
+        /// 模型请求所属 Run。
+        run_id: RunId,
+        /// 当前 Run 中的模型请求序号，从 1 开始。
+        step: u32,
+        /// 本次模型请求的最终 Provider 用量。
+        usage: TokenUsageSnapshot,
     },
     /// 模型提出一个工具调用。
     ToolProposed {
@@ -188,6 +228,7 @@ mod tests {
                         title: "Session 1".to_owned(),
                         model_key: ModelKey::new("model-1").expect("model key"),
                         lifecycle: crate::SessionLifecycle::Active,
+                        workspace_id: None,
                         active_run_id: None,
                         message_count: 0,
                         queued_input_count: 0,
@@ -218,6 +259,41 @@ mod tests {
                 "run_cancelling",
             ),
             (
+                RuntimeEvent::ModelAttemptStarted {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    attempt: 1,
+                },
+                "model_attempt_started",
+            ),
+            (
+                RuntimeEvent::ModelAttemptFailed {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    attempt: 1,
+                    kind: ModelFailureKind::ServiceUnavailable,
+                    will_retry: true,
+                },
+                "model_attempt_failed",
+            ),
+            (
+                RuntimeEvent::ModelRetryScheduled {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    next_attempt: 2,
+                    delay_ms: 500,
+                },
+                "model_retry_scheduled",
+            ),
+            (
+                RuntimeEvent::ModelStreamEstablished {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    attempt: 2,
+                },
+                "model_stream_established",
+            ),
+            (
                 RuntimeEvent::TextDelta {
                     session_id: session_id(),
                     run_id: run_id(),
@@ -234,6 +310,20 @@ mod tests {
                     delta: "reasoning".to_owned(),
                 },
                 "reasoning_delta",
+            ),
+            (
+                RuntimeEvent::UsageUpdated {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    step: 1,
+                    usage: TokenUsageSnapshot {
+                        input_tokens: 120,
+                        output_tokens: 30,
+                        total_tokens: 150,
+                        cached_input_tokens: Some(80),
+                    },
+                },
+                "usage_updated",
             ),
             (
                 RuntimeEvent::ToolProposed {

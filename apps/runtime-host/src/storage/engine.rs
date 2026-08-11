@@ -12,18 +12,23 @@ use assistant_runtime::{
     NewStoredSession, RecoveredRuntime, StoredConversationState, StoredSession,
     StoredSessionLifecycle,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
-    BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, SESSIONS_DIRECTORY, StorageResult, body_path,
-    conflict, conversation, create_new_private_file, database_write_error, internal_error,
-    invalid_data, invalid_data_with_source, non_negative_u64, positive_u64, schema, sync_directory,
+    BLOBS_DIRECTORY, BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, SESSIONS_DIRECTORY,
+    STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path, conflict, conversation,
+    create_new_private_file, database_write_error, internal_error, invalid_data,
+    invalid_data_with_source, non_negative_u64, positive_u64, schema,
+    session_resources::remove_created_session_directories, sync_directory,
 };
 use crate::config_source::prepare_private_directory;
 
 /// 单一阻塞 worker 内部的具体存储引擎。
 pub(super) struct StorageEngine {
-    sessions_directory: PathBuf,
+    pub(super) sessions_directory: PathBuf,
+    pub(super) workspaces_directory: PathBuf,
+    pub(super) blobs_directory: PathBuf,
+    pub(super) upload_staging_directory: PathBuf,
     pub(super) connection: Connection,
     unavailable_sessions: HashSet<String>,
 }
@@ -32,11 +37,26 @@ impl StorageEngine {
     pub(super) fn open(runtime_home: &Path) -> StorageResult<Self> {
         let data_directory = runtime_home.join(DATA_DIRECTORY);
         let sessions_directory = data_directory.join(SESSIONS_DIRECTORY);
+        let workspaces_directory = data_directory.join(WORKSPACES_DIRECTORY);
+        let blobs_directory = data_directory.join(BLOBS_DIRECTORY);
+        let upload_staging_directory = data_directory.join(STAGING_DIRECTORY);
         prepare_private_directory(&data_directory).map_err(|source| {
             internal_error("runtime data directory could not be prepared", source)
         })?;
         prepare_private_directory(&sessions_directory).map_err(|source| {
             internal_error("runtime sessions directory could not be prepared", source)
+        })?;
+        prepare_private_directory(&workspaces_directory).map_err(|source| {
+            internal_error("runtime workspaces directory could not be prepared", source)
+        })?;
+        prepare_private_directory(&blobs_directory).map_err(|source| {
+            internal_error("runtime blobs directory could not be prepared", source)
+        })?;
+        prepare_private_directory(&upload_staging_directory).map_err(|source| {
+            internal_error(
+                "runtime upload staging directory could not be prepared",
+                source,
+            )
         })?;
 
         let database_path = data_directory.join(DATABASE_FILE);
@@ -63,11 +83,17 @@ impl StorageEngine {
             })?;
         schema::initialize(&mut connection)?;
 
-        Ok(Self {
+        let mut engine = Self {
             sessions_directory,
+            workspaces_directory,
+            blobs_directory,
+            upload_staging_directory,
             connection,
             unavailable_sessions: HashSet::new(),
-        })
+        };
+        engine.repair_session_resources()?;
+        engine.recover_attachments()?;
+        Ok(engine)
     }
 
     pub(super) fn load_runtime(&mut self) -> StorageResult<RecoveredRuntime> {
@@ -76,6 +102,8 @@ impl StorageEngine {
         self.unavailable_sessions = unavailable;
         self.interrupt_nonterminal_runs()?;
         Ok(RecoveredRuntime {
+            workspaces: self.load_all_workspaces()?,
+            attachments: self.load_attachments()?,
             sessions: self.load_sessions()?,
             inputs: self.load_inputs()?,
             runs: self.load_runs()?,
@@ -87,36 +115,47 @@ impl StorageEngine {
         session: NewStoredSession,
     ) -> StorageResult<StoredSession> {
         super::filesystem::validate_session_component(&session.session_id)?;
-        let session_directory = self.session_directory(&session.session_id)?;
-        prepare_private_directory(&session_directory).map_err(|source| {
-            internal_error("session data directory could not be prepared", source)
-        })?;
-        let body_path = body_path(&session_directory, 1);
+        let paths = self.prepare_new_session_directories(&session)?;
+        let body_path = body_path(&paths.session_directory, 1);
         create_new_private_file(&body_path)?;
-        sync_directory(&session_directory)?;
+        sync_directory(&paths.session_directory)?;
 
         let prompt_json = serde_json::to_string(&session.system_prompt)
             .map_err(|source| internal_error("system prompt could not be encoded", source))?;
-        let inserted = self.connection.execute(
-            "INSERT INTO sessions (
-                session_id, title, model_key, system_prompt_json, lifecycle,
-                body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, 'active', 1, 0, ?5, ?5, NULL)",
-            params![
-                session.session_id.as_str(),
-                session.title,
-                session.model_key.as_str(),
-                prompt_json,
-                session.created_at_ms,
-            ],
-        );
-        if let Err(source) = inserted {
+        let persisted = (|| -> StorageResult<()> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|source| {
+                    database_write_error("session transaction could not be started", source)
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO sessions (
+                        session_id, title, model_key, system_prompt_json, lifecycle,
+                        body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, 'active', 1, 0, ?5, ?5, NULL)",
+                    params![
+                        session.session_id.as_str(),
+                        session.title,
+                        session.model_key.as_str(),
+                        prompt_json,
+                        session.created_at_ms,
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("session could not be created in runtime storage", source)
+                })?;
+            Self::insert_session_resources(&transaction, &session)?;
+            transaction.commit().map_err(|source| {
+                database_write_error("session transaction could not be committed", source)
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = persisted {
             let _ = fs::remove_file(&body_path);
-            let _ = fs::remove_dir(&session_directory);
-            return Err(database_write_error(
-                "session could not be created in runtime storage",
-                source,
-            ));
+            remove_created_session_directories(&paths);
+            return Err(error);
         }
         sync_directory(&self.sessions_directory)?;
 
@@ -125,6 +164,7 @@ impl StorageEngine {
             title: session.title,
             model_key: session.model_key,
             system_prompt: session.system_prompt,
+            environment: session.environment,
             lifecycle: StoredSessionLifecycle::Active,
             body_generation: 1,
             message_count: 0,
@@ -209,10 +249,11 @@ impl StorageEngine {
                 _ => return Err(invalid_data("stored session lifecycle is invalid")),
             };
             sessions.push(StoredSession {
-                session_id: parsed_session_id,
+                session_id: parsed_session_id.clone(),
                 title,
                 model_key: parsed_model_key,
                 system_prompt,
+                environment: self.load_session_environment(&parsed_session_id)?,
                 lifecycle,
                 body_generation: positive_u64(
                     body_generation,

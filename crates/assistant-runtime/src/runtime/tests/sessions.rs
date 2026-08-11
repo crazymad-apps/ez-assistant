@@ -13,6 +13,7 @@ async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
         .create_session(CreateSessionRequest {
             title: Some("First".to_owned()),
             model_key: None,
+            workspace_id: None,
         })
         .await
         .expect("first session");
@@ -121,6 +122,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "must not commit".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await

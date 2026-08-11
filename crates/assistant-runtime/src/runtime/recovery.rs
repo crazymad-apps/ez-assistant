@@ -2,13 +2,31 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assistant_protocol::{InputId, SessionId};
+use assistant_protocol::{AttachmentId, InputId, SessionId, WorkspaceId};
 
-use crate::{RecoveredRuntime, RuntimeError, RuntimeResult, session::SessionController};
+use crate::{
+    RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredWorkspace,
+    session::SessionController,
+};
 
-pub(super) fn recover_sessions(
+pub(super) struct RecoveredRegistries {
+    pub workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
+    pub attachments: BTreeMap<AttachmentId, StoredAttachment>,
+    pub sessions: BTreeMap<SessionId, Arc<SessionController>>,
+}
+
+pub(super) fn recover_registries(
     recovered: RecoveredRuntime,
-) -> RuntimeResult<BTreeMap<SessionId, Arc<SessionController>>> {
+) -> RuntimeResult<RecoveredRegistries> {
+    let mut workspaces = BTreeMap::new();
+    for workspace in recovered.workspaces {
+        if workspaces
+            .insert(workspace.workspace_id.clone(), workspace)
+            .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+    }
     let mut input_sessions = BTreeMap::<InputId, SessionId>::new();
     for input in &recovered.inputs {
         if input_sessions
@@ -48,6 +66,11 @@ pub(super) fn recover_sessions(
 
     let mut sessions = BTreeMap::new();
     for stored in recovered.sessions {
+        if let Some(workspace_id) = stored.environment.workspace_id.as_ref()
+            && !workspaces.contains_key(workspace_id)
+        {
+            return Err(invalid_recovery());
+        }
         let session_id = stored.session_id.clone();
         let controller = Arc::new(SessionController::recovered(
             stored,
@@ -61,7 +84,24 @@ pub(super) fn recover_sessions(
     if !runs_by_session.is_empty() || !inputs_by_session.is_empty() {
         return Err(invalid_recovery());
     }
-    Ok(sessions)
+    let mut attachments = BTreeMap::new();
+    let mut attachment_keys = std::collections::BTreeSet::new();
+    for attachment in recovered.attachments {
+        if !sessions.contains_key(&attachment.session_id)
+            || !attachment_keys
+                .insert((attachment.session_id.clone(), attachment.blob_hash.clone()))
+            || attachments
+                .insert(attachment.attachment_id.clone(), attachment)
+                .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+    }
+    Ok(RecoveredRegistries {
+        workspaces,
+        attachments,
+        sessions,
+    })
 }
 
 fn invalid_recovery() -> RuntimeError {

@@ -86,8 +86,9 @@
 
 - 正式产品采用**桌面 UI 与 Runtime 双进程、Runtime 内部模块化**的架构。Tauri 进程只承载
   WebView、桌面平台适配和 Runtime Client；独立 Runtime Host 进程承载
-  `assistant-runtime`、Agent 装配和业务权威状态。该 Host 是正式产品进程，不是 `tools/*`
-  验证宿主，也不等同于已经实现系统 daemon、常驻 Worker 池或本地 HTTP 服务。
+  `assistant-runtime`、Agent 装配和业务权威状态。桌面客户端与 Host 统一通过本地 loopback
+  HTTP Command、SSE 和 Streaming Upload 通信；该 Host 是正式产品进程，不是 `tools/*`
+  验证宿主，也不等同于已经实现系统 daemon 或常驻 Worker 池。
 - Session 不创建会话级操作系统子进程；不同 Session 在同一个 Runtime Host 中使用 Tokio
   异步并发，同一 Session 中改变上下文的 Run 默认串行。Shell、MCP 等工具按能力需要启动的
   子进程不改变该产品进程拓扑。

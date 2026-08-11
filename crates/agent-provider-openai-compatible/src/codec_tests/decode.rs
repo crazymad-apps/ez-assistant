@@ -90,13 +90,11 @@ fn decode_response_parses_tool_call_arguments() {
 }
 
 #[test]
-fn decode_rejects_tool_call_response_without_required_reasoning() {
-    let response: ChatResponse = serde_json::from_value(json!({
-        "id": "chatcmpl_missing_reasoning",
-        "model": "deepseek-v4-flash",
-        "choices": [{
-            "index": 0,
-            "message": {
+fn decode_accepts_missing_empty_null_and_text_only_reasoning_on_tool_call_turns() {
+    let cases = [
+        (
+            "missing",
+            json!({
                 "role": "assistant",
                 "content": null,
                 "tool_calls": [{
@@ -104,53 +102,74 @@ fn decode_rejects_tool_call_response_without_required_reasoning() {
                     "type": "function",
                     "function": {"name": "shell", "arguments": "{}"}
                 }]
-            },
-            "finish_reason": "tool_calls"
-        }]
-    }))
-    .expect("parse response");
-
-    let error = decode_response(&response, &Profile::deepseek())
-        .expect_err("thinking tool-call response without reasoning must fail");
-    assert!(
-        matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
-    );
-
-    // 不要求 reasoning 的普通兼容方言仍接受相同原生消息。
-    assert!(decode_response(&response, &reasoning_profile()).is_ok());
-}
-
-#[test]
-fn decode_rejects_empty_null_and_text_only_reasoning_on_tool_call_turns() {
-    for (label, reasoning, content) in [
-        ("empty", json!(""), Value::Null),
-        ("null", Value::Null, Value::Null),
-        ("text-only", Value::Null, json!("I will use a tool")),
-    ] {
+            }),
+        ),
+        (
+            "empty",
+            json!({
+                "role": "assistant",
+                "reasoning_content": "",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"}
+                }]
+            }),
+        ),
+        (
+            "null",
+            json!({
+                "role": "assistant",
+                "reasoning_content": null,
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"}
+                }]
+            }),
+        ),
+        (
+            "text-only",
+            json!({
+                "role": "assistant",
+                "reasoning_content": null,
+                "content": "I will use a tool",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"}
+                }]
+            }),
+        ),
+    ];
+    for (label, message) in cases {
         let response: ChatResponse = serde_json::from_value(json!({
             "id": format!("chatcmpl_{label}"),
             "model": "deepseek-v4-flash",
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "reasoning_content": reasoning,
-                    "content": content,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "shell", "arguments": "{}"}
-                    }]
-                },
+                "message": message,
                 "finish_reason": "tool_calls"
             }]
         }))
         .expect("parse response");
-        let error = decode_response(&response, &Profile::deepseek())
-            .expect_err("tool call requires non-empty reasoning");
+
+        let message = decode_response(&response, &Profile::deepseek())
+            .expect("provider-returned tool call remains executable");
         assert!(
-            matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content")),
-            "case {label}"
+            !message
+                .parts
+                .iter()
+                .any(|part| matches!(part, AssistantPart::Reasoning(_))),
+            "case {label} must not fabricate canonical reasoning"
+        );
+        assert!(
+            message.parts.iter().any(
+                |part| matches!(part, AssistantPart::ToolCall(call) if call.id == call_id("call_1"))
+            ),
+            "case {label} must preserve the tool call"
         );
     }
 }

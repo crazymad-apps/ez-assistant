@@ -2,14 +2,19 @@
 
 use std::{sync::Arc, time::Duration};
 
-use agent_model::{ModelService, ProviderOptions, ReasoningConfig, RetryingModelService};
+use agent_core::ToolAuthorizer;
+use agent_model::{
+    ModelAttemptEvent, ModelAttemptObserver, ModelService, ModelStreamFuture, ProviderOptions,
+    ReasoningConfig, RetryingModelService,
+};
 use agent_sdk::{Agent, AgentBuilder};
 use agent_types::ToolChoice;
 use assistant_protocol::ModelKey;
 
 use super::AssistantRuntime;
 use crate::{
-    ModelCompatibilityProfile, ModelServiceFactoryRequest, RuntimeError, RuntimeResult,
+    ModelCompatibilityProfile, ModelServiceFactoryRequest, RunToolFactory, RunToolFactoryErrorKind,
+    RuntimeError, RuntimeResult,
     config::{ConfigSnapshot, ResolvedModelConfig},
     session::SessionController,
 };
@@ -23,6 +28,66 @@ pub(super) struct CompiledModelService {
     pub(super) profile: ModelCompatibilityProfile,
     pub(super) max_output_tokens: u32,
     pub(super) request_timeout: Duration,
+}
+
+/// 未启用重试时只补充 attempt 观察，不改变下层取消、超时或建流语义。
+struct ObservedModelService {
+    inner: Arc<dyn ModelService>,
+    observer: Arc<dyn ModelAttemptObserver>,
+}
+
+impl ModelService for ObservedModelService {
+    fn capabilities(&self) -> &agent_model::ModelCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        self.inner.context_window_tokens()
+    }
+
+    fn stream(
+        &self,
+        request: agent_model::ModelRequest,
+        context: agent_model::ModelCallContext,
+    ) -> ModelStreamFuture<'_> {
+        Box::pin(async move {
+            let trace = context.trace.clone();
+            self.observer.observe(ModelAttemptEvent::Started {
+                trace: trace.clone(),
+                attempt: 1,
+            });
+            match self.inner.stream(request, context).await {
+                Ok(stream) => {
+                    self.observer
+                        .observe(ModelAttemptEvent::StreamEstablished { trace, attempt: 1 });
+                    Ok(stream)
+                }
+                Err(error) => {
+                    self.observer
+                        .observe(ModelAttemptEvent::EstablishmentFailed {
+                            trace,
+                            attempt: 1,
+                            error: error.clone(),
+                            retry_reason: None,
+                            will_retry: false,
+                        });
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+/// 单次 Run 已同时冻结 Agent 规格和对应授权闸。
+pub(super) struct CompiledRunAgent {
+    agent: Agent,
+    authorizer: Arc<dyn ToolAuthorizer>,
+}
+
+impl CompiledRunAgent {
+    pub(super) fn into_parts(self) -> (Agent, Arc<dyn ToolAuthorizer>) {
+        (self.agent, self.authorizer)
+    }
 }
 
 impl AssistantRuntime {
@@ -41,17 +106,34 @@ pub(super) fn compile_run_agent(
     snapshot: &ConfigSnapshot,
     model_factory: &dyn crate::ModelServiceFactory,
     context_window: Arc<agent_sdk::ContextWindowEvaluator>,
-    tools: agent_tools::ToolSetSnapshot,
-) -> RuntimeResult<Agent> {
+    run_tool_factory: &dyn RunToolFactory,
+    model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
+) -> RuntimeResult<CompiledRunAgent> {
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let model_key = session.model_key()?;
     let model_config = resolve_model(snapshot, &model_key)?;
-    let compiled = compile_model_service(snapshot, &model_key, model_factory)?;
+    let compiled = compile_model_service_with_observer(
+        snapshot,
+        &model_key,
+        model_factory,
+        model_attempt_observer,
+    )?;
     let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
+    let bundle = run_tool_factory
+        .compile(session.environment())
+        .map_err(|source| {
+            if source.kind() == RunToolFactoryErrorKind::WorkingDirectoryUnavailable
+                && let Some(workspace_id) = session.environment().workspace_id.clone()
+            {
+                return RuntimeError::WorkspaceUnavailable { workspace_id };
+            }
+            RuntimeError::RunToolsBuildFailed { source }
+        })?;
+    let (tools, authorizer) = bundle.into_parts();
 
-    AgentBuilder::new(
+    let agent = AgentBuilder::new(
         compiled.model,
         session.system_prompt().clone(),
         context_window,
@@ -65,13 +147,23 @@ pub(super) fn compile_run_agent(
     })
     .budget(active.budget().clone())
     .build()
-    .map_err(|source| RuntimeError::AgentBuildFailed { source })
+    .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
+    Ok(CompiledRunAgent { agent, authorizer })
 }
 
 pub(super) fn compile_model_service(
     snapshot: &ConfigSnapshot,
     model_key: &assistant_protocol::ModelKey,
     model_factory: &dyn crate::ModelServiceFactory,
+) -> RuntimeResult<CompiledModelService> {
+    compile_model_service_with_observer(snapshot, model_key, model_factory, None)
+}
+
+fn compile_model_service_with_observer(
+    snapshot: &ConfigSnapshot,
+    model_key: &assistant_protocol::ModelKey,
+    model_factory: &dyn crate::ModelServiceFactory,
+    model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledModelService> {
     let active = snapshot
         .active()
@@ -91,9 +183,21 @@ pub(super) fn compile_model_service(
             request_timeout: transport.request_timeout(),
         })
         .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
-    let model = active.retry_policy().map_or(base_model.clone(), |policy| {
-        Arc::new(RetryingModelService::new(base_model, policy.clone())) as Arc<dyn ModelService>
-    });
+    let model = match (active.retry_policy(), model_attempt_observer) {
+        (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
+            base_model,
+            policy.clone(),
+            observer,
+        )) as Arc<dyn ModelService>,
+        (Some(policy), None) => {
+            Arc::new(RetryingModelService::new(base_model, policy.clone())) as Arc<dyn ModelService>
+        }
+        (None, Some(observer)) => Arc::new(ObservedModelService {
+            inner: base_model,
+            observer,
+        }) as Arc<dyn ModelService>,
+        (None, None) => base_model,
+    };
     Ok(CompiledModelService {
         model,
         profile,

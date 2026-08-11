@@ -382,6 +382,68 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
 }
 
 #[tokio::test]
+async fn later_execution_skips_tool_message_ids_already_used_by_the_conversation() {
+    let log = OrderLog::new();
+    let prior_user = UserMessage {
+        id: msg_id("message_u0"),
+        parts: vec![UserPart::Text(TextPart {
+            id: part_id("text_u0"),
+            text: "Read the first value.".to_owned(),
+        })],
+    };
+    let prior_assistant = calls_message(
+        "message_previous_tool",
+        vec![call("call_previous", "read_value", json!({}))],
+    );
+    let prior_result = success_result("call_previous", json!({"value": 1}));
+    let history = vec![
+        ConversationMessage::User(prior_user),
+        ConversationMessage::Assistant(prior_assistant),
+        ConversationMessage::Tool(tool_message("toolmsg_1", prior_result)),
+    ];
+    let current_assistant = calls_message(
+        "message_current_tool",
+        vec![call("call_current", "read_value", json!({}))],
+    );
+    let final_assistant = text_message("message_current_final", "Read both values.");
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&current_assistant)),
+            ModelScript::Events(message_events(&final_assistant)),
+        ],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log.clone()));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        "read_value",
+        json!({"value": 2}),
+        log,
+    )]);
+    let (input, _) = make_input(history);
+
+    let execution = AgentExecution::start(
+        make_spec(model, tools, ExecutionBudget::default()),
+        input,
+        make_context(recorder.clone(), authorizer),
+    );
+    let (outcome, _) = finish(execution).await;
+
+    assert_eq!(outcome, ExecutionOutcome::Completed(final_assistant));
+    assert_eq!(
+        recorder.deltas(),
+        vec![
+            ConversationDelta::Assistant(current_assistant),
+            ConversationDelta::Tool(tool_message(
+                "toolmsg_2",
+                success_result("call_current", json!({"value": 2})),
+            )),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     let log = OrderLog::new();
     let provider_state = OpaqueProviderState::new(

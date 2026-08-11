@@ -239,7 +239,7 @@ Model Route → Protocol Codec → Transport → Stream Decoder
 - Transport：HTTP/WebSocket 和流帧传输。
 - Decoder：Provider 流转换为规范 `ModelEvent`。
 
-Provider Codec 必须保存继续下一轮所需的 reasoning、tool call、call ID 和不透明 Provider 状态。例如 [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/) 的工具调用轮次必须完整回传 `reasoning_content`；该约束只能存在于 DeepSeek/OpenAI-compatible Codec 和相应契约测试中，不能进入 Agent Loop 的条件分支。
+Provider Codec 必须保存继续下一轮所需的 reasoning、tool call、call ID 和不透明 Provider 状态。例如 [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/) 的工具调用轮次必须回传 `reasoning_content`；若 Provider 偶发省略该字段，DeepSeek Codec 可在回放编码时补入仅用于 wire 的占位值，但不得伪造规范 reasoning 内容。该约束只能存在于 DeepSeek/OpenAI-compatible Codec 和相应契约测试中，不能进入 Agent Loop 的条件分支。
 
 ### 7.3 模型建立重试
 
@@ -255,6 +255,11 @@ Provider-neutral 的模型重试只允许包装 `ModelService::stream()` 的建�
 
 Core 不知道 attempt，也不增加重试状态机；Runtime 或其他上层宿主只通过装配后的单个
 `ModelService` 使用该能力。
+
+正式 Runtime 为每个 Run 绑定脱敏 attempt observer：在线事件只公开 attempt、等待、是否
+重试和稳定失败分类，不公开 Provider 错误正文；最终模型失败使用专用应用错误码，并把失败
+发生在建流前还是建流后、attempt/retry 次数以及是否已有可见输出写入安全终态摘要。该摘要
+沿用 Run 现有错误列持久化，不把 retry 事件升级为 Conversation 事实。
 
 ## 八、权威记录与观察事件
 
@@ -537,9 +542,11 @@ Model、System Prompt、Context Window、ToolSet、请求配置、Budget 和 Gua
 文件格式和 HTTP 契约均不得上提为产品或 SDK API。
 
 v0.8.0 开始建立正式 `assistant-runtime` 与 `apps/runtime-host`：Runtime library 持有内存 Session、
-Conversation、Run 和执行监督的权威状态，Host 只负责进程入口、具体资源装配与私有本地通信。
-本版本的 Host 是手动启动的正式产品进程，不是 `tools/*` Demo，也不等同于已经实现系统 daemon；
-Unix Socket wire 和命令行验证客户端不构成公共应用协议。
+Conversation、Run 和执行监督的权威状态，Host 只负责进程入口、具体资源装配与传输适配。
+该版本为验证双进程使用的 Unix Socket wire 是阶段性私有实现；自 v0.11.0 起，
+正式 Host 改为默认启用的本地 loopback HTTP。后续可选远程 HTTPS 默认关闭；如显式
+启用则复用同一组 Command、SSE 与 Streaming Upload API。这一替换不改变 Runtime 的业务
+权威状态或 Host 的适配层定位。
 
 v0.9.0 由 Runtime 接管 Runtime Home 配置、脱敏诊断、model key 和 reload：Session 只冻结
 model key 与已渲染 System Prompt，每个 Run 按开始时取得的同一配置快照构造完整 Agent 和

@@ -540,7 +540,7 @@ fn stream_finalize_requires_chunks_and_finish_reason() {
 }
 
 #[test]
-fn stream_rejects_tool_call_turn_without_required_reasoning_before_turn_finished() {
+fn stream_accepts_tool_call_turn_without_reasoning() {
     let mut assembler = ChunkAssembler::new(Profile::deepseek());
     feed(
         &mut assembler,
@@ -555,16 +555,24 @@ fn stream_rejects_tool_call_turn_without_required_reasoning_before_turn_finished
     )
     .expect("tool call chunks assemble before final response validation");
 
-    let error = assembler
+    let events = assembler
         .finalize()
-        .expect_err("missing reasoning must prevent TurnFinished");
-    assert!(
-        matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
+        .expect("provider-returned tool call remains executable");
+    let Some(ModelEvent::TurnFinished { message }) = events.last() else {
+        panic!("expected TurnFinished");
+    };
+    assert_eq!(
+        message.parts,
+        vec![AssistantPart::ToolCall(ToolCall {
+            id: call_id("call_1"),
+            name: tool_name("shell"),
+            arguments: json!({}),
+        })]
     );
 }
 
 #[test]
-fn stream_rejects_empty_null_and_text_only_reasoning_on_tool_call_turns() {
+fn stream_accepts_empty_null_and_text_only_reasoning_on_tool_call_turns() {
     let cases = [
         vec![reasoning_chunk("")],
         vec![chunk(json!({
@@ -582,10 +590,13 @@ fn stream_rejects_empty_null_and_text_only_reasoning_on_tool_call_turns() {
             "function": {"name": "shell", "arguments": "{}"}
         }])));
         chunks.push(finish_chunk("tool_calls"));
-        let error = assemble_with_profile(Profile::deepseek(), chunks)
-            .expect_err("tool call requires non-empty reasoning");
+        let events = assemble_with_profile(Profile::deepseek(), chunks)
+            .expect("provider-returned tool call remains executable");
         assert!(
-            matches!(error, ModelError::Protocol(message) if message.contains("no reasoning content"))
+            matches!(events.last(), Some(ModelEvent::TurnFinished { message }) if message
+                .parts
+                .iter()
+                .any(|part| matches!(part, AssistantPart::ToolCall(call) if call.id == call_id("call_1"))))
         );
     }
 }

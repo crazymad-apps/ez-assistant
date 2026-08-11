@@ -8,6 +8,8 @@
 //! `input_state`、`run_state` 和 `run_projection` 分别负责输入、Run 状态转换与数据库投影。
 
 mod append_effect;
+mod attachment;
+mod attachment_io;
 mod conversation;
 mod engine;
 mod filesystem;
@@ -17,8 +19,10 @@ mod run_projection;
 mod run_state;
 mod schema;
 mod session_management;
+mod session_resources;
 mod tool_exchange;
 mod worker;
+mod workspace;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +41,9 @@ use filesystem::{
 
 const DATA_DIRECTORY: &str = "data";
 const SESSIONS_DIRECTORY: &str = "sessions";
+const WORKSPACES_DIRECTORY: &str = "workspaces";
+const BLOBS_DIRECTORY: &str = "blobs";
+const STAGING_DIRECTORY: &str = "staging/uploads";
 const DATABASE_FILE: &str = "runtime.sqlite3";
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

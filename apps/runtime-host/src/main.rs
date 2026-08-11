@@ -1,18 +1,19 @@
 //! EZ Assistant 正式 Runtime Host 进程入口。
 
+#[cfg(unix)]
+mod attachment_hash;
 mod config;
 #[cfg(unix)]
 mod config_source;
-#[cfg(all(feature = "demo-client", unix))]
-mod demo;
 #[cfg(unix)]
 mod endpoint;
+#[cfg(unix)]
+mod http;
 mod resources;
 #[cfg(unix)]
 mod server;
 #[cfg(unix)]
 mod storage;
-mod wire;
 
 use std::error::Error;
 #[cfg(unix)]
@@ -30,7 +31,7 @@ use crate::config::{CliAction, parse_cli};
 use crate::{
     config::ServeConfig,
     config_source::{LocalConfigSource, prepare_runtime_home},
-    endpoint::OwnedEndpoint,
+    endpoint::RuntimeInstanceGuard,
     resources::HostResources,
     server::RuntimeServer,
     storage::LocalRuntimeStore,
@@ -58,8 +59,12 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
             {
                 let config = ServeConfig::resolve(arguments)?;
                 prepare_runtime_home(&config.runtime_home)?;
-                let endpoint = OwnedEndpoint::bind(config.socket_path.clone())?;
-                let resources = HostResources::new()?;
+                // 单实例锁必须先于 Store；HTTP 端口与发现文件在 Runtime 恢复后才发布。
+                let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
+                let resources = HostResources::new(
+                    &config.runtime_home,
+                    config.unsafe_unrestricted_local_tools,
+                )?;
                 let store = Arc::new(
                     LocalRuntimeStore::open(&config.runtime_home, STORAGE_QUEUE_CAPACITY).await?,
                 );
@@ -67,9 +72,8 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     RuntimeConfig::new(config.event_capacity),
                     Arc::new(LocalConfigSource::new(config.config_path)),
                     resources.model_factory,
-                    resources.system_prompt_factory,
-                    resources.tools,
-                    resources.default_authorizer,
+                    resources.session_environment_factory,
+                    resources.run_tool_factory,
                     store.clone(),
                 )
                 .await
@@ -84,25 +88,29 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     let _ = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
                     return Err(Box::new(error));
                 }
+                let endpoint = match instance.bind_and_publish().await {
+                    Ok(endpoint) => endpoint,
+                    Err(error) => {
+                        let _ = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
+                        return Err(Box::new(error));
+                    }
+                };
                 println!(
-                    "EZ Assistant Runtime is listening at {}",
-                    endpoint.path().display()
+                    "EZ Assistant Runtime is listening at {} (discovery: {})",
+                    endpoint.base_url(),
+                    endpoint.discovery_path().display()
                 );
-                RuntimeServer::new(endpoint, runtime).serve().await?;
-                Ok(())
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = arguments;
-                Err(Box::new(UnsupportedPlatform))
-            }
-        }
-        #[cfg(feature = "demo-client")]
-        CliAction::Demo(arguments) => {
-            #[cfg(unix)]
-            {
-                let config = config::DemoConfig::resolve(arguments)?;
-                demo::run(config).await?;
+                if config.web_demo {
+                    println!("Private Web Demo: {}/demo/", endpoint.base_url());
+                }
+                if config.unsafe_unrestricted_local_tools {
+                    eprintln!(
+                        "WARNING: unrestricted local file and shell tools are enabled. Shell runs with current-user permissions; the Workspace is not a sandbox. Use only with isolated test data."
+                    );
+                }
+                RuntimeServer::new(endpoint, runtime, config.runtime_home, config.web_demo)
+                    .serve()
+                    .await?;
                 Ok(())
             }
             #[cfg(not(unix))]
@@ -117,6 +125,6 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
 #[cfg(not(unix))]
 #[derive(Debug, Error)]
 #[error(
-    "this Runtime Host build does not support the current platform; Unix domain sockets are required in v0.8.0"
+    "this Runtime Host build does not support the current platform; the current local storage adapter requires Unix filesystem semantics"
 )]
 struct UnsupportedPlatform;

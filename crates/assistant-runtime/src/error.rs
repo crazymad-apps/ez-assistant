@@ -2,11 +2,14 @@
 
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
-    InputId, ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle, SessionId,
+    AttachmentId, InputId, ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle,
+    SessionId, WorkspaceId,
 };
 use thiserror::Error;
 
-use crate::{ModelServiceFactoryError, StoreError, SystemPromptFactoryError};
+use crate::{
+    ModelServiceFactoryError, RunToolFactoryError, SessionEnvironmentFactoryError, StoreError,
+};
 
 /// Runtime 操作失败。
 #[derive(Debug, Error)]
@@ -89,11 +92,38 @@ pub enum RuntimeError {
         #[source]
         source: ModelServiceFactoryError,
     },
-    /// System Prompt 在 Session 入库前构造失败。
-    #[error("system prompt could not be created")]
-    SystemPromptBuildFailed {
+    /// Host 无法基于 Session 冻结环境编译单次 Run 工具。
+    #[error("run tools could not be created")]
+    RunToolsBuildFailed {
         #[source]
-        source: SystemPromptFactoryError,
+        source: RunToolFactoryError,
+    },
+    /// Session 环境或 System Prompt 在入库前构造失败。
+    #[error("session environment could not be created")]
+    SessionEnvironmentBuildFailed {
+        #[source]
+        source: SessionEnvironmentFactoryError,
+    },
+    /// 目标 Workspace 不存在。
+    #[error("workspace `{workspace_id}` was not found")]
+    WorkspaceNotFound { workspace_id: WorkspaceId },
+    /// Workspace 已假删，不能绑定新 Session。
+    #[error("workspace `{workspace_id}` was removed")]
+    WorkspaceRemoved { workspace_id: WorkspaceId },
+    /// Workspace 的用户目录当前不可访问。
+    #[error("workspace `{workspace_id}` is unavailable")]
+    WorkspaceUnavailable { workspace_id: WorkspaceId },
+    /// 指定 Attachment 不存在于目标 Session。
+    #[error("attachment `{attachment_id}` was not found in session `{session_id}`")]
+    AttachmentNotFound {
+        session_id: SessionId,
+        attachment_id: AttachmentId,
+    },
+    /// 指定 Attachment 属于目标 Session，但正文或稳定视图当前不可用。
+    #[error("attachment `{attachment_id}` is unavailable in session `{session_id}`")]
+    AttachmentUnavailable {
+        session_id: SessionId,
+        attachment_id: AttachmentId,
     },
     /// Run Agent 构造失败，UserMessage 尚未写入。
     #[error("run agent could not be created")]
@@ -175,9 +205,32 @@ impl RuntimeError {
                 RuntimeErrorCode::ModelBuildFailed,
                 "model could not be prepared for this run",
             ),
-            Self::SystemPromptBuildFailed { .. } => RuntimeErrorInfo::new(
+            Self::RunToolsBuildFailed { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::AgentBuildFailed,
-                "system prompt could not be created",
+                "tools could not be prepared for this run",
+            ),
+            Self::SessionEnvironmentBuildFailed { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::AgentBuildFailed,
+                "session environment could not be created",
+            ),
+            Self::WorkspaceNotFound { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::WorkspaceNotFound,
+                "workspace was not found",
+            ),
+            Self::WorkspaceRemoved { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::WorkspaceRemoved, "workspace was removed")
+            }
+            Self::WorkspaceUnavailable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::WorkspaceUnavailable,
+                "workspace is unavailable",
+            ),
+            Self::AttachmentNotFound { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::AttachmentNotFound,
+                "attachment was not found",
+            ),
+            Self::AttachmentUnavailable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::AttachmentUnavailable,
+                "attachment is unavailable",
             ),
             Self::InternalStateUnavailable { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,

@@ -7,11 +7,7 @@ use thiserror::Error;
 
 const DEFAULT_RUNTIME_HOME_DIRECTORY: &str = ".ez-assistant";
 const CONFIG_FILE: &str = "config.toml";
-const RUN_DIRECTORY: &str = "run";
-const SOCKET_FILE: &str = "runtime.sock";
 const DEFAULT_EVENT_CAPACITY: usize = 256;
-/// `sockaddr_un.sun_path` 在目标 Unix 平台上的保守可用字节数（包含末尾 NUL）。
-const MAX_SOCKET_PATH_BYTES_WITH_NUL: usize = 104;
 
 /// Runtime Host 的进程级命令行入口。
 #[derive(Debug, Parser)]
@@ -19,7 +15,7 @@ const MAX_SOCKET_PATH_BYTES_WITH_NUL: usize = 104;
     name = "ez-assistant-runtime",
     version,
     about = "EZ Assistant Runtime Host",
-    after_help = "The Host listens only on a Unix domain socket. In Demo, `Q` exits the client only; `Ctrl+Q` requests controlled Runtime shutdown after confirmation."
+    after_help = "The Host listens on a dynamic IPv4 loopback HTTP port and publishes private discovery data under Runtime Home/run/runtime.json."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,9 +26,6 @@ struct Cli {
 pub(crate) enum CliAction {
     /// Start the Runtime Host.
     Serve(ServeArguments),
-    /// Start the private validation client.
-    #[cfg(feature = "demo-client")]
-    Demo(DemoArguments),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
@@ -40,37 +33,25 @@ pub(crate) struct ServeArguments {
     /// Absolute Runtime Home override; defaults to ~/.ez-assistant.
     #[arg(long, value_name = "PATH")]
     runtime_home: Option<PathBuf>,
-    /// Explicit absolute Unix socket path; independent from Runtime Home.
-    #[arg(long, value_name = "PATH")]
-    socket: Option<PathBuf>,
     /// Positive Runtime event buffer capacity; defaults to 256.
     #[arg(long, value_name = "COUNT")]
     event_capacity: Option<NonZeroUsize>,
-}
-
-#[cfg(feature = "demo-client")]
-#[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
-pub(crate) struct DemoArguments {
-    /// Absolute Runtime Home override; defaults to ~/.ez-assistant.
-    #[arg(long, value_name = "PATH")]
-    runtime_home: Option<PathBuf>,
-    /// Explicit absolute Unix socket path.
-    #[arg(long, value_name = "PATH")]
-    socket: Option<PathBuf>,
+    /// UNSAFE: enable unrestricted local file and shell tools. The Workspace is not a sandbox; use only with isolated test data.
+    #[arg(long)]
+    unsafe_unrestricted_local_tools: bool,
+    /// Serve the private browser validation page from this Host instance.
+    #[cfg(feature = "web-demo")]
+    #[arg(long)]
+    web_demo: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServeConfig {
     pub(crate) runtime_home: PathBuf,
     pub(crate) config_path: PathBuf,
-    pub(crate) socket_path: PathBuf,
     pub(crate) event_capacity: NonZeroUsize,
-}
-
-#[cfg(feature = "demo-client")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DemoConfig {
-    pub(crate) socket_path: PathBuf,
+    pub(crate) unsafe_unrestricted_local_tools: bool,
+    pub(crate) web_demo: bool,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -79,10 +60,6 @@ pub(crate) enum ConfigError {
     HomeDirectoryUnavailable,
     #[error("Runtime Home must be absolute")]
     RelativeRuntimeHome,
-    #[error("runtime socket path must be absolute")]
-    RelativeSocketPath,
-    #[error("runtime socket path is too long; use --socket with a shorter absolute path")]
-    SocketPathTooLong,
 }
 
 pub(crate) fn parse_cli(
@@ -99,24 +76,17 @@ pub(crate) fn parse_cli(
 impl ServeConfig {
     pub(crate) fn resolve(arguments: ServeArguments) -> Result<Self, ConfigError> {
         let runtime_home = resolve_runtime_home(arguments.runtime_home)?;
-        let socket_path = resolve_socket(&runtime_home, arguments.socket)?;
         Ok(Self {
             config_path: runtime_home.join(CONFIG_FILE),
             runtime_home,
-            socket_path,
             event_capacity: arguments.event_capacity.unwrap_or_else(|| {
                 NonZeroUsize::new(DEFAULT_EVENT_CAPACITY).expect("static capacity is non-zero")
             }),
-        })
-    }
-}
-
-#[cfg(feature = "demo-client")]
-impl DemoConfig {
-    pub(crate) fn resolve(arguments: DemoArguments) -> Result<Self, ConfigError> {
-        let runtime_home = resolve_runtime_home(arguments.runtime_home)?;
-        Ok(Self {
-            socket_path: resolve_socket(&runtime_home, arguments.socket)?,
+            unsafe_unrestricted_local_tools: arguments.unsafe_unrestricted_local_tools,
+            #[cfg(feature = "web-demo")]
+            web_demo: arguments.web_demo,
+            #[cfg(not(feature = "web-demo"))]
+            web_demo: false,
         })
     }
 }
@@ -133,29 +103,10 @@ fn resolve_runtime_home(override_path: Option<PathBuf>) -> Result<PathBuf, Confi
     }
 }
 
-/// 只在 bootstrap 边界把 `~` 解析为绝对路径；后续代码始终持有完整路径。
+/// 只在 bootstrap 边界把用户目录解析为绝对路径；后续始终持有完整路径。
 fn default_runtime_home(home: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
     home.map(|path| path.join(DEFAULT_RUNTIME_HOME_DIRECTORY))
         .ok_or(ConfigError::HomeDirectoryUnavailable)
-}
-
-fn resolve_socket(
-    runtime_home: &std::path::Path,
-    socket: Option<PathBuf>,
-) -> Result<PathBuf, ConfigError> {
-    let path = socket.unwrap_or_else(|| runtime_home.join(RUN_DIRECTORY).join(SOCKET_FILE));
-    if !path.is_absolute() {
-        return Err(ConfigError::RelativeSocketPath);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-
-        if path.as_os_str().as_bytes().len() + 1 > MAX_SOCKET_PATH_BYTES_WITH_NUL {
-            return Err(ConfigError::SocketPathTooLong);
-        }
-    }
-    Ok(path)
 }
 
 #[cfg(test)]
@@ -165,11 +116,8 @@ mod tests {
     use super::*;
 
     fn expect_serve(action: CliAction) -> ServeArguments {
-        match action {
-            CliAction::Serve(arguments) => arguments,
-            #[cfg(feature = "demo-client")]
-            CliAction::Demo(_) => panic!("serve action"),
-        }
+        let CliAction::Serve(arguments) = action;
+        arguments
     }
 
     #[test]
@@ -189,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_requires_absolute_paths_and_positive_capacity() {
+    fn serve_requires_an_absolute_runtime_home_and_positive_capacity() {
         assert_eq!(
             parse_cli([
                 OsString::from("serve"),
@@ -215,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_derives_config_and_socket_from_runtime_home() {
+    fn serve_derives_config_from_runtime_home() {
         let home = std::env::temp_dir().join("runtime-host-config-test");
         let arguments = expect_serve(
             parse_cli([
@@ -228,10 +176,37 @@ mod tests {
         let config = ServeConfig::resolve(arguments).expect("config");
         assert_eq!(config.runtime_home, home);
         assert_eq!(config.config_path, home.join(CONFIG_FILE));
-        assert_eq!(
-            config.socket_path,
-            home.join(RUN_DIRECTORY).join(SOCKET_FILE)
+        assert!(!config.unsafe_unrestricted_local_tools);
+        assert!(!config.web_demo);
+    }
+
+    #[test]
+    fn unrestricted_local_tools_require_the_explicit_risk_named_switch() {
+        let home = std::env::temp_dir().join("runtime-host-config-test");
+        let arguments = expect_serve(
+            parse_cli([
+                OsString::from("serve"),
+                OsString::from("--runtime-home"),
+                home.into_os_string(),
+                OsString::from("--unsafe-unrestricted-local-tools"),
+            ])
+            .expect("parse"),
         );
+        assert!(
+            ServeConfig::resolve(arguments)
+                .expect("config")
+                .unsafe_unrestricted_local_tools
+        );
+    }
+
+    #[test]
+    fn unrestricted_switch_help_states_that_workspace_is_not_a_sandbox() {
+        let error = parse_cli([OsString::from("serve"), OsString::from("--help")])
+            .expect_err("help exits through clap");
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        assert!(help.contains("--unsafe-unrestricted-local-tools"));
+        assert!(help.contains("Workspace is not a sandbox"));
     }
 
     #[test]
@@ -247,46 +222,30 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "web-demo")]
     #[test]
-    fn rejects_overlong_socket_path() {
-        let home = PathBuf::from("/").join("x".repeat(MAX_SOCKET_PATH_BYTES_WITH_NUL));
-        assert_eq!(
-            resolve_socket(&home, None),
-            Err(ConfigError::SocketPathTooLong)
+    fn web_demo_still_requires_an_explicit_startup_switch() {
+        let home = std::env::temp_dir().join("runtime-host-config-test");
+        let arguments = expect_serve(
+            parse_cli([
+                OsString::from("serve"),
+                OsString::from("--runtime-home"),
+                home.into_os_string(),
+                OsString::from("--web-demo"),
+            ])
+            .expect("parse"),
         );
+        assert!(ServeConfig::resolve(arguments).expect("config").web_demo);
     }
 
-    #[cfg(feature = "demo-client")]
+    #[cfg(not(feature = "web-demo"))]
     #[test]
-    fn demo_and_serve_resolve_the_same_explicit_socket() {
-        let home = std::env::temp_dir().join("runtime-host-config-test");
-        let path = std::env::temp_dir().join("runtime-host-config-test.sock");
-        let serve = parse_cli([
-            OsString::from("serve"),
-            OsString::from("--runtime-home"),
-            home.clone().into_os_string(),
-            OsString::from("--socket"),
-            path.clone().into_os_string(),
-        ])
-        .expect("serve");
-        let demo = parse_cli([
-            OsString::from("demo"),
-            OsString::from("--runtime-home"),
-            home.into_os_string(),
-            OsString::from("--socket"),
-            path.clone().into_os_string(),
-        ])
-        .expect("demo");
-        let CliAction::Serve(serve) = serve else {
-            panic!("serve action");
-        };
-        let CliAction::Demo(demo) = demo else {
-            panic!("demo action");
-        };
+    fn builds_without_web_demo_do_not_accept_the_startup_switch() {
         assert_eq!(
-            ServeConfig::resolve(serve).expect("serve").socket_path,
-            path
+            parse_cli([OsString::from("serve"), OsString::from("--web-demo"),])
+                .expect_err("feature-disabled switch")
+                .kind(),
+            ErrorKind::UnknownArgument
         );
-        assert_eq!(DemoConfig::resolve(demo).expect("demo").socket_path, path);
     }
 }

@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ConfigurationStatus, IdempotencyKey, InputId, ModelConfiguration, ModelKey, RunId, RunSnapshot,
-    RuntimeLifecycle, SessionId, SessionListFilter, SessionSummary,
+    AttachmentId, AttachmentSummary, ConfigurationStatus, IdempotencyKey, InputId,
+    ModelConfiguration, ModelKey, RunId, RunSnapshot, RuntimeLifecycle, SessionId,
+    SessionListFilter, SessionSummary, WorkspaceId, WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -116,6 +117,78 @@ pub struct ValidateModelConnectionResult {
     pub outcome: ConnectionValidationOutcome,
 }
 
+/// 登记或恢复一个本机 Workspace。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RegisterWorkspaceRequest {
+    /// 用户选择的本机绝对 UTF-8 目录路径。
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RegisterWorkspaceResult {
+    pub workspace: WorkspaceSummary,
+}
+
+/// 查询一个 Workspace；已移除 Workspace 仍可查询。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetWorkspaceRequest {
+    pub workspace_id: WorkspaceId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetWorkspaceResult {
+    pub workspace: WorkspaceSummary,
+}
+
+/// 按确定性顺序列出当前活动 Workspace。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListWorkspacesRequest {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListWorkspacesResult {
+    pub workspaces: Vec<WorkspaceSummary>,
+}
+
+/// 从新 Session 的正常可选列表中假删一个 Workspace。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveWorkspaceRequest {
+    pub workspace_id: WorkspaceId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveWorkspaceResult {
+    pub workspace: WorkspaceSummary,
+}
+
+/// 查询 Session 中的一个 Attachment。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetAttachmentRequest {
+    pub session_id: SessionId,
+    pub attachment_id: AttachmentId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetAttachmentResult {
+    pub attachment: AttachmentSummary,
+}
+
+/// 按创建顺序列出 Session 的全部 Attachment。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListAttachmentsRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListAttachmentsResult {
+    pub attachments: Vec<AttachmentSummary>,
+}
+
+/// HTTP 流式上传完成后的稳定业务结果。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UploadAttachmentResult {
+    pub attachment: AttachmentSummary,
+}
+
 /// 创建一个空 Session。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CreateSessionRequest {
@@ -123,6 +196,9 @@ pub struct CreateSessionRequest {
     pub title: Option<String>,
     /// 显式模型 key；`None` 表示使用创建时配置快照中的默认模型。
     pub model_key: Option<ModelKey>,
+    /// 可选的 Workspace 冻结绑定；创建后不能直接换绑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 /// 创建 Session 的成功结果。
@@ -167,6 +243,9 @@ pub struct SubmitInputRequest {
     pub session_id: SessionId,
     /// 原样进入规范 UserMessage 的文本；Runtime 负责非空白校验。
     pub message: String,
+    /// 按用户选择顺序引用的 Session Attachment。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_ids: Vec<AttachmentId>,
     /// 可选的不透明请求身份；重复 key 直接返回首次结果。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<IdempotencyKey>,
@@ -281,6 +360,9 @@ pub struct ReenterFromUserMessageRequest {
     pub session_id: SessionId,
     pub message_id: crate::MessageId,
     pub message: String,
+    /// 替换消息按用户选择顺序引用的 Session Attachment。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_ids: Vec<AttachmentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<IdempotencyKey>,
 }
@@ -332,6 +414,18 @@ pub enum RuntimeCommand {
     ReloadConfig(ReloadConfigRequest),
     /// 显式验证指定模型连接。
     ValidateModelConnection(ValidateModelConnectionRequest),
+    /// 登记或恢复 Workspace。
+    RegisterWorkspace(RegisterWorkspaceRequest),
+    /// 查询 Workspace。
+    GetWorkspace(GetWorkspaceRequest),
+    /// 列出活动 Workspace。
+    ListWorkspaces(ListWorkspacesRequest),
+    /// 假删 Workspace。
+    RemoveWorkspace(RemoveWorkspaceRequest),
+    /// 查询 Attachment。
+    GetAttachment(GetAttachmentRequest),
+    /// 列出 Session Attachment。
+    ListAttachments(ListAttachmentsRequest),
     /// 创建 Session。
     CreateSession(CreateSessionRequest),
     /// 列出 Session。
@@ -378,6 +472,18 @@ pub enum RuntimeCommandResult {
     ReloadConfig(ReloadConfigResult),
     /// 模型连接验证已完成。
     ValidateModelConnection(ValidateModelConnectionResult),
+    /// Workspace 已登记或恢复。
+    RegisterWorkspace(RegisterWorkspaceResult),
+    /// Workspace 查询已返回。
+    GetWorkspace(GetWorkspaceResult),
+    /// Workspace 列表已返回。
+    ListWorkspaces(ListWorkspacesResult),
+    /// Workspace 已假删。
+    RemoveWorkspace(RemoveWorkspaceResult),
+    /// Attachment 查询已返回。
+    GetAttachment(GetAttachmentResult),
+    /// Attachment 列表已返回。
+    ListAttachments(ListAttachmentsResult),
     /// Session 已创建。
     CreateSession(CreateSessionResult),
     /// Session 列表已返回。
@@ -422,6 +528,7 @@ mod tests {
             title: "Session 1".to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
             lifecycle: crate::SessionLifecycle::Active,
+            workspace_id: None,
             active_run_id: None,
             message_count: 0,
             queued_input_count: 0,
@@ -441,6 +548,18 @@ mod tests {
             text: String::new(),
             tools: Vec::new(),
             error: None,
+        }
+    }
+
+    fn workspace_summary() -> WorkspaceSummary {
+        WorkspaceSummary {
+            workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+            user_directory: "/workspace".to_owned(),
+            agent_directory: "/runtime/workspaces/workspace-1/agent".to_owned(),
+            lifecycle: crate::WorkspaceLifecycle::Active,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            removed_at_ms: None,
         }
     }
 
@@ -478,6 +597,7 @@ mod tests {
         let command = RuntimeCommand::SubmitInput(SubmitInputRequest {
             session_id: SessionId::new("session-1").expect("session id"),
             message: "hello".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         });
         let value = serde_json::to_value(&command).expect("serialize command");
@@ -495,6 +615,30 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<RuntimeCommand>(value).expect("deserialize command"),
             command
+        );
+    }
+
+    #[test]
+    fn input_attachment_ids_are_ordered_and_default_to_empty() {
+        let legacy = serde_json::from_value::<SubmitInputRequest>(json!({
+            "session_id": "session-1",
+            "message": "hello"
+        }))
+        .expect("legacy input request");
+        assert!(legacy.attachment_ids.is_empty());
+
+        let request = SubmitInputRequest {
+            session_id: SessionId::new("session-1").expect("session id"),
+            message: "compare".to_owned(),
+            attachment_ids: vec![
+                AttachmentId::new("attachment-2").expect("attachment id"),
+                AttachmentId::new("attachment-1").expect("attachment id"),
+            ],
+            idempotency_key: None,
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize input request")["attachment_ids"],
+            json!(["attachment-2", "attachment-1"])
         );
     }
 
@@ -548,6 +692,28 @@ mod tests {
                 "validate_model_connection",
             ),
             (
+                RuntimeCommand::RegisterWorkspace(RegisterWorkspaceRequest {
+                    path: "/workspace".to_owned(),
+                }),
+                "register_workspace",
+            ),
+            (
+                RuntimeCommand::GetWorkspace(GetWorkspaceRequest {
+                    workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+                }),
+                "get_workspace",
+            ),
+            (
+                RuntimeCommand::ListWorkspaces(ListWorkspacesRequest::default()),
+                "list_workspaces",
+            ),
+            (
+                RuntimeCommand::RemoveWorkspace(RemoveWorkspaceRequest {
+                    workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+                }),
+                "remove_workspace",
+            ),
+            (
                 RuntimeCommand::CreateSession(CreateSessionRequest::default()),
                 "create_session",
             ),
@@ -565,6 +731,7 @@ mod tests {
                 RuntimeCommand::SubmitInput(SubmitInputRequest {
                     session_id: session_id.clone(),
                     message: "hello".to_owned(),
+                    attachment_ids: Vec::new(),
                     idempotency_key: None,
                 }),
                 "submit_input",
@@ -626,6 +793,7 @@ mod tests {
                     session_id: session_id.clone(),
                     message_id: crate::MessageId::new("message-1").expect("message id"),
                     message: "replacement".to_owned(),
+                    attachment_ids: Vec::new(),
                     idempotency_key: Some(
                         IdempotencyKey::new("replace-1").expect("idempotency key"),
                     ),
@@ -684,6 +852,30 @@ mod tests {
                     }),
                 }),
                 "validate_model_connection",
+            ),
+            (
+                RuntimeCommandResult::RegisterWorkspace(RegisterWorkspaceResult {
+                    workspace: workspace_summary(),
+                }),
+                "register_workspace",
+            ),
+            (
+                RuntimeCommandResult::GetWorkspace(GetWorkspaceResult {
+                    workspace: workspace_summary(),
+                }),
+                "get_workspace",
+            ),
+            (
+                RuntimeCommandResult::ListWorkspaces(ListWorkspacesResult {
+                    workspaces: vec![workspace_summary()],
+                }),
+                "list_workspaces",
+            ),
+            (
+                RuntimeCommandResult::RemoveWorkspace(RemoveWorkspaceResult {
+                    workspace: workspace_summary(),
+                }),
+                "remove_workspace",
             ),
             (
                 RuntimeCommandResult::CreateSession(CreateSessionResult {

@@ -358,12 +358,10 @@ async fn turn_2_request_round_trips_reasoning_tool_calls_and_thinking() {
     assert_eq!(captured, expected);
 }
 
-#[tokio::test]
-async fn encode_rejects_tool_call_assistant_without_reasoning() {
-    // 官方文档：thinking 模式带 tool calls 的 assistant 消息必须在后续请求中完整回传
-    // `reasoning_content`，否则 API 返回 400；编码侧提前以 Config 显式失败。
-    let transport = Arc::new(RecordedTransport::new([]));
-    let service = service_with(&transport);
+#[test]
+fn encode_pads_tool_call_assistant_without_reasoning_for_replay() {
+    // DeepSeek 偶尔自行返回不带 reasoning 的 tool call。规范消息不伪造
+    // ReasoningPart；只在再次编码给 DeepSeek 时补入单空格 wire 占位。
     let mut request = turn_1_request();
     request.conversation = ConversationSnapshot::new(vec![
         user_message("message_1", "How is the weather in Paris today?"),
@@ -377,20 +375,29 @@ async fn encode_rejects_tool_call_assistant_without_reasoning() {
         tool_result_message("message_2", "call_get_weather_1", "Cloudy."),
     ]);
 
-    let error = service
-        .stream(request, ModelCallContext::default())
-        .await
-        .err()
-        .expect("encoding must fail before any request");
-    let ModelError::Config(message) = error else {
-        panic!("expected a config error, got {error:?}");
-    };
-    assert!(
-        message.contains("reasoning"),
-        "error must explain the missing reasoning content: {message}"
+    let encoded = encode_request(&request, &Profile::deepseek(), MODEL)
+        .expect("missing provider reasoning is repaired at the wire boundary");
+    let json = serde_json::to_value(encoded).expect("serialize encoded request");
+    assert_eq!(json["messages"][1]["reasoning_content"], json!(" "));
+    assert_eq!(json["messages"][1]["content"], json!(""));
+    assert_eq!(
+        json["messages"][1]["tool_calls"][0]["id"],
+        json!("call_get_weather_1")
     );
-    // 失败发生在建立前：不得发出任何请求。
-    assert!(transport.take_requests().is_empty());
+
+    // 占位是 DeepSeek Profile 方言行为，不能泄漏到普通 OpenAI-compatible 请求。
+    let generic = encode_request(
+        &request,
+        &Profile::openai_compatible(provider_id("generic")),
+        MODEL,
+    )
+    .expect("generic profile accepts the canonical tool exchange");
+    let generic_json = serde_json::to_value(generic).expect("serialize generic request");
+    assert!(
+        generic_json["messages"][1]
+            .get("reasoning_content")
+            .is_none()
+    );
 }
 
 #[tokio::test]

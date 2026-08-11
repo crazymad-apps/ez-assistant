@@ -37,7 +37,7 @@ const REPLAY_BODY: &str = concat!(
     "data: [DONE]\n\n",
 );
 
-/// DeepSeek thinking Profile 下不合法的工具调用响应：缺少 `reasoning_content`。
+/// DeepSeek thinking Profile 下偶发的工具调用响应：缺少 `reasoning_content`。
 const TOOL_CALL_WITHOUT_REASONING_BODY: &str = concat!(
     "data: {\"id\":\"chatcmpl-missing-reasoning\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chatcmpl-missing-reasoning\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -309,7 +309,7 @@ async fn stream_replays_reasoning_text_and_tool_call_turn_end_to_end() {
 }
 
 #[tokio::test]
-async fn deepseek_stream_rejects_tool_call_without_reasoning_as_protocol_terminal() {
+async fn deepseek_stream_accepts_tool_call_without_reasoning() {
     let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
         200,
         TOOL_CALL_WITHOUT_REASONING_BODY,
@@ -321,15 +321,14 @@ async fn deepseek_stream_rejects_tool_call_without_reasoning_as_protocol_termina
         .expect("stream established");
     let collected = EventCollector::collect_validated(stream).await;
 
-    let ModelError::Protocol(message) = collected.assert_failed() else {
-        panic!("expected protocol failure");
-    };
-    assert!(message.contains("no reasoning content"));
-    assert!(
-        !collected
-            .events()
-            .iter()
-            .any(|event| matches!(event, ModelEvent::TurnFinished { .. }))
+    let message = collected.assert_finished();
+    assert_eq!(
+        message.parts,
+        vec![AssistantPart::ToolCall(ToolCall {
+            id: call_id("call_1"),
+            name: tool_name("shell"),
+            arguments: json!({}),
+        })]
     );
     collected.assert_single_terminal();
 }

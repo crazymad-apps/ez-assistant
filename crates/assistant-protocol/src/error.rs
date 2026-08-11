@@ -36,8 +36,45 @@ pub enum RuntimeErrorCode {
     ModelUnavailable,
     /// 已校验模型无法构造为本次 Run 的服务或 Agent。
     ModelBuildFailed,
+    /// 模型调用已经开始，但本次 Provider Turn 最终失败。
+    ModelExecutionFailed,
+    /// 指定 Workspace 不存在。
+    WorkspaceNotFound,
+    /// 指定 Workspace 已移除，不能绑定新 Session。
+    WorkspaceRemoved,
+    /// Workspace 用户目录当前不可访问。
+    WorkspaceUnavailable,
+    /// 指定 Attachment 不存在于目标 Session。
+    AttachmentNotFound,
+    /// Attachment 正文或稳定视图当前不可用。
+    AttachmentUnavailable,
+    /// 上传文件超过 Host 公布的单文件上限。
+    AttachmentTooLarge,
+    /// 上传请求、文件名或 multipart 结构无效。
+    AttachmentUploadInvalid,
     /// 不应向客户端暴露内部细节的故障。
     Internal,
+}
+
+/// 模型 attempt 失败的脱敏稳定分类。
+///
+/// 该分类只表达可安全展示和聚合的故障事实，不携带 Provider 原始错误正文、
+/// prompt、credential 或请求内容。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFailureKind {
+    Configuration,
+    Authentication,
+    Connection,
+    Timeout,
+    StreamInterrupted,
+    ProviderRejected,
+    RateLimited,
+    ServiceUnavailable,
+    ContextOverflow,
+    Protocol,
+    ToolArguments,
+    Cancelled,
 }
 
 /// Host 可以发送给客户端的脱敏错误信息。
@@ -87,6 +124,26 @@ mod tests {
             (RuntimeErrorCode::ModelNotFound, "model_not_found"),
             (RuntimeErrorCode::ModelUnavailable, "model_unavailable"),
             (RuntimeErrorCode::ModelBuildFailed, "model_build_failed"),
+            (
+                RuntimeErrorCode::ModelExecutionFailed,
+                "model_execution_failed",
+            ),
+            (RuntimeErrorCode::WorkspaceNotFound, "workspace_not_found"),
+            (RuntimeErrorCode::WorkspaceRemoved, "workspace_removed"),
+            (
+                RuntimeErrorCode::WorkspaceUnavailable,
+                "workspace_unavailable",
+            ),
+            (RuntimeErrorCode::AttachmentNotFound, "attachment_not_found"),
+            (
+                RuntimeErrorCode::AttachmentUnavailable,
+                "attachment_unavailable",
+            ),
+            (RuntimeErrorCode::AttachmentTooLarge, "attachment_too_large"),
+            (
+                RuntimeErrorCode::AttachmentUploadInvalid,
+                "attachment_upload_invalid",
+            ),
             (RuntimeErrorCode::Internal, "internal"),
         ];
 

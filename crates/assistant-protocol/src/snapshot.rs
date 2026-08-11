@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId};
+use crate::{
+    AttachmentId, InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId, WorkspaceId,
+};
 
 /// Runtime 对外可见的生命周期状态。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -37,6 +39,52 @@ pub enum SessionListFilter {
     Archived,
     /// 返回全部 Session。
     All,
+}
+
+/// Workspace 是否仍可供新 Session 选择。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLifecycle {
+    /// Workspace 正常登记，可绑定新 Session。
+    Active,
+    /// Workspace 已从正常选择列表移除，但历史绑定和目录均保留。
+    Removed,
+}
+
+/// 一个 Workspace 的稳定业务投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkspaceSummary {
+    /// Runtime 分配的不透明 Workspace 标识。
+    pub workspace_id: WorkspaceId,
+    /// Host canonicalize 后保存的用户工作目录。
+    pub user_directory: String,
+    /// Runtime Home 中由 Host 管理的 Workspace 级 Agent 私有目录。
+    pub agent_directory: String,
+    /// Workspace 当前是否可供新 Session 选择。
+    pub lifecycle: WorkspaceLifecycle,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub removed_at_ms: Option<i64>,
+}
+
+/// Attachment 的物理正文和稳定视图当前是否可用。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentState {
+    Ready,
+    Unavailable,
+}
+
+/// 一个 Session Attachment 的客户端可见业务投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttachmentSummary {
+    pub attachment_id: AttachmentId,
+    pub session_id: SessionId,
+    pub original_name: String,
+    pub size_bytes: u64,
+    pub agent_readable_path: String,
+    pub state: AttachmentState,
+    pub created_at_ms: i64,
 }
 
 /// Runtime 业务 Run 的活动态和终态。
@@ -110,6 +158,9 @@ pub struct SessionSummary {
     pub model_key: ModelKey,
     /// Session 当前是活动还是归档状态。
     pub lifecycle: SessionLifecycle,
+    /// 创建 Session 时冻结的 Workspace 绑定；`None` 表示普通未绑定会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
     /// 当前活动 Run；Session 空闲时为 `None`。
     pub active_run_id: Option<RunId>,
     /// 规范 Conversation 中已经完整提交的消息数量。
@@ -133,6 +184,19 @@ pub struct ToolActivitySnapshot {
     pub stdout: String,
     /// 截至快照时观察到的标准错误输出；事件丢失时可能不完整。
     pub stderr: String,
+}
+
+/// 一次完整模型请求由 Provider 最终确认的 token 用量。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TokenUsageSnapshot {
+    /// 本次请求消耗的输入 token。
+    pub input_tokens: u64,
+    /// 本次响应产生的输出 token。
+    pub output_tokens: u64,
+    /// Provider 报告的总 token；不在应用层重新计算。
+    pub total_tokens: u64,
+    /// 输入 token 中命中缓存的数量；Provider 未提供时为 `None`。
+    pub cached_input_tokens: Option<u64>,
 }
 
 /// 一个 Runtime Run 的当前只读快照。

@@ -25,6 +25,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "first payload".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -33,6 +34,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "different payload is ignored for the same key".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: Some(key),
         })
         .await
@@ -65,6 +67,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "active".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -76,6 +79,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "queued".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -152,6 +156,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -163,6 +168,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "second".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -210,7 +216,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
             ConversationMessage::User(message) => {
                 message.parts.iter().find_map(|part| match part {
                     UserPart::Text(part) => Some(part.text.as_str()),
-                    UserPart::Injected(_) => None,
+                    UserPart::Injected(_) | UserPart::FileReferences(_) => None,
                 })
             }
             _ => None,
@@ -235,8 +241,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         source.clone(),
         Arc::new(StaticModelFactory::new(model)),
         Arc::new(StaticSystemPromptFactory),
-        ToolSetSnapshot::default(),
-        Arc::new(AllowAllAuthorizer),
+        static_run_tool_factory(ToolSetSnapshot::default()),
     );
     runtime
         .reload_config(ReloadConfigRequest::default())
@@ -255,6 +260,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "retry me".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await

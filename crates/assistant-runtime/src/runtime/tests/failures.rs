@@ -59,6 +59,7 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "fail once".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -71,6 +72,7 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "overflow once".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -94,6 +96,157 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
 }
 
 #[tokio::test]
+async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
+    const PRIVATE_PROVIDER_DETAIL: &str = "private-provider-overload-detail";
+    let failure = || ModelError::Unavailable {
+        message: PRIVATE_PROVIDER_DETAIL.to_owned(),
+        status: Some(503),
+        retry_after_ms: None,
+    };
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        (0..4).map(|_| ModelScript::FailEstablishment(failure())),
+    ));
+    let runtime = runtime(model.clone());
+    runtime.config_registry.replace_document_for_test(&format!(
+        "{TEST_CONFIG}\n[runtime.model_retry]\nretry_on = [\"unavailable\"]\ndelays_ms = [1, 1, 1]\nmax_retry_after_ms = 10\n"
+    ));
+    let mut events = runtime.subscribe_events();
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    let started = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session.session_id.clone(),
+            message: "retry unavailable model".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("run accepted");
+
+    let terminal =
+        wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    let error = terminal.error.expect("model failure");
+    assert_eq!(
+        error.code,
+        assistant_protocol::RuntimeErrorCode::ModelExecutionFailed
+    );
+    assert_eq!(
+        error.message,
+        "model execution failed before stream establishment (kind=service_unavailable, attempts=4, retries=3, output_observed=false)"
+    );
+    assert!(!error.message.contains(PRIVATE_PROVIDER_DETAIL));
+    assert_eq!(model.take_requests().len(), 4);
+
+    let observed = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events.recv().await.expect("runtime event");
+            let finished = matches!(
+                &event,
+                RuntimeEvent::RunFinished { run_id, .. } if run_id == &started.run.run_id
+            );
+            observed.push(event);
+            if finished {
+                return observed;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ModelAttemptStarted { .. }))
+            .count(),
+        4
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ModelRetryScheduled { .. }))
+            .count(),
+        3
+    );
+    assert!(observed.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ModelAttemptFailed {
+            attempt: 4,
+            kind: assistant_protocol::ModelFailureKind::ServiceUnavailable,
+            will_retry: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn in_stream_failure_reports_establishment_and_partial_output_without_retry() {
+    const PRIVATE_STREAM_DETAIL: &str = "private-stream-disconnect-detail";
+    let message_id = MessageId::new("stream-failure-message").expect("message id");
+    let part_id = PartId::new("stream-failure-text").expect("part id");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [ModelScript::Events(vec![
+            ModelEvent::TurnStarted {
+                message_id,
+                model: ModelIdentity::new(
+                    ProviderId::new("fixture").expect("provider id"),
+                    "fixture-model",
+                ),
+            },
+            ModelEvent::TextStarted {
+                id: part_id.clone(),
+            },
+            ModelEvent::TextDelta {
+                id: part_id,
+                delta: "partial".to_owned(),
+            },
+            ModelEvent::TurnFailed {
+                error: ModelError::Transport {
+                    kind: ModelTransportErrorKind::Interrupted,
+                    message: PRIVATE_STREAM_DETAIL.to_owned(),
+                },
+            },
+        ])],
+    ));
+    let runtime = runtime(model.clone());
+    runtime.config_registry.replace_document_for_test(&format!(
+        "{TEST_CONFIG}\n[runtime.model_retry]\nretry_on = [\"connection\", \"timeout\", \"rate_limited\", \"unavailable\"]\ndelays_ms = [1, 1, 1]\nmax_retry_after_ms = 10\n"
+    ));
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    let started = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session.session_id.clone(),
+            message: "stream then fail".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("run accepted");
+
+    let terminal =
+        wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    let error = terminal.error.expect("model failure");
+    assert_eq!(
+        error.code,
+        assistant_protocol::RuntimeErrorCode::ModelExecutionFailed
+    );
+    assert_eq!(
+        error.message,
+        "model execution failed after stream establishment (kind=stream_interrupted, attempts=1, retries=0, output_observed=true)"
+    );
+    assert!(!error.message.contains(PRIVATE_STREAM_DETAIL));
+    assert_eq!(model.take_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy() {
     let model = Arc::new(PanicModel {
         capabilities: model_capabilities(false),
@@ -107,6 +260,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "panic".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -160,6 +314,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -171,6 +326,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .submit_input(SubmitInputRequest {
             session_id: session.session.session_id.clone(),
             message: "must remain queued".to_owned(),
+            attachment_ids: Vec::new(),
             idempotency_key: None,
         })
         .await
@@ -194,6 +350,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             .submit_input(SubmitInputRequest {
                 session_id: session.session.session_id,
                 message: "must be rejected".to_owned(),
+                attachment_ids: Vec::new(),
                 idempotency_key: None,
             })
             .await,
@@ -213,6 +370,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
             .submit_input(SubmitInputRequest {
                 session_id: session.session.session_id.clone(),
                 message: " \n\t".to_owned(),
+                attachment_ids: Vec::new(),
                 idempotency_key: None,
             })
             .await,

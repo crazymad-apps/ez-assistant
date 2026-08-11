@@ -5,15 +5,15 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use agent_core::{AgentEvent, AgentEventStream, CompletionFuture, ToolCompletionStatus};
 use agent_tools::ToolOutputChannel as AgentToolOutputChannel;
 use assistant_protocol::{
-    PartId as ProtocolPartId, RunId, RuntimeEvent, ToolActivitySnapshot, ToolActivityStatus,
-    ToolCallId as ProtocolToolCallId, ToolOutputChannel,
+    PartId as ProtocolPartId, RunId, RuntimeEvent, TokenUsageSnapshot, ToolActivitySnapshot,
+    ToolActivityStatus, ToolCallId as ProtocolToolCallId, ToolOutputChannel,
 };
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::broadcast;
 
 use crate::{RuntimeError, RuntimeResult, RuntimeStore, session::SessionController};
 
-use super::{RunRecord, is_active_run, settlement::settle_run};
+use super::{RunModelDiagnostics, RunRecord, is_active_run, settlement::settle_run};
 
 /// 同时排空可用观察事件并等待可靠 completion，随后只结算一次 Runtime Run。
 pub(crate) async fn supervise_run(
@@ -23,6 +23,7 @@ pub(crate) async fn supervise_run(
     completion: CompletionFuture,
     event_sender: broadcast::Sender<RuntimeEvent>,
     store: Arc<dyn RuntimeStore>,
+    model_diagnostics: Arc<RunModelDiagnostics>,
 ) {
     let completion = AssertUnwindSafe(completion).catch_unwind();
     tokio::pin!(completion);
@@ -34,7 +35,12 @@ pub(crate) async fn supervise_run(
             event = events.next(), if events_open => {
                 match event {
                     Some(event) => {
-                        if let Ok(Some(event)) = project_agent_event(&session, &run_id, event) {
+                        if let Ok(Some(event)) = project_agent_event(
+                            &session,
+                            &run_id,
+                            event,
+                            model_diagnostics.as_ref(),
+                        ) {
                             let _ = event_sender.send(event);
                         }
                     }
@@ -46,7 +52,15 @@ pub(crate) async fn supervise_run(
     };
     drop(events);
 
-    match settle_run(&session, &run_id, outcome, store.as_ref()).await {
+    match settle_run(
+        &session,
+        &run_id,
+        outcome,
+        store.as_ref(),
+        Some(model_diagnostics.as_ref()),
+    )
+    .await
+    {
         Ok(snapshot) => {
             let _ = event_sender.send(RuntimeEvent::RunFinished {
                 session_id: snapshot.session_id,
@@ -67,6 +81,7 @@ fn project_agent_event(
     session: &SessionController,
     run_id: &RunId,
     event: AgentEvent,
+    model_diagnostics: &RunModelDiagnostics,
 ) -> RuntimeResult<Option<RuntimeEvent>> {
     if event.is_terminal() {
         return Ok(None);
@@ -81,6 +96,7 @@ fn project_agent_event(
             }))
         }
         AgentEvent::TextDelta { id, delta } => {
+            model_diagnostics.mark_output_observed();
             let part_id = ProtocolPartId::new(id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime text part id",
@@ -95,6 +111,7 @@ fn project_agent_event(
             }))
         }
         AgentEvent::ReasoningDelta { id, delta } => {
+            model_diagnostics.mark_output_observed();
             let part_id = ProtocolPartId::new(id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime reasoning part id",
@@ -108,6 +125,17 @@ fn project_agent_event(
                 delta,
             }))
         }
+        AgentEvent::UsageUpdated { step, usage } => Ok(Some(RuntimeEvent::UsageUpdated {
+            session_id,
+            run_id: run_id.clone(),
+            step,
+            usage: TokenUsageSnapshot {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+            },
+        })),
         AgentEvent::ToolProposed { call } => {
             let call_id = ProtocolToolCallId::new(call.id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
@@ -202,9 +230,11 @@ fn project_agent_event(
                 status,
             }))
         }
-        AgentEvent::StepStarted { .. }
-        | AgentEvent::UsageUpdated { .. }
-        | AgentEvent::GuardrailTriggered { .. }
+        AgentEvent::StepStarted { .. } => {
+            model_diagnostics.mark_step_started();
+            Ok(None)
+        }
+        AgentEvent::GuardrailTriggered { .. }
         | AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }
         | AgentEvent::ExecutionCancelled { .. }

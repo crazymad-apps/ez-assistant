@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use agent_model::{ModelError, ModelRequest, ReasoningEffort};
 use agent_types::{
-    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage, ToolChoice,
-    ToolDefinition, ToolMessage, ToolResultContent, UserMessage, UserPart,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
+    FileReferencesPart, ToolChoice, ToolDefinition, ToolMessage, ToolResultContent, UserMessage,
+    UserPart,
 };
 use serde_json::Value;
 
@@ -34,6 +35,11 @@ const RESERVED_REQUEST_KEYS: &[&str] = &[
 
 /// 派生摘要在线上编码为 system message 时使用的固定说明。
 const CONTEXT_SUMMARY_PREFIX: &str = "[Context summary derived from earlier conversation]";
+
+/// DeepSeek thinking 回放要求 `reasoning_content` 字段存在，但模型偶尔会
+/// 在 tool-call 轮次省略该字段。单空格只是 wire 占位：它不进入规范消息，
+/// 同时兼容会拒绝空字符串的 DeepSeek 模型。
+const MISSING_REASONING_WIRE_PLACEHOLDER: &str = " ";
 
 /// 把规范请求编码为 Chat Completions 原生请求。
 ///
@@ -230,32 +236,55 @@ fn encode_context_summary(message: &ContextSummaryMessage) -> ChatSystemMessage 
 
 /// 把规范 user 消息编码为原生 user 消息。
 ///
-/// `Text` 与 `Injected` 片段在线上都是文本；恰好一个 part 时用纯字符串，
-/// 多个 parts 时用 text part 数组保序。
+/// 三种规范 Part 都编码为文本；File References 先渲染为稳定 XML。
+/// 恰好一个 part 时用纯字符串，多个 parts 时用 text part 数组保序。
 fn encode_user_message(message: &UserMessage) -> ChatUserMessage {
-    let texts: Vec<&str> = message
+    let texts: Vec<String> = message
         .parts
         .iter()
         .map(|part| match part {
-            UserPart::Text(text) | UserPart::Injected(text) => text.text.as_str(),
+            UserPart::Text(text) | UserPart::Injected(text) => text.text.clone(),
+            UserPart::FileReferences(files) => render_file_references(files),
         })
         .collect();
-    let content = if texts.len() == 1 {
-        ChatUserContent::Text(texts[0].to_owned())
-    } else if texts.is_empty() {
-        ChatUserContent::Text(String::new())
-    } else {
-        ChatUserContent::Parts(
+    let content = match texts.len() {
+        0 | 1 => ChatUserContent::Text(texts.into_iter().next().unwrap_or_default()),
+        _ => ChatUserContent::Parts(
             texts
                 .into_iter()
                 .map(|text| ChatContentPart {
                     kind: ChatContentPartKind::Text,
-                    text: text.to_owned(),
+                    text,
                 })
                 .collect(),
-        )
+        ),
     };
     ChatUserMessage { content }
+}
+
+/// 文件引用只声明 Agent 可读文件，不伪造已读取文件或 Tool Result。
+fn render_file_references(part: &FileReferencesPart) -> String {
+    let mut xml = String::from("<attached_files>\n");
+    for file in &part.files {
+        xml.push_str("  <file>\n    <name>");
+        push_xml_text(&mut xml, &file.original_name);
+        xml.push_str("</name>\n    <path>");
+        push_xml_text(&mut xml, &file.readable_path);
+        xml.push_str("</path>\n  </file>\n");
+    }
+    xml.push_str("</attached_files>");
+    xml
+}
+
+fn push_xml_text(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            character => output.push(character),
+        }
+    }
 }
 
 /// 把规范 assistant 消息编码为原生 assistant 消息。
@@ -265,9 +294,10 @@ fn encode_user_message(message: &UserMessage) -> ChatUserMessage {
 /// 未声明 reasoning 字段时返回 [`ModelError::Config`]，不静默丢弃。
 ///
 /// Profile 声明 [`Profile::tool_calls_require_reasoning`] 时（DeepSeek thinking 模式：
-/// 带 tool calls 的 assistant 消息必须在后续请求中完整回传 `reasoning_content`，
-/// 否则 API 返回 400，见 <https://api-docs.deepseek.com/guides/thinking_mode/>），
-/// 有 tool calls 却没有 reasoning 内容的消息同样以 [`ModelError::Config`] 显式失败。
+/// 带 tool calls 的 assistant 消息必须在后续请求中回传 `reasoning_content`，
+/// 见 <https://api-docs.deepseek.com/guides/thinking_mode/>），编码器会对 Provider 偶发的
+/// 缺失内容补一个仅用于线上协议的单空格。规范消息仍如实表示为
+/// “没有 reasoning part”，不向 UI 或 Journal 伪造 reasoning 内容。
 fn encode_assistant_message(
     message: &AssistantMessage,
     profile: &Profile,
@@ -305,22 +335,22 @@ fn encode_assistant_message(
         }
     }
 
-    if profile.tool_calls_require_reasoning && !tool_calls.is_empty() && reasoning_text.is_empty() {
-        return Err(ModelError::Config(
-            "assistant message has tool calls but no reasoning content; this profile requires reasoning content to be passed back with tool calls"
-                .to_owned(),
-        ));
-    }
-
     let mut extra = BTreeMap::new();
-    if !reasoning_text.is_empty() {
+    let reasoning_to_encode = if !reasoning_text.is_empty() {
+        Some(reasoning_text.as_str())
+    } else if profile.tool_calls_require_reasoning && !tool_calls.is_empty() {
+        Some(MISSING_REASONING_WIRE_PLACEHOLDER)
+    } else {
+        None
+    };
+    if let Some(reasoning) = reasoning_to_encode {
         let Some(field) = &profile.reasoning_content_field else {
             return Err(ModelError::Config(
-                "assistant message contains reasoning content but the profile declares no reasoning content field"
+                "assistant message requires a reasoning field but the profile declares no reasoning content field"
                     .to_owned(),
             ));
         };
-        extra.insert(field.clone(), Value::String(reasoning_text));
+        extra.insert(field.clone(), Value::String(reasoning.to_owned()));
     }
 
     Ok(ChatAssistantMessage {

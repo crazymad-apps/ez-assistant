@@ -154,7 +154,8 @@ impl AssistantRuntime {
             .ok_or(RuntimeError::InvalidRequest {
                 reason: "target message is not a user message in this session",
             })?;
-        let new_message = create_user_message(request.message)?;
+        let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
+        let new_message = create_user_message(request.message, files)?;
         let mut messages = current.messages[..target_index].to_vec();
         messages.push(ConversationMessage::User(new_message.clone()));
         let replacement = ConversationSnapshot::new(messages);
@@ -208,7 +209,8 @@ impl AssistantRuntime {
             &config,
             self.model_factory.as_ref(),
             self.context_window.clone(),
-            self.tools.clone(),
+            self.run_tool_factory.as_ref(),
+            None,
         )?;
         let changed_at_ms = now_ms()?;
         let rewritten = self

@@ -1,5 +1,6 @@
 //! AssistantRuntime 生命周期门禁和 Session Registry。
 
+mod attachment;
 mod connection_validation;
 mod input;
 mod model;
@@ -7,6 +8,9 @@ mod recovery;
 mod session_management;
 mod shutdown;
 mod tasks;
+mod workspace;
+
+pub use attachment::StagedAttachmentUpload;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -14,27 +18,26 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use agent_core::ToolAuthorizer;
 use agent_sdk::ContextWindowEvaluator;
-use agent_tools::ToolSetSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    CancelRunRequest, CancelRunResult, ConfigurationStatus, CreateSessionRequest,
+    AttachmentId, CancelRunRequest, CancelRunResult, ConfigurationStatus, CreateSessionRequest,
     CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
     GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
     ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
     ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeLifecycle, SessionId,
-    SessionSummary,
+    SessionSummary, WorkspaceId,
 };
-use tokio::sync::{RwLock as AsyncRwLock, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use self::model::resolve_session_model_key;
-use self::recovery::recover_sessions;
+use self::recovery::recover_registries;
 use self::tasks::RuntimeTasks;
 use crate::{
-    ModelServiceFactory, NewStoredSession, RecoveredRuntime, RuntimeConfig, RuntimeConfigSource,
-    RuntimeError, RuntimeResult, RuntimeStore, SystemPromptFactory,
+    ModelServiceFactory, NewStoredSession, RecoveredRuntime, RunToolFactory, RuntimeConfig,
+    RuntimeConfigSource, RuntimeError, RuntimeResult, RuntimeStore, SessionEnvironmentFactory,
+    SessionEnvironmentFactoryRequest, StoreErrorKind, StoredWorkspace, WorkspaceEnvironmentSource,
     config::{
         ConfigRegistry, ConfigSnapshot, project_model_by_key, project_models, project_status,
     },
@@ -61,14 +64,16 @@ pub struct AssistantRuntime {
     config: RuntimeConfig,
     lifecycle: RwLock<RuntimeLifecycle>,
     sessions: RwLock<BTreeMap<SessionId, Arc<SessionController>>>,
+    workspaces: RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>,
+    attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: AsyncRwLock<()>,
+    workspace_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
     model_factory: Arc<dyn ModelServiceFactory>,
-    system_prompt_factory: Arc<dyn SystemPromptFactory>,
-    tools: ToolSetSnapshot,
+    session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+    run_tool_factory: Arc<dyn RunToolFactory>,
     context_window: Arc<ContextWindowEvaluator>,
-    default_authorizer: Arc<dyn ToolAuthorizer>,
     event_sender: broadcast::Sender<RuntimeEvent>,
     root_cancellation: CancellationToken,
     tasks: RuntimeTasks,
@@ -82,17 +87,15 @@ impl AssistantRuntime {
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
         model_factory: Arc<dyn ModelServiceFactory>,
-        system_prompt_factory: Arc<dyn SystemPromptFactory>,
-        tools: ToolSetSnapshot,
-        default_authorizer: Arc<dyn ToolAuthorizer>,
+        session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        run_tool_factory: Arc<dyn RunToolFactory>,
     ) -> Self {
         Self::from_recovered(
             config,
             config_source,
             model_factory,
-            system_prompt_factory,
-            tools,
-            default_authorizer,
+            session_environment_factory,
+            run_tool_factory,
             Arc::new(crate::storage::VolatileRuntimeStore::default()),
             RecoveredRuntime::default(),
         )
@@ -105,9 +108,8 @@ impl AssistantRuntime {
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
         model_factory: Arc<dyn ModelServiceFactory>,
-        system_prompt_factory: Arc<dyn SystemPromptFactory>,
-        tools: ToolSetSnapshot,
-        default_authorizer: Arc<dyn ToolAuthorizer>,
+        session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        run_tool_factory: Arc<dyn RunToolFactory>,
         store: Arc<dyn RuntimeStore>,
     ) -> RuntimeResult<Self> {
         let recovered = store
@@ -118,9 +120,8 @@ impl AssistantRuntime {
             config,
             config_source,
             model_factory,
-            system_prompt_factory,
-            tools,
-            default_authorizer,
+            session_environment_factory,
+            run_tool_factory,
             store,
             recovered,
         )
@@ -131,29 +132,30 @@ impl AssistantRuntime {
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
         model_factory: Arc<dyn ModelServiceFactory>,
-        system_prompt_factory: Arc<dyn SystemPromptFactory>,
-        tools: ToolSetSnapshot,
-        default_authorizer: Arc<dyn ToolAuthorizer>,
+        session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        run_tool_factory: Arc<dyn RunToolFactory>,
         store: Arc<dyn RuntimeStore>,
         recovered: RecoveredRuntime,
     ) -> RuntimeResult<Self> {
         let (event_sender, _) = broadcast::channel(config.event_capacity.get());
-        let sessions = recover_sessions(recovered)?;
+        let recovered = recover_registries(recovered)?;
         Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
-            sessions: RwLock::new(sessions),
+            sessions: RwLock::new(recovered.sessions),
+            workspaces: RwLock::new(recovered.workspaces),
+            attachments: RwLock::new(recovered.attachments),
             store,
             operation_gate: AsyncRwLock::new(()),
+            workspace_mutation_gate: AsyncMutex::new(()),
             config_registry: Arc::new(ConfigRegistry::new(config_source)),
             model_factory,
-            system_prompt_factory,
-            tools,
+            session_environment_factory,
+            run_tool_factory,
             context_window: Arc::new(
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
                     .expect("static context window threshold is valid"),
             ),
-            default_authorizer,
             event_sender,
             root_cancellation: CancellationToken::new(),
             tasks: RuntimeTasks::new(),
@@ -230,14 +232,11 @@ impl AssistantRuntime {
     ) -> RuntimeResult<CreateSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
+        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
         let title = request.title.unwrap_or_else(|| "New Session".to_owned());
         let config_snapshot = self.config_registry.snapshot()?;
         let model_key = resolve_session_model_key(&config_snapshot, request.model_key)?;
-        let system_prompt = self
-            .system_prompt_factory
-            .create_system_prompt()
-            .map_err(|source| RuntimeError::SystemPromptBuildFailed { source })?;
 
         let session_id = {
             let sessions =
@@ -248,17 +247,43 @@ impl AssistantRuntime {
                     })?;
             allocate_session_id(&sessions)?
         };
+        let workspace = request
+            .workspace_id
+            .as_ref()
+            .map(|workspace_id| self.workspace_for_new_session(workspace_id))
+            .transpose()?;
+        let prepared = self
+            .session_environment_factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &session_id,
+                workspace: workspace
+                    .as_ref()
+                    .map(|workspace| WorkspaceEnvironmentSource {
+                        workspace_id: &workspace.workspace_id,
+                        user_directory: &workspace.user_directory,
+                        agent_directory: &workspace.agent_directory,
+                    }),
+            })
+            .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
         let stored = self
             .store
             .create_session(NewStoredSession {
                 session_id: session_id.clone(),
                 title,
                 model_key,
-                system_prompt,
+                system_prompt: prepared.system_prompt,
+                environment: prepared.environment,
                 created_at_ms: now_ms()?,
             })
             .await
-            .map_err(|source| RuntimeError::from_store("create session", source))?;
+            .map_err(|source| {
+                if source.kind() == StoreErrorKind::ResourceUnavailable
+                    && let Some(workspace_id) = request.workspace_id
+                {
+                    return RuntimeError::WorkspaceUnavailable { workspace_id };
+                }
+                RuntimeError::from_store("create session", source)
+            })?;
         let session = Arc::new(SessionController::new(stored));
         let mut sessions =
             self.sessions

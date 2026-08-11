@@ -2,9 +2,13 @@
 
 use std::{error::Error, sync::Arc, time::Duration};
 
-use agent_model::{ModelService, SystemPromptSnapshot};
+use agent_core::ToolAuthorizer;
+use agent_model::ModelService;
+use agent_tools::ToolSetSnapshot;
 use agent_types::ProviderId;
 use thiserror::Error;
+
+use crate::SessionExecutionEnvironment;
 
 /// Runtime 已根据 provider 推导出的内部 Codec 方言。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,35 +68,68 @@ pub trait ModelServiceFactory: Send + Sync {
     ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError>;
 }
 
-/// System Prompt 构造失败。
+/// 一次 Run 冻结使用的工具定义与授权闸。
+///
+/// Bundle 不进入 Protocol 或 Conversation；不同 Run 必须分别由
+/// [`RunToolFactory`] 编译，不得修改共享的可变路径解析器。
+pub struct RunToolBundle {
+    tools: ToolSetSnapshot,
+    authorizer: Arc<dyn ToolAuthorizer>,
+}
+
+impl RunToolBundle {
+    pub fn new(tools: ToolSetSnapshot, authorizer: Arc<dyn ToolAuthorizer>) -> Self {
+        Self { tools, authorizer }
+    }
+
+    /// 消费 Bundle，取回本 Run 的不可变工具集和授权闸。
+    pub fn into_parts(self) -> (ToolSetSnapshot, Arc<dyn ToolAuthorizer>) {
+        (self.tools, self.authorizer)
+    }
+}
+
+/// Host 构造单次 Run 工具时的失败分类。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunToolFactoryErrorKind {
+    /// Session 冻结的默认工作目录当前不可用。
+    WorkingDirectoryUnavailable,
+    /// 路径、工具配置或注册无法形成不可变 Bundle。
+    InvalidConfiguration,
+}
+
+/// 单次 Run 工具编译失败。
 #[derive(Debug, Error)]
-#[error("system prompt could not be created")]
-pub struct SystemPromptFactoryError {
+#[error("run tools could not be created")]
+pub struct RunToolFactoryError {
+    kind: RunToolFactoryErrorKind,
     #[source]
     source: Option<Box<dyn Error + Send + Sync>>,
 }
 
-impl SystemPromptFactoryError {
-    /// 创建一条不携带底层详情的失败。
-    pub fn new() -> Self {
-        Self { source: None }
+impl RunToolFactoryError {
+    pub fn new(kind: RunToolFactoryErrorKind) -> Self {
+        Self { kind, source: None }
     }
 
-    /// 保留底层错误链，但不把详情写入 Display。
-    pub fn with_source(source: impl Error + Send + Sync + 'static) -> Self {
+    pub fn with_source(
+        kind: RunToolFactoryErrorKind,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
         Self {
+            kind,
             source: Some(Box::new(source)),
         }
     }
-}
 
-impl Default for SystemPromptFactoryError {
-    fn default() -> Self {
-        Self::new()
+    pub fn kind(&self) -> RunToolFactoryErrorKind {
+        self.kind
     }
 }
 
-/// 在 Session 创建时渲染一次冻结的 System Prompt。
-pub trait SystemPromptFactory: Send + Sync {
-    fn create_system_prompt(&self) -> Result<SystemPromptSnapshot, SystemPromptFactoryError>;
+/// 根据 Session 创建时冻结的目录事实编译单次 Run 工具。
+pub trait RunToolFactory: Send + Sync {
+    fn compile(
+        &self,
+        environment: &SessionExecutionEnvironment,
+    ) -> Result<RunToolBundle, RunToolFactoryError>;
 }

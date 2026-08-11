@@ -63,6 +63,51 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
 }
 
 #[test]
+fn encode_file_references_preserves_part_and_file_order_with_xml_text_escaping() {
+    let profile = base_profile();
+    let message = ConversationMessage::User(UserMessage {
+        id: message_id("message_1"),
+        parts: vec![
+            UserPart::Text(TextPart {
+                id: part_id("text_1"),
+                text: "Compare these files".to_owned(),
+            }),
+            UserPart::FileReferences(FileReferencesPart {
+                id: part_id("files_1"),
+                files: vec![
+                    FileReference {
+                        original_name: "a<&>.txt".to_owned(),
+                        readable_path: "/stable/a&1.txt".to_owned(),
+                    },
+                    FileReference {
+                        original_name: "b.xlsx".to_owned(),
+                        readable_path: "/stable/<b>.xlsx".to_owned(),
+                    },
+                ],
+            }),
+            UserPart::Injected(TextPart {
+                id: part_id("injected_1"),
+                text: "internal continuation".to_owned(),
+            }),
+        ],
+    });
+
+    let encoded = encode_request(&request(vec![message]), &profile, MODEL).expect("encode request");
+    let json = serde_json::to_value(&encoded).expect("serialize request");
+    assert_eq!(
+        json["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "Compare these files"},
+            {
+                "type": "text",
+                "text": "<attached_files>\n  <file>\n    <name>a&lt;&amp;&gt;.txt</name>\n    <path>/stable/a&amp;1.txt</path>\n  </file>\n  <file>\n    <name>b.xlsx</name>\n    <path>/stable/&lt;b&gt;.xlsx</path>\n  </file>\n</attached_files>"
+            },
+            {"type": "text", "text": "internal continuation"},
+        ])
+    );
+}
+
+#[test]
 fn encode_context_summary_uses_a_derived_system_message() {
     let profile = base_profile();
     let message = ConversationMessage::ContextSummary(ContextSummaryMessage {

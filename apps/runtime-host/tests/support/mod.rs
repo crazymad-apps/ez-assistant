@@ -1,19 +1,18 @@
+#![allow(dead_code)]
+
 use std::{
     fs,
-    io::{Read, Write},
     net::TcpListener,
-    os::unix::net::UnixStream,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 use axum::{Json, Router, response::IntoResponse, routing::post};
+use reqwest::blocking::Client as HttpClient;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
-
-const PROTOCOL_VERSION: u32 = 1;
 
 pub struct FakeProvider {
     endpoint: String,
@@ -68,34 +67,75 @@ impl Drop for FakeProvider {
 }
 
 async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
-    let body = serde_json::to_string(&body).expect("serialize fake Provider request");
-    let case = latest_case(&body);
+    let body_text = serde_json::to_string(&body).expect("serialize fake Provider request");
+    let case = latest_case(&body_text);
+    let current_turn_has_tool_result = current_turn_has_tool_result(&body);
     if matches!(case, "BLOCK_FOR_RESTART" | "CANCEL_CASE") {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let response = if case == "TOOL_CASE" && !body.contains("\"role\":\"tool\"") {
+    let response = if case == "TOOL_CASE" && !current_turn_has_tool_result {
         concat!(
             "data: {\"id\":\"tool-1\",\"model\":\"offline-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-echo-1\",\"type\":\"function\",\"function\":{\"name\":\"echo_text\",\"arguments\":\"{\\\"text\\\":\\\"offline echo\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"tool-1\",\"model\":\"offline-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"id\":\"tool-1\",\"model\":\"offline-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\n",
             "data: [DONE]\n\n"
         )
         .to_owned()
+    } else if case == "FILE_REFERENCE_CASE" && !current_turn_has_tool_result {
+        file_read_tool_response(
+            attached_file_path(&body).expect("File References request contains a readable path"),
+            file_tool_exchange_number(&body),
+        )
     } else {
-        let response_id = format!("text-{case}");
+        let response_id = if case == "FILE_REFERENCE_CASE" {
+            format!("text-{case}-{}", file_tool_exchange_number(&body))
+        } else {
+            format!("text-{case}")
+        };
         let text = if case == "REPLACEMENT_CASE" {
             "replacement answer"
         } else if case == "TOOL_CASE" {
             "tool answer"
+        } else if case == "FILE_REFERENCE_CASE" && body_text.contains("attachment-tool-token-91") {
+            "file tool verified"
+        } else if case == "FILE_REFERENCE_CASE" {
+            "file tool result missing"
         } else if case == "QUEUED_AFTER_RESTART" {
             "resumed answer"
         } else {
             "offline answer"
         };
         format!(
-            "data: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{text:?}}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+            "data: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{text:?}}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":120,\"completion_tokens\":20,\"total_tokens\":140,\"prompt_tokens_details\":{{\"cached_tokens\":80}}}}}}\n\ndata: [DONE]\n\n"
         )
     };
     ([("content-type", "text/event-stream")], response)
+}
+
+/// 只观察最近一条 User Message 之后的消息，避免历史 Tool Result 让新的 Run
+/// 被 fake Provider 误判为已经完成当前工具调用。
+fn current_turn_has_tool_result(body: &Value) -> bool {
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(last_user) = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return false;
+    };
+    messages[last_user + 1..]
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+}
+
+fn file_tool_exchange_number(body: &Value) -> usize {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .count()
+        + usize::from(!current_turn_has_tool_result(body))
 }
 
 fn latest_case(body: &str) -> &'static str {
@@ -106,11 +146,62 @@ fn latest_case(body: &str) -> &'static str {
         "TOOL_CASE",
         "CANCEL_CASE",
         "REPLACEMENT_CASE",
+        "FILE_REFERENCE_CASE",
     ]
     .into_iter()
     .filter_map(|marker| body.rfind(marker).map(|position| (position, marker)))
     .max_by_key(|(position, _)| *position)
     .map_or("DEFAULT_CASE", |(_, marker)| marker)
+}
+
+fn attached_file_path(body: &Value) -> Option<&str> {
+    body.get("messages")?
+        .as_array()?
+        .iter()
+        .rev()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .find_map(|text| {
+            let start = text.find("<path>")? + "<path>".len();
+            let end = text[start..].find("</path>")? + start;
+            Some(&text[start..end])
+        })
+}
+
+fn file_read_tool_response(path: &str, exchange_number: usize) -> String {
+    let arguments =
+        serde_json::to_string(&json!({ "path": path })).expect("serialize read_file arguments");
+    let proposal = json!({
+        "id": format!("file-tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": format!("call-read-file-{exchange_number}"),
+                    "type": "function",
+                    "function": { "name": "read_file", "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": format!("file-tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
 pub fn write_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
@@ -147,31 +238,65 @@ max_output_tokens = 4096
 
 pub struct HostProcess {
     child: Option<Child>,
-    socket: PathBuf,
+    base_url: String,
+    access_token: String,
 }
 
 impl HostProcess {
-    pub fn start(runtime_home: &Path, socket: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"))
+    pub fn start(runtime_home: &Path) -> Self {
+        Self::start_with_options(runtime_home, false, false)
+    }
+
+    pub fn start_unrestricted(runtime_home: &Path) -> Self {
+        Self::start_with_options(runtime_home, false, true)
+    }
+
+    #[cfg(feature = "web-demo")]
+    pub fn start_web_demo(runtime_home: &Path) -> Self {
+        Self::start_with_options(runtime_home, true, false)
+    }
+
+    #[cfg(feature = "web-demo")]
+    pub fn start_unrestricted_web_demo(runtime_home: &Path) -> Self {
+        Self::start_with_options(runtime_home, true, true)
+    }
+
+    fn start_with_options(runtime_home: &Path, web_demo: bool, unrestricted_tools: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
+        command
             .arg("serve")
             .arg("--runtime-home")
             .arg(runtime_home)
-            .arg("--socket")
-            .arg(socket)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn Runtime Host");
-        let mut host = Self {
+            .stderr(Stdio::piped());
+        #[cfg(feature = "web-demo")]
+        if web_demo {
+            command.arg("--web-demo");
+        }
+        if unrestricted_tools {
+            command.arg("--unsafe-unrestricted-local-tools");
+        }
+        #[cfg(not(feature = "web-demo"))]
+        let _ = web_demo;
+        let mut child = command.spawn().expect("spawn Runtime Host");
+        let (base_url, access_token) = wait_until_ready(runtime_home, &mut child);
+        Self {
             child: Some(child),
-            socket: socket.to_owned(),
-        };
-        host.wait_until_ready();
-        host
+            base_url,
+            access_token,
+        }
     }
 
     pub fn connect(&self) -> Client {
-        Client::connect(&self.socket)
+        Client::connect(self.base_url.clone(), self.access_token.clone())
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn access_token(&self) -> &str {
+        &self.access_token
     }
 
     pub fn kill(mut self) -> Output {
@@ -187,29 +312,6 @@ impl HostProcess {
             .wait_with_output()
             .expect("wait Runtime Host")
     }
-
-    fn wait_until_ready(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if UnixStream::connect(&self.socket).is_ok() {
-                return;
-            }
-            if let Some(status) = self
-                .child
-                .as_mut()
-                .expect("owned Runtime Host")
-                .try_wait()
-                .expect("poll Runtime Host")
-            {
-                panic!("Runtime Host exited before ready: {status}");
-            }
-            assert!(
-                Instant::now() < deadline,
-                "Runtime Host did not become ready"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
 }
 
 impl Drop for HostProcess {
@@ -222,32 +324,24 @@ impl Drop for HostProcess {
 }
 
 pub struct Client {
-    stream: UnixStream,
+    http: HttpClient,
+    base_url: String,
+    access_token: String,
     next_request: u64,
 }
 
 impl Client {
-    fn connect(socket: &Path) -> Self {
-        let stream = UnixStream::connect(socket).expect("connect Runtime Host");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .expect("client read timeout");
-        stream
-            .set_write_timeout(Some(Duration::from_secs(3)))
-            .expect("client write timeout");
-        let mut client = Self {
-            stream,
+    fn connect(base_url: String, access_token: String) -> Self {
+        Self {
+            http: HttpClient::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(12))
+                .build()
+                .expect("HTTP client"),
+            base_url,
+            access_token,
             next_request: 1,
-        };
-        client.write(&json!({
-            "type": "hello",
-            "protocol_version": PROTOCOL_VERSION,
-            "client_name": "v0.10.0-offline-acceptance"
-        }));
-        let hello = client.read();
-        assert_eq!(hello["type"], "hello_ack");
-        assert_eq!(hello["protocol_version"], PROTOCOL_VERSION);
-        client
+        }
     }
 
     pub fn runtime(&mut self, command_type: &str, payload: Value) -> Value {
@@ -305,45 +399,57 @@ impl Client {
     fn request(&mut self, command: Value) -> Value {
         let request_id = format!("request-{}", self.next_request);
         self.next_request += 1;
-        self.write(&json!({
-            "type": "request",
-            "request_id": request_id,
-            "command": command
-        }));
-        loop {
-            let frame = self.read();
-            match frame["type"].as_str() {
-                Some("response") if frame["request_id"] == request_id => {
-                    return frame["result"].clone();
-                }
-                Some("error") if frame["request_id"] == request_id => {
-                    panic!("Runtime command failed: {}", frame["error"]);
-                }
-                Some("event") => {}
-                other => panic!("unexpected server frame: {other:?}"),
-            }
+        let response = self
+            .http
+            .post(format!("{}/commands", self.base_url))
+            .bearer_auth(&self.access_token)
+            .json(&json!({
+                "request_id": request_id,
+                "command": command
+            }))
+            .send()
+            .expect("send Runtime command");
+        let status = response.status();
+        let body: Value = response.json().expect("decode Runtime command response");
+        assert!(
+            status.is_success(),
+            "Runtime command failed ({status}): {body}"
+        );
+        assert_eq!(body["request_id"], request_id);
+        body["result"].clone()
+    }
+}
+
+fn wait_until_ready(runtime_home: &Path, child: &mut Child) -> (String, String) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let discovery_path = runtime_home.join("run/runtime.json");
+    let http = HttpClient::builder()
+        .connect_timeout(Duration::from_millis(200))
+        .timeout(Duration::from_millis(500))
+        .build()
+        .expect("readiness client");
+    loop {
+        if let Ok(bytes) = fs::read(&discovery_path)
+            && let Ok(discovery) = serde_json::from_slice::<Value>(&bytes)
+            && let (Some(base_url), Some(access_token)) = (
+                discovery["address"].as_str(),
+                discovery["access_token"].as_str(),
+            )
+            && http
+                .get(format!("{base_url}/health"))
+                .bearer_auth(access_token)
+                .send()
+                .is_ok_and(|response| response.status().is_success())
+        {
+            return (base_url.to_owned(), access_token.to_owned());
         }
-    }
-
-    fn write(&mut self, value: &Value) {
-        let bytes = serde_json::to_vec(value).expect("encode client frame");
-        let length = u32::try_from(bytes.len()).expect("frame length");
-        self.stream
-            .write_all(&length.to_be_bytes())
-            .expect("write frame header");
-        self.stream.write_all(&bytes).expect("write frame body");
-        self.stream.flush().expect("flush client frame");
-    }
-
-    fn read(&mut self) -> Value {
-        let mut header = [0_u8; 4];
-        self.stream
-            .read_exact(&mut header)
-            .expect("read frame header");
-        let length = u32::from_be_bytes(header) as usize;
-        assert!((1..=1024 * 1024).contains(&length));
-        let mut bytes = vec![0_u8; length];
-        self.stream.read_exact(&mut bytes).expect("read frame body");
-        serde_json::from_slice(&bytes).expect("decode server frame")
+        if let Some(status) = child.try_wait().expect("poll Runtime Host") {
+            panic!("Runtime Host exited before ready: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Runtime Host did not become ready"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }
