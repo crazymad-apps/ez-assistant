@@ -11,20 +11,24 @@ mod id;
 mod snapshot;
 
 pub use command::{
-    ArchiveSessionRequest, ArchiveSessionResult, CancelQueuedInputRequest, CancelQueuedInputResult,
-    CancelRunRequest, CancelRunResult, ConnectionValidationFailure,
-    ConnectionValidationFailureKind, ConnectionValidationOutcome, CreateSessionRequest,
-    CreateSessionResult, GetAttachmentRequest, GetAttachmentResult, GetConfigStatusRequest,
-    GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest, GetRunResult,
-    GetSessionRequest, GetSessionResult, GetWorkspaceRequest, GetWorkspaceResult,
-    ListAttachmentsRequest, ListAttachmentsResult, ListModelsRequest, ListModelsResult,
+    ArchiveSessionRequest, ArchiveSessionResult, CancelChildTaskRequest, CancelChildTaskResult,
+    CancelQueuedInputRequest, CancelQueuedInputResult, CancelRunRequest, CancelRunResult,
+    ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
+    CreateSessionRequest, CreateSessionResult, DecideApprovalRequest, DecideApprovalResult,
+    GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest, GetChildTaskResult,
+    GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest,
+    GetRunResult, GetSessionRequest, GetSessionResult, GetWorkspaceRequest, GetWorkspaceResult,
+    ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
+    ListModelsRequest, ListModelsResult, ListPendingApprovalsRequest, ListPendingApprovalsResult,
     ListRunsRequest, ListRunsResult, ListSessionsRequest, ListSessionsResult,
     ListWorkspacesRequest, ListWorkspacesResult, ReenterFromUserMessageRequest,
     ReenterFromUserMessageResult, RegisterWorkspaceRequest, RegisterWorkspaceResult,
-    ReloadConfigRequest, ReloadConfigResult, RemoveWorkspaceRequest, RemoveWorkspaceResult,
-    RestoreSessionRequest, RestoreSessionResult, ResumeSessionRequest, ResumeSessionResult,
-    RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult, SetSessionModelRequest,
-    SetSessionModelResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, SubmitInputRequest,
+    ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest, ReloadPermissionsResult,
+    RemoveWorkspaceRequest, RemoveWorkspaceResult, RestoreSessionRequest, RestoreSessionResult,
+    ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
+    RuntimeCommandResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
+    SetSessionModelRequest, SetSessionModelResult, SetSessionVariantRequest,
+    SetSessionVariantResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, SubmitInputRequest,
     SubmitInputResult, UploadAttachmentResult, ValidateModelConnectionRequest,
     ValidateModelConnectionResult,
 };
@@ -33,16 +37,20 @@ pub use config::{
     ModelConfiguration,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
-pub use event::RuntimeEvent;
+pub use event::{ChildTaskEvent, RuntimeEvent};
 pub use host::{RuntimeHostCapabilities, RuntimeHostHealth, RuntimeHostHealthStatus};
 pub use id::{
-    AttachmentId, IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError,
-    PartId, RunId, SessionId, ToolCallId, WorkspaceId,
+    ApprovalId, AttachmentId, ChildTaskId, IdempotencyKey, IdentifierError, InputId, MessageId,
+    ModelKey, ModelKeyError, PartId, RunId, SessionId, ToolCallId, WorkspaceId,
 };
 pub use snapshot::{
-    AttachmentState, AttachmentSummary, RunSnapshot, RunStatus, RuntimeLifecycle, SessionLifecycle,
-    SessionListFilter, SessionSummary, TokenUsageSnapshot, ToolActivitySnapshot,
-    ToolActivityStatus, ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
+    AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
+    AttachmentState, AttachmentSummary, ChildTaskSnapshot, ChildTaskStatus, GuardrailKind,
+    GuardrailMode, PermissionDiagnostic, PermissionDiagnosticCode, PermissionFileStatus,
+    PermissionFileSummary, PermissionScope, RunSnapshot, RunStatus, RuntimeLifecycle,
+    SessionLifecycle, SessionListFilter, SessionSummary, TokenUsageSnapshot, ToolActivitySnapshot,
+    ToolActivityStatus, ToolApprovalSubject, ToolOutputChannel, WorkspaceLifecycle,
+    WorkspaceSummary,
 };
 
 /// 客户端与 Runtime Host 当前共同理解的应用协议版本。

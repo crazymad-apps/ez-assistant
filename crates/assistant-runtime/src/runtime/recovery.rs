@@ -2,17 +2,18 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assistant_protocol::{AttachmentId, InputId, SessionId, WorkspaceId};
+use assistant_protocol::{AttachmentId, ChildTaskId, InputId, RunId, SessionId, WorkspaceId};
 
 use crate::{
-    RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredWorkspace,
-    session::SessionController,
+    RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredChildTask,
+    StoredWorkspace, session::SessionController,
 };
 
 pub(super) struct RecoveredRegistries {
     pub workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     pub attachments: BTreeMap<AttachmentId, StoredAttachment>,
     pub sessions: BTreeMap<SessionId, Arc<SessionController>>,
+    pub child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
 }
 
 pub(super) fn recover_registries(
@@ -37,11 +38,18 @@ pub(super) fn recover_registries(
         }
     }
     let mut referenced_inputs = std::collections::BTreeSet::new();
+    let mut run_sessions = BTreeMap::<RunId, SessionId>::new();
     for run in &recovered.runs {
         if input_sessions.get(&run.input_id) != Some(&run.session_id) {
             return Err(invalid_recovery());
         }
         referenced_inputs.insert(run.input_id.clone());
+        if run_sessions
+            .insert(run.run_id.clone(), run.session_id.clone())
+            .is_some()
+        {
+            return Err(invalid_recovery());
+        }
     }
     if input_sessions
         .keys()
@@ -84,6 +92,17 @@ pub(super) fn recover_registries(
     if !runs_by_session.is_empty() || !inputs_by_session.is_empty() {
         return Err(invalid_recovery());
     }
+    let mut child_tasks = BTreeMap::new();
+    for child in recovered.child_tasks {
+        if !sessions.contains_key(&child.session_id)
+            || run_sessions.get(&child.parent_run_id) != Some(&child.session_id)
+            || child_tasks
+                .insert(child.child_task_id.clone(), child)
+                .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+    }
     let mut attachments = BTreeMap::new();
     let mut attachment_keys = std::collections::BTreeSet::new();
     for attachment in recovered.attachments {
@@ -101,6 +120,7 @@ pub(super) fn recover_registries(
         workspaces,
         attachments,
         sessions,
+        child_tasks,
     })
 }
 

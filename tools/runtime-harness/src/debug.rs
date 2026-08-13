@@ -243,7 +243,7 @@ impl RunDebug {
             ExecutionOutcome::Completed(_) => ("run_completed", None),
             ExecutionOutcome::Failed(error) => ("run_failed", Some(error.to_string())),
             ExecutionOutcome::Cancelled => ("run_cancelled", None),
-            ExecutionOutcome::CompactionRequired { reason, step } => (
+            ExecutionOutcome::CompactionRequired { reason, step, .. } => (
                 "run_compaction_required",
                 Some(format!("{reason:?} at step {step}")),
             ),

@@ -73,21 +73,31 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
     if matches!(case, "BLOCK_FOR_RESTART" | "CANCEL_CASE") {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let response = if case == "TOOL_CASE" && !current_turn_has_tool_result {
-        concat!(
-            "data: {\"id\":\"tool-1\",\"model\":\"offline-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-echo-1\",\"type\":\"function\",\"function\":{\"name\":\"echo_text\",\"arguments\":\"{\\\"text\\\":\\\"offline echo\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"tool-1\",\"model\":\"offline-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\n",
-            "data: [DONE]\n\n"
-        )
-        .to_owned()
+    let response = if case == "DELEGATE_PARALLEL_CASE"
+        && has_tool_definition(&body, "delegate_task")
+        && !current_turn_has_tool_result
+    {
+        parallel_delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "DELEGATE_BLOCK_CASE"
+        && has_tool_definition(&body, "delegate_task")
+        && !current_turn_has_tool_result
+    {
+        blocking_delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "DELEGATE_CASE"
+        && has_tool_definition(&body, "delegate_task")
+        && !current_turn_has_tool_result
+    {
+        delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "TOOL_CASE" && !current_turn_has_tool_result {
+        directory_list_tool_response(tool_exchange_number(&body))
     } else if case == "FILE_REFERENCE_CASE" && !current_turn_has_tool_result {
         file_read_tool_response(
             attached_file_path(&body).expect("File References request contains a readable path"),
-            file_tool_exchange_number(&body),
+            tool_exchange_number(&body),
         )
     } else {
-        let response_id = if case == "FILE_REFERENCE_CASE" {
-            format!("text-{case}-{}", file_tool_exchange_number(&body))
+        let response_id = if matches!(case, "FILE_REFERENCE_CASE" | "TOOL_CASE") {
+            format!("text-{case}-{}", tool_exchange_number(&body))
         } else {
             format!("text-{case}")
         };
@@ -128,7 +138,7 @@ fn current_turn_has_tool_result(body: &Value) -> bool {
         .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
 }
 
-fn file_tool_exchange_number(body: &Value) -> usize {
+fn tool_exchange_number(body: &Value) -> usize {
     body.get("messages")
         .and_then(Value::as_array)
         .into_iter()
@@ -136,6 +146,148 @@ fn file_tool_exchange_number(body: &Value) -> usize {
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
         .count()
         + usize::from(!current_turn_has_tool_result(body))
+}
+
+fn has_tool_definition(body: &Value, expected_name: &str) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                == Some(expected_name)
+        })
+}
+
+fn delegate_task_tool_response(exchange_number: usize) -> String {
+    let proposal = json!({
+        "id": format!("delegate-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": format!("call-delegate-{exchange_number}"),
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_task",
+                        "arguments": "{\"title\":\"Offline child\",\"task\":\"Return one final answer.\"}"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": format!("delegate-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
+fn parallel_delegate_task_tool_response(exchange_number: usize) -> String {
+    delegate_tool_response(
+        exchange_number,
+        &[
+            ("Offline child A", "Return child A result."),
+            ("Offline child B", "Return child B result."),
+        ],
+    )
+}
+
+fn blocking_delegate_task_tool_response(exchange_number: usize) -> String {
+    delegate_tool_response(
+        exchange_number,
+        &[("Interrupted child", "BLOCK_FOR_RESTART")],
+    )
+}
+
+fn delegate_tool_response(exchange_number: usize, tasks: &[(&str, &str)]) -> String {
+    let tool_calls = tasks
+        .iter()
+        .enumerate()
+        .map(|(index, (title, task))| {
+            json!({
+                "index": index,
+                "id": format!("call-delegate-{exchange_number}-{index}"),
+                "type": "function",
+                "function": {
+                    "name": "delegate_task",
+                    "arguments": serde_json::to_string(&json!({
+                        "title": title,
+                        "task": task,
+                    })).expect("serialize delegate arguments")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let proposal = json!({
+        "id": format!("delegate-batch-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": { "role": "assistant", "tool_calls": tool_calls },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": format!("delegate-batch-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
+fn directory_list_tool_response(exchange_number: usize) -> String {
+    let proposal = json!({
+        "id": format!("tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": format!("call-list-directory-{exchange_number}"),
+                    "type": "function",
+                    "function": {
+                        "name": "list_directory",
+                        "arguments": "{\"path\":\".\"}"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": format!("tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
 fn latest_case(body: &str) -> &'static str {
@@ -147,6 +299,9 @@ fn latest_case(body: &str) -> &'static str {
         "CANCEL_CASE",
         "REPLACEMENT_CASE",
         "FILE_REFERENCE_CASE",
+        "DELEGATE_CASE",
+        "DELEGATE_PARALLEL_CASE",
+        "DELEGATE_BLOCK_CASE",
     ]
     .into_iter()
     .filter_map(|marker| body.rfind(marker).map(|position| (position, marker)))
@@ -244,24 +399,15 @@ pub struct HostProcess {
 
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, false, false)
-    }
-
-    pub fn start_unrestricted(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, false, true)
+        Self::start_with_options(runtime_home, false)
     }
 
     #[cfg(feature = "web-demo")]
     pub fn start_web_demo(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, true, false)
+        Self::start_with_options(runtime_home, true)
     }
 
-    #[cfg(feature = "web-demo")]
-    pub fn start_unrestricted_web_demo(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, true, true)
-    }
-
-    fn start_with_options(runtime_home: &Path, web_demo: bool, unrestricted_tools: bool) -> Self {
+    fn start_with_options(runtime_home: &Path, web_demo: bool) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
         command
             .arg("serve")
@@ -272,9 +418,6 @@ impl HostProcess {
         #[cfg(feature = "web-demo")]
         if web_demo {
             command.arg("--web-demo");
-        }
-        if unrestricted_tools {
-            command.arg("--unsafe-unrestricted-local-tools");
         }
         #[cfg(not(feature = "web-demo"))]
         let _ = web_demo;
@@ -363,6 +506,18 @@ impl Client {
             "payload": { "session_id": session_id }
         }));
         assert_eq!(result["scope"], "conversation_snapshot");
+        result["payload"]["conversation"].clone()
+    }
+
+    pub fn child_conversation(&mut self, session_id: &str, child_task_id: &str) -> Value {
+        let result = self.request(json!({
+            "scope": "child_task_conversation_snapshot",
+            "payload": {
+                "session_id": session_id,
+                "child_task_id": child_task_id
+            }
+        }));
+        assert_eq!(result["scope"], "child_task_conversation_snapshot");
         result["payload"]["conversation"].clone()
     }
 

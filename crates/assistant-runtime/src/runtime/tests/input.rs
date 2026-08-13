@@ -1,7 +1,8 @@
 use super::*;
 
 use assistant_protocol::{
-    CancelQueuedInputRequest, IdempotencyKey, RetryRunRequest, SubmitInputRequest,
+    AgentVariant, ApprovalMode, CancelQueuedInputRequest, IdempotencyKey, RetryRunRequest,
+    SetSessionApprovalModeRequest, SubmitInputRequest,
 };
 
 #[tokio::test]
@@ -23,6 +24,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
     let key = IdempotencyKey::new("submit-1").expect("key");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            variant: AgentVariant::Plan,
             session_id: session.session.session_id.clone(),
             message: "first payload".to_owned(),
             attachment_ids: Vec::new(),
@@ -32,6 +34,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .expect("first submit");
     let repeated = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "different payload is ignored for the same key".to_owned(),
             attachment_ids: Vec::new(),
@@ -41,6 +44,18 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .expect("idempotent retry");
     assert_eq!(repeated.input_id, first.input_id);
     assert_eq!(repeated.run.run_id, first.run.run_id);
+    assert_eq!(repeated.run.variant, AgentVariant::Plan);
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session.session_id.clone(),
+            })
+            .expect("session summary")
+            .session
+            .current_variant,
+        AgentVariant::Plan,
+        "a duplicate key must not apply the repeated request variant"
+    );
     assert_eq!(
         wait_for_terminal(&runtime, &session.session.session_id, &first.run.run_id)
             .await
@@ -52,6 +67,14 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .await
         .expect("conversation");
     assert_eq!(conversation.messages.len(), 2);
+    let ConversationMessage::User(user) = &conversation.messages[0] else {
+        panic!("first conversation message must be user")
+    };
+    assert!(matches!(user.parts[0], UserPart::Text(_)));
+    let UserPart::Injected(injected) = &user.parts[1] else {
+        panic!("variant injection must follow user-visible parts")
+    };
+    assert_eq!(injected.text, crate::agent_variant::PLAN_INJECTION_V1);
 }
 
 #[tokio::test]
@@ -63,8 +86,10 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .create_session(CreateSessionRequest::default())
         .await
         .expect("session");
+    set_auto_approval(&runtime, &session.session.session_id).await;
     let active = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "active".to_owned(),
             attachment_ids: Vec::new(),
@@ -77,6 +102,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .expect("tool entered");
     let queued = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "queued".to_owned(),
             attachment_ids: Vec::new(),
@@ -152,8 +178,10 @@ async fn same_session_inputs_execute_in_acceptance_order() {
         .create_session(CreateSessionRequest::default())
         .await
         .expect("session");
+    set_auto_approval(&runtime, &session.session.session_id).await;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
@@ -166,6 +194,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
         .expect("first entered");
     let second = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
@@ -242,6 +271,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         Arc::new(StaticModelFactory::new(model)),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     runtime
         .reload_config(ReloadConfigRequest::default())
@@ -258,6 +288,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .expect("remove config");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "retry me".to_owned(),
             attachment_ids: Vec::new(),
@@ -284,6 +315,13 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .reload_config(ReloadConfigRequest::default())
         .await
         .expect("restore config");
+    runtime
+        .set_session_approval_mode(SetSessionApprovalModeRequest {
+            session_id: session.session.session_id.clone(),
+            approval_mode: ApprovalMode::Auto,
+        })
+        .await
+        .expect("change approval mode");
     let retry = runtime
         .retry_run(RetryRunRequest {
             session_id: session.session.session_id.clone(),
@@ -293,6 +331,8 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .expect("retry");
     assert_eq!(retry.run.input_id, first.input_id);
     assert_eq!(retry.run.attempt, 2);
+    assert_eq!(retry.run.variant, AgentVariant::Build);
+    assert_eq!(retry.run.approval_mode, ApprovalMode::Auto);
     assert_eq!(
         wait_for_terminal(&runtime, &session.session.session_id, &retry.run.run_id)
             .await

@@ -51,6 +51,8 @@ impl AssistantRuntime {
         let outcome = tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(ModelError::Cancelled),
+            // 连接验证是一次显式、最小且无工具的探测，仍复用 request timeout 作为
+            // 整体上限；正式模型流由 Transport 将同一配置解释为逐 chunk 空闲上限。
             result = tokio::time::timeout(compiled.request_timeout, validation) => {
                 match result {
                     Ok(result) => result,

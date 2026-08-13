@@ -2,9 +2,10 @@ use super::*;
 
 use crate::StagedAttachmentUpload;
 use assistant_protocol::{
-    ArchiveSessionRequest, IdempotencyKey, ListAttachmentsRequest, ListRunsRequest,
-    ReenterFromUserMessageRequest, RestoreSessionRequest, SessionLifecycle, SessionListFilter,
-    SetSessionModelRequest,
+    AgentVariant, ApprovalMode, ArchiveSessionRequest, IdempotencyKey, ListAttachmentsRequest,
+    ListRunsRequest, ReenterFromUserMessageRequest, RestoreSessionRequest, SessionLifecycle,
+    SessionListFilter, SetSessionApprovalModeRequest, SetSessionModelRequest,
+    SetSessionVariantRequest,
 };
 
 #[tokio::test]
@@ -61,6 +62,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message: "not allowed".to_owned(),
                 attachment_ids: Vec::new(),
@@ -148,6 +150,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
     let session_id = created.session.session_id;
     let active = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "active input".to_owned(),
             attachment_ids: Vec::new(),
@@ -155,9 +158,45 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
         })
         .await
         .expect("active run");
+    let pending = wait_for_pending_approval(&runtime, &session_id).await;
+    runtime
+        .decide_approval(assistant_protocol::DecideApprovalRequest {
+            session_id: session_id.clone(),
+            approval_id: pending.approval_id,
+            decision: assistant_protocol::ApprovalDecision::AllowOnce,
+        })
+        .await
+        .expect("allow the active tool once");
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
         .expect("tool entered");
+
+    let variant = runtime
+        .set_session_variant(SetSessionVariantRequest {
+            session_id: session_id.clone(),
+            variant: AgentVariant::Plan,
+        })
+        .await
+        .expect("variant changes during an active run");
+    assert_eq!(variant.session.current_variant, AgentVariant::Plan);
+    let approval = runtime
+        .set_session_approval_mode(SetSessionApprovalModeRequest {
+            session_id: session_id.clone(),
+            approval_mode: ApprovalMode::Auto,
+        })
+        .await
+        .expect("approval mode changes during an active run");
+    assert_eq!(approval.session.approval_mode, ApprovalMode::Auto);
+    let frozen = runtime
+        .get_run(GetRunRequest {
+            session_id: session_id.clone(),
+            run_id: active.run.run_id.clone(),
+        })
+        .await
+        .expect("active run snapshot")
+        .run;
+    assert_eq!(frozen.variant, AgentVariant::Build);
+    assert_eq!(frozen.approval_mode, ApprovalMode::Ask);
 
     assert!(matches!(
         runtime
@@ -179,6 +218,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
     assert!(matches!(
         runtime
             .reenter_from_user_message(ReenterFromUserMessageRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message_id: assistant_protocol::MessageId::new("unknown").expect("message id"),
                 message: "replacement".to_owned(),
@@ -247,6 +287,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .attachment;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "first question".to_owned(),
             attachment_ids: vec![old_attachment.attachment_id.clone()],
@@ -257,6 +298,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
     let second = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "second question".to_owned(),
             attachment_ids: Vec::new(),
@@ -280,6 +322,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
 
     let replacement = runtime
         .reenter_from_user_message(ReenterFromUserMessageRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message_id: assistant_protocol::MessageId::new(target.as_str()).expect("message id"),
             message: "replacement question".to_owned(),
@@ -290,6 +333,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .expect("replace history");
     let repeated = runtime
         .reenter_from_user_message(ReenterFromUserMessageRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message_id: assistant_protocol::MessageId::new("already-removed").expect("message id"),
             message: "different retry payload is ignored".to_owned(),

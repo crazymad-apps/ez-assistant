@@ -13,8 +13,10 @@
 - 公共不变量使用受控构造并覆盖序列化 round-trip 测试。
 - `ConversationSnapshot` 是 ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果
   顺序的唯一校验入口；Context、Provider 和 Harness 只能复用，不能各自实现。
-- `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存
-  策略、模型或 usage。
+- `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存策略；
+  生成摘要的模型身份、摘要请求自身的 usage 和被压缩历史的累计 usage 分字段保存。
+- `UserPart::Injected` 可承载 Runtime 已确定且需要持久重放的变体指令或 continuation 锚点；
+  它不是用户正文，但必须随规范 User Message 持久化，不能在会话重建时重新猜测生成。
 - `UserPart::FileReferences` 是持久化的用户可见 Part，只保存原始文件名与
   Agent 稳定可读路径；不包含应用层 Attachment ID、文件正文、Base64 或解析结果。
 

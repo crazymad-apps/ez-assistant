@@ -12,7 +12,6 @@ use agent_model::{
     GenerationConfig, ModelCallContext, ModelCapabilities, ModelError, ModelRequest, ModelService,
     ModelStreamFuture, ModelTransportErrorKind, ReasoningConfig, SystemPromptSnapshot,
 };
-use agent_sdk::AllowAllAuthorizer;
 use agent_testkit::{ModelScript, OrderLog, ScriptedModelService, ScriptedTool, message_events};
 use agent_tools::{
     ToolOutputChannel as AgentToolOutputChannel, ToolOutputChunk, ToolRegistry, ToolSetSnapshot,
@@ -22,8 +21,9 @@ use agent_types::{
     PartId, ProviderId, TextPart, ToolCall, ToolCallId, ToolChoice, ToolName, UserPart,
 };
 use assistant_protocol::{
-    ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    RunId, ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
+    ApprovalSnapshot, ConnectionValidationFailure, ConnectionValidationFailureKind,
+    ConnectionValidationOutcome, ListPendingApprovalsRequest, RunId, SetSessionApprovalModeRequest,
+    ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
 };
 use serde_json::json;
 use tokio::sync::{Barrier, Notify, broadcast::error::RecvError};
@@ -33,10 +33,12 @@ use super::connection_validation::{
 };
 use super::*;
 use crate::{
-    ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    ModelServiceFactoryError, ModelServiceFactoryRequest, PreparedSessionEnvironment,
-    RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
-    RuntimeConfigSource, SessionEnvironmentFactoryError, SessionExecutionEnvironment,
+    ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
+    ChildTaskWorkspaceLease, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
+    ConfigSourceLoad, ModelServiceFactoryError, ModelServiceFactoryRequest,
+    PreparedSessionEnvironment, RunToolBundle, RunToolFactory, RunToolFactoryError,
+    RunToolFactoryErrorKind, RuntimeConfigSource, SessionEnvironmentFactoryError,
+    SessionExecutionEnvironment,
 };
 
 const TEST_CONFIG: &str = r#"
@@ -59,15 +61,58 @@ struct StaticRunToolFactory {
     tools: ToolSetSnapshot,
 }
 
+#[derive(Default)]
+struct TestChildWorkspaceFactory {
+    released_paths: Arc<Mutex<Vec<String>>>,
+}
+
+struct TestChildWorkspaceLease {
+    path: String,
+    directory: Option<tempfile::TempDir>,
+    released_paths: Arc<Mutex<Vec<String>>>,
+}
+
+impl ChildTaskWorkspaceLease for TestChildWorkspaceLease {
+    fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl Drop for TestChildWorkspaceLease {
+    fn drop(&mut self) {
+        // 先释放 TempDir，再记录已清理路径，使测试观察到的状态与产品 lease 一致。
+        drop(self.directory.take());
+        self.released_paths
+            .lock()
+            .expect("released path log")
+            .push(self.path.clone());
+    }
+}
+
+impl ChildTaskWorkspaceFactory for TestChildWorkspaceFactory {
+    fn create<'a>(
+        &'a self,
+        _child_task_id: &'a assistant_protocol::ChildTaskId,
+    ) -> ChildTaskWorkspaceFuture<'a> {
+        let released_paths = self.released_paths.clone();
+        Box::pin(async move {
+            let directory = tempfile::tempdir().map_err(ChildTaskWorkspaceError::with_source)?;
+            let path = directory.path().to_string_lossy().into_owned();
+            Ok(Box::new(TestChildWorkspaceLease {
+                path,
+                directory: Some(directory),
+                released_paths,
+            }) as Box<dyn ChildTaskWorkspaceLease>)
+        })
+    }
+}
+
 impl RunToolFactory for StaticRunToolFactory {
     fn compile(
         &self,
         _environment: &SessionExecutionEnvironment,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
-        Ok(RunToolBundle::new(
-            self.tools.clone(),
-            Arc::new(AllowAllAuthorizer),
-        ))
+        Ok(RunToolBundle::new(self.tools.clone(), Vec::new()))
     }
 }
 
@@ -382,6 +427,7 @@ fn runtime_with_run_tool_factory(
         Arc::new(StaticModelFactory::new(model)),
         Arc::new(StaticSystemPromptFactory),
         run_tool_factory,
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     runtime
         .config_registry
@@ -428,6 +474,7 @@ fn runtime_with_factories_and_config(
         model_factory,
         system_prompt_factory,
         static_run_tool_factory(tools),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     runtime
         .config_registry
@@ -446,10 +493,35 @@ async fn runtime_with_store(
         Arc::new(StaticModelFactory::new(model)),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
         store,
+        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
     )
     .await
     .expect("open test runtime");
+    runtime
+        .config_registry
+        .replace_document_for_test(TEST_CONFIG);
+    runtime
+}
+
+async fn runtime_with_store_and_child_workspaces(
+    model: Arc<dyn ModelService>,
+    store: Arc<dyn RuntimeStore>,
+    workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
+) -> AssistantRuntime {
+    let runtime = AssistantRuntime::open(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("non-zero")),
+        Arc::new(MissingConfigSource),
+        Arc::new(StaticModelFactory::new(model)),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        workspace_factory,
+        store,
+        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+    )
+    .await
+    .expect("open child-capable test runtime");
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
@@ -566,12 +638,47 @@ async fn wait_for_terminal(
     .expect("run reaches terminal state")
 }
 
+async fn set_auto_approval(runtime: &AssistantRuntime, session_id: &SessionId) {
+    runtime
+        .set_session_approval_mode(SetSessionApprovalModeRequest {
+            session_id: session_id.clone(),
+            approval_mode: assistant_protocol::ApprovalMode::Auto,
+        })
+        .await
+        .expect("set automatic approval mode");
+}
+
+async fn wait_for_pending_approval(
+    runtime: &AssistantRuntime,
+    session_id: &SessionId,
+) -> ApprovalSnapshot {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let mut approvals = runtime
+                .list_pending_approvals(ListPendingApprovalsRequest {
+                    session_id: session_id.clone(),
+                })
+                .expect("list pending approvals")
+                .approvals;
+            if let Some(approval) = approvals.pop() {
+                return approval;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval becomes pending")
+}
+
+mod approval;
 mod attachment;
 mod concurrency;
 mod config;
 mod connection_validation;
+mod delegation;
 mod failures;
 mod input;
+mod permission;
 mod runs;
 mod session_management;
 mod sessions;

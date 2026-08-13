@@ -179,6 +179,15 @@ pub struct ContextSummaryMessage {
     pub id: MessageId,
     /// 摘要正文。
     pub text: String,
+    /// 生成摘要的模型；旧正文没有该字段时保持为空以兼容读取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::ModelIdentity>,
+    /// 摘要模型调用的实际用量；它属于本次模型调用，但不参与窗口预检。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::TokenUsage>,
+    /// 被本摘要替换掉的历史模型调用累计用量；供 UI 恢复总量，不参与窗口预检。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_usage: Option<crate::TokenUsage>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -523,6 +532,9 @@ mod tests {
         let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
             id: id("summary_1"),
             text: "The user selected the local-first architecture.".to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
         });
         let json = serde_json::to_string(&message).expect("serialize context summary");
         assert!(json.contains(r#""role":"context_summary""#));

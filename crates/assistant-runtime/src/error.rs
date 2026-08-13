@@ -2,8 +2,8 @@
 
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
-    AttachmentId, InputId, ModelKey, RunId, RuntimeErrorCode, RuntimeErrorInfo, RuntimeLifecycle,
-    SessionId, WorkspaceId,
+    ApprovalId, AttachmentId, ChildTaskId, InputId, ModelKey, RunId, RuntimeErrorCode,
+    RuntimeErrorInfo, RuntimeLifecycle, SessionId, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -51,6 +51,11 @@ pub enum RuntimeError {
         session_id: SessionId,
         /// 未找到的 Run。
         run_id: RunId,
+    },
+    #[error("child task `{child_task_id}` was not found in session `{session_id}`")]
+    ChildTaskNotFound {
+        session_id: SessionId,
+        child_task_id: ChildTaskId,
     },
     #[error("input `{input_id}` was not found in session `{session_id}`")]
     InputNotFound {
@@ -125,6 +130,18 @@ pub enum RuntimeError {
         session_id: SessionId,
         attachment_id: AttachmentId,
     },
+    #[error("approval `{approval_id}` was not found")]
+    ApprovalNotFound { approval_id: ApprovalId },
+    #[error("approval `{approval_id}` is no longer pending")]
+    ApprovalExpired { approval_id: ApprovalId },
+    #[error("the requested permission scope is unavailable")]
+    PermissionScopeUnavailable,
+    #[error("permission file is invalid")]
+    PermissionFileInvalid,
+    #[error("permission file changed during update")]
+    PermissionFileConflict,
+    #[error("permission rule could not be persisted")]
+    PermissionPersistenceFailed,
     /// Run Agent 构造失败，UserMessage 尚未写入。
     #[error("run agent could not be created")]
     AgentBuildFailed {
@@ -176,6 +193,10 @@ impl RuntimeError {
             Self::RunNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::RunNotFound, "run was not found")
             }
+            Self::ChildTaskNotFound { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ChildTaskNotFound,
+                "child task was not found",
+            ),
             Self::InputNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::InputNotFound, "input was not found")
             }
@@ -231,6 +252,29 @@ impl RuntimeError {
             Self::AttachmentUnavailable { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::AttachmentUnavailable,
                 "attachment is unavailable",
+            ),
+            Self::ApprovalNotFound { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::ApprovalNotFound, "approval was not found")
+            }
+            Self::ApprovalExpired { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ApprovalExpired,
+                "approval is no longer pending",
+            ),
+            Self::PermissionScopeUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PermissionScopeUnavailable,
+                "permission scope is unavailable",
+            ),
+            Self::PermissionFileInvalid => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PermissionFileInvalid,
+                "permission file is invalid",
+            ),
+            Self::PermissionFileConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PermissionFileConflict,
+                "permission file changed during update",
+            ),
+            Self::PermissionPersistenceFailed => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PermissionPersistenceFailed,
+                "permission rule could not be persisted",
             ),
             Self::InternalStateUnavailable { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,

@@ -18,6 +18,8 @@ pub enum RuntimeErrorCode {
     SessionNotIdle,
     /// 指定 Run 不存在。
     RunNotFound,
+    /// 指定子任务不存在于目标 Session。
+    ChildTaskNotFound,
     /// 指定持久化输入不存在。
     InputNotFound,
     /// 指定 Run 的状态不允许创建新的执行尝试。
@@ -38,6 +40,12 @@ pub enum RuntimeErrorCode {
     ModelBuildFailed,
     /// 模型调用已经开始，但本次 Provider Turn 最终失败。
     ModelExecutionFailed,
+    /// Runtime 无法完成一次自动上下文压缩或达到压缩恢复上限。
+    ContextCompactionFailed,
+    /// 一项受 Runtime 限时控制的操作已经超时。
+    Timeout,
+    /// 一项可独立取消的操作已经完成取消收敛。
+    Cancelled,
     /// 指定 Workspace 不存在。
     WorkspaceNotFound,
     /// 指定 Workspace 已移除，不能绑定新 Session。
@@ -52,6 +60,17 @@ pub enum RuntimeErrorCode {
     AttachmentTooLarge,
     /// 上传请求、文件名或 multipart 结构无效。
     AttachmentUploadInvalid,
+    /// 权限文件内容无法被当前 schema 完整接受。
+    PermissionFileInvalid,
+    /// 权限文件在修改期间发生 revision 冲突。
+    PermissionFileConflict,
+    /// 显式权限重载无法完成。
+    PermissionReloadFailed,
+    /// Runtime 无法持久化一条权限规则。
+    PermissionPersistenceFailed,
+    ApprovalNotFound,
+    ApprovalExpired,
+    PermissionScopeUnavailable,
     /// 不应向客户端暴露内部细节的故障。
     Internal,
 }
@@ -109,6 +128,7 @@ mod tests {
             (RuntimeErrorCode::SessionArchived, "session_archived"),
             (RuntimeErrorCode::SessionNotIdle, "session_not_idle"),
             (RuntimeErrorCode::RunNotFound, "run_not_found"),
+            (RuntimeErrorCode::ChildTaskNotFound, "child_task_not_found"),
             (RuntimeErrorCode::InputNotFound, "input_not_found"),
             (RuntimeErrorCode::RunNotRetryable, "run_not_retryable"),
             (RuntimeErrorCode::StorageUnavailable, "storage_unavailable"),
@@ -128,6 +148,12 @@ mod tests {
                 RuntimeErrorCode::ModelExecutionFailed,
                 "model_execution_failed",
             ),
+            (
+                RuntimeErrorCode::ContextCompactionFailed,
+                "context_compaction_failed",
+            ),
+            (RuntimeErrorCode::Timeout, "timeout"),
+            (RuntimeErrorCode::Cancelled, "cancelled"),
             (RuntimeErrorCode::WorkspaceNotFound, "workspace_not_found"),
             (RuntimeErrorCode::WorkspaceRemoved, "workspace_removed"),
             (
@@ -143,6 +169,28 @@ mod tests {
             (
                 RuntimeErrorCode::AttachmentUploadInvalid,
                 "attachment_upload_invalid",
+            ),
+            (
+                RuntimeErrorCode::PermissionFileInvalid,
+                "permission_file_invalid",
+            ),
+            (
+                RuntimeErrorCode::PermissionFileConflict,
+                "permission_file_conflict",
+            ),
+            (
+                RuntimeErrorCode::PermissionReloadFailed,
+                "permission_reload_failed",
+            ),
+            (
+                RuntimeErrorCode::PermissionPersistenceFailed,
+                "permission_persistence_failed",
+            ),
+            (RuntimeErrorCode::ApprovalNotFound, "approval_not_found"),
+            (RuntimeErrorCode::ApprovalExpired, "approval_expired"),
+            (
+                RuntimeErrorCode::PermissionScopeUnavailable,
+                "permission_scope_unavailable",
             ),
             (RuntimeErrorCode::Internal, "internal"),
         ];

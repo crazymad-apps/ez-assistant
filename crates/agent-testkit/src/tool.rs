@@ -5,14 +5,19 @@
 //! 片段（验证引擎的 `ToolOutput` 事件桥接）。每次执行写入共享
 //! [`OrderLog`](crate::OrderLog)。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use agent_tools::{
-    Tool, ToolContext, ToolError, ToolExecuteFuture, ToolOutputChunk, ToolResolution,
+    Tool, ToolContext, ToolError, ToolExecuteFuture, ToolExecutionMode, ToolOutputChunk,
+    ToolResolution,
 };
 use agent_types::ToolName;
 use serde_json::Value;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::OrderLog;
 use crate::order::LogEntry;
@@ -28,12 +33,65 @@ enum ToolBehavior {
     Hang,
 }
 
+/// 确定性工具执行闸门，用于证明多个 execution future 是否真正重叠。
+///
+/// 每个装配该闸门的工具进入 `execute` 后先增加计数，再挂起到 [`release`](Self::release)。
+/// 测试可以等待指定进入数，不依赖 wall clock 或 sleep。
+#[derive(Clone, Default)]
+pub struct ToolExecutionGate {
+    entered: Arc<AtomicUsize>,
+    changed: Arc<Notify>,
+    released: CancellationToken,
+}
+
+impl ToolExecutionGate {
+    /// 创建未放行的执行闸门。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前已经进入闸门的工具数量。
+    pub fn entered(&self) -> usize {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    /// 等到至少 `count` 个工具进入；已达到时立即返回。
+    pub async fn wait_for_entered(&self, count: usize) {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.entered() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// 放行当前和后续进入的工具；幂等。
+    pub fn release(&self) {
+        self.released.cancel();
+    }
+
+    async fn enter(&self, cancellation: &CancellationToken) -> bool {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            () = self.released.cancelled() => true,
+        }
+    }
+}
+
 /// 脚本化的确定性 Fake 工具。
 #[derive(Clone)]
 pub struct ScriptedTool {
     name: ToolName,
     description: String,
     behavior: ToolBehavior,
+    execution_mode: ToolExecutionMode,
+    execution_gate: Option<ToolExecutionGate>,
     output_chunks: Vec<ToolOutputChunk>,
     entered: Option<Arc<Notify>>,
     cleanup_completed: Option<Arc<Notify>>,
@@ -63,6 +121,8 @@ impl ScriptedTool {
             name: ToolName::new(name).expect("valid tool name"),
             description: format!("Scripted tool `{name}`"),
             behavior,
+            execution_mode: ToolExecutionMode::Serial,
+            execution_gate: None,
             output_chunks: vec![],
             entered: None,
             cleanup_completed: None,
@@ -75,6 +135,18 @@ impl ScriptedTool {
     /// 覆盖默认的工具描述。
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
+        self
+    }
+
+    /// 覆盖注册时冻结的内部执行属性。
+    pub fn with_execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
+    /// 进入执行后挂起在确定性闸门，直到测试放行或执行被取消。
+    pub fn with_execution_gate(mut self, gate: ToolExecutionGate) -> Self {
+        self.execution_gate = Some(gate);
         self
     }
 
@@ -124,6 +196,10 @@ impl Tool for ScriptedTool {
         self.description.clone()
     }
 
+    fn execution_mode(&self) -> ToolExecutionMode {
+        self.execution_mode
+    }
+
     fn resolve(
         &self,
         input: Self::Input,
@@ -144,6 +220,11 @@ impl Tool for ScriptedTool {
             });
             if let Some(entered) = &self.entered {
                 entered.notify_one();
+            }
+            if let Some(gate) = &self.execution_gate
+                && !gate.enter(&context.cancellation).await
+            {
+                return Err(ToolError::execution("gated tool interrupted"));
             }
             for chunk in &self.output_chunks {
                 (context.output_sink)(chunk.clone());

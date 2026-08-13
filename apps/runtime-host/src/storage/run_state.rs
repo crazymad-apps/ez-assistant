@@ -11,6 +11,7 @@ use super::{
     StorageEngine, StorageResult,
     append_effect::{AppendPurpose, apply_run_settlement},
     conflict, database_write_error, internal_error, invalid_data_with_source,
+    mode::{approval_mode_value, parse_agent_variant},
     recovery::AppendRequest,
 };
 
@@ -44,7 +45,16 @@ impl StorageEngine {
         if next != source_attempt + 1 {
             return Err(conflict("only the latest run can be retried"));
         }
-        self.connection.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, ?4, 'accepted', 0, NULL, NULL, ?5, NULL, NULL)", params![attempt.run_id.as_str(), attempt.session_id.as_str(), input_id, next, attempt.created_at_ms]).map_err(|source| database_write_error("run attempt could not be created", source))?;
+        let agent_variant = self
+            .connection
+            .query_row(
+                "SELECT agent_variant FROM inputs WHERE input_id = ?1",
+                [&input_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|source| internal_error("run input variant could not be queried", source))?;
+        let agent_variant = parse_agent_variant(&agent_variant)?;
+        self.connection.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, ?4, 'accepted', 0, ?5, NULL, NULL, ?6, NULL, NULL)", params![attempt.run_id.as_str(), attempt.session_id.as_str(), input_id, next, approval_mode_value(attempt.approval_mode), attempt.created_at_ms]).map_err(|source| database_write_error("run attempt could not be created", source))?;
         Ok(StoredRun {
             run_id: attempt.run_id,
             session_id: attempt.session_id,
@@ -53,6 +63,8 @@ impl StorageEngine {
             attempt: u32::try_from(next)
                 .map_err(|source| internal_error("run attempt exceeds runtime range", source))?,
             status: RunStatus::Accepted,
+            agent_variant,
+            approval_mode: attempt.approval_mode,
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),

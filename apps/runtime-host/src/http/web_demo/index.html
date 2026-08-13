@@ -81,6 +81,24 @@
             <button id="cancel-run" class="danger" disabled>取消活动 Run</button>
           </div>
         </div>
+        <div class="session-controls" aria-label="Session 执行设置">
+          <label>
+            Agent 变体
+            <select id="agent-variant" disabled>
+              <option value="build">Build</option>
+              <option value="plan">Plan</option>
+            </select>
+          </label>
+          <label>
+            审批模式
+            <select id="approval-mode" disabled>
+              <option value="ask">Ask</option>
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+          <button id="reload-permissions" class="secondary" disabled>重载权限规则</button>
+          <small id="permission-status">尚未重载</small>
+        </div>
         <div class="token-usage" aria-live="polite">
           <div class="token-usage-heading">
             <span>Token Usage</span>
@@ -93,8 +111,37 @@
             <div><dt>Cached</dt><dd id="usage-cached">—</dd></div>
           </dl>
         </div>
+        <div class="run-usage-aggregate" aria-live="polite">
+          <span>Run 累计用量</span>
+          <dl>
+            <div><dt>Parent</dt><dd id="usage-parent-total">—</dd></div>
+            <div><dt>Children</dt><dd id="usage-child-total">—</dd></div>
+            <div><dt>Combined</dt><dd id="usage-combined-total">—</dd></div>
+            <div><dt>Cached</dt><dd id="usage-combined-cached">—</dd></div>
+          </dl>
+        </div>
+        <section class="child-tasks" aria-labelledby="child-task-heading">
+          <div class="section-title">
+            <div>
+              <h3 id="child-task-heading">子任务</h3>
+              <p>每个任务拥有独立 Conversation；事件丢失后从 Runtime 权威快照重建。</p>
+            </div>
+            <button id="refresh-child-tasks" class="secondary" disabled>刷新子任务</button>
+          </div>
+          <div id="child-task-list" class="child-task-list empty">当前父 Run 暂无子任务</div>
+        </section>
         <div id="message-list" class="message-list empty">请选择 Session 查看历史消息</div>
         <p id="conversation-status" class="conversation-status"></p>
+        <section class="approvals" aria-labelledby="approval-heading">
+          <div class="section-title">
+            <div>
+              <h3 id="approval-heading">待审批工具调用</h3>
+              <p>决定由 Runtime 原子消费；可用按钮完全来自审批快照。</p>
+            </div>
+            <button id="refresh-approvals" class="secondary" disabled>刷新审批</button>
+          </div>
+          <div id="approval-list" class="approval-list empty">当前没有待审批项</div>
+        </section>
         <div class="attachments">
           <div>
             <h3>附件</h3>
@@ -111,10 +158,15 @@
           用户输入
           <textarea id="message" rows="5" placeholder="输入一条用于验证 Runtime 的消息"></textarea>
         </label>
+        <div class="quick-inputs">
+          <button id="quick-plan" class="secondary" disabled>继续调整计划</button>
+          <button id="quick-build" class="secondary" disabled>开始实施</button>
+        </div>
         <button id="submit" disabled>提交消息</button>
       </section>
     </main>
 
+    <script src="/demo/child-tasks.js" defer></script>
     <script src="/demo/app.js" defer></script>
   </body>
 </html>

@@ -3,9 +3,8 @@
 ## 模块定位
 
 `crates/agent-context` 提供 Provider-neutral 的共享模型上下文能力。v0.3.0 中
-`agent-core` 是正式调用方，`runtime-harness` 是直接装配其余能力的临时验证调用方。
-它负责统一规则和可替换策略，不持有应用会话或业务 Run；正式
-`assistant-runtime` 的接入留待总体设计。
+`agent-core` 和 `assistant-runtime` 是正式调用方，`runtime-harness` 是直接装配其余能力的
+临时验证调用方。它负责统一规则和可替换策略，不持有应用会话或业务 Run。
 
 修改前必须阅读：
 
@@ -51,6 +50,9 @@
   仅清除派生 replacement 中旧 Assistant usage，不得修改原始历史。
 - `ContextLayout::build` 只做共享结构校验和原子分块；Rolling Summary 的
   `minimum_recent_user_turns` 只在 `partition` 时参与 head/tail 边界计算。
+- Runtime continuation 使用 `partition_for_continuation`：普通阈值压缩保留最近完整 User Turn；
+  Provider overflow 可压缩当前已经形成完整 Tool Exchange 的活动 Turn。若 replacement 会以
+  Assistant 继续执行，必须追加持久化的 Injected User continuation 锚点，维持规范 Turn 布局。
 - Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界。
 - 所有比例和策略配置在构造期校验；运行时错误使用稳定错误类型，不泄露 prompt、
   credential 或完整响应正文。

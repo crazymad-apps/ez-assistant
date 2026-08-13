@@ -3,15 +3,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_types::ConversationSnapshot;
-use assistant_protocol::{InputId, SessionId};
+use assistant_protocol::{ChildTaskId, InputId, SessionId};
 
 use crate::{
-    AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
-    NewAttachmentUpload, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingToolExchange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredRun, StoredRunSettlement,
-    StoredSession, StoredWorkspace, UserMessageCommit, WorkspaceRemoval,
-    storage::VolatileRuntimeStore,
+    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
+    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
+    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
+    RecoveredRuntime, RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredRun, StoredRunSettlement,
+    StoredSession, StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
 pub(super) struct FaultInjectingStore {
@@ -82,6 +84,58 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.create_session(session)
     }
 
+    fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
+        self.inner.create_child_task(task)
+    }
+
+    fn start_child_task(&self, start: ChildTaskStart) -> StoreFuture<'_, ()> {
+        self.inner.start_child_task(start)
+    }
+
+    fn begin_child_tool_exchange(&self, pending: PendingChildToolExchange) -> StoreFuture<'_, ()> {
+        self.inner.begin_child_tool_exchange(pending)
+    }
+
+    fn mark_child_tool_execution_started(
+        &self,
+        start: ChildToolExecutionStart,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.mark_child_tool_execution_started(start)
+    }
+
+    fn complete_child_tool_exchange(
+        &self,
+        completed: CompletedChildToolExchange,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.complete_child_tool_exchange(completed)
+    }
+
+    fn settle_child_task(&self, settlement: StoredChildTaskSettlement) -> StoreFuture<'_, ()> {
+        self.inner.settle_child_task(settlement)
+    }
+
+    fn request_child_task_cancellation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, StoredChildTask> {
+        self.inner
+            .request_child_task_cancellation(session_id, child_task_id)
+    }
+
+    fn load_child_conversation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, ConversationSnapshot> {
+        self.inner
+            .load_child_conversation(session_id, child_task_id)
+    }
+
+    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()> {
+        self.inner.replace_context(replacement)
+    }
+
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         self.inner.accept_input(input)
     }
@@ -104,6 +158,10 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()> {
         self.inner.begin_tool_exchange(pending)
+    }
+
+    fn mark_tool_execution_started(&self, start: ToolExecutionStart) -> StoreFuture<'_, ()> {
+        self.inner.mark_tool_execution_started(start)
     }
 
     fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()> {
@@ -133,6 +191,14 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()> {
         self.inner.set_session_model(change)
+    }
+
+    fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()> {
+        self.inner.set_session_variant(change)
+    }
+
+    fn set_session_approval_mode(&self, change: ApprovalModeChange) -> StoreFuture<'_, ()> {
+        self.inner.set_session_approval_mode(change)
     }
 
     fn rewrite_from_user(&self, rewrite: ConversationRewrite) -> StoreFuture<'_, RewriteResult> {

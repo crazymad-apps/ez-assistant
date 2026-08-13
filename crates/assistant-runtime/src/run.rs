@@ -7,16 +7,16 @@ mod supervisor;
 
 pub(crate) use model_diagnostics::{ModelFailureDiagnostics, RunModelDiagnostics};
 pub(crate) use recorder::RuntimeRecorder;
-pub(crate) use settlement::settle_run;
-pub(crate) use supervisor::supervise_run;
+pub(crate) use settlement::{settle_run, settle_run_with_error};
+pub(crate) use supervisor::observe_run_execution;
 
 use agent_types::{
     AssistantPart, ConversationMessage, ConversationSnapshot, FileReference, FileReferencesPart,
     MessageId, PartId, TextPart, UserMessage, UserPart,
 };
 use assistant_protocol::{
-    InputId, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeEvent, SessionId,
-    ToolActivitySnapshot,
+    AgentVariant, ApprovalMode, InputId, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo,
+    RuntimeEvent, SessionId, ToolActivitySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +31,8 @@ pub(crate) struct RunRecord {
     input_id: InputId,
     attempt: u32,
     status: RunStatus,
+    variant: AgentVariant,
+    approval_mode: ApprovalMode,
     cancel_requested: bool,
     reasoning: String,
     text: String,
@@ -45,6 +47,8 @@ impl RunRecord {
         session_id: SessionId,
         input_id: InputId,
         attempt: u32,
+        variant: AgentVariant,
+        approval_mode: ApprovalMode,
         message_ids: Vec<MessageId>,
     ) -> Self {
         Self {
@@ -53,6 +57,8 @@ impl RunRecord {
             input_id,
             attempt,
             status: RunStatus::Accepted,
+            variant,
+            approval_mode,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
@@ -69,6 +75,8 @@ impl RunRecord {
             input_id: run.input_id,
             attempt: run.attempt,
             status: run.status,
+            variant: run.agent_variant,
+            approval_mode: run.approval_mode,
             cancel_requested: run.cancel_requested,
             reasoning: String::new(),
             text: String::new(),
@@ -114,6 +122,8 @@ impl RunRecord {
             input_id: self.input_id.clone(),
             attempt: self.attempt,
             status: self.status,
+            variant: self.variant,
+            approval_mode: self.approval_mode,
             cancel_requested: self.cancel_requested,
             reasoning: self.reasoning.clone(),
             text: self.text.clone(),
@@ -204,6 +214,7 @@ pub(crate) fn allocate_run_id(state: &SessionState) -> RuntimeResult<RunId> {
 pub(crate) fn create_user_message(
     text: String,
     files: Vec<FileReference>,
+    variant: AgentVariant,
 ) -> RuntimeResult<UserMessage> {
     let message_id = allocate_message_id()?;
     let mut parts = vec![UserPart::Text(TextPart {
@@ -216,13 +227,18 @@ pub(crate) fn create_user_message(
             files,
         }));
     }
+    // 注入作为规范 Part 落盘；恢复和重试必须复用历史文本，不能按当前模板重算。
+    parts.push(UserPart::Injected(TextPart {
+        id: allocate_part_id()?,
+        text: crate::agent_variant::injection_text(variant).to_owned(),
+    }));
     Ok(UserMessage {
         id: message_id,
         parts,
     })
 }
 
-fn allocate_message_id() -> RuntimeResult<MessageId> {
+pub(crate) fn allocate_message_id() -> RuntimeResult<MessageId> {
     id::generate("m")
         .map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "message id random source",
@@ -234,7 +250,7 @@ fn allocate_message_id() -> RuntimeResult<MessageId> {
         })
 }
 
-fn allocate_part_id() -> RuntimeResult<PartId> {
+pub(crate) fn allocate_part_id() -> RuntimeResult<PartId> {
     id::generate("p")
         .map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "part id random source",

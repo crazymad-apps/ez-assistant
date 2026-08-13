@@ -246,6 +246,7 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
             reason,
             step,
             dropped_events,
+            ..
         } => format!(
             "agent.execution_compaction_required reason={reason:?} step={step} \
              dropped={dropped_events}"
@@ -260,7 +261,7 @@ pub(crate) fn format_outcome(outcome: &ExecutionOutcome) -> String {
         }
         ExecutionOutcome::Failed(error) => format!("failed error={error}"),
         ExecutionOutcome::Cancelled => "cancelled".to_owned(),
-        ExecutionOutcome::CompactionRequired { reason, step } => {
+        ExecutionOutcome::CompactionRequired { reason, step, .. } => {
             format!("compaction_required reason={reason:?} step={step}")
         }
     }

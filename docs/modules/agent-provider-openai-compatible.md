@@ -39,6 +39,9 @@
   `TurnFailed` 传播。
 - Transport 必须保留 Connect、Timeout、Interrupted 分类；429、408、425 与 5xx 提供
   provider-neutral 限流/暂时不可用事实和可解析的 Retry-After，不把分类先折成字符串。
+- 流式模型请求的 `request_timeout` 约束等待响应建立和相邻响应正文 chunk 的空闲时间，
+  每收到一个 chunk 都重新计时；不得把它配置为覆盖完整 SSE 生命周期的总时限。响应建立前
+  Timeout 可进入上层有限重试，响应建立后的空闲 Timeout 只能结束当前 Step，不透明重试。
 - Provider wire 观察位于 Transport 装饰器：记录编码后安全请求、允许的响应头、原始 chunks、
   EOF 和 TransportError，同时原样转发请求、分块、取消与错误。观察器不得写文件或改变结果。
 - wire body/chunk 在内存中保持原始 bytes，serde 使用 Base64 紧凑表示；相同规范请求与相同

@@ -25,7 +25,9 @@ use agent_types::{AssistantMessage, PartId, TokenUsage, ToolCall, ToolCallId};
 use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{ActiveGuardrailMode, CompactionReason, ExecutionError, GuardrailKind};
+use crate::{
+    ActiveGuardrailMode, CompactionReason, ExecutionConsumption, ExecutionError, GuardrailKind,
+};
 
 /// 事件通道容量；超出后新事件丢弃并计数。
 pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -131,6 +133,9 @@ pub enum AgentEvent {
         reason: CompactionReason,
         /// 阈值预检即将开始或 Provider Overflow 已经开始的 Model Step。
         step: u32,
+        /// 本段 execution 在交接前已经可靠消费的硬预算。
+        #[serde(default)]
+        consumption: ExecutionConsumption,
         /// 本次执行因背压或订阅断开丢弃的事件数。
         dropped_events: u64,
     },
@@ -347,6 +352,10 @@ mod tests {
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 2,
+                consumption: ExecutionConsumption {
+                    steps: 1,
+                    tool_calls: 1,
+                },
                 dropped_events: 1,
             },
         ];
@@ -401,6 +410,10 @@ mod tests {
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ProviderOverflow,
                 step: 3,
+                consumption: ExecutionConsumption {
+                    steps: 3,
+                    tool_calls: 2,
+                },
                 dropped_events: 0,
             },
         ];
@@ -499,6 +512,10 @@ mod tests {
         sender.send(AgentEvent::ExecutionCompactionRequired {
             reason: CompactionReason::ThresholdReached,
             step: 4,
+            consumption: ExecutionConsumption {
+                steps: 3,
+                tool_calls: 2,
+            },
             dropped_events: sender.dropped_events(),
         });
         drop(sender);
@@ -511,6 +528,10 @@ mod tests {
             Some(AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 4,
+                consumption: ExecutionConsumption {
+                    steps: 3,
+                    tool_calls: 2,
+                },
                 dropped_events: 1,
             })
         );

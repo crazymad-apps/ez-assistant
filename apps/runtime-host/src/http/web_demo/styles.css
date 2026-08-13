@@ -26,6 +26,8 @@ main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding-bottom:
 .section-title { align-items: center; justify-content: space-between; }
 .section-title p { margin-bottom: 0; }
 .grow { flex: 1; }
+.session-controls { display: grid; grid-template-columns: minmax(130px, 180px) minmax(130px, 180px) auto 1fr; align-items: end; gap: 12px; margin-top: 16px; padding: 14px; border: 1px solid #283246; border-radius: 11px; background: #0d1119; }
+.session-controls small { align-self: center; color: #8490a4; overflow-wrap: anywhere; }
 
 label { display: block; color: #aeb8c8; font-size: 13px; }
 input, textarea, select, button { font: inherit; }
@@ -60,8 +62,42 @@ button.danger { background: #a7434d; }
 .token-usage dt { color: #788397; font-size: 11px; }
 .token-usage dd { margin: 2px 0 0; color: #dce8ff; font: 600 15px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+.child-tasks { display: grid; gap: 12px; margin-top: 16px; padding: 14px; border: 1px solid #31415d; border-radius: 11px; background: #0d121c; }
+.child-tasks h3 { margin: 0 0 4px; font-size: 15px; }
+.child-tasks p { margin-bottom: 0; font-size: 12px; }
+.run-usage-aggregate { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; padding: 10px 12px; border: 1px solid #283246; border-radius: 9px; background: #101827; }
+.run-usage-aggregate > span { color: #9aabc5; font-size: 12px; font-weight: 700; }
+.run-usage-aggregate dl { display: grid; grid-template-columns: repeat(4, minmax(76px, 1fr)); gap: 7px; width: min(630px, 76%); margin: 0; }
+.run-usage-aggregate dl div { padding: 6px 9px; border-radius: 7px; background: #151f30; }
+.run-usage-aggregate dt { color: #78879d; font-size: 10px; }
+.run-usage-aggregate dd { margin: 2px 0 0; color: #dce8ff; font: 600 13px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.child-task-list { display: grid; gap: 9px; }
+.child-task-list.empty { color: #788397; font-size: 13px; }
+.child-task-item { overflow: hidden; border: 1px solid #2f3c53; border-radius: 10px; background: #101722; }
+.child-task-item[data-status="completed"] { border-color: #2d5949; }
+.child-task-item[data-status="failed"], .child-task-item[data-status="interrupted"] { border-color: #70424a; }
+.child-task-summary { display: flex; align-items: center; gap: 10px; padding: 10px 11px; }
+.child-task-toggle { min-width: 0; flex: 1; padding: 0; background: transparent; text-align: left; white-space: normal; }
+.child-task-toggle:hover:not(:disabled) { background: transparent; }
+.child-task-toggle strong, .child-task-toggle small { display: block; overflow-wrap: anywhere; }
+.child-task-toggle small { margin-top: 4px; color: #8490a4; }
+.child-task-actions { display: flex; gap: 7px; }
+.child-task-actions button { padding: 7px 10px; }
+.child-task-details { display: grid; gap: 9px; padding: 0 11px 11px; border-top: 1px solid #273348; }
+.child-task-usage { padding-top: 10px; color: #91a0b7; overflow-wrap: anywhere; }
+.child-message-list { display: flex; flex-direction: column; gap: 8px; max-height: 440px; padding: 10px; overflow-y: auto; border-radius: 8px; background: #090d14; }
+.child-message-list.empty { align-items: center; color: #788397; font-size: 12px; }
+.child-message { display: grid; gap: 5px; padding: 9px 10px; border: 1px solid #2b3547; border-radius: 8px; background: #151b27; white-space: pre-wrap; overflow-wrap: anywhere; }
+.child-message.user { margin-left: 14%; border-color: #376bb3; background: #1b3e6c; }
+.child-message.tool { margin-inline: 8%; background: #101620; color: #aab7ca; }
+.child-message strong { color: #91a0b7; font-size: 11px; text-transform: uppercase; }
+.child-message small { color: #8490a4; }
+.child-reasoning { max-height: none; margin: 0 0 5px; padding: 8px 9px; border-left: 3px solid #64748b; background: #0f172a; color: #cbd5e1; font: inherit; }
+.child-tool-output { max-height: 180px; margin: 5px 0 0; padding: 8px 9px; }
+
 .message-list { display: flex; flex-direction: column; gap: 12px; min-height: 220px; max-height: 560px; margin-top: 16px; padding: 16px; overflow-y: auto; border: 1px solid #283246; border-radius: 11px; background: #090c12; }
 .message-list.empty { align-items: center; justify-content: center; color: #788397; font-size: 14px; }
+.history-truncation { position: sticky; top: 0; z-index: 1; align-self: center; padding: 7px 10px; border: 1px solid #3b465a; border-radius: 999px; background: #151b27; color: #9eabc0; font-size: 12px; }
 .message-row { display: flex; width: 100%; }
 .message-row.user { justify-content: flex-end; }
 .message-row.assistant { justify-content: flex-start; }
@@ -81,6 +117,18 @@ button.danger { background: #a7434d; }
 .conversation-status { min-height: 20px; margin: 10px 0 0; color: #91a0b7; font-size: 13px; }
 .conversation-status.error { color: #ffb3ba; }
 .composer { margin-top: 12px; }
+.quick-inputs { display: flex; gap: 8px; margin: 10px 0; }
+.approvals { display: grid; gap: 10px; margin-top: 16px; padding: 14px; border: 1px solid #654f2c; border-radius: 11px; background: #16130d; }
+.approvals h3 { margin: 0 0 4px; font-size: 15px; }
+.approvals p { margin-bottom: 0; font-size: 12px; }
+.approval-list { display: grid; gap: 9px; }
+.approval-list.empty { color: #788397; font-size: 13px; }
+.approval-item { display: grid; gap: 8px; padding: 11px 12px; border: 1px solid #514127; border-radius: 9px; background: #11100d; }
+.approval-item strong, .approval-item small { overflow-wrap: anywhere; }
+.approval-item small { color: #a69a82; }
+.approval-facts { margin: 0; padding: 9px 10px; border: 1px solid #3d3527; background: #0c0b09; color: #d7c9aa; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.approval-actions button { padding: 8px 11px; }
 .attachments { display: grid; gap: 10px; margin-top: 16px; padding: 14px; border: 1px solid #283246; border-radius: 11px; background: #0d1119; }
 .attachments h3 { margin: 0 0 4px; font-size: 15px; }
 .attachments p { margin-bottom: 0; font-size: 12px; }
@@ -102,8 +150,14 @@ code { color: #bad1ff; }
   .row { align-items: stretch; flex-direction: column; }
   .connection, .workspaces, .sessions, .conversation { grid-column: auto; }
   .actions { width: 100%; flex-direction: column; }
+  .session-controls { grid-template-columns: 1fr; }
+  .quick-inputs { flex-direction: column; }
   .token-usage { align-items: stretch; flex-direction: column; }
   .token-usage dl { grid-template-columns: repeat(2, 1fr); width: 100%; }
+  .run-usage-aggregate { align-items: stretch; flex-direction: column; }
+  .run-usage-aggregate dl { grid-template-columns: repeat(2, 1fr); width: 100%; }
+  .child-task-summary { align-items: stretch; flex-direction: column; }
+  .child-task-actions button { width: 100%; }
   .message-card { max-width: 92%; }
   button { width: 100%; }
 }

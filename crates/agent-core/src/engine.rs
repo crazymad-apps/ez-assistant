@@ -18,38 +18,32 @@
 //!   达到阈值或 Provider 报 Context Overflow 时以 CompactionRequired 交回 Runtime，
 //!   Core 不在当前执行内压缩或重试。
 //! - 副作用前顺序：begin pending exchange → resolve whole batch → Guardrail →
-//!   逐个 valid invocation 独立过闸 → 工具执行；invalid item 不进入授权或执行。
-//!   整批 ToolResult 原子完成 exchange 后才进入下一轮。
+//!   valid invocation 独立过闸 → 工具执行；默认工具逐项串行，只有连续且显式
+//!   `ParallelEligible` 的调用组成并行组；invalid item 不进入授权或执行。
+//!   整批 ToolResult 仍按原顺序原子完成 exchange 后才进入下一轮。
 //! - 取消收敛：模型流内经 `ModelCallContext` 传播并在终态收敛点检查令牌、
 //!   授权等待经 `select!` race、工具执行等待 cancellation-aware dispatch 完成清理；
 //!   收敛前为批次内未结算调用补记 interrupted 错误 `ToolResult` 并落账，
 //!   journal 中 Tool Call/Result 始终配对。
 //! - 最终消息（无工具调用的完成 Turn）Core **不落账**，经完成事件交 Runtime。
 
-use std::{num::NonZeroU32, sync::Arc};
-
 use agent_context::ContextWindowDecision;
 use agent_model::{LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest};
-use agent_tools::{
-    Dispatcher, ResolvedBatchItemRef, ResolvedToolBatch, ToolContext, ToolOutputChunk,
-    ToolOutputSink,
-};
+use agent_tools::Dispatcher;
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
-    ToolCall, ToolCallId, ToolMessage, ToolResult, ToolResultContent, ToolResultStatus,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, ToolCall,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ActiveGuardrailMode, AgentEvent, BudgetKind, CompactionReason, ExchangeReceipt,
-    ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome, ExecutionSpec,
-    GuardrailKind, RecordError, ToolAuthorization, ToolCompletionStatus, event::AgentEventSender,
-    guardrail::GuardrailState, guardrail::GuardrailTrigger,
+    AgentEvent, BudgetKind, CompactionReason, ExecutionContext, ExecutionError, ExecutionInput,
+    ExecutionOutcome, ExecutionSpec, event::AgentEventSender, guardrail::GuardrailState,
 };
 
-/// 取消收敛时为未结算调用补记的模型可读错误文本。
-const INTERRUPTED_TEXT: &str = "interrupted: execution cancelled";
+mod tool_batch;
+
+use tool_batch::BatchEnd;
 
 /// 引擎状态机；由 [`crate::AgentExecution::start`] 内唯一的 tokio 任务驱动。
 pub(crate) struct Engine {
@@ -257,341 +251,6 @@ impl Engine {
         }
     }
 
-    /// 逐位置结算一个已整批 resolve 的 Tool Call 批次。
-    ///
-    /// 正常路径结算出与批次等长、同序的 `ToolResult` 列表；取消、预算到达或 Enforce
-    /// Guardrail 触发时直接收敛到终态（未结算调用已先行结算错误 `ToolResult`）。
-    async fn execute_batch(
-        &mut self,
-        exchange: &ExchangeReceipt,
-        calls: &[ToolCall],
-        resolved: &mut ResolvedToolBatch,
-    ) -> BatchEnd {
-        let mut results: Vec<ToolResult> = Vec::with_capacity(calls.len());
-        for (index, call) in calls.iter().enumerate() {
-            if self.cancellation.is_cancelled() {
-                return BatchEnd::Terminal(
-                    self.converge_cancelled(exchange, &calls[index..], results)
-                        .await,
-                );
-            }
-            let Some(item) = resolved.get(index) else {
-                self.guardrails.reset_repeated_invocation();
-                let result = error_result(
-                    &call.id,
-                    format!("resolved batch is missing position {index}"),
-                );
-                let status = result.status.clone();
-                results.push(result);
-                self.events.send(AgentEvent::ToolCompleted {
-                    call_id: call.id.clone(),
-                    status: ToolCompletionStatus::Failed,
-                });
-                if let Some(trigger) = self.observe_result(status) {
-                    self.emit_guardrail_trigger(trigger, &call.id);
-                    if trigger.mode == ActiveGuardrailMode::Enforce {
-                        return BatchEnd::Terminal(
-                            self.enforce_guardrail(exchange, calls, index + 1, results, trigger)
-                                .await,
-                        );
-                    }
-                }
-                continue;
-            };
-            let invocation = match item {
-                ResolvedBatchItemRef::Invalid(result) => {
-                    self.guardrails.reset_repeated_invocation();
-                    results.push(result.clone());
-                    self.events.send(AgentEvent::ToolCompleted {
-                        call_id: call.id.clone(),
-                        status: ToolCompletionStatus::Failed,
-                    });
-                    if let Some(trigger) = self.observe_result(result.status.clone()) {
-                        self.emit_guardrail_trigger(trigger, &call.id);
-                        if trigger.mode == ActiveGuardrailMode::Enforce {
-                            return BatchEnd::Terminal(
-                                self.enforce_guardrail(
-                                    exchange,
-                                    calls,
-                                    index + 1,
-                                    results,
-                                    trigger,
-                                )
-                                .await,
-                            );
-                        }
-                    }
-                    continue;
-                }
-                ResolvedBatchItemRef::Valid(invocation) => invocation,
-            };
-            if let Some(trigger) = self.observe_invocation(invocation.fingerprint()) {
-                self.emit_guardrail_trigger(trigger, &call.id);
-                if trigger.mode == ActiveGuardrailMode::Enforce {
-                    return BatchEnd::Terminal(
-                        self.enforce_guardrail(exchange, calls, index, results, trigger)
-                            .await,
-                    );
-                }
-            }
-            // 授权等待与取消 race（biased：取消优先，保证 race 可断言）。
-            let authorization = tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => None,
-                authorization = self.context.authorizer.authorize(invocation, resolved) => Some(authorization),
-            };
-            let Some(authorization) = authorization else {
-                return BatchEnd::Terminal(
-                    self.converge_cancelled(exchange, &calls[index..], results)
-                        .await,
-                );
-            };
-            match authorization {
-                ToolAuthorization::Deny { reason } => {
-                    // Deny 在授权闸处转换为错误 ToolResult：不执行、不计入预算、循环继续。
-                    let result = error_result(&call.id, reason);
-                    self.events.send(AgentEvent::ToolCompleted {
-                        call_id: call.id.clone(),
-                        status: ToolCompletionStatus::Failed,
-                    });
-                    let status = result.status.clone();
-                    results.push(result);
-                    if let Some(trigger) = self.observe_result(status) {
-                        self.emit_guardrail_trigger(trigger, &call.id);
-                        if trigger.mode == ActiveGuardrailMode::Enforce {
-                            return BatchEnd::Terminal(
-                                self.enforce_guardrail(
-                                    exchange,
-                                    calls,
-                                    index + 1,
-                                    results,
-                                    trigger,
-                                )
-                                .await,
-                            );
-                        }
-                    }
-                }
-                ToolAuthorization::Allow => {
-                    // max_tool_calls 预检：dispatch 前的硬边界，按实际 dispatch 数计。
-                    if let Some(limit) = self.spec.budget.max_tool_calls
-                        && self.dispatched >= limit
-                    {
-                        // 本 call 及批次内剩余调用全部结算预算超额错误，
-                        // 整批落账后受控终止。
-                        for pending in &calls[index..] {
-                            results.push(error_result(
-                                &pending.id,
-                                format!("tool call budget exceeded (limit {limit})"),
-                            ));
-                            self.events.send(AgentEvent::ToolCompleted {
-                                call_id: pending.id.clone(),
-                                status: ToolCompletionStatus::Failed,
-                            });
-                        }
-                        if let Err(error) = self.complete_tool_results(exchange, results).await {
-                            return BatchEnd::Terminal(self.fail(ExecutionError::Record(error)));
-                        }
-                        return BatchEnd::Terminal(self.fail(ExecutionError::BudgetExceeded {
-                            kind: BudgetKind::ToolCalls,
-                            limit,
-                        }));
-                    }
-                    self.dispatched += 1;
-                    self.events.send(AgentEvent::ToolStarted {
-                        call_id: call.id.clone(),
-                    });
-                    let context =
-                        ToolContext::new(self.cancellation.clone(), self.output_sink(&call.id));
-                    // Tool SPI 要求取消后完成资源清理再解析 future；Engine 不直接
-                    // drop dispatch，否则真实 Shell 的进程树清理可能被跳过。
-                    let result = match Dispatcher::execute(resolved, index, context) {
-                        Ok(execution) => execution.await,
-                        Err(error) => error_result(&call.id, error.to_string()),
-                    };
-                    if self.cancellation.is_cancelled() {
-                        return BatchEnd::Terminal(
-                            self.converge_cancelled(exchange, &calls[index..], results)
-                                .await,
-                        );
-                    }
-                    self.events.send(AgentEvent::ToolCompleted {
-                        call_id: call.id.clone(),
-                        status: completion_status(&result),
-                    });
-                    let status = result.status.clone();
-                    results.push(result);
-                    if let Some(trigger) = self.observe_result(status) {
-                        self.emit_guardrail_trigger(trigger, &call.id);
-                        if trigger.mode == ActiveGuardrailMode::Enforce {
-                            return BatchEnd::Terminal(
-                                self.enforce_guardrail(
-                                    exchange,
-                                    calls,
-                                    index + 1,
-                                    results,
-                                    trigger,
-                                )
-                                .await,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        BatchEnd::Settled(results)
-    }
-
-    fn observe_invocation(
-        &mut self,
-        fingerprint: &agent_tools::ToolFingerprint,
-    ) -> Option<GuardrailTrigger> {
-        let config = self
-            .spec
-            .guardrails
-            .as_ref()
-            .and_then(|guardrails| guardrails.repeated_invocation);
-        self.guardrails.observe_invocation(config, fingerprint)
-    }
-
-    fn observe_result(&mut self, status: ToolResultStatus) -> Option<GuardrailTrigger> {
-        let config = self
-            .spec
-            .guardrails
-            .as_ref()
-            .and_then(|guardrails| guardrails.consecutive_failures);
-        self.guardrails.observe_result(config, status)
-    }
-
-    fn emit_guardrail_trigger(&self, trigger: GuardrailTrigger, call_id: &ToolCallId) {
-        self.events.send(AgentEvent::GuardrailTriggered {
-            kind: trigger.kind,
-            mode: trigger.mode,
-            threshold: trigger.threshold,
-            observed: trigger.observed,
-            call_id: call_id.clone(),
-        });
-    }
-
-    /// Enforce 时为尚未结算的位置补齐 Guardrail 错误，先原子完成 pending exchange，
-    /// 再发可靠失败终态；若 complete 失败，Record error 优先。
-    async fn enforce_guardrail(
-        &mut self,
-        exchange: &ExchangeReceipt,
-        calls: &[ToolCall],
-        unsettled_from: usize,
-        mut results: Vec<ToolResult>,
-        trigger: GuardrailTrigger,
-    ) -> ExecutionOutcome {
-        for call in calls.iter().skip(unsettled_from) {
-            results.push(guardrail_error_result(
-                &call.id,
-                trigger.kind,
-                trigger.threshold,
-            ));
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: ToolCompletionStatus::Failed,
-            });
-        }
-        if let Err(error) = self.complete_tool_results(exchange, results).await {
-            return self.fail(ExecutionError::Record(error));
-        }
-        self.fail(ExecutionError::GuardrailTriggered {
-            kind: trigger.kind,
-            threshold: trigger.threshold,
-        })
-    }
-
-    /// 取消收敛：为批次内未结算调用补记 interrupted 错误 `ToolResult`（保证
-    /// Tool Call/Result 配对），按序落账全部已结算 ToolMessage 后归为
-    /// `ExecutionCancelled` 唯一终态；此处落账失败仍按阻断规则收敛为
-    /// `ExecutionFailed{Record}`，不能在 Tool Call/Result 尚未配对时宣告取消成功。
-    async fn converge_cancelled(
-        &mut self,
-        exchange: &ExchangeReceipt,
-        unsettled: &[ToolCall],
-        mut results: Vec<ToolResult>,
-    ) -> ExecutionOutcome {
-        for call in unsettled {
-            results.push(error_result(&call.id, INTERRUPTED_TEXT.to_owned()));
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: ToolCompletionStatus::Failed,
-            });
-        }
-        if let Err(error) = self.complete_tool_results(exchange, results).await {
-            return self.fail(ExecutionError::Record(error));
-        }
-        self.cancelled()
-    }
-
-    /// 构造完整有序 ToolMessage 批次，原子完成 pending exchange，再追加投影。
-    ///
-    /// `ToolMessage.id` 从 `toolmsg_1` 开始寻找当前完整 Conversation 中未占用的序号。
-    ///
-    /// 每个 Run 都会创建新的 Engine，因此不能只依赖执行内计数器：历史 Run 可能已经
-    /// 持久化同名 ToolMessage。生成前必须对完整投影去重，否则第二个工具 Run 会在
-    /// Store 的 Conversation 全局 Message ID 校验处永久留下 ready exchange。
-    async fn complete_tool_results(
-        &mut self,
-        exchange: &ExchangeReceipt,
-        results: Vec<ToolResult>,
-    ) -> Result<(), RecordError> {
-        let mut messages = Vec::with_capacity(results.len());
-        for result in results {
-            messages.push(ToolMessage {
-                id: self.next_tool_message_id()?,
-                result,
-            });
-        }
-        self.context
-            .recorder
-            .complete_tool_exchange(exchange, messages.clone())
-            .await?;
-        for message in messages {
-            self.projection.push(ConversationMessage::Tool(message));
-        }
-        Ok(())
-    }
-
-    fn next_tool_message_id(&mut self) -> Result<MessageId, RecordError> {
-        loop {
-            self.tool_messages = self
-                .tool_messages
-                .checked_add(1)
-                .ok_or_else(|| RecordError {
-                    message: "tool message id sequence is exhausted".to_owned(),
-                })?;
-            let candidate =
-                MessageId::new(format!("toolmsg_{}", self.tool_messages)).map_err(|_| {
-                    RecordError {
-                        message: "tool message id could not be constructed".to_owned(),
-                    }
-                })?;
-            if self
-                .projection
-                .iter()
-                .all(|message| conversation_message_id(message) != &candidate)
-            {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    /// 工具流式输出桥接：`ToolOutputChunk` → `AgentEvent::ToolOutput`。
-    fn output_sink(&self, call_id: &ToolCallId) -> ToolOutputSink {
-        let events = self.events.clone();
-        let call_id = call_id.clone();
-        Arc::new(move |chunk: ToolOutputChunk| {
-            events.send(AgentEvent::ToolOutput {
-                call_id: call_id.clone(),
-                channel: chunk.channel,
-                chunk: chunk.delta,
-            });
-        })
-    }
-
     /// 收敛为 `ExecutionFailed`：发送终态事件（携带丢弃计数）并返回镜像结果。
     fn fail(&self, error: ExecutionError) -> ExecutionOutcome {
         self.events.send(AgentEvent::ExecutionFailed {
@@ -611,31 +270,22 @@ impl Engine {
 
     /// 收敛为上下文压缩交接终态；Core 不发起压缩，也不重试当前 Step。
     fn compaction_required(&self, reason: CompactionReason, step: u32) -> ExecutionOutcome {
+        let consumption = crate::ExecutionConsumption {
+            steps: self.steps,
+            tool_calls: self.dispatched,
+        };
         self.events.send(AgentEvent::ExecutionCompactionRequired {
             reason,
             step,
+            consumption,
             dropped_events: self.events.dropped_events(),
         });
-        ExecutionOutcome::CompactionRequired { reason, step }
+        ExecutionOutcome::CompactionRequired {
+            reason,
+            step,
+            consumption,
+        }
     }
-}
-
-fn conversation_message_id(message: &ConversationMessage) -> &MessageId {
-    match message {
-        ConversationMessage::System(message) => &message.id,
-        ConversationMessage::ContextSummary(message) => &message.id,
-        ConversationMessage::User(message) => &message.id,
-        ConversationMessage::Assistant(message) => &message.id,
-        ConversationMessage::Tool(message) => &message.id,
-    }
-}
-
-/// 一个 Tool Call 批次的结局。
-enum BatchEnd {
-    /// 整批正常结算（含 Deny/工具失败转换的错误结果），按批次顺序排列。
-    Settled(Vec<ToolResult>),
-    /// 执行已收敛到终态（Guardrail、取消或预算到达）。
-    Terminal(ExecutionOutcome),
 }
 
 /// 提取消息中的全部 Tool Call（保持 parts 内顺序）。
@@ -648,36 +298,4 @@ fn tool_calls_of(message: &AssistantMessage) -> Vec<ToolCall> {
             _ => None,
         })
         .collect()
-}
-
-/// 由 `ToolResultStatus` 映射完成状态。
-fn completion_status(result: &ToolResult) -> ToolCompletionStatus {
-    match result.status {
-        ToolResultStatus::Success => ToolCompletionStatus::Success,
-        ToolResultStatus::Error => ToolCompletionStatus::Failed,
-    }
-}
-
-/// 构造模型可读文本内容的错误 `ToolResult`（Deny/预算/取消结算共用）。
-fn error_result(call_id: &ToolCallId, message: String) -> ToolResult {
-    ToolResult {
-        call_id: call_id.clone(),
-        status: ToolResultStatus::Error,
-        content: ToolResultContent::Text(message),
-    }
-}
-
-/// 构造 Enforce 为未执行位置补齐的模型可读错误结果。
-fn guardrail_error_result(
-    call_id: &ToolCallId,
-    kind: GuardrailKind,
-    threshold: NonZeroU32,
-) -> ToolResult {
-    error_result(
-        call_id,
-        format!(
-            "guardrail enforced: {kind:?} reached threshold {}",
-            threshold.get()
-        ),
-    )
 }

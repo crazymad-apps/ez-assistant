@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+agent-context = { path = "../agent-context" }
 agent-model = { path = "../agent-model" }
 agent-sdk = { path = "../agent-sdk" }
 agent-tools = { path = "../agent-tools" }
@@ -19,6 +20,7 @@ futures-util.workspace = true
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -27,3 +29,4 @@ url.workspace = true
 
 [dev-dependencies]
 agent-testkit = { path = "../agent-testkit" }
+tempfile.workspace = true

@@ -228,6 +228,51 @@ async fn recorder_failure_blocks_all_side_effects() {
 }
 
 #[tokio::test]
+async fn recorder_failure_at_started_blocks_tool_execution_and_settles_result() {
+    let log = OrderLog::new();
+    let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);
+    let turn2 = text_message("message_2", "The tool could not be started.");
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&turn1)),
+            ModelScript::Events(message_events(&turn2)),
+        ],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::failing_start(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log.clone()));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        "get_date",
+        json!({"date": "2026-08-11"}),
+        log.clone(),
+    )]);
+    let (input, _) = make_input(vec![]);
+    let execution = AgentExecution::start(
+        make_spec(model, tools, ExecutionBudget::default()),
+        input,
+        make_context(recorder.clone(), authorizer),
+    );
+    let (outcome, _) = finish(execution).await;
+
+    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert!(recorder.started_calls().is_empty());
+    assert!(
+        !log.entries()
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::ToolExecute { .. }))
+    );
+    let deltas = recorder.deltas();
+    let ConversationDelta::Tool(message) = &deltas[1] else {
+        panic!("second delta must be the failed tool result, got {deltas:?}");
+    };
+    assert_eq!(
+        message.result,
+        error_result("call_1", "tool execution start could not be recorded")
+    );
+}
+
+#[tokio::test]
 async fn recorder_failure_at_tool_record_fails_controlled() {
     let log = OrderLog::new();
     let turn1 = calls_message("message_1", vec![call("call_1", "get_date", json!({}))]);

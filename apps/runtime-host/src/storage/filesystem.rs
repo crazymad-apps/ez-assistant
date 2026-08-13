@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use assistant_protocol::{AttachmentId, SessionId, WorkspaceId};
+use assistant_protocol::{AttachmentId, ChildTaskId, SessionId, WorkspaceId};
 use assistant_runtime::{StoreError, StoreErrorKind};
 use rusqlite::ErrorCode;
 
@@ -81,6 +81,21 @@ pub(super) fn body_path(session_directory: &Path, generation: u64) -> PathBuf {
     session_directory.join(format!("conversation.{generation}.jsonl"))
 }
 
+pub(super) fn child_tasks_directory(session_directory: &Path) -> PathBuf {
+    session_directory.join("child-tasks")
+}
+
+pub(super) fn child_task_directory(
+    session_directory: &Path,
+    child_task_id: &ChildTaskId,
+) -> PathBuf {
+    child_tasks_directory(session_directory).join(child_task_id.as_str())
+}
+
+pub(super) fn child_body_path(child_task_directory: &Path, generation: u64) -> PathBuf {
+    child_task_directory.join(format!("body-{generation}.jsonl"))
+}
+
 pub(super) fn validate_session_component(session_id: &SessionId) -> StorageResult<()> {
     validate_identifier_component(
         session_id.as_str(),
@@ -99,6 +114,13 @@ pub(super) fn validate_attachment_component(attachment_id: &AttachmentId) -> Sto
     validate_identifier_component(
         attachment_id.as_str(),
         "attachment id cannot be used by local runtime storage",
+    )
+}
+
+pub(super) fn validate_child_task_component(child_task_id: &ChildTaskId) -> StorageResult<()> {
+    validate_identifier_component(
+        child_task_id.as_str(),
+        "child task id cannot be used by local runtime storage",
     )
 }
 

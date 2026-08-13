@@ -29,6 +29,10 @@ pub(crate) enum HostCommand {
     ConversationSnapshot {
         session_id: SessionId,
     },
+    ChildTaskConversationSnapshot {
+        session_id: SessionId,
+        child_task_id: assistant_protocol::ChildTaskId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -40,8 +44,9 @@ pub(crate) struct CommandResponse {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
 pub(crate) enum HostCommandResult {
-    Runtime(RuntimeCommandResult),
+    Runtime(Box<RuntimeCommandResult>),
     ConversationSnapshot { conversation: ConversationSnapshot },
+    ChildTaskConversationSnapshot { conversation: ConversationSnapshot },
 }
 
 #[derive(Serialize)]
@@ -115,6 +120,18 @@ async fn dispatch(
                     false,
                 )
             }),
+        HostCommand::ChildTaskConversationSnapshot {
+            session_id,
+            child_task_id,
+        } => runtime
+            .child_task_conversation_snapshot(&session_id, &child_task_id)
+            .await
+            .map(|conversation| {
+                (
+                    HostCommandResult::ChildTaskConversationSnapshot { conversation },
+                    false,
+                )
+            }),
     }
 }
 
@@ -137,6 +154,18 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::ReloadConfig(request) => (
             RuntimeCommandResult::ReloadConfig(runtime.reload_config(request).await?),
+            false,
+        ),
+        RuntimeCommand::ReloadPermissions(request) => (
+            RuntimeCommandResult::ReloadPermissions(runtime.reload_permissions(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListPendingApprovals(request) => (
+            RuntimeCommandResult::ListPendingApprovals(runtime.list_pending_approvals(request)?),
+            false,
+        ),
+        RuntimeCommand::DecideApproval(request) => (
+            RuntimeCommandResult::DecideApproval(runtime.decide_approval(request).await?),
             false,
         ),
         RuntimeCommand::ValidateModelConnection(request) => (
@@ -205,6 +234,18 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ListRuns(runtime.list_runs(request).await?),
             false,
         ),
+        RuntimeCommand::ListChildTasks(request) => (
+            RuntimeCommandResult::ListChildTasks(runtime.list_child_tasks(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetChildTask(request) => (
+            RuntimeCommandResult::GetChildTask(runtime.get_child_task(request).await?),
+            false,
+        ),
+        RuntimeCommand::CancelChildTask(request) => (
+            RuntimeCommandResult::CancelChildTask(runtime.cancel_child_task(request).await?),
+            false,
+        ),
         RuntimeCommand::ArchiveSession(request) => (
             RuntimeCommandResult::ArchiveSession(runtime.archive_session(request).await?),
             false,
@@ -215,6 +256,16 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetSessionModel(request) => (
             RuntimeCommandResult::SetSessionModel(runtime.set_session_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSessionVariant(request) => (
+            RuntimeCommandResult::SetSessionVariant(runtime.set_session_variant(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSessionApprovalMode(request) => (
+            RuntimeCommandResult::SetSessionApprovalMode(
+                runtime.set_session_approval_mode(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::ReenterFromUserMessage(request) => (
@@ -232,5 +283,5 @@ async fn dispatch_runtime(
             true,
         ),
     };
-    Ok((HostCommandResult::Runtime(result), shutdown))
+    Ok((HostCommandResult::Runtime(Box::new(result)), shutdown))
 }

@@ -13,10 +13,10 @@ use std::{
 use agent_context::ContextWindowEvaluator;
 use agent_core::{
     ActiveGuardrailMode, AgentEvent, AgentExecution, BudgetKind, CompactionReason,
-    ComposedToolAuthorizer, ConversationDelta, ExecutionBudget, ExecutionContext, ExecutionError,
-    ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec, GuardrailCheckConfig,
-    GuardrailConfig, GuardrailKind, RecordError, ToolAuthorization, ToolAuthorizer,
-    ToolCompletionStatus,
+    ComposedToolAuthorizer, ConversationDelta, ExecutionBudget, ExecutionConsumption,
+    ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome, ExecutionRecorder,
+    ExecutionSpec, GuardrailCheckConfig, GuardrailConfig, GuardrailKind, RecordError,
+    ToolAuthorization, ToolAuthorizer, ToolCompletionStatus,
 };
 use agent_memory::{
     MemoryPropertyValue, MemoryRecallRequest, MemoryRecallResponse, PinnedMemoryCategory,
@@ -30,12 +30,13 @@ use agent_model::{
 use agent_testkit::{
     AuthorizeGate, FakePinnedMemoryStore, FakeShellCompletion, FakeShellScript, FakeShellTool,
     InMemoryRecorder, LogEntry, ModelScript, OrderLog, PinnedMemoryObservation, ScriptedAuthorizer,
-    ScriptedMemoryRecall, ScriptedModelService, ScriptedPolicy, ScriptedTool, message_events,
+    ScriptedMemoryRecall, ScriptedModelService, ScriptedPolicy, ScriptedTool, ToolExecutionGate,
+    message_events,
 };
 use agent_tools::{
     AbsolutePath, ListPinnedMemoriesTool, PinMemoryTool, RecallMemoryTool, RecallMemoryToolConfig,
-    SessionPathResolver, ShellExecTool, ShellExecToolConfig, ToolOutputChannel, ToolOutputChunk,
-    ToolRegistry, ToolSetSnapshot, UnpinMemoryTool, UpdatePinnedMemoryTool,
+    SessionPathResolver, ShellExecTool, ShellExecToolConfig, ToolExecutionMode, ToolOutputChannel,
+    ToolOutputChunk, ToolRegistry, ToolSetSnapshot, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
@@ -411,5 +412,7 @@ mod context;
 mod guardrails;
 #[path = "engine_harness/model_loop.rs"]
 mod model_loop;
+#[path = "engine_harness/parallel.rs"]
+mod parallel;
 #[path = "engine_harness/recording.rs"]
 mod recording;

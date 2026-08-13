@@ -35,7 +35,7 @@ impl ModelService for GatedCompletionModel {
 }
 
 #[tokio::test]
-async fn failed_and_compaction_runs_settle_without_automatic_retry() {
+async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failure() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
         8_192,
@@ -57,6 +57,7 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
 
     let failed = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "fail once".to_owned(),
             attachment_ids: Vec::new(),
@@ -70,6 +71,7 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
 
     let compact = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "overflow once".to_owned(),
             attachment_ids: Vec::new(),
@@ -79,9 +81,16 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
         .expect("compaction run accepted");
     let compact =
         wait_for_terminal(&runtime, &session.session.session_id, &compact.run.run_id).await;
+    assert_eq!(compact.status, assistant_protocol::RunStatus::Failed);
     assert_eq!(
-        compact.status,
-        assistant_protocol::RunStatus::CompactionRequired
+        compact.error.as_ref().map(|error| error.code),
+        Some(assistant_protocol::RuntimeErrorCode::ContextCompactionFailed)
+    );
+    assert!(
+        compact
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("provider_overflow"))
     );
     assert_eq!(model.take_requests().len(), 2);
     assert_eq!(
@@ -93,6 +102,86 @@ async fn failed_and_compaction_runs_settle_without_automatic_retry() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
+    let mut first = assistant_text("assistant-before-compaction", "long prior answer");
+    first.usage = Some(agent_types::TokenUsage {
+        input_tokens: 6_500,
+        output_tokens: 500,
+        total_tokens: 7_000,
+        cached_input_tokens: Some(6_000),
+        reasoning_tokens: None,
+    });
+    let summary = assistant_text("summary-generated", "prior request and answer summarized");
+    let final_message = assistant_text("assistant-after-compaction", "continued after compaction");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::Events(message_events(&summary)),
+            ModelScript::Events(message_events(&final_message)),
+        ],
+    ));
+    let runtime = runtime(model.clone());
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+
+    let first_run = runtime
+        .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "first turn".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("first run accepted");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session.session_id, &first_run.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+
+    let continued = runtime
+        .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("continuation accepted");
+    let continued =
+        wait_for_terminal(&runtime, &session.session.session_id, &continued.run.run_id).await;
+    assert_eq!(continued.status, assistant_protocol::RunStatus::Completed);
+
+    let conversation = runtime
+        .conversation_snapshot(&session.session.session_id)
+        .await
+        .expect("compacted conversation");
+    agent_context::ContextLayout::build(&conversation)
+        .expect("compacted parent conversation remains structurally valid");
+    assert!(matches!(
+        conversation.messages.first(),
+        Some(ConversationMessage::ContextSummary(summary))
+            if summary.text == "prior request and answer summarized"
+    ));
+    assert!(matches!(
+        conversation.messages.last(),
+        Some(ConversationMessage::Assistant(message))
+            if message.id.as_str() == "assistant-after-compaction"
+    ));
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].tools.is_empty());
+    assert_eq!(requests[1].tool_choice, ToolChoice::None);
 }
 
 #[tokio::test]
@@ -119,6 +208,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "retry unavailable model".to_owned(),
             attachment_ids: Vec::new(),
@@ -223,6 +313,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "stream then fail".to_owned(),
             attachment_ids: Vec::new(),
@@ -258,6 +349,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "panic".to_owned(),
             attachment_ids: Vec::new(),
@@ -312,6 +404,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("session");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
@@ -324,6 +417,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("first model entered");
     runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "must remain queued".to_owned(),
             attachment_ids: Vec::new(),
@@ -348,6 +442,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id,
                 message: "must be rejected".to_owned(),
                 attachment_ids: Vec::new(),
@@ -368,6 +463,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id.clone(),
                 message: " \n\t".to_owned(),
                 attachment_ids: Vec::new(),

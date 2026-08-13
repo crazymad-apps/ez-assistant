@@ -171,6 +171,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     ] {
         let accepted = runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
@@ -221,6 +222,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
         .session;
     let accepted = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session_id.clone(),
             message: "must fail before start".to_owned(),
             attachment_ids: Vec::new(),
@@ -255,9 +257,6 @@ impl RunToolFactory for ObservingRunToolFactory {
                 RunToolFactoryErrorKind::WorkingDirectoryUnavailable,
             ));
         }
-        Ok(RunToolBundle::new(
-            ToolSetSnapshot::default(),
-            Arc::new(AllowAllAuthorizer),
-        ))
+        Ok(RunToolBundle::new(ToolSetSnapshot::default(), Vec::new()))
     }
 }

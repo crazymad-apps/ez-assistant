@@ -113,6 +113,9 @@ fn encode_context_summary_uses_a_derived_system_message() {
     let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
         id: message_id("summary_1"),
         text: "The user selected a local-first architecture.".to_owned(),
+        model: None,
+        usage: None,
+        compacted_usage: None,
     });
 
     let encoded = encode_request(&request(vec![message]), &profile, MODEL).expect("encode request");

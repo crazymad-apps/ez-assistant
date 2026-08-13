@@ -2,20 +2,28 @@
 
 use std::{sync::Arc, time::Duration};
 
-use agent_core::ToolAuthorizer;
+use agent_core::{ExecutionBudget, ToolAuthorizer};
 use agent_model::{
     ModelAttemptEvent, ModelAttemptObserver, ModelService, ModelStreamFuture, ProviderOptions,
-    ReasoningConfig, RetryingModelService,
+    ReasoningConfig, RetryingModelService, SystemPromptSnapshot,
 };
 use agent_sdk::{Agent, AgentBuilder};
 use agent_types::ToolChoice;
-use assistant_protocol::ModelKey;
+use assistant_protocol::{AgentVariant, ApprovalMode, ModelKey};
 
 use super::AssistantRuntime;
 use crate::{
-    ModelCompatibilityProfile, ModelServiceFactoryRequest, RunToolFactory, RunToolFactoryErrorKind,
-    RuntimeError, RuntimeResult,
+    ChildTaskWorkspaceFactory, ModelCompatibilityProfile, ModelServiceFactoryRequest,
+    RunToolFactory, RunToolFactoryErrorKind, RuntimeError, RuntimeResult, RuntimeStore,
     config::{ConfigSnapshot, ResolvedModelConfig},
+    context_compaction::RuntimeContextCompactor,
+    delegation::{
+        ChildTaskRegistry, DelegateTaskTool, ParentDelegationController, ParentDelegationResources,
+    },
+    permission::{
+        ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
+        RuntimeToolAuthorizer,
+    },
     session::SessionController,
 };
 
@@ -82,12 +90,35 @@ impl ModelService for ObservedModelService {
 pub(super) struct CompiledRunAgent {
     agent: Agent,
     authorizer: Arc<dyn ToolAuthorizer>,
+    compactor: Arc<RuntimeContextCompactor>,
 }
 
 impl CompiledRunAgent {
-    pub(super) fn into_parts(self) -> (Agent, Arc<dyn ToolAuthorizer>) {
-        (self.agent, self.authorizer)
+    pub(super) fn into_parts(
+        self,
+    ) -> (Agent, Arc<dyn ToolAuthorizer>, Arc<RuntimeContextCompactor>) {
+        (self.agent, self.authorizer, self.compactor)
     }
+}
+
+pub(super) struct RunAuthorizationInput {
+    pub(super) permission_coordinator: Arc<PermissionCoordinator>,
+    pub(super) approval_registry: Arc<ApprovalRegistry>,
+    pub(super) variant: AgentVariant,
+    pub(super) approval_mode: ApprovalMode,
+    pub(super) run_id: assistant_protocol::RunId,
+    pub(super) cancellation: tokio_util::sync::CancellationToken,
+    pub(super) events: tokio::sync::broadcast::Sender<assistant_protocol::RuntimeEvent>,
+}
+
+/// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
+pub(super) struct RunCompilationResources<'a> {
+    pub(super) model_factory: &'a dyn crate::ModelServiceFactory,
+    pub(super) context_window: Arc<agent_sdk::ContextWindowEvaluator>,
+    pub(super) run_tool_factory: &'a dyn RunToolFactory,
+    pub(super) child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
+    pub(super) child_tasks: Arc<ChildTaskRegistry>,
+    pub(super) store: Arc<dyn RuntimeStore>,
 }
 
 impl AssistantRuntime {
@@ -102,11 +133,10 @@ impl AssistantRuntime {
 }
 
 pub(super) fn compile_run_agent(
-    session: &SessionController,
+    session: Arc<SessionController>,
     snapshot: &ConfigSnapshot,
-    model_factory: &dyn crate::ModelServiceFactory,
-    context_window: Arc<agent_sdk::ContextWindowEvaluator>,
-    run_tool_factory: &dyn RunToolFactory,
+    resources: RunCompilationResources<'_>,
+    authorization: RunAuthorizationInput,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledRunAgent> {
     let active = snapshot
@@ -117,11 +147,12 @@ pub(super) fn compile_run_agent(
     let compiled = compile_model_service_with_observer(
         snapshot,
         &model_key,
-        model_factory,
+        resources.model_factory,
         model_attempt_observer,
     )?;
     let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
-    let bundle = run_tool_factory
+    let bundle = resources
+        .run_tool_factory
         .compile(session.environment())
         .map_err(|source| {
             if source.kind() == RunToolFactoryErrorKind::WorkingDirectoryUnavailable
@@ -131,24 +162,145 @@ pub(super) fn compile_run_agent(
             }
             RuntimeError::RunToolsBuildFailed { source }
         })?;
-    let (tools, authorizer) = bundle.into_parts();
-
-    let agent = AgentBuilder::new(
-        compiled.model,
+    let (base_tools, infrastructure_policies) = bundle.into_parts();
+    let parent_compactor = Arc::new(RuntimeContextCompactor::for_parent(
+        compiled.model.clone(),
         session.system_prompt().clone(),
-        context_window,
-    )
-    .tools(tools)
-    .model_request(agent_core::ModelRequestConfig {
+    ));
+    let session_id = session.id().clone();
+    let run_id = authorization.run_id.clone();
+    let authorizer = Arc::new(RuntimeToolAuthorizer::new(
+        RunAuthorizationScope {
+            variant: authorization.variant,
+            approval_mode: authorization.approval_mode,
+        },
+        session.permission_scopes(),
+        authorization.permission_coordinator.clone(),
+        infrastructure_policies.clone(),
+        session.environment(),
+        Arc::new(RuntimeApprovalResolver {
+            registry: authorization.approval_registry.clone(),
+            session_id,
+            run_id,
+            child_task_id: None,
+            variant: authorization.variant,
+            approval_mode: authorization.approval_mode,
+            workspace_id: session.environment().workspace_id.clone(),
+            cancellation: authorization.cancellation.clone(),
+            events: authorization.events.clone(),
+        }),
+    )?);
+
+    let model_request = agent_core::ModelRequestConfig {
         tool_choice: ToolChoice::Auto,
         generation: model_config.generation().clone(),
         reasoning,
         provider_options,
+    };
+    // 不具备 Tool Call 能力的模型维持历史纯文本路径；一旦模型支持工具，父 Agent
+    // 才派生 delegate_task，而子 Agent 始终只拿到原始 Base ToolSet。
+    let parent_tools = if compiled.model.capabilities().tool_calls {
+        let delegation = active.delegation();
+        let mut child_generation = model_request.generation.clone();
+        child_generation.max_output_tokens = Some(
+            child_generation
+                .max_output_tokens
+                .unwrap_or(u32::MAX)
+                .min(delegation.max_output_tokens().get()),
+        );
+        let child_budget = ExecutionBudget {
+            max_steps: Some(
+                active
+                    .budget()
+                    .max_steps
+                    .unwrap_or(u32::MAX)
+                    .min(delegation.max_steps().get()),
+            ),
+            max_tool_calls: Some(
+                active
+                    .budget()
+                    .max_tool_calls
+                    .unwrap_or(u32::MAX)
+                    .min(delegation.max_tool_calls().get()),
+            ),
+        };
+        let mut child_prompt_parts = session.system_prompt().parts().to_vec();
+        child_prompt_parts.push(crate::delegation::CHILD_AGENT_INSTRUCTION_V1.to_owned());
+        let child_prompt = SystemPromptSnapshot::new(child_prompt_parts);
+        let child_compactor = Arc::new(RuntimeContextCompactor::for_child(
+            compiled.model.clone(),
+            child_prompt.clone(),
+        ));
+        let mut child_builder = AgentBuilder::new(
+            compiled.model.clone(),
+            child_prompt,
+            resources.context_window.clone(),
+        )
+        .tools(base_tools.clone())
+        .model_request(agent_core::ModelRequestConfig {
+            tool_choice: ToolChoice::Auto,
+            generation: child_generation,
+            reasoning: model_request.reasoning.clone(),
+            provider_options: model_request.provider_options.clone(),
+        })
+        .budget(child_budget);
+        if active.guardrails().repeated_invocation.is_some()
+            || active.guardrails().consecutive_failures.is_some()
+        {
+            child_builder = child_builder.guardrails(active.guardrails().clone());
+        }
+        let child_agent = Arc::new(
+            child_builder
+                .build()
+                .map_err(|source| RuntimeError::AgentBuildFailed { source })?,
+        );
+        let delegation_controller =
+            Arc::new(ParentDelegationController::new(ParentDelegationResources {
+                session: session.clone(),
+                parent_run_id: authorization.run_id,
+                variant: authorization.variant,
+                approval_mode: authorization.approval_mode,
+                child_agent,
+                child_compactor,
+                store: resources.store,
+                registry: resources.child_tasks,
+                workspace_factory: resources.child_task_workspace_factory,
+                permission_coordinator: authorization.permission_coordinator,
+                approval_registry: authorization.approval_registry,
+                infrastructure_policies,
+                events: authorization.events,
+                limits: delegation,
+            }));
+        base_tools
+            .try_with_tool(DelegateTaskTool::new(delegation_controller))
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "delegate task tool definition",
+            })?
+    } else {
+        base_tools
+    };
+
+    let mut builder = AgentBuilder::new(
+        compiled.model,
+        session.system_prompt().clone(),
+        resources.context_window,
+    )
+    .tools(parent_tools)
+    .model_request(model_request)
+    .budget(active.budget().clone());
+    if active.guardrails().repeated_invocation.is_some()
+        || active.guardrails().consecutive_failures.is_some()
+    {
+        builder = builder.guardrails(active.guardrails().clone());
+    }
+    let agent = builder
+        .build()
+        .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
+    Ok(CompiledRunAgent {
+        agent,
+        authorizer,
+        compactor: parent_compactor,
     })
-    .budget(active.budget().clone())
-    .build()
-    .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
-    Ok(CompiledRunAgent { agent, authorizer })
 }
 
 pub(super) fn compile_model_service(

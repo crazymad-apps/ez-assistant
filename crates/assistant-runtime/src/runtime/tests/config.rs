@@ -26,6 +26,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         factory.clone(),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     ));
     runtime
         .config_registry
@@ -49,6 +50,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
 
     let old_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: before_reload.session.session_id.clone(),
             message: "race before swap".to_owned(),
             attachment_ids: Vec::new(),
@@ -79,6 +81,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
     );
     let new_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: after_reload.session.session_id.clone(),
             message: "run after swap".to_owned(),
             attachment_ids: Vec::new(),
@@ -133,6 +136,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         factory.clone(),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(registry.snapshot()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     assert_eq!(
         runtime
@@ -151,9 +155,12 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         .create_session(CreateSessionRequest::default())
         .await
         .expect("second session");
+    set_auto_approval(&runtime, &first.session.session_id).await;
+    set_auto_approval(&runtime, &second.session.session_id).await;
 
     let first_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
             attachment_ids: Vec::new(),
@@ -177,6 +184,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     let second_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
             attachment_ids: Vec::new(),
@@ -205,6 +213,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     let rejected = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
             message: "must not use stale key".to_owned(),
             attachment_ids: Vec::new(),
@@ -259,6 +268,7 @@ max_output_tokens = 4096
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     let reloaded = runtime
         .reload_config(ReloadConfigRequest::default())
@@ -339,6 +349,7 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     assert_eq!(
         missing
@@ -364,6 +375,7 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
         Arc::new(StaticModelFactory::new(empty_model())),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     );
     let result = unsafe_source
         .reload_config(ReloadConfigRequest::default())

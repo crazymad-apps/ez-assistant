@@ -40,11 +40,12 @@ pub(super) struct RawRuntimeConfig {
     pub(super) model_retry: Option<RawModelRetryConfig>,
 }
 
-/// 模型 HTTP 建连和完整请求的超时输入，单位统一为毫秒。
+/// 模型 HTTP 建连、响应建立和流空闲的超时输入，单位统一为毫秒。
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct RawModelTransportConfig {
     pub(super) connect_timeout_ms: u64,
+    /// 等待响应建立及相邻流 chunk 的最长时间；不是流式请求总时长上限。
     pub(super) request_timeout_ms: u64,
 }
 
@@ -83,6 +84,35 @@ pub(super) struct RawAgentDefaults {
     pub(super) generation: RawGenerationConfig,
     #[serde(default)]
     pub(super) execution_limits: RawExecutionLimits,
+    #[serde(default)]
+    pub(super) guardrails: RawGuardrailConfig,
+    #[serde(default)]
+    pub(super) delegation: RawDelegationConfig,
+}
+
+/// 单层子任务委派的模型无关调度与执行上限。
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct RawDelegationConfig {
+    pub(super) max_tasks_per_run: u32,
+    pub(super) max_concurrent_tasks: u32,
+    pub(super) task_timeout_ms: u64,
+    pub(super) max_steps: u32,
+    pub(super) max_tool_calls: u32,
+    pub(super) max_output_tokens: u32,
+}
+
+impl Default for RawDelegationConfig {
+    fn default() -> Self {
+        Self {
+            max_tasks_per_run: 8,
+            max_concurrent_tasks: 4,
+            task_timeout_ms: 900_000,
+            max_steps: 40,
+            max_tool_calls: 100,
+            max_output_tokens: 16_384,
+        }
+    }
 }
 
 /// Provider-neutral generation 输入；缺失字段保留 Provider 默认行为。
@@ -102,6 +132,44 @@ pub(super) struct RawGenerationConfig {
 pub(super) struct RawExecutionLimits {
     pub(super) max_steps: Option<u32>,
     pub(super) max_tool_calls: Option<u32>,
+}
+
+/// Agent Loop 的模型无关 Guardrail 输入。
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct RawGuardrailConfig {
+    pub(super) repeated_invocation: RawGuardrailCheck,
+    pub(super) consecutive_failures: RawGuardrailCheck,
+}
+
+impl Default for RawGuardrailConfig {
+    fn default() -> Self {
+        Self {
+            repeated_invocation: RawGuardrailCheck {
+                mode: RawGuardrailMode::Enforce,
+                threshold: 4,
+            },
+            consecutive_failures: RawGuardrailCheck {
+                mode: RawGuardrailMode::Enforce,
+                threshold: 5,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawGuardrailCheck {
+    pub(super) mode: RawGuardrailMode,
+    pub(super) threshold: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RawGuardrailMode {
+    Off,
+    Observe,
+    Enforce,
 }
 
 /// 单个 `models.<key>` 的原始字段集合。

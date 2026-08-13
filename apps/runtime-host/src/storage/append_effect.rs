@@ -1,6 +1,8 @@
 //! staged append 的持久业务意图及其 SQLite 提交效果。
 
-use assistant_protocol::{RunId, RunStatus, RuntimeErrorInfo, SessionId};
+use assistant_protocol::{
+    ChildTaskId, ChildTaskStatus, RunId, RunStatus, RuntimeErrorInfo, SessionId,
+};
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +27,30 @@ pub(super) enum AppendPurpose {
         cancel_requested: bool,
         error: Option<RuntimeErrorInfo>,
     },
+    /// 子任务初始 User Message 已写入，切换到 running。
+    ChildStart,
+    /// 子任务完整工具批次已写入，清除 child pending 事实。
+    ChildToolExchange { receipt_id: String },
+    /// 子任务最终消息已写入，结算 child 终态。
+    ChildSettlement {
+        status: ChildTaskStatus,
+        cancel_requested: bool,
+        error: Option<RuntimeErrorInfo>,
+        final_message_id: Option<agent_types::MessageId>,
+    },
+}
+
+/// 同一 staged append 算法的两种业务目标；物理表和路径只在 Host 内部适配。
+#[derive(Clone, Debug)]
+pub(super) enum ConversationStorageTarget {
+    Session {
+        session_id: SessionId,
+        run_id: RunId,
+    },
+    ChildTask {
+        session_id: SessionId,
+        child_task_id: ChildTaskId,
+    },
 }
 
 pub(super) fn encode_purpose(purpose: &AppendPurpose) -> StorageResult<String> {
@@ -46,16 +72,18 @@ pub(super) fn decode_purpose(value: &str) -> StorageResult<AppendPurpose> {
 pub(super) fn apply_purpose(
     transaction: &Transaction<'_>,
     purpose: &AppendPurpose,
-    run_id: &RunId,
-    session_id: &SessionId,
+    target: &ConversationStorageTarget,
     created_at_ms: i64,
 ) -> StorageResult<()> {
-    match purpose {
-        AppendPurpose::Messages => Ok(()),
-        AppendPurpose::UserMessage => {
+    match (purpose, target) {
+        (AppendPurpose::Messages, _) => Ok(()),
+        (AppendPurpose::UserMessage, ConversationStorageTarget::Session { session_id, run_id }) => {
             apply_user_message_start(transaction, run_id, session_id, created_at_ms)
         }
-        AppendPurpose::ToolExchange { receipt_id } => {
+        (
+            AppendPurpose::ToolExchange { receipt_id },
+            ConversationStorageTarget::Session { session_id, run_id },
+        ) => {
             let deleted = transaction
                 .execute(
                     "DELETE FROM pending_tool_exchanges
@@ -72,10 +100,128 @@ pub(super) fn apply_purpose(
             }
             Ok(())
         }
-        AppendPurpose::RunSettlement { .. } => {
-            apply_run_settlement(transaction, run_id, session_id, purpose, created_at_ms)
-        }
+        (
+            AppendPurpose::RunSettlement { .. },
+            ConversationStorageTarget::Session { session_id, run_id },
+        ) => apply_run_settlement(transaction, run_id, session_id, purpose, created_at_ms),
+        (
+            AppendPurpose::ChildStart,
+            ConversationStorageTarget::ChildTask {
+                session_id,
+                child_task_id,
+            },
+        ) => apply_child_start(transaction, child_task_id, session_id, created_at_ms),
+        (
+            AppendPurpose::ChildToolExchange { receipt_id },
+            ConversationStorageTarget::ChildTask {
+                session_id,
+                child_task_id,
+            },
+        ) => clear_child_exchange(transaction, receipt_id, child_task_id, session_id),
+        (
+            AppendPurpose::ChildSettlement { .. },
+            ConversationStorageTarget::ChildTask {
+                session_id,
+                child_task_id,
+            },
+        ) => apply_child_settlement(
+            transaction,
+            child_task_id,
+            session_id,
+            purpose,
+            created_at_ms,
+        ),
+        _ => Err(invalid_data(
+            "append purpose does not match conversation target",
+        )),
     }
+}
+
+fn apply_child_start(
+    transaction: &Transaction<'_>,
+    child_task_id: &ChildTaskId,
+    session_id: &SessionId,
+    started_at_ms: i64,
+) -> StorageResult<()> {
+    let changed = transaction
+        .execute(
+            "UPDATE child_tasks SET status = 'running', started_at_ms = ?1
+             WHERE child_task_id = ?2 AND session_id = ?3 AND status = 'accepted'",
+            params![started_at_ms, child_task_id.as_str(), session_id.as_str()],
+        )
+        .map_err(|source| internal_error("child task could not be started", source))?;
+    if changed != 1 {
+        return Err(conflict("child task cannot be started"));
+    }
+    Ok(())
+}
+
+fn clear_child_exchange(
+    transaction: &Transaction<'_>,
+    receipt_id: &str,
+    child_task_id: &ChildTaskId,
+    session_id: &SessionId,
+) -> StorageResult<()> {
+    let deleted = transaction
+        .execute(
+            "DELETE FROM child_pending_tool_exchanges
+             WHERE receipt_id = ?1 AND child_task_id = ?2 AND session_id = ?3 AND state = 'ready'",
+            params![receipt_id, child_task_id.as_str(), session_id.as_str()],
+        )
+        .map_err(|source| {
+            internal_error("pending child tool exchange could not be cleared", source)
+        })?;
+    if deleted != 1 {
+        return Err(invalid_data(
+            "pending child tool exchange finalization is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_child_settlement(
+    transaction: &Transaction<'_>,
+    child_task_id: &ChildTaskId,
+    session_id: &SessionId,
+    purpose: &AppendPurpose,
+    finished_at_ms: i64,
+) -> StorageResult<()> {
+    let AppendPurpose::ChildSettlement {
+        status,
+        cancel_requested,
+        error,
+        final_message_id,
+    } = purpose
+    else {
+        return Err(invalid_data("child task settlement purpose is invalid"));
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE child_tasks
+             SET status = ?1, cancel_requested = MAX(cancel_requested, ?2), final_message_id = ?3,
+                 error_code = ?4, error_message = ?5, finished_at_ms = ?6
+             WHERE child_task_id = ?7 AND session_id = ?8
+               AND status IN ('accepted', 'running')",
+            params![
+                super::mode::child_task_status_value(*status),
+                i64::from(*cancel_requested),
+                final_message_id
+                    .as_ref()
+                    .map(agent_types::MessageId::as_str),
+                error
+                    .as_ref()
+                    .map(|error| super::run_projection::error_code_value(error.code)),
+                error.as_ref().map(|error| error.message.as_str()),
+                finished_at_ms,
+                child_task_id.as_str(),
+                session_id.as_str(),
+            ],
+        )
+        .map_err(|source| internal_error("child task could not be settled", source))?;
+    if changed != 1 {
+        return Err(conflict("child task is not in a settleable state"));
+    }
+    Ok(())
 }
 
 fn apply_user_message_start(

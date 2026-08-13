@@ -1,4 +1,73 @@
 use super::*;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+};
+
+struct LocalResponseServer {
+    url: String,
+    task: thread::JoinHandle<()>,
+}
+
+impl LocalResponseServer {
+    fn join(self) {
+        self.task.join().expect("local response server should stop");
+    }
+}
+
+/// 启动只服务一个请求的本地 chunked HTTP server。
+///
+/// 每个 `(delay, bytes)` 的 delay 都发生在对应 chunk 写入前，便于分别验证响应
+/// 建立超时、相邻 chunk 空闲超时和不受总时长限制的持续流。
+fn local_chunked_response(
+    header_delay: Duration,
+    chunks: Vec<(Duration, &'static [u8])>,
+) -> LocalResponseServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local response server");
+    let address = listener.local_addr().expect("local response address");
+    let task = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept local request");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request);
+        thread::sleep(header_delay);
+        if stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .is_err()
+        {
+            return;
+        }
+        for (delay, chunk) in chunks {
+            thread::sleep(delay);
+            let frame = format!("{:X}\r\n", chunk.len());
+            if stream.write_all(frame.as_bytes()).is_err()
+                || stream.write_all(chunk).is_err()
+                || stream.write_all(b"\r\n").is_err()
+                || stream.flush().is_err()
+            {
+                return;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+        let _ = stream.flush();
+    });
+    LocalResponseServer {
+        url: format!("http://{address}/stream"),
+        task,
+    }
+}
+
+fn local_transport_request(url: String) -> TransportRequest {
+    TransportRequest {
+        trace: None,
+        method: "GET".to_owned(),
+        url,
+        headers: Vec::new(),
+        body: Vec::new(),
+    }
+}
 
 #[tokio::test]
 async fn encode_failure_fails_before_any_request() {
@@ -63,6 +132,84 @@ async fn timeout_returns_transport_err() {
             message: "request timed out".to_owned(),
         }
     );
+}
+
+#[tokio::test]
+async fn reqwest_timeout_bounds_response_establishment() {
+    let server = local_chunked_response(Duration::from_millis(250), Vec::new());
+    let transport = ReqwestTransport::with_timeouts(TransportTimeouts {
+        connect: Duration::from_millis(50),
+        request: Duration::from_millis(75),
+    })
+    .expect("transport should build");
+
+    let result = transport
+        .execute(local_transport_request(server.url.clone()))
+        .await;
+
+    assert!(matches!(result, Err(TransportError::Timeout)));
+    server.join();
+}
+
+#[tokio::test]
+async fn reqwest_stream_can_outlive_request_timeout_while_chunks_keep_arriving() {
+    let server = local_chunked_response(
+        Duration::ZERO,
+        vec![
+            (Duration::ZERO, b"a"),
+            (Duration::from_millis(120), b"b"),
+            (Duration::from_millis(120), b"c"),
+        ],
+    );
+    let transport = ReqwestTransport::with_timeouts(TransportTimeouts {
+        connect: Duration::from_millis(100),
+        request: Duration::from_millis(200),
+    })
+    .expect("transport should build");
+    let mut response = transport
+        .execute(local_transport_request(server.url.clone()))
+        .await
+        .expect("response should establish");
+    let mut received = Vec::new();
+
+    while let Some(item) = response.body.next().await {
+        received.extend(item.expect("each chunk should arrive before the idle timeout"));
+    }
+
+    assert_eq!(received, b"abc");
+    server.join();
+}
+
+#[tokio::test]
+async fn reqwest_stream_times_out_after_a_chunk_goes_idle() {
+    let server = local_chunked_response(
+        Duration::ZERO,
+        vec![
+            (Duration::ZERO, b"a"),
+            (Duration::from_millis(250), b"late"),
+        ],
+    );
+    let transport = ReqwestTransport::with_timeouts(TransportTimeouts {
+        connect: Duration::from_millis(50),
+        request: Duration::from_millis(75),
+    })
+    .expect("transport should build");
+    let mut response = transport
+        .execute(local_transport_request(server.url.clone()))
+        .await
+        .expect("response should establish");
+
+    assert_eq!(
+        response.body.next().await.expect("first body item"),
+        Ok(b"a".to_vec())
+    );
+    assert_eq!(
+        response.body.next().await.expect("timeout body item"),
+        Err(TransportError::Timeout)
+    );
+    assert!(response.body.next().await.is_none());
+    drop(response);
+    server.join();
 }
 
 #[tokio::test]

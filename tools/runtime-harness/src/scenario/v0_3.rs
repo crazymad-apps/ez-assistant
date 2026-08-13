@@ -998,7 +998,7 @@ fn compaction_required(
     outcome: &ExecutionOutcome,
 ) -> Result<(CompactionReason, u32), HarnessError> {
     match outcome {
-        ExecutionOutcome::CompactionRequired { reason, step } => Ok((*reason, *step)),
+        ExecutionOutcome::CompactionRequired { reason, step, .. } => Ok((*reason, *step)),
         other => Err(scenario_error(format!(
             "expected CompactionRequired, got {}",
             format_outcome(other)

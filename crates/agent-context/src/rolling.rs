@@ -30,12 +30,17 @@ Return only the concise summary.";
 /// 临时压缩消息只存在于单次请求中，不写入历史或 replacement。
 const COMPRESSION_MESSAGE_ID: &str = "context_compaction_instruction";
 const COMPRESSION_PART_ID: &str = "context_compaction_instruction_text";
+/// 整个活动 Turn 被摘要替换后保留的模型续跑锚点；它属于持久化规范历史，UI 隐藏。
+const CONTINUATION_MESSAGE_ID_SUFFIX: &str = "_continuation";
+const CONTINUATION_PART_ID_SUFFIX: &str = "_continuation_text";
+const CONTINUATION_INSTRUCTION: &str = "Continue the active task from the context summary above.";
 
 /// 同模型滚动摘要策略配置。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RollingSummaryPolicy {
     summary_output_tokens: u32,
     minimum_recent_user_turns: u32,
+    protect_active_turn: bool,
 }
 
 impl RollingSummaryPolicy {
@@ -50,7 +55,18 @@ impl RollingSummaryPolicy {
         Ok(Self {
             summary_output_tokens,
             minimum_recent_user_turns,
+            protect_active_turn: true,
         })
+    }
+
+    /// Runtime continuation 专用策略：摘要可以承接当前仍在工具循环中的完整 User Turn。
+    pub fn for_active_continuation(
+        summary_output_tokens: u32,
+        minimum_recent_user_turns: u32,
+    ) -> Result<Self, RollingSummaryPolicyError> {
+        let mut policy = Self::new(summary_output_tokens, minimum_recent_user_turns)?;
+        policy.protect_active_turn = false;
+        Ok(policy)
     }
 
     /// 压缩请求允许生成的最大输出 token。
@@ -102,7 +118,11 @@ impl CompressionStrategy for RollingSummarySameModel {
                 system_prompt,
                 layout,
             } = input;
-            let partition = layout.partition(policy.minimum_recent_user_turns());
+            let partition = layout.partition_for_continuation(
+                policy.minimum_recent_user_turns(),
+                policy.protect_active_turn,
+            );
+            let compacted_usage = aggregate_replaced_usage(&partition);
             let compressed_blocks = report_count(partition.compressible_head().len())?;
             let retained_blocks = report_count(partition.protected_tail().len())?;
             if !partition.has_compressible_head() {
@@ -160,6 +180,8 @@ impl CompressionStrategy for RollingSummarySameModel {
                 partition.protected_tail(),
                 &message,
                 summary_text,
+                compacted_usage,
+                !policy.protect_active_turn,
             );
             validate_replacement(&replacement)?;
 
@@ -252,11 +274,16 @@ fn build_replacement(
     protected_tail: &[crate::ContextBlock],
     message: &AssistantMessage,
     summary_text: String,
+    compacted_usage: Option<agent_types::TokenUsage>,
+    ensure_continuation_anchor: bool,
 ) -> ConversationSnapshot {
     let mut messages = protected_prefix.to_vec();
     messages.push(ConversationMessage::ContextSummary(ContextSummaryMessage {
         id: message.id.clone(),
         text: summary_text,
+        model: Some(message.model.clone()),
+        usage: message.usage.clone(),
+        compacted_usage,
     }));
     messages.extend(
         protected_tail
@@ -264,7 +291,84 @@ fn build_replacement(
             .flat_map(|block| block.messages().iter().cloned())
             .map(clear_assistant_usage),
     );
+    if ensure_continuation_anchor
+        && !messages
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::User(_)))
+    {
+        messages.push(continuation_anchor(&message.id));
+    }
     ConversationSnapshot::new(messages)
+}
+
+fn continuation_anchor(summary_id: &MessageId) -> ConversationMessage {
+    ConversationMessage::User(UserMessage {
+        id: MessageId::new(format!(
+            "{}{CONTINUATION_MESSAGE_ID_SUFFIX}",
+            summary_id.as_str()
+        ))
+        .expect("non-empty summary id forms a valid continuation message id"),
+        parts: vec![UserPart::Injected(TextPart {
+            id: PartId::new(format!(
+                "{}{CONTINUATION_PART_ID_SUFFIX}",
+                summary_id.as_str()
+            ))
+            .expect("non-empty summary id forms a valid continuation part id"),
+            text: CONTINUATION_INSTRUCTION.to_owned(),
+        })],
+    })
+}
+
+fn aggregate_replaced_usage(
+    partition: &crate::ContextPartition<'_>,
+) -> Option<agent_types::TokenUsage> {
+    let mut total: Option<agent_types::TokenUsage> = None;
+    for message in partition
+        .compressible_head()
+        .iter()
+        .chain(partition.protected_tail())
+        .flat_map(|block| block.messages())
+    {
+        match message {
+            ConversationMessage::Assistant(message) => {
+                add_usage(&mut total, message.usage.as_ref());
+            }
+            ConversationMessage::ContextSummary(message) => {
+                add_usage(&mut total, message.compacted_usage.as_ref());
+                add_usage(&mut total, message.usage.as_ref());
+            }
+            ConversationMessage::System(_)
+            | ConversationMessage::User(_)
+            | ConversationMessage::Tool(_) => {}
+        }
+    }
+    total
+}
+
+fn add_usage(total: &mut Option<agent_types::TokenUsage>, usage: Option<&agent_types::TokenUsage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    let target = total.get_or_insert_with(agent_types::TokenUsage::default);
+    target.input_tokens = target.input_tokens.saturating_add(usage.input_tokens);
+    target.output_tokens = target.output_tokens.saturating_add(usage.output_tokens);
+    target.total_tokens = target.total_tokens.saturating_add(usage.total_tokens);
+    if let Some(value) = usage.cached_input_tokens {
+        target.cached_input_tokens = Some(
+            target
+                .cached_input_tokens
+                .unwrap_or_default()
+                .saturating_add(value),
+        );
+    }
+    if let Some(value) = usage.reasoning_tokens {
+        target.reasoning_tokens = Some(
+            target
+                .reasoning_tokens
+                .unwrap_or_default()
+                .saturating_add(value),
+        );
+    }
 }
 
 fn clear_assistant_usage(mut message: ConversationMessage) -> ConversationMessage {
@@ -549,6 +653,15 @@ mod tests {
                 ConversationMessage::ContextSummary(ContextSummaryMessage {
                     id: id("summary_1"),
                     text: "condensed facts\nopen question".to_owned(),
+                    model: Some(summary.model.clone()),
+                    usage: summary.usage.clone(),
+                    compacted_usage: Some(agent_types::TokenUsage {
+                        input_tokens: 60,
+                        output_tokens: 30,
+                        total_tokens: 90,
+                        cached_input_tokens: Some(12),
+                        reasoning_tokens: Some(6),
+                    }),
                 }),
                 snapshot.messages[5].clone(),
                 assistant("assistant_3", None),
@@ -647,6 +760,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_old"),
                 text: "old summary".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             user("user_1"),
             assistant("assistant_1", Some(usage(40))),
@@ -699,6 +815,69 @@ mod tests {
         let mut expected_conversation = snapshot.messages[..3].to_vec();
         expected_conversation.push(compression_instruction_message());
         assert_eq!(requests[0].conversation.messages, expected_conversation);
+    }
+
+    #[tokio::test]
+    async fn active_turn_compaction_persists_a_user_anchor_for_the_continuation_result() {
+        let call_id = ToolCallId::new("call_active").expect("valid call id");
+        let snapshot = ConversationSnapshot::new(vec![
+            user("user_active"),
+            ConversationMessage::Assistant(AssistantMessage {
+                id: id("assistant_active"),
+                model: model_identity(),
+                parts: vec![AssistantPart::ToolCall(ToolCall {
+                    id: call_id.clone(),
+                    name: ToolName::new("lookup").expect("valid tool name"),
+                    arguments: serde_json::json!({}),
+                })],
+                finish_reason: FinishReason::ToolCalls,
+                usage: Some(usage(20)),
+            }),
+            ConversationMessage::Tool(ToolMessage {
+                id: id("tool_active"),
+                result: ToolResult {
+                    call_id,
+                    status: ToolResultStatus::Success,
+                    content: ToolResultContent::Text("result".to_owned()),
+                },
+            }),
+        ]);
+        let summary = summary_message(
+            "summary_active",
+            vec![AssistantPart::Text(TextPart {
+                id: part_id("summary_active_text"),
+                text: "active task summarized".to_owned(),
+            })],
+            FinishReason::Stop,
+        );
+        let model = Arc::new(ScriptedModel::new([Script::Events(message_events(
+            &summary,
+        ))]));
+        let strategy = RollingSummarySameModel::new(
+            RollingSummaryPolicy::for_active_continuation(64, 0).expect("valid policy"),
+        );
+
+        let StrategyOutcome::Candidate(mut candidate) = strategy
+            .compact(input(model, &snapshot), CancellationToken::new())
+            .await
+            .expect("active turn compaction succeeds")
+        else {
+            panic!("expected candidate");
+        };
+        assert!(matches!(
+            candidate.replacement.messages.as_slice(),
+            [ConversationMessage::ContextSummary(_), ConversationMessage::User(UserMessage {
+                parts,
+                ..
+            })] if matches!(parts.as_slice(), [UserPart::Injected(part)] if part.text == CONTINUATION_INSTRUCTION)
+        ));
+
+        candidate
+            .replacement
+            .messages
+            .push(assistant("assistant_continued", None));
+        crate::ContextLayout::build(&candidate.replacement)
+            .expect("persisted continuation result remains a valid user turn");
     }
 
     #[tokio::test]

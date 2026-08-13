@@ -76,26 +76,38 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         RuntimeErrorCode::SessionNotFound
         | RuntimeErrorCode::RunNotFound
+        | RuntimeErrorCode::ChildTaskNotFound
         | RuntimeErrorCode::InputNotFound
         | RuntimeErrorCode::ModelNotFound
         | RuntimeErrorCode::WorkspaceNotFound
         | RuntimeErrorCode::AttachmentNotFound => StatusCode::NOT_FOUND,
+        RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::SessionBusy
         | RuntimeErrorCode::SessionArchived
         | RuntimeErrorCode::SessionNotIdle
         | RuntimeErrorCode::RunNotRetryable
         | RuntimeErrorCode::WorkspaceRemoved
         | RuntimeErrorCode::WorkspaceUnavailable
-        | RuntimeErrorCode::AttachmentUnavailable => StatusCode::CONFLICT,
+        | RuntimeErrorCode::AttachmentUnavailable
+        | RuntimeErrorCode::PermissionFileConflict => StatusCode::CONFLICT,
+        RuntimeErrorCode::ApprovalExpired | RuntimeErrorCode::PermissionScopeUnavailable => {
+            StatusCode::CONFLICT
+        }
         RuntimeErrorCode::AttachmentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         RuntimeErrorCode::AttachmentUploadInvalid => StatusCode::BAD_REQUEST,
         RuntimeErrorCode::StorageUnavailable
         | RuntimeErrorCode::RuntimeShuttingDown
         | RuntimeErrorCode::ConfigurationUnavailable
-        | RuntimeErrorCode::ModelUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        | RuntimeErrorCode::ModelUnavailable
+        | RuntimeErrorCode::PermissionReloadFailed
+        | RuntimeErrorCode::PermissionPersistenceFailed => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeErrorCode::PermissionFileInvalid => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::AgentBuildFailed
         | RuntimeErrorCode::ModelBuildFailed
+        | RuntimeErrorCode::ContextCompactionFailed
         | RuntimeErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         RuntimeErrorCode::ModelExecutionFailed => StatusCode::BAD_GATEWAY,
+        RuntimeErrorCode::Timeout => StatusCode::REQUEST_TIMEOUT,
+        RuntimeErrorCode::Cancelled => StatusCode::CONFLICT,
     }
 }

@@ -18,19 +18,24 @@ use super::{
     BLOBS_DIRECTORY, BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, SESSIONS_DIRECTORY,
     STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path, conflict, conversation,
     create_new_private_file, database_write_error, internal_error, invalid_data,
-    invalid_data_with_source, non_negative_u64, positive_u64, schema,
-    session_resources::remove_created_session_directories, sync_directory,
+    invalid_data_with_source,
+    mode::{agent_variant_value, approval_mode_value, parse_agent_variant, parse_approval_mode},
+    non_negative_u64, positive_u64, schema,
+    session_resources::remove_created_session_directories,
+    sync_directory,
 };
 use crate::config_source::prepare_private_directory;
 
 /// 单一阻塞 worker 内部的具体存储引擎。
 pub(super) struct StorageEngine {
+    pub(super) runtime_home: PathBuf,
     pub(super) sessions_directory: PathBuf,
     pub(super) workspaces_directory: PathBuf,
     pub(super) blobs_directory: PathBuf,
     pub(super) upload_staging_directory: PathBuf,
     pub(super) connection: Connection,
     unavailable_sessions: HashSet<String>,
+    pub(super) unavailable_child_tasks: HashSet<String>,
 }
 
 impl StorageEngine {
@@ -84,12 +89,14 @@ impl StorageEngine {
         schema::initialize(&mut connection)?;
 
         let mut engine = Self {
+            runtime_home: runtime_home.to_path_buf(),
             sessions_directory,
             workspaces_directory,
             blobs_directory,
             upload_staging_directory,
             connection,
             unavailable_sessions: HashSet::new(),
+            unavailable_child_tasks: HashSet::new(),
         };
         engine.repair_session_resources()?;
         engine.recover_attachments()?;
@@ -98,6 +105,9 @@ impl StorageEngine {
 
     pub(super) fn load_runtime(&mut self) -> StorageResult<RecoveredRuntime> {
         let mut unavailable = self.recover_body_appends()?;
+        self.unavailable_child_tasks = self.recover_child_storage()?;
+        self.interrupt_nonterminal_child_tasks()?;
+        // parent delegate result 必须在 child 工具交换和 child 终态修复之后重建。
         unavailable.extend(self.recover_pending_tool_exchanges()?);
         self.unavailable_sessions = unavailable;
         self.interrupt_nonterminal_runs()?;
@@ -107,6 +117,7 @@ impl StorageEngine {
             sessions: self.load_sessions()?,
             inputs: self.load_inputs()?,
             runs: self.load_runs()?,
+            child_tasks: self.load_child_tasks()?,
         })
     }
 
@@ -132,14 +143,17 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, system_prompt_json, lifecycle,
-                        body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, 'active', 1, 0, ?5, ?5, NULL)",
+                        session_id, title, model_key, system_prompt_json, current_variant,
+                        approval_mode, lifecycle, body_generation, message_count, created_at_ms,
+                        updated_at_ms, archived_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, 0, ?7, ?7, NULL)",
                     params![
                         session.session_id.as_str(),
                         session.title,
                         session.model_key.as_str(),
                         prompt_json,
+                        agent_variant_value(session.current_variant),
+                        approval_mode_value(session.approval_mode),
                         session.created_at_ms,
                     ],
                 )
@@ -166,6 +180,8 @@ impl StorageEngine {
             system_prompt: session.system_prompt,
             environment: session.environment,
             lifecycle: StoredSessionLifecycle::Active,
+            current_variant: session.current_variant,
+            approval_mode: session.approval_mode,
             body_generation: 1,
             message_count: 0,
             created_at_ms: session.created_at_ms,
@@ -191,8 +207,9 @@ impl StorageEngine {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT session_id, title, model_key, system_prompt_json, lifecycle,
-                        body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms
+                "SELECT session_id, title, model_key, system_prompt_json, current_variant,
+                        approval_mode, lifecycle, body_generation, message_count, created_at_ms,
+                        updated_at_ms, archived_at_ms
                  FROM sessions
                  ORDER BY created_at_ms, session_id",
             )
@@ -205,11 +222,13 @@ impl StorageEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -221,6 +240,8 @@ impl StorageEngine {
                 title,
                 model_key,
                 prompt_json,
+                current_variant,
+                approval_mode,
                 lifecycle,
                 body_generation,
                 message_count,
@@ -255,6 +276,8 @@ impl StorageEngine {
                 system_prompt,
                 environment: self.load_session_environment(&parsed_session_id)?,
                 lifecycle,
+                current_variant: parse_agent_variant(&current_variant)?,
+                approval_mode: parse_approval_mode(&approval_mode)?,
                 body_generation: positive_u64(
                     body_generation,
                     "stored body generation is invalid",

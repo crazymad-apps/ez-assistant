@@ -1,22 +1,23 @@
-//! Core 两阶段 Recorder 到 Runtime Session/Run Journal 的绑定。
+//! Core 两阶段 Recorder 到主 Run 或子任务独立 Journal 的统一绑定。
+
+mod target;
 
 use std::sync::Arc;
 
 use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
-use agent_types::{AssistantMessage, ToolMessage};
-use assistant_protocol::RunId;
+use agent_types::{AssistantMessage, ToolCallId, ToolMessage};
+use assistant_protocol::{RunId, ToolCallId as ProtocolToolCallId};
 
 use crate::{
-    CompletedToolExchange, PendingToolExchange, RuntimeStore, id,
-    session::{SessionController, SessionState},
+    RuntimeStore, delegation::ChildTaskRecord as ChildTaskRecordImpl, id,
+    session::SessionController,
 };
 
-use super::is_active_run;
+use self::target::RecorderTarget;
 
-/// 把 Core 的两阶段落账调用绑定到唯一 Session/Run。
+/// 把 Core 的两阶段落账调用绑定到唯一的规范 Conversation 目标。
 pub(crate) struct RuntimeRecorder {
-    session: Arc<SessionController>,
-    run_id: RunId,
+    target: RecorderTarget,
     store: Arc<dyn RuntimeStore>,
 }
 
@@ -27,8 +28,14 @@ impl RuntimeRecorder {
         store: Arc<dyn RuntimeStore>,
     ) -> Self {
         Self {
-            session,
-            run_id,
+            target: RecorderTarget::parent(session, run_id),
+            store,
+        }
+    }
+
+    pub(crate) fn for_child(task: Arc<ChildTaskRecordImpl>, store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            target: RecorderTarget::child(task),
             store,
         }
     }
@@ -40,24 +47,12 @@ impl ExecutionRecorder for RuntimeRecorder {
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
-            // mutation gate 跨越 Store await，保证终态结算不能越过一个尚未完成的
-            // pending 提交；同步 state lock 只用于前后两个短内存临界区。
-            let _mutation = self.session.mutation().await;
-            {
-                let mut state = self.lock_state()?;
-                if !is_active_run(&state, &self.run_id) {
-                    state.is_faulted = true;
-                    return Err(record_error("active run does not match recorder"));
-                }
-                let journal = state
-                    .journal
-                    .as_ref()
-                    .ok_or_else(|| record_error("session conversation is unavailable"))?;
-                if journal.validate_tool_exchange_begin(&assistant).is_err() {
-                    state.is_faulted = true;
-                    return Err(record_error("journal rejected tool exchange begin"));
-                }
-            }
+            // 各目标独占自己的 mutation gate；Store await 不能被同一目标的终态结算越过，
+            // sibling child 之间则不互相阻塞。
+            let _mutation = self.target.mutation().await;
+            self.target
+                .validate_begin(&assistant)
+                .inspect_err(|_| self.target.fault())?;
 
             let receipt = ExchangeReceipt::new(
                 id::generate("exchange")
@@ -66,34 +61,40 @@ impl ExecutionRecorder for RuntimeRecorder {
             let created_at_ms = crate::runtime::now_ms()
                 .map_err(|_| record_error("tool exchange time could not be recorded"))?;
             if self
-                .store
-                .begin_tool_exchange(PendingToolExchange {
-                    receipt: receipt.clone(),
-                    session_id: self.session.id().clone(),
-                    run_id: self.run_id.clone(),
-                    assistant: assistant.clone(),
+                .target
+                .persist_begin(
+                    self.store.as_ref(),
+                    receipt.clone(),
+                    assistant.clone(),
                     created_at_ms,
-                })
+                )
                 .await
                 .is_err()
             {
-                self.fault_state();
+                self.target.fault();
                 return Err(record_error("tool exchange begin could not be persisted"));
             }
-
-            let mut state = self.lock_state()?;
-            let journal = state
-                .journal
-                .as_mut()
-                .ok_or_else(|| record_error("session conversation is unavailable"))?;
-            if journal
-                .begin_tool_exchange_with_receipt(&self.run_id, receipt.clone(), assistant)
-                .is_err()
-            {
-                state.is_faulted = true;
-                return Err(record_error("journal rejected persisted tool exchange"));
-            }
+            self.target
+                .commit_begin(receipt.clone(), assistant)
+                .inspect_err(|_| self.target.fault())?;
             Ok(receipt)
+        })
+    }
+
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        receipt: &'a ExchangeReceipt,
+        call_id: &'a ToolCallId,
+    ) -> RecordFuture<'a, ()> {
+        Box::pin(async move {
+            let call_id = ProtocolToolCallId::new(call_id.as_str())
+                .map_err(|_| record_error("tool call id could not be recorded"))?;
+            let started_at_ms = crate::runtime::now_ms()
+                .map_err(|_| record_error("tool execution start time could not be recorded"))?;
+            self.target
+                .persist_started(self.store.as_ref(), receipt.clone(), call_id, started_at_ms)
+                .await
+                .map_err(|_| record_error("tool execution start could not be persisted"))
         })
     }
 
@@ -103,104 +104,204 @@ impl ExecutionRecorder for RuntimeRecorder {
         results: Vec<ToolMessage>,
     ) -> RecordFuture<'a, ()> {
         Box::pin(async move {
-            let _mutation = self.session.mutation().await;
-            let batch = {
-                let mut state = self.lock_state()?;
-                if !is_active_run(&state, &self.run_id) {
-                    state.is_faulted = true;
-                    return Err(record_error("active run does not match recorder"));
-                }
-                let journal = state
-                    .journal
-                    .as_ref()
-                    .ok_or_else(|| record_error("session conversation is unavailable"))?;
-                match journal.tool_exchange_batch(&self.run_id, receipt, &results) {
-                    Ok(batch) => batch,
-                    Err(_) => {
-                        state.is_faulted = true;
-                        return Err(record_error("journal rejected tool exchange completion"));
-                    }
-                }
-            };
+            let _mutation = self.target.mutation().await;
+            let batch = self
+                .target
+                .validate_complete(receipt, &results)
+                .inspect_err(|_| self.target.fault())?;
             let operation_id = id::generate("append")
                 .map_err(|_| record_error("storage operation id could not be allocated"))?;
             let completed_at_ms = crate::runtime::now_ms()
                 .map_err(|_| record_error("tool exchange time could not be recorded"))?;
             if self
-                .store
-                .complete_tool_exchange(CompletedToolExchange {
+                .target
+                .persist_complete(
+                    self.store.as_ref(),
                     operation_id,
-                    receipt: receipt.clone(),
-                    session_id: self.session.id().clone(),
-                    run_id: self.run_id.clone(),
-                    results: results.clone(),
+                    receipt.clone(),
+                    results.clone(),
                     completed_at_ms,
-                })
+                )
                 .await
                 .is_err()
             {
-                self.fault_state();
+                self.target.fault();
                 return Err(record_error(
                     "tool exchange completion could not be persisted",
                 ));
             }
-
-            let message_ids = batch.iter().map(message_id).cloned().collect::<Vec<_>>();
-            let mut state = self.lock_state()?;
-            let Some(journal) = state.journal.as_mut() else {
-                state.is_faulted = true;
-                return Err(record_error("session conversation is unavailable"));
-            };
-            if journal
-                .complete_tool_exchange(&self.run_id, receipt, results)
-                .is_err()
-            {
-                state.is_faulted = true;
-                return Err(record_error("journal rejected persisted tool exchange"));
-            }
-            let persisted_message_count = journal.message_count();
-            let Ok(message_count) = u64::try_from(persisted_message_count) else {
-                state.is_faulted = true;
-                return Err(record_error("conversation message count is exhausted"));
-            };
-            let Some(run) = state.runs.get_mut(&self.run_id) else {
-                state.is_faulted = true;
-                return Err(record_error("active run record is unavailable"));
-            };
-            run.extend_message_ids(message_ids);
-            state.persisted_message_count = persisted_message_count;
-            state.message_count = message_count;
-            Ok(())
+            self.target
+                .commit_complete(receipt, results, &batch)
+                .inspect_err(|_| self.target.fault())
         })
     }
 }
 
-impl RuntimeRecorder {
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, SessionState>, RecordError> {
-        self.session
-            .lock_state()
-            .map_err(|_| record_error("session state is unavailable"))
-    }
-
-    fn fault_state(&self) {
-        if let Ok(mut state) = self.session.lock_state() {
-            state.is_faulted = true;
-        }
-    }
-}
-
-fn message_id(message: &agent_types::ConversationMessage) -> &agent_types::MessageId {
-    match message {
-        agent_types::ConversationMessage::System(message) => &message.id,
-        agent_types::ConversationMessage::ContextSummary(message) => &message.id,
-        agent_types::ConversationMessage::User(message) => &message.id,
-        agent_types::ConversationMessage::Assistant(message) => &message.id,
-        agent_types::ConversationMessage::Tool(message) => &message.id,
-    }
-}
-
-fn record_error(message: &'static str) -> RecordError {
+pub(super) fn record_error(message: &'static str) -> RecordError {
     RecordError {
         message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_model::SystemPromptSnapshot;
+    use agent_types::{
+        AssistantPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
+        ToolCall, ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
+    };
+    use assistant_protocol::{
+        AgentVariant, ApprovalMode, ChildTaskId, InputId, ModelKey, RunId, SessionId,
+    };
+    use serde_json::json;
+
+    use crate::{
+        ChildTaskStart, NewStoredChildTask, NewStoredInput, NewStoredSession,
+        SessionExecutionEnvironment, delegation::ChildTaskRecord, storage::VolatileRuntimeStore,
+    };
+
+    #[tokio::test]
+    async fn child_target_uses_the_same_recorder_algorithm_with_an_independent_journal() {
+        let store = Arc::new(VolatileRuntimeStore::default());
+        let session_id = SessionId::new("s-recorder-child").expect("session id");
+        let run_id = RunId::new("r-recorder-child").expect("run id");
+        store
+            .create_session(NewStoredSession {
+                session_id: session_id.clone(),
+                title: "recorder fixture".to_owned(),
+                model_key: ModelKey::new("fixture").expect("model key"),
+                system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
+                environment: SessionExecutionEnvironment {
+                    workspace_id: None,
+                    working_directory: "/volatile/session/private".to_owned(),
+                    workspace_private_directory: None,
+                    session_attachment_directory: "/volatile/session/attachments".to_owned(),
+                    session_private_directory: "/volatile/session/private".to_owned(),
+                },
+                current_variant: AgentVariant::Build,
+                approval_mode: ApprovalMode::Ask,
+                created_at_ms: 1,
+            })
+            .await
+            .expect("create session");
+        store
+            .accept_input(NewStoredInput {
+                input_id: InputId::new("input-recorder-child").expect("input id"),
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                idempotency_key: None,
+                agent_variant: AgentVariant::Build,
+                approval_mode: ApprovalMode::Ask,
+                message: user_message("parent-user"),
+                accepted_at_ms: 2,
+            })
+            .await
+            .expect("create parent run");
+        let child_task_id = ChildTaskId::new("ct-recorder-child").expect("child id");
+        store
+            .create_child_task(NewStoredChildTask {
+                child_task_id: child_task_id.clone(),
+                session_id: session_id.clone(),
+                parent_run_id: run_id,
+                parent_tool_call_id: ProtocolToolCallId::new("delegate-call")
+                    .expect("parent call id"),
+                title: "child".to_owned(),
+                system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+                agent_variant: AgentVariant::Build,
+                created_at_ms: 3,
+            })
+            .await
+            .expect("create child");
+        store
+            .start_child_task(ChildTaskStart {
+                operation_id: "start-child".to_owned(),
+                child_task_id: child_task_id.clone(),
+                session_id: session_id.clone(),
+                message: user_message("child-user"),
+                started_at_ms: 4,
+            })
+            .await
+            .expect("start child");
+        let conversation = store
+            .load_child_conversation(&session_id, &child_task_id)
+            .await
+            .expect("load child conversation");
+        let stored = store
+            .load_runtime()
+            .await
+            .expect("load child projection")
+            .child_tasks
+            .into_iter()
+            .find(|task| task.child_task_id == child_task_id)
+            .expect("stored child task");
+        let task = Arc::new(
+            ChildTaskRecord::recovered(&stored, Some(conversation)).expect("recover child record"),
+        );
+        let recorder = RuntimeRecorder::for_child(task, store.clone());
+        let call_id = ToolCallId::new("child-call").expect("call id");
+        let receipt = recorder
+            .begin_tool_exchange(AssistantMessage {
+                id: MessageId::new("child-assistant-tool").expect("message id"),
+                model: ModelIdentity::new(
+                    ProviderId::new("fixture").expect("provider id"),
+                    "fixture",
+                ),
+                parts: vec![AssistantPart::ToolCall(ToolCall {
+                    id: call_id.clone(),
+                    name: ToolName::new("fixture").expect("tool name"),
+                    arguments: json!({}),
+                })],
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            })
+            .await
+            .expect("begin child exchange");
+        recorder
+            .mark_tool_execution_started(&receipt, &call_id)
+            .await
+            .expect("mark child tool started");
+        recorder
+            .complete_tool_exchange(
+                &receipt,
+                vec![ToolMessage {
+                    id: MessageId::new("child-tool-result").expect("message id"),
+                    result: ToolResult {
+                        call_id,
+                        status: ToolResultStatus::Success,
+                        content: ToolResultContent::Text("done".to_owned()),
+                    },
+                }],
+            )
+            .await
+            .expect("complete child exchange");
+
+        assert_eq!(
+            store
+                .load_child_conversation(&session_id, &child_task_id)
+                .await
+                .expect("load persisted child conversation")
+                .messages
+                .len(),
+            3
+        );
+        assert!(
+            store
+                .load_conversation(&session_id)
+                .await
+                .expect("load parent conversation")
+                .messages
+                .is_empty()
+        );
+    }
+
+    fn user_message(id: &str) -> UserMessage {
+        UserMessage {
+            id: MessageId::new(id).expect("message id"),
+            parts: vec![UserPart::Text(TextPart {
+                id: PartId::new(format!("part-{id}")).expect("part id"),
+                text: id.to_owned(),
+            })],
+        }
     }
 }

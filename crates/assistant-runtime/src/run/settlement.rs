@@ -29,6 +29,28 @@ pub(crate) async fn settle_run(
     store: &dyn RuntimeStore,
     model_diagnostics: Option<&RunModelDiagnostics>,
 ) -> RuntimeResult<RunSnapshot> {
+    settle_run_inner(session, run_id, outcome, store, model_diagnostics, None).await
+}
+
+/// Runtime 编排（例如自动压缩）失败时，以已经脱敏的稳定错误结算同一 Run。
+pub(crate) async fn settle_run_with_error(
+    session: &SessionController,
+    run_id: &RunId,
+    error: RuntimeErrorInfo,
+    store: &dyn RuntimeStore,
+    model_diagnostics: Option<&RunModelDiagnostics>,
+) -> RuntimeResult<RunSnapshot> {
+    settle_run_inner(session, run_id, None, store, model_diagnostics, Some(error)).await
+}
+
+async fn settle_run_inner(
+    session: &SessionController,
+    run_id: &RunId,
+    outcome: Option<ExecutionOutcome>,
+    store: &dyn RuntimeStore,
+    model_diagnostics: Option<&RunModelDiagnostics>,
+    forced_error: Option<RuntimeErrorInfo>,
+) -> RuntimeResult<RunSnapshot> {
     let _mutation = session.mutation().await;
     let (candidate, messages, settlement, cancel_requested) = {
         let mut state = session.lock_state()?;
@@ -61,22 +83,35 @@ pub(crate) async fn settle_run(
                 component: "run settlement conversation",
             }
         })?;
-        let mut settlement = match outcome {
-            Some(ExecutionOutcome::Completed(message)) => {
-                match candidate.append_completed(ConversationMessage::Assistant(message.clone())) {
-                    Ok(()) => completed_settlement(&message),
-                    Err(_) => {
-                        state.is_faulted = true;
-                        internal_failure("final assistant message could not be committed")
+        let mut settlement = if let Some(error) = forced_error {
+            RunSettlement {
+                status: RunStatus::Failed,
+                reasoning: None,
+                text: None,
+                error: Some(error),
+            }
+        } else {
+            match outcome {
+                Some(ExecutionOutcome::Completed(message)) => {
+                    match candidate
+                        .append_completed(ConversationMessage::Assistant(message.clone()))
+                    {
+                        Ok(()) => completed_settlement(&message),
+                        Err(_) => {
+                            state.is_faulted = true;
+                            internal_failure("final assistant message could not be committed")
+                        }
                     }
                 }
+                Some(ExecutionOutcome::Failed(error)) => {
+                    failed_settlement(&error, model_diagnostics)
+                }
+                Some(ExecutionOutcome::Cancelled) => RunSettlement::terminal(RunStatus::Cancelled),
+                Some(ExecutionOutcome::CompactionRequired { .. }) => {
+                    RunSettlement::terminal(RunStatus::CompactionRequired)
+                }
+                None => internal_failure("agent completion task terminated unexpectedly"),
             }
-            Some(ExecutionOutcome::Failed(error)) => failed_settlement(&error, model_diagnostics),
-            Some(ExecutionOutcome::Cancelled) => RunSettlement::terminal(RunStatus::Cancelled),
-            Some(ExecutionOutcome::CompactionRequired { .. }) => {
-                RunSettlement::terminal(RunStatus::CompactionRequired)
-            }
-            None => internal_failure("agent completion task terminated unexpectedly"),
         };
         if has_pending {
             state.is_faulted = true;

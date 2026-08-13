@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ExecutionOutcome::Failed(error) => println!("状态：Failed ({error})"),
         ExecutionOutcome::Cancelled => println!("状态：Cancelled"),
-        ExecutionOutcome::CompactionRequired { reason, step } => {
+        ExecutionOutcome::CompactionRequired { reason, step, .. } => {
             println!("状态：CompactionRequired ({reason:?}, step={step})")
         }
     }
@@ -240,6 +240,7 @@ fn describe_event(event: &AgentEvent) -> String {
             reason,
             step,
             dropped_events,
+            ..
         } => format!(
             "execution.compaction_required: {reason:?} step={step} \
              (dropped_events={dropped_events})"

@@ -142,6 +142,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     let key = IdempotencyKey::new("files-submit").expect("key");
     let accepted = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "compare".to_owned(),
             attachment_ids: vec![second.attachment_id.clone(), first.attachment_id.clone()],
@@ -163,6 +164,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
         })
         .expect("user message");
     assert!(matches!(user.parts[0], UserPart::Text(_)));
+    assert_eq!(user.parts.len(), 3);
     let UserPart::FileReferences(files) = &user.parts[1] else {
         panic!("second user part must contain file references");
     };
@@ -183,9 +185,14 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             ),
         ]
     );
+    let UserPart::Injected(injected) = &user.parts[2] else {
+        panic!("third user part must contain the persisted variant injection");
+    };
+    assert_eq!(injected.text, crate::agent_variant::BUILD_INJECTION_V1);
 
     let reused = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "reuse one file".to_owned(),
             attachment_ids: vec![first.attachment_id.clone()],
@@ -224,6 +231,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
 
     let idempotent = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "ignored retry payload".to_owned(),
             attachment_ids: vec![foreign.attachment_id.clone()],
@@ -235,6 +243,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id.clone(),
                 message: "duplicate ids".to_owned(),
                 attachment_ids: vec![first.attachment_id.clone(), first.attachment_id.clone()],
@@ -246,6 +255,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: second_session.session_id,
                 message: "cross session".to_owned(),
                 attachment_ids: vec![second.attachment_id],
@@ -264,6 +274,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id,
                 message: "unavailable".to_owned(),
                 attachment_ids: vec![first.attachment_id],

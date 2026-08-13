@@ -3,9 +3,53 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ModelFailureKind, PartId, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
-    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel,
+    ApprovalDecision, ApprovalId, ApprovalSnapshot, ChildTaskId, ChildTaskSnapshot,
+    ChildTaskStatus, GuardrailKind, GuardrailMode, ModelFailureKind, PartId, PermissionFileSummary,
+    RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary, TokenUsageSnapshot,
+    ToolActivityStatus, ToolCallId, ToolOutputChannel,
 };
+
+/// 子任务事件的 payload；父子所有权固定放在外层 RuntimeEvent envelope。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChildTaskEvent {
+    Created {
+        task: Box<ChildTaskSnapshot>,
+    },
+    Started,
+    TextDelta {
+        part_id: PartId,
+        delta: String,
+    },
+    ReasoningDelta {
+        part_id: PartId,
+        delta: String,
+    },
+    UsageUpdated {
+        step: u32,
+        usage: TokenUsageSnapshot,
+    },
+    ToolProposed {
+        call_id: ToolCallId,
+        tool_name: String,
+    },
+    ToolStarted {
+        call_id: ToolCallId,
+    },
+    ToolOutput {
+        call_id: ToolCallId,
+        channel: ToolOutputChannel,
+        chunk: String,
+    },
+    ToolCompleted {
+        call_id: ToolCallId,
+        status: ToolActivityStatus,
+    },
+    Finished {
+        status: ChildTaskStatus,
+        error: Option<RuntimeErrorInfo>,
+    },
+}
 
 /// Runtime 向在线客户端发布的产品层观察事件。
 ///
@@ -19,6 +63,43 @@ pub enum RuntimeEvent {
     SessionCreated {
         /// 新 Session 的稳定摘要。
         session: SessionSummary,
+    },
+    /// Session 当前 Agent 变体发生变化。
+    SessionVariantChanged {
+        session: SessionSummary,
+    },
+    /// Session 当前审批模式发生变化。
+    SessionApprovalModeChanged {
+        session: SessionSummary,
+    },
+    /// 一个 Session cohort 的权限快照已被原子替换。
+    PermissionReloaded {
+        session_id: SessionId,
+        files: Vec<PermissionFileSummary>,
+    },
+    ApprovalRequested {
+        approval: Box<ApprovalSnapshot>,
+    },
+    ApprovalResolved {
+        session_id: SessionId,
+        run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_task_id: Option<ChildTaskId>,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+    },
+    ApprovalCancelled {
+        session_id: SessionId,
+        run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_task_id: Option<ChildTaskId>,
+        approval_id: ApprovalId,
+    },
+    ChildTaskEvent {
+        session_id: SessionId,
+        parent_run_id: RunId,
+        child_task_id: ChildTaskId,
+        event: ChildTaskEvent,
     },
     /// 一个 Run 已被 Runtime 原子登记。
     RunAccepted {
@@ -147,6 +228,16 @@ pub enum RuntimeEvent {
         /// 完成后的工具活动状态。
         status: ToolActivityStatus,
     },
+    /// 一个 Runtime 配置的 Guardrail 首次达到当前连续序列阈值。
+    GuardrailTriggered {
+        session_id: SessionId,
+        run_id: RunId,
+        call_id: ToolCallId,
+        kind: GuardrailKind,
+        mode: GuardrailMode,
+        threshold: u32,
+        observed: u32,
+    },
     /// Run 已由 completion 唯一结算为终态。
     RunFinished {
         /// Run 所属 Session。
@@ -173,6 +264,43 @@ mod tests {
 
     fn run_id() -> RunId {
         RunId::new("run-1").expect("run id")
+    }
+
+    fn session_fixture() -> SessionSummary {
+        SessionSummary {
+            session_id: session_id(),
+            title: "Session 1".to_owned(),
+            model_key: ModelKey::new("model-1").expect("model key"),
+            lifecycle: crate::SessionLifecycle::Active,
+            current_variant: crate::AgentVariant::Build,
+            approval_mode: crate::ApprovalMode::Ask,
+            workspace_id: None,
+            active_run_id: None,
+            message_count: 0,
+            queued_input_count: 0,
+            resume_required: false,
+        }
+    }
+
+    fn approval_fixture() -> ApprovalSnapshot {
+        ApprovalSnapshot {
+            approval_id: ApprovalId::new("approval-1").expect("approval id"),
+            session_id: session_id(),
+            run_id: run_id(),
+            child_task_id: None,
+            call_id: ToolCallId::new("call-1").expect("call id"),
+            variant: crate::AgentVariant::Build,
+            approval_mode: crate::ApprovalMode::Ask,
+            subject: crate::ToolApprovalSubject::General {
+                tool_name: "echo_text".to_owned(),
+            },
+            available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
+            exact_rule_preview: crate::ToolApprovalSubject::General {
+                tool_name: "echo_text".to_owned(),
+            },
+            status: crate::ApprovalStatus::Pending,
+            created_at_ms: 1,
+        }
     }
 
     #[test]
@@ -223,19 +351,71 @@ mod tests {
             (RuntimeEvent::RuntimeShuttingDown, "runtime_shutting_down"),
             (
                 RuntimeEvent::SessionCreated {
-                    session: SessionSummary {
-                        session_id: session_id(),
-                        title: "Session 1".to_owned(),
-                        model_key: ModelKey::new("model-1").expect("model key"),
-                        lifecycle: crate::SessionLifecycle::Active,
-                        workspace_id: None,
-                        active_run_id: None,
-                        message_count: 0,
-                        queued_input_count: 0,
-                        resume_required: false,
-                    },
+                    session: session_fixture(),
                 },
                 "session_created",
+            ),
+            (
+                RuntimeEvent::SessionVariantChanged {
+                    session: SessionSummary {
+                        current_variant: crate::AgentVariant::Plan,
+                        ..session_fixture()
+                    },
+                },
+                "session_variant_changed",
+            ),
+            (
+                RuntimeEvent::SessionApprovalModeChanged {
+                    session: SessionSummary {
+                        approval_mode: crate::ApprovalMode::Auto,
+                        ..session_fixture()
+                    },
+                },
+                "session_approval_mode_changed",
+            ),
+            (
+                RuntimeEvent::PermissionReloaded {
+                    session_id: session_id(),
+                    files: vec![crate::PermissionFileSummary {
+                        scope: crate::PermissionScope::Global,
+                        status: crate::PermissionFileStatus::Ready,
+                    }],
+                },
+                "permission_reloaded",
+            ),
+            (
+                RuntimeEvent::ApprovalRequested {
+                    approval: Box::new(approval_fixture()),
+                },
+                "approval_requested",
+            ),
+            (
+                RuntimeEvent::ApprovalResolved {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    child_task_id: None,
+                    approval_id: ApprovalId::new("approval-1").expect("approval id"),
+                    decision: ApprovalDecision::AllowSession,
+                },
+                "approval_resolved",
+            ),
+            (
+                RuntimeEvent::ApprovalCancelled {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    child_task_id: None,
+                    approval_id: ApprovalId::new("approval-1").expect("approval id"),
+                },
+                "approval_cancelled",
+            ),
+            (
+                RuntimeEvent::ChildTaskEvent {
+                    session_id: session_id(),
+                    parent_run_id: run_id(),
+                    child_task_id: ChildTaskId::new("child-1").expect("child id"),
+                    event: ChildTaskEvent::Started,
+                },
+                "child_task_event",
             ),
             (
                 RuntimeEvent::RunAccepted {
@@ -360,6 +540,18 @@ mod tests {
                     status: ToolActivityStatus::Completed,
                 },
                 "tool_completed",
+            ),
+            (
+                RuntimeEvent::GuardrailTriggered {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    call_id: ToolCallId::new("call-1").expect("call id"),
+                    kind: GuardrailKind::RepeatedInvocation,
+                    mode: GuardrailMode::Enforce,
+                    threshold: 4,
+                    observed: 4,
+                },
+                "guardrail_triggered",
             ),
             (
                 RuntimeEvent::RunFinished {

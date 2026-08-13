@@ -748,7 +748,7 @@ async fn supervise(
             record_event(&session, &run_id, &event, &runtime);
         }
         let outcome = execution.completion.await;
-        let ExecutionOutcome::CompactionRequired { reason, step } = outcome else {
+        let ExecutionOutcome::CompactionRequired { reason, step, .. } = outcome else {
             finish_run(&session, &run_id, outcome, &runtime);
             return;
         };
@@ -972,7 +972,7 @@ fn finish_run(
                 RunStatus::Failed
             }
             ExecutionOutcome::Cancelled => RunStatus::Cancelled,
-            ExecutionOutcome::CompactionRequired { reason, step } => {
+            ExecutionOutcome::CompactionRequired { reason, step, .. } => {
                 if let Some(run) = &mut state.run {
                     run.last_error = Some(format!(
                         "context compaction required at step {step}: {reason:?}"

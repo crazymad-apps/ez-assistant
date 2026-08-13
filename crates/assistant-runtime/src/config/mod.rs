@@ -17,7 +17,7 @@ use std::{num::NonZeroUsize, time::Duration};
 pub use compile::compile_runtime_config;
 pub use domain::{
     ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
-    ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
+    DelegationConfig, ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
     RuntimeModelTransportConfig,
 };
 pub use source::{

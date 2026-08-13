@@ -965,6 +965,7 @@ mod tests {
                 &AgentEvent::ExecutionCompactionRequired {
                     reason: CompactionReason::ThresholdReached,
                     step: 1,
+                    consumption: agent_core::ExecutionConsumption::default(),
                     dropped_events: 2,
                 },
             )
@@ -975,6 +976,7 @@ mod tests {
                 ExecutionOutcome::CompactionRequired {
                     reason: CompactionReason::ThresholdReached,
                     step: 1,
+                    consumption: agent_core::ExecutionConsumption::default(),
                 },
             )
             .expect("finish");

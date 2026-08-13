@@ -46,7 +46,7 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
     assert!(disabled_output.status.success());
     assert!(!runtime_home.path().join("run/runtime.json").exists());
 
-    let host = HostProcess::start_unrestricted_web_demo(runtime_home.path());
+    let host = HostProcess::start_web_demo(runtime_home.path());
     let base_url = host.base_url().to_owned();
     let token = host.access_token().to_owned();
 
@@ -136,6 +136,15 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
     assert!(demo_html.contains("usage-output"));
     assert!(demo_html.contains("usage-total"));
     assert!(demo_html.contains("usage-cached"));
+    assert!(demo_html.contains("agent-variant"));
+    assert!(demo_html.contains("approval-mode"));
+    assert!(demo_html.contains("reload-permissions"));
+    assert!(demo_html.contains("approval-list"));
+    assert!(demo_html.contains("quick-plan"));
+    assert!(demo_html.contains("quick-build"));
+    assert!(demo_html.contains("child-task-list"));
+    assert!(demo_html.contains("usage-combined-total"));
+    assert!(demo_html.contains("/demo/child-tasks.js"));
     assert!(!demo_html.contains("event-log"));
 
     let demo_script = http
@@ -163,6 +172,32 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
     assert!(demo_script.contains("turn.usage"));
     assert!(demo_script.contains("eventName === \"stream_gap\""));
     assert!(demo_script.contains("refreshAuthoritativeState"));
+    assert!(demo_script.contains("requestAnimationFrame(flushUiFrame)"));
+    assert!(demo_script.contains("node.appendData(delta)"));
+    assert!(demo_script.contains("MAX_RENDERED_HISTORY_MESSAGES"));
+    assert!(!demo_script.contains("textContent += event.delta"));
+    assert!(demo_script.contains("set_session_variant"));
+    assert!(demo_script.contains("set_session_approval_mode"));
+    assert!(demo_script.contains("reload_permissions"));
+    assert!(demo_script.contains("list_pending_approvals"));
+    assert!(demo_script.contains("decide_approval"));
+    assert!(demo_script.contains("event.type === \"approval_requested\""));
+    assert!(demo_script.contains("byId(\"agent-variant\").value"));
+    assert!(demo_script.contains("childTasks.handleEvent(event)"));
+    assert!(demo_script.contains("childTasks.setParentConversation(conversation)"));
+
+    let child_task_script = http
+        .get(format!("{base_url}/demo/child-tasks.js"))
+        .send()
+        .expect("Web Demo child task script");
+    assert_eq!(child_task_script.status(), reqwest::StatusCode::OK);
+    let child_task_script = child_task_script.text().expect("child task script body");
+    assert!(child_task_script.contains("list_child_tasks"));
+    assert!(child_task_script.contains("cancel_child_task"));
+    assert!(demo_script.contains("child_task_conversation_snapshot"));
+    assert!(child_task_script.contains("requestAnimationFrame"));
+    assert!(child_task_script.contains("liveChildUsage"));
+    assert!(!child_task_script.contains("textContent += event.delta"));
 
     let event_response = http
         .get(format!("{base_url}/events"))
@@ -201,6 +236,10 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
         .clone();
     assert_eq!(session["workspace_id"], workspace_id);
     let session_id = session["session_id"].as_str().expect("session id");
+    client.runtime(
+        "set_session_approval_mode",
+        json!({ "session_id": session_id, "approval_mode": "auto" }),
+    );
     let source = runtime_home.path().join("upload-source.txt");
     fs::write(&source, "attachment-tool-token-91").expect("write upload source");
     let upload = http
@@ -303,6 +342,7 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
                     "payload": {
                         "session_id": session_id,
                         "message": "   ",
+                        "variant": "build",
                         "attachment_ids": [attachment_id]
                     }
                 }
@@ -384,6 +424,7 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
         json!({
             "session_id": session_id,
             "message": "FILE_REFERENCE_CASE inspect the attached file",
+            "variant": "build",
             "attachment_ids": [attachment_id],
             "idempotency_key": "file-reference-first"
         }),
@@ -409,6 +450,7 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
         json!({
             "session_id": session_id,
             "message": "FILE_REFERENCE_CASE inspect the attached file again",
+            "variant": "build",
             "attachment_ids": [attachment_id],
             "idempotency_key": "file-reference-second"
         }),
@@ -451,7 +493,7 @@ fn local_http_enforces_access_boundaries_streams_events_and_serves_opt_in_demo()
         "archived",
     );
 
-    let second_host = HostProcess::start_unrestricted_web_demo(runtime_home.path());
+    let second_host = HostProcess::start_web_demo(runtime_home.path());
     let second_token = second_host.access_token().to_owned();
     let mut recovered = second_host.connect();
     let sessions = recovered.runtime("list_sessions", json!({ "filter": "all" }));

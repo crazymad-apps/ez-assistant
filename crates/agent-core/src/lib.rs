@@ -39,7 +39,8 @@ pub use context::ExecutionContext;
 pub use error::{BudgetKind, ExecutionError};
 pub use event::{AgentEvent, AgentEventStream, ToolCompletionStatus};
 pub use execution::{
-    AgentExecution, CompactionReason, CompletionFuture, ExecutionControl, ExecutionOutcome,
+    AgentExecution, CompactionReason, CompletionFuture, ExecutionConsumption, ExecutionControl,
+    ExecutionOutcome,
 };
 pub use guardrail::{ActiveGuardrailMode, GuardrailCheckConfig, GuardrailConfig, GuardrailKind};
 pub use input::ExecutionInput;

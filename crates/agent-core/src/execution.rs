@@ -42,7 +42,7 @@ pub enum CompactionReason {
 /// `ExecutionCompleted{message}` ↔ [`ExecutionOutcome::Completed`]、
 /// `ExecutionFailed{error}` ↔ [`ExecutionOutcome::Failed`]、
 /// `ExecutionCancelled` ↔ [`ExecutionOutcome::Cancelled`]、
-/// `ExecutionCompactionRequired{reason,step}` ↔
+/// `ExecutionCompactionRequired{reason,step,consumption}` ↔
 /// [`ExecutionOutcome::CompactionRequired`]。每次执行恰好收敛到一个终态，
 /// 完成结果与终态事件承载同一事实。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -60,7 +60,21 @@ pub enum ExecutionOutcome {
         reason: CompactionReason,
         /// 阈值预检即将开始或 Provider Overflow 已经开始的 Model Step。
         step: u32,
+        /// 本段 execution 在交接前已经可靠消费的硬预算。
+        #[serde(default)]
+        consumption: ExecutionConsumption,
     },
+}
+
+/// 一段 [`AgentExecution`] 已经实际消费的硬预算事实。
+///
+/// 该值由 Engine 自身在压缩交接终态生成，不能从允许丢弃的观察事件反推。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionConsumption {
+    /// 已经开始的模型 Turn 数。
+    pub steps: u32,
+    /// 已经越过授权与预算闸并实际 dispatch 的工具调用数。
+    pub tool_calls: u32,
 }
 
 /// 一次执行的取消控制句柄。
@@ -201,6 +215,14 @@ mod tests {
                 *self.pending.lock().expect("lock pending") = Some(assistant);
                 ExchangeReceipt::new("exchange_1")
             })
+        }
+
+        fn mark_tool_execution_started<'a>(
+            &'a self,
+            _receipt: &'a ExchangeReceipt,
+            _call_id: &'a agent_types::ToolCallId,
+        ) -> RecordFuture<'a, ()> {
+            Box::pin(std::future::ready(Ok(())))
         }
 
         fn complete_tool_exchange<'a>(
@@ -414,6 +436,10 @@ mod tests {
             ExecutionOutcome::CompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 2,
+                consumption: ExecutionConsumption {
+                    steps: 1,
+                    tool_calls: 0,
+                },
             },
         ];
         for outcome in outcomes {
@@ -423,6 +449,22 @@ mod tests {
                 outcome
             );
         }
+        let legacy = serde_json::json!({
+            "type": "compaction_required",
+            "data": {
+                "reason": "threshold_reached",
+                "step": 1
+            }
+        });
+        assert_eq!(
+            serde_json::from_value::<ExecutionOutcome>(legacy)
+                .expect("legacy compaction outcome without consumption remains readable"),
+            ExecutionOutcome::CompactionRequired {
+                reason: CompactionReason::ThresholdReached,
+                step: 1,
+                consumption: ExecutionConsumption::default(),
+            }
+        );
         // 稳定 tag：蛇形命名。
         let json = serde_json::to_value(ExecutionOutcome::Cancelled).expect("serialize to value");
         assert_eq!(json, serde_json::json!({"type": "cancelled"}));

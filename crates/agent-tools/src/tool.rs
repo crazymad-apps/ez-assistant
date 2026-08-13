@@ -17,7 +17,7 @@
 use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
 
 use agent_types::{
-    ToolCall, ToolDefinition, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
+    ToolCall, ToolCallId, ToolDefinition, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
 };
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
@@ -59,6 +59,20 @@ pub struct ToolOutputChunk {
 /// 流式输出回调；Core 会把它转换为 `AgentEvent::ToolOutput`。
 pub type ToolOutputSink = Arc<dyn Fn(ToolOutputChunk) + Send + Sync>;
 
+/// Core 调度同一模型 Turn 中工具调用时使用的执行属性。
+///
+/// 该属性只在工具注册边界冻结，不进入模型可见 [`ToolDefinition`]，也不属于
+/// 授权事实。工具必须显式选择 [`ParallelEligible`](Self::ParallelEligible)；
+/// 默认串行保证现有工具在升级后不改变副作用顺序。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolExecutionMode {
+    /// 与批次中相邻调用按原顺序逐个执行。
+    #[default]
+    Serial,
+    /// Core 可以把连续、同样具备该属性的调用组成并行组。
+    ParallelEligible,
+}
+
 /// 单次工具执行的控制面上下文。
 #[derive(Clone)]
 pub struct ToolContext {
@@ -66,6 +80,10 @@ pub struct ToolContext {
     pub cancellation: CancellationToken,
     /// 执行期间发送 stdout/stderr 或进度片段的回调。
     pub output_sink: ToolOutputSink,
+    /// 当前模型 Tool Call 的稳定标识；由 Core dispatch 时绑定。
+    ///
+    /// 直接单测工具时可以为空，只有需要建立跨层业务关系的工具才必须读取它。
+    call_id: Option<ToolCallId>,
 }
 
 impl ToolContext {
@@ -74,7 +92,20 @@ impl ToolContext {
         Self {
             cancellation,
             output_sink,
+            call_id: None,
         }
+    }
+
+    /// 绑定当前调用标识。该信息不进入工具输入 Schema 或授权事实。
+    #[must_use]
+    pub fn with_call_id(mut self, call_id: ToolCallId) -> Self {
+        self.call_id = Some(call_id);
+        self
+    }
+
+    /// 读取由 Core 绑定的当前 Tool Call 标识。
+    pub fn call_id(&self) -> Option<&ToolCallId> {
+        self.call_id.as_ref()
     }
 }
 
@@ -83,6 +114,7 @@ impl Default for ToolContext {
         Self {
             cancellation: CancellationToken::new(),
             output_sink: Arc::new(|_| {}),
+            call_id: None,
         }
     }
 }
@@ -227,6 +259,11 @@ pub trait Tool: Send + Sync + 'static {
         ToolInputDefaults::default()
     }
 
+    /// 返回只供 Core 调度使用的执行属性；注册时读取并冻结一次。
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Serial
+    }
+
     /// 在不执行 I/O 的前提下，落实确定性默认值并构造授权事实。
     fn resolve(&self, input: Self::Input)
     -> Result<ToolResolution<Self::ResolvedInput>, ToolError>;
@@ -245,11 +282,15 @@ pub(crate) trait ErasedTool: Send + Sync {
 
 pub(crate) struct TypedToolErasure<T: Tool> {
     tool: Arc<T>,
+    execution_mode: ToolExecutionMode,
 }
 
 impl<T: Tool> TypedToolErasure<T> {
-    pub(crate) fn new(tool: Arc<T>) -> Self {
-        Self { tool }
+    pub(crate) fn new(tool: Arc<T>, execution_mode: ToolExecutionMode) -> Self {
+        Self {
+            tool,
+            execution_mode,
+        }
     }
 }
 
@@ -290,6 +331,7 @@ impl<T: Tool> ErasedTool for TypedToolErasure<T> {
                 })
             }),
             fingerprint,
+            self.execution_mode,
         );
         let executor: Box<dyn ErasedResolvedExecution> = Box::new(TypedResolvedExecution {
             tool: self.tool.clone(),

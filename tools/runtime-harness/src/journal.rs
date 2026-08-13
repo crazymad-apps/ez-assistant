@@ -315,6 +315,14 @@ impl ExecutionRecorder for HarnessRecorder {
         ))
     }
 
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        _receipt: &'a ExchangeReceipt,
+        _call_id: &'a agent_types::ToolCallId,
+    ) -> RecordFuture<'a, ()> {
+        Box::pin(ready(Ok(())))
+    }
+
     fn complete_tool_exchange<'a>(
         &'a self,
         receipt: &'a ExchangeReceipt,

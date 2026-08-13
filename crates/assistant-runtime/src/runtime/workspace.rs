@@ -9,7 +9,8 @@ use assistant_protocol::{
 use super::AssistantRuntime;
 use crate::{
     NewWorkspaceRegistration, RuntimeError, RuntimeResult, StoreErrorKind, StoredWorkspace,
-    StoredWorkspaceLifecycle, WorkspaceRemoval, id, workspace::summary,
+    StoredWorkspaceLifecycle, WorkspaceRemoval, id, permission::PermissionFileScope,
+    workspace::summary,
 };
 
 impl AssistantRuntime {
@@ -44,6 +45,8 @@ impl AssistantRuntime {
                     RuntimeError::from_store("register workspace", source)
                 }
             })?;
+        self.permission_coordinator
+            .register_empty_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))?;
         let projection = summary(&stored);
         self.workspaces
             .write()

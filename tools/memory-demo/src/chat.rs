@@ -288,7 +288,7 @@ async fn finish_run(
         }
         ExecutionOutcome::Failed(error) => eprintln!("\nrun failed: {error}"),
         ExecutionOutcome::Cancelled => println!("\nrun cancelled"),
-        ExecutionOutcome::CompactionRequired { reason, step } => eprintln!(
+        ExecutionOutcome::CompactionRequired { reason, step, .. } => eprintln!(
             "\nrun requires context compaction at step {step} ({reason:?}); this demo does not \
              implement Runtime compaction"
         ),

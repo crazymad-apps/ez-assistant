@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use agent_core::{AgentExecution, ExecutionContext, ExecutionInput, ExecutionSpec, ToolAuthorizer};
+use agent_core::{
+    AgentExecution, ExecutionBudget, ExecutionContext, ExecutionInput, ExecutionSpec,
+    ToolAuthorizer,
+};
 use agent_model::SystemPromptSnapshot;
 use agent_types::ToolDefinition;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +32,20 @@ impl Agent {
     /// 当前线程不在可用于 `tokio::spawn` 的 Tokio Runtime 中时会 panic。
     pub fn start(&self, input: ExecutionInput, context: ExecutionContext) -> AgentExecution {
         AgentExecution::start(self.spec.clone(), input, context)
+    }
+
+    /// 使用调用方给出的“本业务执行剩余预算”启动 continuation。
+    ///
+    /// 只覆盖本次派生 spec 的预算，冻结模型、Prompt、工具、Guardrail 和请求配置保持不变。
+    pub fn start_with_budget(
+        &self,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        budget: ExecutionBudget,
+    ) -> AgentExecution {
+        let mut spec = self.spec.clone();
+        spec.budget = budget;
+        AgentExecution::start(spec, input, context)
     }
 
     /// 使用一次执行独享的不可恢复 Recorder 启动一次执行。
@@ -63,5 +80,10 @@ impl Agent {
     /// 按注册顺序只读访问模型可见的冻结工具定义。
     pub fn tool_definitions(&self) -> &[ToolDefinition] {
         self.spec.tools.definitions()
+    }
+
+    /// 只读访问冻结的完整业务执行预算。
+    pub fn execution_budget(&self) -> &ExecutionBudget {
+        &self.spec.budget
     }
 }

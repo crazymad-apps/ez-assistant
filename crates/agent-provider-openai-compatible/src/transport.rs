@@ -180,7 +180,7 @@ pub enum TransportError {
     /// 响应头到达之前失败（DNS、TLS、拒绝连接、客户端构建等）。
     #[error("request failed before the response started: {0}")]
     Connect(String),
-    /// 连接或整体请求超时。
+    /// 等待响应建立或相邻响应正文 chunk 超时。
     #[error("request timed out")]
     Timeout,
     /// 响应正文读取中途失败（连接重置、对端提前关闭等）。
@@ -193,7 +193,9 @@ pub enum TransportError {
 pub struct TransportTimeouts {
     /// 建立连接允许的最长时间。
     pub connect: Duration,
-    /// 单次请求的总预算，覆盖流式响应读取完毕。
+    /// 等待响应建立以及相邻响应正文 chunk 的最长空闲时间。
+    ///
+    /// 该值不是流式响应的总生命周期上限；每收到一个正文 chunk 都会重新计时。
     pub request: Duration,
 }
 
@@ -316,6 +318,7 @@ fn recorded_response_headers(headers: &[(String, String)]) -> Vec<(String, Strin
 /// 基于 reqwest 的默认 [`Transport`] 实现。
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    request_timeout: Duration,
 }
 
 impl ReqwestTransport {
@@ -326,14 +329,19 @@ impl ReqwestTransport {
 
     /// 用显式超时配置创建。
     pub fn with_timeouts(timeouts: TransportTimeouts) -> Result<Self, TransportError> {
+        // reqwest 的 ClientBuilder::timeout 是整个请求（包括完整响应正文）的总预算，
+        // 不适合可能长时间持续产出 SSE chunk 的模型流。这里只让 reqwest 管理建连
+        // 上限；响应建立与正文空闲上限由 execute 分阶段管理。
         let client = reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
-            .timeout(timeouts.request)
             .build()
             .map_err(|error| {
                 TransportError::Connect(format!("failed to build the http client: {error}"))
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            request_timeout: timeouts.request,
+        })
     }
 }
 
@@ -347,11 +355,11 @@ impl Transport for ReqwestTransport {
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }
-            let response = builder
-                .body(request.body)
-                .send()
-                .await
-                .map_err(send_error)?;
+            let response =
+                tokio::time::timeout(self.request_timeout, builder.body(request.body).send())
+                    .await
+                    .map_err(|_| TransportError::Timeout)?
+                    .map_err(send_error)?;
             let status = response.status().as_u16();
             let headers = response
                 .headers()
@@ -363,9 +371,24 @@ impl Transport for ReqwestTransport {
                     )
                 })
                 .collect();
-            let body = response
-                .bytes_stream()
-                .map(|result| result.map(|chunk| chunk.to_vec()).map_err(body_error));
+            let mut body = response.bytes_stream();
+            let request_timeout = self.request_timeout;
+            let body = async_stream::stream! {
+                loop {
+                    match tokio::time::timeout(request_timeout, body.next()).await {
+                        Ok(Some(Ok(chunk))) => yield Ok(chunk.to_vec()),
+                        Ok(Some(Err(error))) => {
+                            yield Err(body_error(error));
+                            return;
+                        }
+                        Ok(None) => return,
+                        Err(_) => {
+                            yield Err(TransportError::Timeout);
+                            return;
+                        }
+                    }
+                }
+            };
             Ok(TransportResponse {
                 status,
                 headers,

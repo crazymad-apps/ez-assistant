@@ -50,6 +50,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
   Engine，因此不得只依赖执行内从 1 开始的计数器；后续 Run 必须避开历史 Run 已占用的 ID。
 - 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付；终态包括
   Completed、Failed、Cancelled 和 CompactionRequired，均报告丢弃计数。
+- CompactionRequired 同时携带 Engine 自身统计的已消费 Step 与实际 dispatch 工具数；这些值属于
+  continuation 硬预算事实，Runtime 不得从可能丢弃的观察事件反推。
 - Core 不发起上下文压缩请求、不生成 Context Checkpoint，也不在同一个
   `AgentExecution` 内压缩后重试；压缩编排和 continuation 属于上层。v0.3.0 由
   Runtime Harness 临时验证，正式 Runtime 接口留待总体设计。
@@ -78,8 +80,11 @@ Context Window Evaluator、历史布局和 replacement 校验归
   `ToolResult`，不进入 policy、Authorizer、预算或 execute。
 - 文件、Shell 和通用工具使用各自的类型化授权事实，不强制共享一个 whitelist
   结构；策略具体规则、Plan/Build 和名单内容由上层装配。
-- Core 只保证逐 Tool Call 独立过闸（Allow 即执行，再处理下一调用），不设"整批放行
-  才执行"的规则。
+- Core 保证每个 Tool Call 独立过闸；普通工具仍按原顺序逐项授权和执行。只有一段连续、显式
+  `ParallelEligible` 的 valid invocation 会同时等待授权，并在预算与 started 可靠边界完成后
+  并发执行；Invalid 或 Serial 项构成顺序屏障，不跨越屏障重排副作用。
+- 并行组结果必须按原 Tool Call 顺序观察 Guardrail、形成 ToolMessage 并原子完成 exchange；
+  取消时先等待组内 Tool SPI 完成清理，再为未结算组统一形成 interrupted 结果。
 - 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在
   authorize 时提供本轮 resolved batch 上下文，批次审批交互由 Runtime 借此自行完成。
 - Core 授权决策仅 `Allow` / `Deny { reason }`；`Deny` 在授权闸处转换为错误 `ToolResult`——回喂模型、驱动循环继续的唯一载体是 error `ToolResult`，对模型与循环不存在"被拒绝"类别；reason 措辞归 Runtime。

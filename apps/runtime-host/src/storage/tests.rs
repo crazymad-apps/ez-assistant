@@ -14,14 +14,19 @@ use agent_types::{
     ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, IdempotencyKey, InputId, ModelKey, RunId, RunStatus, SessionId, WorkspaceId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, IdempotencyKey, InputId, ModelKey,
+    PermissionDiagnosticCode, RunId, RunStatus, SessionId, WorkspaceId,
 };
 use assistant_runtime::{
-    ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange, NewAttachmentUpload,
-    NewStoredInput, NewStoredSession, NewWorkspaceRegistration, PendingToolExchange, RuntimeStore,
-    SessionExecutionEnvironment, StoreErrorKind, StoredAttachmentState, StoredConversationState,
-    StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle, UserMessageCommit,
-    WorkspaceRemoval,
+    ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    ContextReplacementTarget, ConversationRewrite, ModelChange, NewAttachmentUpload,
+    NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
+    PendingChildToolExchange, PendingToolExchange, PermissionDocument, PermissionFileRevision,
+    PermissionFileScope, PermissionFileStore, RuntimeStore, SessionExecutionEnvironment,
+    StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState,
+    StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -29,7 +34,7 @@ use tempfile::TempDir;
 use super::{
     DATA_DIRECTORY, DATABASE_FILE, LocalRuntimeStore, SESSIONS_DIRECTORY, StorageEngine,
     append_effect::AppendPurpose,
-    body_path, conversation,
+    body_path, child_body_path, child_task_directory, conversation,
     recovery::{AppendRequest, ReplacementPlan},
 };
 
@@ -39,6 +44,10 @@ fn session_id(value: &str) -> SessionId {
 
 fn run_id(value: &str) -> RunId {
     RunId::new(value).expect("run id")
+}
+
+fn child_task_id(value: &str) -> ChildTaskId {
+    ChildTaskId::new(value).expect("child task id")
 }
 
 fn workspace_id(value: &str) -> WorkspaceId {
@@ -63,6 +72,8 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
                 .into_owned(),
             session_private_directory: private_directory.to_string_lossy().into_owned(),
         },
+        current_variant: assistant_protocol::AgentVariant::Build,
+        approval_mode: assistant_protocol::ApprovalMode::Ask,
         created_at_ms: 1_000,
     }
 }
@@ -153,6 +164,29 @@ fn pending_tool_exchange(session: &str, run: &str, receipt: &str) -> PendingTool
     }
 }
 
+fn pending_delegate_exchange(session: &str, run: &str, receipt: &str) -> PendingToolExchange {
+    PendingToolExchange {
+        receipt: ExchangeReceipt::new(receipt).expect("receipt"),
+        session_id: session_id(session),
+        run_id: run_id(run),
+        assistant: AssistantMessage {
+            id: MessageId::new(format!("assistant-{receipt}")).expect("message id"),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider id"),
+                "fixture-model",
+            ),
+            parts: vec![AssistantPart::ToolCall(ToolCall {
+                id: ToolCallId::new("call-1").expect("call id"),
+                name: ToolName::new("delegate_task").expect("tool name"),
+                arguments: serde_json::json!({"title": "recover child", "task": "inspect"}),
+            })],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        },
+        created_at_ms: 2_000,
+    }
+}
+
 fn tool_results() -> Vec<ToolMessage> {
     tool_exchange()
         .into_iter()
@@ -161,6 +195,18 @@ fn tool_results() -> Vec<ToolMessage> {
             _ => None,
         })
         .collect()
+}
+
+fn start_tool(engine: &mut StorageEngine, session: &str, run: &str, receipt: &str) {
+    engine
+        .mark_tool_execution_started(ToolExecutionStart {
+            receipt: ExchangeReceipt::new(receipt).expect("receipt"),
+            session_id: session_id(session),
+            run_id: run_id(run),
+            call_id: assistant_protocol::ToolCallId::new("call-1").expect("call id"),
+            started_at_ms: 2_200,
+        })
+        .expect("record tool started");
 }
 
 fn open_engine(root: &TempDir) -> StorageEngine {
@@ -292,13 +338,14 @@ fn initializes_private_database_and_current_schema() {
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type = 'table' AND name IN (
                 'sessions', 'inputs', 'runs', 'run_message_refs',
-                'pending_tool_exchanges', 'body_appends', 'workspaces', 'session_resources'
+                'pending_tool_exchanges', 'pending_tool_starts', 'body_appends',
+                'workspaces', 'session_resources'
              )",
             [],
             |row| row.get(0),
         )
         .expect("table count");
-    assert_eq!(table_count, 8);
+    assert_eq!(table_count, 9);
 
     let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
     assert_eq!(
@@ -316,6 +363,339 @@ fn initializes_private_database_and_current_schema() {
             .mode()
             & 0o777,
         0o700
+    );
+}
+
+#[test]
+fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-schema-child", "r-schema-child");
+    let before: (i64, i64) = engine
+        .connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions), (SELECT COUNT(*) FROM runs)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count legacy rows");
+
+    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization");
+    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization twice");
+
+    let after: (i64, i64, i64) = engine
+        .connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions), (SELECT COUNT(*) FROM runs),
+                    (SELECT COUNT(*) FROM child_tasks)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("count rows after compatible schema initialization");
+    assert_eq!((after.0, after.1), before);
+    assert_eq!(after.2, 0);
+}
+
+#[test]
+fn child_task_body_is_independent_and_round_trips_all_reliable_steps() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-child", "r-child");
+    let child_id = child_task_id("ct-child");
+    let created = engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            parent_run_id: run_id("r-child"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-call")
+                .expect("parent tool call id"),
+            title: "inspect storage".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child prompt".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect("create child task");
+    assert_eq!(created.status, ChildTaskStatus::Accepted);
+    let task_directory = child_task_directory(
+        &engine
+            .session_directory(&session_id("s-child"))
+            .expect("session directory"),
+        &child_id,
+    );
+    assert!(child_body_path(&task_directory, 1).is_file());
+
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            message: raw_user_message("child-user", "inspect"),
+            started_at_ms: 2_100,
+        })
+        .expect("start child task");
+    let ConversationMessage::Assistant(tool_assistant) = tool_exchange().remove(0) else {
+        unreachable!("tool fixture starts with assistant")
+    };
+    engine
+        .begin_child_tool_exchange(PendingChildToolExchange {
+            receipt: ExchangeReceipt::new("child-receipt").expect("receipt"),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            assistant: tool_assistant,
+            created_at_ms: 2_200,
+        })
+        .expect("begin child tool exchange");
+    engine
+        .mark_child_tool_execution_started(ChildToolExecutionStart {
+            receipt: ExchangeReceipt::new("child-receipt").expect("receipt"),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            call_id: assistant_protocol::ToolCallId::new("call-1").expect("call id"),
+            started_at_ms: 2_300,
+        })
+        .expect("mark child tool started");
+    engine
+        .complete_child_tool_exchange(CompletedChildToolExchange {
+            operation_id: "complete-child-tool".to_owned(),
+            receipt: ExchangeReceipt::new("child-receipt").expect("receipt"),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            results: tool_results(),
+            completed_at_ms: 2_400,
+        })
+        .expect("complete child tool exchange");
+    engine
+        .settle_child_task(StoredChildTaskSettlement {
+            operation_id: "settle-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child"),
+            status: ChildTaskStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message("child-final", "done")],
+            final_message_id: Some(MessageId::new("child-final").expect("final id")),
+            finished_at_ms: 2_500,
+        })
+        .expect("settle child task");
+
+    assert_eq!(
+        engine
+            .load_child_conversation(&session_id("s-child"), &child_id)
+            .expect("load child body")
+            .messages
+            .len(),
+        4
+    );
+    assert!(
+        engine
+            .load_conversation(&session_id("s-child"))
+            .expect("load parent body")
+            .messages
+            .is_empty()
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover child task");
+    assert_eq!(recovered.child_tasks.len(), 1);
+    assert_eq!(recovered.child_tasks[0].status, ChildTaskStatus::Completed);
+    assert_eq!(recovered.child_tasks[0].message_count, 4);
+    assert_eq!(
+        recovered.child_tasks[0].conversation_state,
+        StoredConversationState::Available
+    );
+    assert_eq!(recovered.sessions[0].message_count, 0);
+    assert_eq!(
+        reopened
+            .load_child_conversation(&session_id("s-child"), &child_id)
+            .expect("load recovered child body")
+            .messages
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn accepted_child_can_fail_before_its_initial_message_is_started() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-child-prestart", "r-child-prestart");
+    let child_id = child_task_id("ct-child-prestart");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-prestart"),
+            parent_run_id: run_id("r-child-prestart"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-prestart")
+                .expect("tool call id"),
+            title: "prepare workspace".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect("create accepted child");
+    engine
+        .request_child_task_cancellation(&session_id("s-child-prestart"), &child_id)
+        .expect("record cancellation request");
+    engine
+        .settle_child_task(StoredChildTaskSettlement {
+            operation_id: "settle-child-prestart".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-prestart"),
+            status: ChildTaskStatus::Failed,
+            cancel_requested: false,
+            error: Some(assistant_protocol::RuntimeErrorInfo::new(
+                assistant_protocol::RuntimeErrorCode::Internal,
+                "child task workspace could not be prepared",
+            )),
+            messages: Vec::new(),
+            final_message_id: None,
+            finished_at_ms: 2_100,
+        })
+        .expect("settle accepted child as failed");
+
+    let recovered = engine.load_runtime().expect("recover failed child");
+    assert_eq!(recovered.child_tasks[0].status, ChildTaskStatus::Failed);
+    assert!(recovered.child_tasks[0].cancel_requested);
+    assert_eq!(recovered.child_tasks[0].message_count, 0);
+    assert!(
+        engine
+            .load_child_conversation(&session_id("s-child-prestart"), &child_id)
+            .expect("empty child body")
+            .messages
+            .is_empty()
+    );
+}
+
+#[test]
+fn child_task_parent_and_read_ownership_reject_cross_session_access() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-owner", "r-owner");
+    engine
+        .create_session(new_session("s-other", &engine.sessions_directory))
+        .expect("create second session");
+
+    let error = engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_task_id("ct-wrong-owner"),
+            session_id: session_id("s-other"),
+            parent_run_id: run_id("r-owner"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-wrong")
+                .expect("tool call id"),
+            title: "wrong owner".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect_err("cross-session parent must be rejected");
+    assert_eq!(error.kind(), StoreErrorKind::Conflict);
+
+    let child_id = child_task_id("ct-owner");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-owner"),
+            parent_run_id: run_id("r-owner"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-owner")
+                .expect("tool call id"),
+            title: "owned".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect("create owned child");
+    assert_eq!(
+        engine
+            .load_child_conversation(&session_id("s-other"), &child_id)
+            .expect_err("cross-session child read must fail")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+}
+
+#[test]
+fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-child-recovery", "r-child-recovery");
+    let child_id = child_task_id("ct-child-recovery");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-recovery"),
+            parent_run_id: run_id("r-child-recovery"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-recovery")
+                .expect("tool call id"),
+            title: "recover pending tool".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect("create child");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-child-recovery".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-recovery"),
+            message: raw_user_message("child-recovery-user", "inspect"),
+            started_at_ms: 2_100,
+        })
+        .expect("start child");
+    let ConversationMessage::Assistant(assistant) = tool_exchange().remove(0) else {
+        unreachable!("tool fixture starts with assistant")
+    };
+    engine
+        .begin_child_tool_exchange(PendingChildToolExchange {
+            receipt: ExchangeReceipt::new("child-recovery-receipt").expect("receipt"),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-recovery"),
+            assistant,
+            created_at_ms: 2_200,
+        })
+        .expect("begin child exchange");
+    engine
+        .mark_child_tool_execution_started(ChildToolExecutionStart {
+            receipt: ExchangeReceipt::new("child-recovery-receipt").expect("receipt"),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-child-recovery"),
+            call_id: assistant_protocol::ToolCallId::new("call-1").expect("call id"),
+            started_at_ms: 2_300,
+        })
+        .expect("mark child tool started");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("repair child exchange");
+    assert_eq!(recovered.child_tasks[0].message_count, 3);
+    let conversation = reopened
+        .load_child_conversation(&session_id("s-child-recovery"), &child_id)
+        .expect("load repaired child conversation");
+    assert_eq!(conversation.messages.len(), 3);
+    let ConversationMessage::Tool(result) = &conversation.messages[2] else {
+        panic!("repaired child exchange must end with a tool result")
+    };
+    assert_eq!(
+        result.result.content,
+        ToolResultContent::Text("runtime restarted; tool execution outcome is unknown".to_owned())
+    );
+    assert!(
+        reopened
+            .load_conversation(&session_id("s-child-recovery"))
+            .expect("load parent conversation")
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM child_pending_tool_exchanges",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("count child pending exchanges"),
+        0
     );
 }
 
@@ -525,6 +905,126 @@ async fn worker_round_trips_session_and_shuts_down_explicitly() {
     );
 }
 
+#[tokio::test]
+async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_edits() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let user_directory = root.path().join("user-workspace");
+    fs::create_dir(&user_directory).expect("user workspace");
+    let store = LocalRuntimeStore::open(root.path(), 8)
+        .await
+        .expect("open local store");
+    let workspace = store
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-permission"),
+            requested_directory: user_directory.to_string_lossy().into_owned(),
+            changed_at_ms: 1,
+        })
+        .await
+        .expect("register workspace");
+    let sessions_directory = root.path().join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY);
+    let mut session = new_session("s-permission", &sessions_directory);
+    session.environment.workspace_id = Some(workspace.workspace_id.clone());
+    session.environment.working_directory = workspace.user_directory.clone();
+    session.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
+    let session = store
+        .create_session(session)
+        .await
+        .expect("create bound session");
+
+    let content = PermissionDocument::empty()
+        .render()
+        .expect("permission JSON");
+    let scopes = [
+        PermissionFileScope::Global,
+        PermissionFileScope::Workspace(workspace.workspace_id.clone()),
+        PermissionFileScope::Session(session.session_id.clone()),
+    ];
+    for scope in &scopes {
+        let missing = store
+            .load_permission_file(scope)
+            .await
+            .expect("load missing permission");
+        assert_eq!(missing.revision, PermissionFileRevision::Missing);
+        let revision = store
+            .replace_permission_file(scope, &missing.revision, content.clone())
+            .await
+            .expect("replace permission file");
+        assert!(matches!(revision, PermissionFileRevision::Content(_)));
+    }
+
+    let global_path = root.path().join("permissions.json");
+    let workspace_path = Path::new(&workspace.agent_directory).join("permissions.json");
+    let session_path =
+        Path::new(&session.environment.session_private_directory).join("permissions.json");
+    assert_eq!(fs::read(&global_path).expect("global file"), content);
+    assert_eq!(fs::read(workspace_path).expect("workspace file"), content);
+    assert_eq!(fs::read(session_path).expect("session file"), content);
+
+    let original = store
+        .load_permission_file(&PermissionFileScope::Global)
+        .await
+        .expect("load original revision");
+    fs::write(&global_path, b"external edit\n").expect("external edit");
+    assert_eq!(
+        store
+            .replace_permission_file(
+                &PermissionFileScope::Global,
+                &original.revision,
+                PermissionDocument::empty().render().expect("replacement"),
+            )
+            .await
+            .expect_err("stale revision must conflict")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+    assert_eq!(
+        fs::read(&global_path).expect("external content remains"),
+        b"external edit\n"
+    );
+
+    fs::set_permissions(&global_path, fs::Permissions::from_mode(0o644))
+        .expect("broaden fixture permissions");
+    let warning = store
+        .load_permission_file(&PermissionFileScope::Global)
+        .await
+        .expect("broad permissions remain loadable");
+    assert!(
+        warning
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == PermissionDiagnosticCode::UnsafePermissions })
+    );
+    store.shutdown().await.expect("shutdown worker");
+}
+
+#[test]
+fn permission_loader_rejects_symlinks_and_non_regular_files() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let target = root.path().join("target.json");
+    fs::write(&target, b"{}\n").expect("target");
+    symlink(&target, root.path().join("permissions.json")).expect("symlink");
+    let engine = open_engine(&root);
+    assert_eq!(
+        engine
+            .load_permission_file(&PermissionFileScope::Global)
+            .expect_err("symlink must be rejected")
+            .kind(),
+        StoreErrorKind::InvalidData
+    );
+
+    let directory_root = tempfile::tempdir().expect("directory tempdir");
+    fs::create_dir(directory_root.path().join("permissions.json"))
+        .expect("permission directory fixture");
+    let directory_engine = open_engine(&directory_root);
+    assert_eq!(
+        directory_engine
+            .load_permission_file(&PermissionFileScope::Global)
+            .expect_err("directory must be rejected")
+            .kind(),
+        StoreErrorKind::InvalidData
+    );
+}
+
 #[test]
 fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     let root = TempDir::new().expect("tempdir");
@@ -557,6 +1057,8 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     };
     engine
         .accept_input(NewStoredInput {
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
             input_id: InputId::new("input-files").expect("input id"),
             run_id: run_id("run-files"),
             session_id: session.clone(),
@@ -728,6 +1230,7 @@ fn completed_tool_exchange_enters_body_as_one_batch_and_clears_pending() {
     engine
         .begin_tool_exchange(pending_tool_exchange("s-tool", "r-tool", "receipt-tool"))
         .expect("begin tool exchange");
+    start_tool(&mut engine, "s-tool", "r-tool", "receipt-tool");
     let pending_state: String = engine
         .connection
         .query_row(
@@ -756,6 +1259,13 @@ fn completed_tool_exchange_enters_body_as_one_batch_and_clears_pending() {
         })
         .expect("count pending");
     assert_eq!(pending_count, 0);
+    let started_count: i64 = engine
+        .connection
+        .query_row("SELECT COUNT(*) FROM pending_tool_starts", [], |row| {
+            row.get(0)
+        })
+        .expect("count pending starts");
+    assert_eq!(started_count, 0);
     let conversation = engine
         .load_conversation(&session_id("s-tool"))
         .expect("load conversation");
@@ -767,6 +1277,42 @@ fn completed_tool_exchange_enters_body_as_one_batch_and_clears_pending() {
                 .get::<_, i64>(0))
             .expect("count refs"),
         2
+    );
+}
+
+#[test]
+fn startup_repairs_unstarted_tool_as_not_executed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-unstarted", "r-unstarted");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_500 WHERE run_id = 'r-unstarted'",
+            [],
+        )
+        .expect("mark run running");
+    engine
+        .begin_tool_exchange(pending_tool_exchange(
+            "s-unstarted",
+            "r-unstarted",
+            "receipt-unstarted",
+        ))
+        .expect("begin tool exchange");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().expect("recover unstarted exchange");
+    let conversation = reopened
+        .load_conversation(&session_id("s-unstarted"))
+        .expect("load repaired conversation");
+    let ConversationMessage::Tool(result) = &conversation.messages[1] else {
+        panic!("repaired batch must end with a tool result")
+    };
+    assert_eq!(result.result.status, ToolResultStatus::Error);
+    assert_eq!(
+        result.result.content,
+        ToolResultContent::Text("runtime restarted before tool execution started".to_owned())
     );
 }
 
@@ -831,6 +1377,7 @@ fn startup_repairs_begun_tool_exchange_with_unknown_results_without_reexecution(
     engine
         .begin_tool_exchange(pending_tool_exchange("s-begun", "r-begun", "receipt-begun"))
         .expect("begin tool exchange");
+    start_tool(&mut engine, "s-begun", "r-begun", "receipt-begun");
     drop(engine);
 
     let mut reopened = open_engine(&root);
@@ -859,6 +1406,168 @@ fn startup_repairs_begun_tool_exchange_with_unknown_results_without_reexecution(
             .expect("count pending"),
         0
     );
+    assert_eq!(
+        reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM pending_tool_starts", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count pending starts"),
+        0
+    );
+}
+
+#[test]
+fn startup_rebuilds_parent_delegate_result_from_completed_child() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-delegate-complete", "r-delegate-complete");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_500
+             WHERE run_id = 'r-delegate-complete'",
+            [],
+        )
+        .expect("mark parent running");
+    engine
+        .begin_tool_exchange(pending_delegate_exchange(
+            "s-delegate-complete",
+            "r-delegate-complete",
+            "receipt-delegate-complete",
+        ))
+        .expect("begin delegate exchange");
+    start_tool(
+        &mut engine,
+        "s-delegate-complete",
+        "r-delegate-complete",
+        "receipt-delegate-complete",
+    );
+    let child_id = child_task_id("ct-delegate-complete");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-delegate-complete"),
+            parent_run_id: run_id("r-delegate-complete"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("call-1").expect("call id"),
+            title: "recover completed child".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_100,
+        })
+        .expect("create child");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-delegate-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-delegate-complete"),
+            message: raw_user_message("delegate-child-user", "inspect"),
+            started_at_ms: 2_200,
+        })
+        .expect("start child");
+    engine
+        .settle_child_task(StoredChildTaskSettlement {
+            operation_id: "settle-delegate-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-delegate-complete"),
+            status: ChildTaskStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message(
+                "delegate-child-final",
+                "recovered answer",
+            )],
+            final_message_id: Some(MessageId::new("delegate-child-final").expect("message id")),
+            finished_at_ms: 2_300,
+        })
+        .expect("settle child");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.child_tasks[0].status, ChildTaskStatus::Completed);
+    assert_eq!(recovered.runs[0].status, RunStatus::Interrupted);
+    let conversation = reopened
+        .load_conversation(&session_id("s-delegate-complete"))
+        .expect("parent conversation");
+    let ConversationMessage::Tool(tool) = &conversation.messages[1] else {
+        panic!("delegate recovery must append one tool result");
+    };
+    assert_eq!(tool.result.status, ToolResultStatus::Success);
+    let ToolResultContent::Json(content) = &tool.result.content else {
+        panic!("completed child result must remain structured");
+    };
+    assert_eq!(content["task_id"], child_id.as_str());
+    assert_eq!(content["result"], "recovered answer");
+}
+
+#[test]
+fn startup_interrupts_running_child_before_rebuilding_parent_result() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-delegate-running", "r-delegate-running");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_500
+             WHERE run_id = 'r-delegate-running'",
+            [],
+        )
+        .expect("mark parent running");
+    engine
+        .begin_tool_exchange(pending_delegate_exchange(
+            "s-delegate-running",
+            "r-delegate-running",
+            "receipt-delegate-running",
+        ))
+        .expect("begin delegate exchange");
+    start_tool(
+        &mut engine,
+        "s-delegate-running",
+        "r-delegate-running",
+        "receipt-delegate-running",
+    );
+    let child_id = child_task_id("ct-delegate-running");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-delegate-running"),
+            parent_run_id: run_id("r-delegate-running"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("call-1").expect("call id"),
+            title: "recover running child".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_100,
+        })
+        .expect("create child");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-running-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-delegate-running"),
+            message: raw_user_message("running-child-user", "inspect"),
+            started_at_ms: 2_200,
+        })
+        .expect("start child");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(
+        recovered.child_tasks[0].status,
+        ChildTaskStatus::Interrupted
+    );
+    assert_eq!(recovered.runs[0].status, RunStatus::Interrupted);
+    let conversation = reopened
+        .load_conversation(&session_id("s-delegate-running"))
+        .expect("parent conversation");
+    let ConversationMessage::Tool(tool) = &conversation.messages[1] else {
+        panic!("delegate recovery must append one tool result");
+    };
+    let ToolResultContent::Json(content) = &tool.result.content else {
+        panic!("interrupted child result must remain structured");
+    };
+    assert_eq!(content["error"]["details"]["task_id"], child_id.as_str());
+    assert_eq!(content["error"]["details"]["code"], "interrupted");
 }
 
 #[test]
@@ -876,6 +1585,7 @@ fn startup_commits_ready_tool_exchange_with_its_recorded_results() {
     engine
         .begin_tool_exchange(pending_tool_exchange("s-ready", "r-ready", "receipt-ready"))
         .expect("begin tool exchange");
+    start_tool(&mut engine, "s-ready", "r-ready", "receipt-ready");
     engine
         .connection
         .execute(
@@ -905,6 +1615,14 @@ fn startup_commits_ready_tool_exchange_with_its_recorded_results() {
             .query_row("SELECT COUNT(*) FROM pending_tool_exchanges", [], |row| row
                 .get::<_, i64>(0))
             .expect("count pending"),
+        0
+    );
+    assert_eq!(
+        reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM pending_tool_starts", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count pending starts"),
         0
     );
 }
@@ -1175,6 +1893,122 @@ fn committed_generation_replaces_message_count_and_removes_old_body() {
     );
 }
 
+#[test]
+fn active_run_context_replacement_switches_generation_without_rewriting_run_relations() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-compact-run", "r-compact-run");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_100 WHERE run_id = 'r-compact-run'",
+            [],
+        )
+        .expect("activate run");
+    engine
+        .append_messages(append_request(
+            "operation-compact-run",
+            "s-compact-run",
+            "r-compact-run",
+        ))
+        .expect("append original");
+    let replacement = ConversationSnapshot::new(vec![user_message(
+        "message-compact-run",
+        "summary replacement",
+    )]);
+
+    engine
+        .replace_context(ContextReplacement {
+            target: ContextReplacementTarget::Run {
+                session_id: session_id("s-compact-run"),
+                run_id: run_id("r-compact-run"),
+            },
+            conversation: replacement.clone(),
+            changed_at_ms: 3_000,
+        })
+        .expect("replace active run context");
+
+    let generation: i64 = engine
+        .connection
+        .query_row(
+            "SELECT body_generation FROM sessions WHERE session_id = 's-compact-run'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("session generation");
+    let status: String = engine
+        .connection
+        .query_row(
+            "SELECT status FROM runs WHERE run_id = 'r-compact-run'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("run status");
+    assert_eq!(generation, 2);
+    assert_eq!(status, "running");
+    assert_eq!(
+        engine
+            .load_conversation(&session_id("s-compact-run"))
+            .expect("replacement conversation"),
+        replacement
+    );
+}
+
+#[test]
+fn running_child_context_replacement_switches_only_child_generation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-compact-child", "r-compact-child");
+    let child_id = child_task_id("ct-compact-child");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-compact-child"),
+            parent_run_id: run_id("r-compact-child"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-compact")
+                .expect("call id"),
+            title: "compact child".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child prompt".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_000,
+        })
+        .expect("create child");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-compact-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-compact-child"),
+            message: raw_user_message("child-original", "long child task"),
+            started_at_ms: 2_100,
+        })
+        .expect("start child");
+    let replacement = ConversationSnapshot::new(vec![user_message(
+        "child-replacement",
+        "summary replacement",
+    )]);
+
+    engine
+        .replace_context(ContextReplacement {
+            target: ContextReplacementTarget::ChildTask {
+                session_id: session_id("s-compact-child"),
+                child_task_id: child_id.clone(),
+            },
+            conversation: replacement.clone(),
+            changed_at_ms: 3_000,
+        })
+        .expect("replace child context");
+
+    let tasks = engine.load_child_tasks().expect("load child tasks");
+    assert_eq!(tasks[0].body_generation, 2);
+    assert_eq!(tasks[0].status, ChildTaskStatus::Running);
+    assert_eq!(
+        engine
+            .load_child_conversation(&session_id("s-compact-child"), &child_id)
+            .expect("child replacement"),
+        replacement
+    );
+}
+
 fn switch_generation_without_cleanup(connection: &mut Connection, plan: &ReplacementPlan) {
     connection
         .execute(
@@ -1209,6 +2043,8 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         let user_message = raw_user_message(user, user);
         engine
             .accept_input(NewStoredInput {
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
                 input_id: InputId::new(input).expect("input id"),
                 run_id: run_id(run),
                 session_id: session.clone(),
@@ -1241,6 +2077,28 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             .expect("settle run");
     }
 
+    let removed_child_id = child_task_id("ct-rewrite-tail");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: removed_child_id.clone(),
+            session_id: session.clone(),
+            parent_run_id: run_id("run-two"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-rewrite-tail")
+                .expect("tool call id"),
+            title: "removed tail child".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 1_300,
+        })
+        .expect("create tail child");
+    let removed_child_directory = child_task_directory(
+        &engine
+            .session_directory(&session)
+            .expect("session directory"),
+        &removed_child_id,
+    );
+    assert!(removed_child_directory.is_dir());
+
     let replacement_user = raw_user_message("user-replacement", "replacement");
     let result = engine
         .rewrite_from_user(ConversationRewrite {
@@ -1250,6 +2108,8 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 replacement_user.clone(),
             )]),
             input: NewStoredInput {
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
                 input_id: InputId::new("input-replacement").expect("input id"),
                 run_id: run_id("run-replacement"),
                 session_id: session.clone(),
@@ -1284,6 +2144,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         1,
     );
     assert!(!old_body.exists());
+    assert!(!removed_child_directory.exists());
 }
 
 #[test]
@@ -1328,6 +2189,8 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     let queued_message = raw_user_message("queued-user", "queued");
     engine
         .accept_input(NewStoredInput {
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
             input_id: InputId::new("queued-input").expect("input id"),
             run_id: run_id("queued-run"),
             session_id: session.clone(),
@@ -1336,11 +2199,25 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
             accepted_at_ms: 2_004,
         })
         .expect("queued input");
+    engine
+        .set_session_variant(VariantChange {
+            session_id: session.clone(),
+            variant: assistant_protocol::AgentVariant::Plan,
+            changed_at_ms: 2_005,
+        })
+        .expect("variant change while run is active");
+    engine
+        .set_session_approval_mode(ApprovalModeChange {
+            session_id: session.clone(),
+            approval_mode: assistant_protocol::ApprovalMode::Auto,
+            changed_at_ms: 2_006,
+        })
+        .expect("approval mode change while run is active");
     assert!(matches!(
         engine.set_session_archive(ArchiveChange {
             session_id: session.clone(),
             archived: true,
-            changed_at_ms: 2_005,
+            changed_at_ms: 2_007,
         }),
         Err(error) if error.kind() == StoreErrorKind::Conflict
     ));
@@ -1350,6 +2227,22 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         StoredSessionLifecycle::Active
     );
     assert_eq!(recovered.sessions[0].model_key.as_str(), "other-model");
+    assert_eq!(
+        recovered.sessions[0].current_variant,
+        assistant_protocol::AgentVariant::Plan
+    );
+    assert_eq!(
+        recovered.sessions[0].approval_mode,
+        assistant_protocol::ApprovalMode::Auto
+    );
+    assert_eq!(
+        recovered.runs[0].agent_variant,
+        assistant_protocol::AgentVariant::Build
+    );
+    assert_eq!(
+        recovered.runs[0].approval_mode,
+        assistant_protocol::ApprovalMode::Ask
+    );
 }
 
 #[test]

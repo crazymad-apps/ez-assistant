@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use agent_core::{
     ConversationDelta, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
 };
-use agent_types::{AssistantMessage, ToolMessage};
+use agent_types::{AssistantMessage, AssistantPart, ToolCallId, ToolMessage};
 
 use crate::OrderLog;
 use crate::order::LogEntry;
@@ -20,6 +20,7 @@ pub struct InMemoryRecorder {
     state: Mutex<RecorderState>,
     /// 第 N 次 Recorder 调用（begin/complete 合计，从 1 开始）注入失败。
     fail_at: Option<u64>,
+    fail_start: bool,
     log: OrderLog,
 }
 
@@ -28,6 +29,7 @@ struct RecorderState {
     /// completed exchange 展平后的规范投影视图。
     deltas: Vec<ConversationDelta>,
     pending: Vec<PendingExchange>,
+    started: Vec<(ExchangeReceipt, ToolCallId)>,
     attempts: u64,
     next_exchange: u64,
 }
@@ -44,6 +46,7 @@ impl InMemoryRecorder {
         Self {
             state: Mutex::new(RecorderState::default()),
             fail_at: None,
+            fail_start: false,
             log,
         }
     }
@@ -53,6 +56,14 @@ impl InMemoryRecorder {
         assert!(call > 0, "fail_at counts recorder calls from 1");
         Self {
             fail_at: Some(call),
+            ..Self::new(log)
+        }
+    }
+
+    /// 创建一个在 started 可靠记录点失败的 Recorder。
+    pub fn failing_start(log: OrderLog) -> Self {
+        Self {
+            fail_start: true,
             ..Self::new(log)
         }
     }
@@ -75,6 +86,15 @@ impl InMemoryRecorder {
             .iter()
             .map(|pending| (pending.receipt.clone(), pending.assistant.clone()))
             .collect()
+    }
+
+    /// 已在副作用前确认 started 的 receipt/call 快照。
+    pub fn started_calls(&self) -> Vec<(ExchangeReceipt, ToolCallId)> {
+        self.state
+            .lock()
+            .expect("recorder mutex poisoned")
+            .started
+            .clone()
     }
 
     fn next_attempt(state: &mut RecorderState, fail_at: Option<u64>) -> Result<(), RecordError> {
@@ -104,6 +124,45 @@ impl ExecutionRecorder for InMemoryRecorder {
                 assistant,
             });
             Ok(receipt)
+        })
+    }
+
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        receipt: &'a ExchangeReceipt,
+        call_id: &'a ToolCallId,
+    ) -> RecordFuture<'a, ()> {
+        Box::pin(async move {
+            if self.fail_start {
+                return Err(RecordError {
+                    message: "injected tool start record failure".to_owned(),
+                });
+            }
+            let mut state = self.state.lock().expect("recorder mutex poisoned");
+            let pending = state
+                .pending
+                .iter()
+                .find(|pending| pending.receipt == *receipt)
+                .ok_or_else(|| RecordError {
+                    message: format!("unknown pending exchange `{}`", receipt.as_str()),
+                })?;
+            let contains_call =
+                pending.assistant.parts.iter().any(
+                    |part| matches!(part, AssistantPart::ToolCall(call) if call.id == *call_id),
+                );
+            if !contains_call {
+                return Err(RecordError {
+                    message: "tool call does not belong to pending exchange".to_owned(),
+                });
+            }
+            if !state
+                .started
+                .iter()
+                .any(|started| started.0 == *receipt && started.1 == *call_id)
+            {
+                state.started.push((receipt.clone(), call_id.clone()));
+            }
+            Ok(())
         })
     }
 

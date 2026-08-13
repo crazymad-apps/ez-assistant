@@ -6,7 +6,10 @@ use assistant_protocol::{
 };
 use assistant_runtime::StoredRun;
 
-use super::{StorageEngine, StorageResult, internal_error, invalid_data, invalid_data_with_source};
+use super::{
+    StorageEngine, StorageResult, internal_error, invalid_data, invalid_data_with_source,
+    mode::{parse_agent_variant, parse_approval_mode},
+};
 
 impl StorageEngine {
     /// 加载全部 Run，并在进入 Runtime 恢复投影前校验数据库原始值。
@@ -14,10 +17,12 @@ impl StorageEngine {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, error_code,
-                        error_message, created_at_ms, started_at_ms, finished_at_ms
-                 FROM runs
-                 ORDER BY created_at_ms, run_id",
+                "SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
+                        runs.cancel_requested, inputs.agent_variant, runs.approval_mode,
+                        runs.error_code, runs.error_message, runs.created_at_ms,
+                        runs.started_at_ms, runs.finished_at_ms
+                 FROM runs JOIN inputs ON inputs.input_id = runs.input_id
+                 ORDER BY runs.created_at_ms, runs.run_id",
             )
             .map_err(|source| internal_error("runtime runs could not be queried", source))?;
         let rows = statement
@@ -29,11 +34,13 @@ impl StorageEngine {
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
                 ))
             })
             .map_err(|source| internal_error("runtime runs could not be read", source))?;
@@ -46,6 +53,8 @@ impl StorageEngine {
                 attempt,
                 status,
                 cancel_requested,
+                agent_variant,
+                approval_mode,
                 error_code,
                 error_message,
                 created_at_ms,
@@ -79,6 +88,8 @@ impl StorageEngine {
                     invalid_data_with_source("stored run attempt is invalid", source)
                 })?,
                 status: parse_run_status(&status)?,
+                agent_variant: parse_agent_variant(&agent_variant)?,
+                approval_mode: parse_approval_mode(&approval_mode)?,
                 cancel_requested: cancel_requested == 1,
                 error,
                 created_at_ms,
@@ -129,7 +140,7 @@ fn parse_run_status(value: &str) -> StorageResult<RunStatus> {
     }
 }
 
-fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
+pub(super) fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
     match value {
         "invalid_request" => Ok(RuntimeErrorCode::InvalidRequest),
         "session_not_found" => Ok(RuntimeErrorCode::SessionNotFound),
@@ -137,6 +148,7 @@ fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
         "session_archived" => Ok(RuntimeErrorCode::SessionArchived),
         "session_not_idle" => Ok(RuntimeErrorCode::SessionNotIdle),
         "run_not_found" => Ok(RuntimeErrorCode::RunNotFound),
+        "child_task_not_found" => Ok(RuntimeErrorCode::ChildTaskNotFound),
         "input_not_found" => Ok(RuntimeErrorCode::InputNotFound),
         "run_not_retryable" => Ok(RuntimeErrorCode::RunNotRetryable),
         "storage_unavailable" => Ok(RuntimeErrorCode::StorageUnavailable),
@@ -147,6 +159,9 @@ fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
         "model_unavailable" => Ok(RuntimeErrorCode::ModelUnavailable),
         "model_build_failed" => Ok(RuntimeErrorCode::ModelBuildFailed),
         "model_execution_failed" => Ok(RuntimeErrorCode::ModelExecutionFailed),
+        "context_compaction_failed" => Ok(RuntimeErrorCode::ContextCompactionFailed),
+        "timeout" => Ok(RuntimeErrorCode::Timeout),
+        "cancelled" => Ok(RuntimeErrorCode::Cancelled),
         "workspace_not_found" => Ok(RuntimeErrorCode::WorkspaceNotFound),
         "workspace_removed" => Ok(RuntimeErrorCode::WorkspaceRemoved),
         "workspace_unavailable" => Ok(RuntimeErrorCode::WorkspaceUnavailable),
@@ -154,6 +169,13 @@ fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
         "attachment_unavailable" => Ok(RuntimeErrorCode::AttachmentUnavailable),
         "attachment_too_large" => Ok(RuntimeErrorCode::AttachmentTooLarge),
         "attachment_upload_invalid" => Ok(RuntimeErrorCode::AttachmentUploadInvalid),
+        "permission_file_invalid" => Ok(RuntimeErrorCode::PermissionFileInvalid),
+        "permission_file_conflict" => Ok(RuntimeErrorCode::PermissionFileConflict),
+        "permission_reload_failed" => Ok(RuntimeErrorCode::PermissionReloadFailed),
+        "permission_persistence_failed" => Ok(RuntimeErrorCode::PermissionPersistenceFailed),
+        "approval_not_found" => Ok(RuntimeErrorCode::ApprovalNotFound),
+        "approval_expired" => Ok(RuntimeErrorCode::ApprovalExpired),
+        "permission_scope_unavailable" => Ok(RuntimeErrorCode::PermissionScopeUnavailable),
         "internal" => Ok(RuntimeErrorCode::Internal),
         _ => Err(invalid_data("stored run error code is invalid")),
     }
@@ -180,6 +202,7 @@ pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
         RuntimeErrorCode::SessionArchived => "session_archived",
         RuntimeErrorCode::SessionNotIdle => "session_not_idle",
         RuntimeErrorCode::RunNotFound => "run_not_found",
+        RuntimeErrorCode::ChildTaskNotFound => "child_task_not_found",
         RuntimeErrorCode::InputNotFound => "input_not_found",
         RuntimeErrorCode::RunNotRetryable => "run_not_retryable",
         RuntimeErrorCode::StorageUnavailable => "storage_unavailable",
@@ -190,6 +213,9 @@ pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
         RuntimeErrorCode::ModelUnavailable => "model_unavailable",
         RuntimeErrorCode::ModelBuildFailed => "model_build_failed",
         RuntimeErrorCode::ModelExecutionFailed => "model_execution_failed",
+        RuntimeErrorCode::ContextCompactionFailed => "context_compaction_failed",
+        RuntimeErrorCode::Timeout => "timeout",
+        RuntimeErrorCode::Cancelled => "cancelled",
         RuntimeErrorCode::WorkspaceNotFound => "workspace_not_found",
         RuntimeErrorCode::WorkspaceRemoved => "workspace_removed",
         RuntimeErrorCode::WorkspaceUnavailable => "workspace_unavailable",
@@ -197,6 +223,66 @@ pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
         RuntimeErrorCode::AttachmentUnavailable => "attachment_unavailable",
         RuntimeErrorCode::AttachmentTooLarge => "attachment_too_large",
         RuntimeErrorCode::AttachmentUploadInvalid => "attachment_upload_invalid",
+        RuntimeErrorCode::PermissionFileInvalid => "permission_file_invalid",
+        RuntimeErrorCode::PermissionFileConflict => "permission_file_conflict",
+        RuntimeErrorCode::PermissionReloadFailed => "permission_reload_failed",
+        RuntimeErrorCode::PermissionPersistenceFailed => "permission_persistence_failed",
+        RuntimeErrorCode::ApprovalNotFound => "approval_not_found",
+        RuntimeErrorCode::ApprovalExpired => "approval_expired",
+        RuntimeErrorCode::PermissionScopeUnavailable => "permission_scope_unavailable",
         RuntimeErrorCode::Internal => "internal",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_runtime_error_code_round_trips_through_sqlite_text() {
+        let codes = [
+            RuntimeErrorCode::InvalidRequest,
+            RuntimeErrorCode::SessionNotFound,
+            RuntimeErrorCode::SessionBusy,
+            RuntimeErrorCode::SessionArchived,
+            RuntimeErrorCode::SessionNotIdle,
+            RuntimeErrorCode::RunNotFound,
+            RuntimeErrorCode::ChildTaskNotFound,
+            RuntimeErrorCode::InputNotFound,
+            RuntimeErrorCode::RunNotRetryable,
+            RuntimeErrorCode::StorageUnavailable,
+            RuntimeErrorCode::RuntimeShuttingDown,
+            RuntimeErrorCode::AgentBuildFailed,
+            RuntimeErrorCode::ConfigurationUnavailable,
+            RuntimeErrorCode::ModelNotFound,
+            RuntimeErrorCode::ModelUnavailable,
+            RuntimeErrorCode::ModelBuildFailed,
+            RuntimeErrorCode::ModelExecutionFailed,
+            RuntimeErrorCode::ContextCompactionFailed,
+            RuntimeErrorCode::Timeout,
+            RuntimeErrorCode::Cancelled,
+            RuntimeErrorCode::WorkspaceNotFound,
+            RuntimeErrorCode::WorkspaceRemoved,
+            RuntimeErrorCode::WorkspaceUnavailable,
+            RuntimeErrorCode::AttachmentNotFound,
+            RuntimeErrorCode::AttachmentUnavailable,
+            RuntimeErrorCode::AttachmentTooLarge,
+            RuntimeErrorCode::AttachmentUploadInvalid,
+            RuntimeErrorCode::PermissionFileInvalid,
+            RuntimeErrorCode::PermissionFileConflict,
+            RuntimeErrorCode::PermissionReloadFailed,
+            RuntimeErrorCode::PermissionPersistenceFailed,
+            RuntimeErrorCode::ApprovalNotFound,
+            RuntimeErrorCode::ApprovalExpired,
+            RuntimeErrorCode::PermissionScopeUnavailable,
+            RuntimeErrorCode::Internal,
+        ];
+
+        for code in codes {
+            assert_eq!(
+                parse_error_code(error_code_value(code)).expect("stored error code"),
+                code
+            );
+        }
     }
 }

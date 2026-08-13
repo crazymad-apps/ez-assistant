@@ -259,6 +259,7 @@ dependencies = [
 name = "assistant-runtime"
 version = "0.1.0"
 dependencies = [
+ "agent-context",
  "agent-core",
  "agent-model",
  "agent-sdk",
@@ -269,8 +270,10 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

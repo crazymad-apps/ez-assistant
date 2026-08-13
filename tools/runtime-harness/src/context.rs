@@ -533,6 +533,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "earlier conversation summary".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             ConversationMessage::User(user(latest_user)),
         ])
@@ -573,6 +576,9 @@ mod tests {
                 ContextSummaryMessage {
                     id: id("summary_old"),
                     text: "old summary".to_owned(),
+                    model: None,
+                    usage: None,
+                    compacted_usage: None,
                 },
             )]),
         };
@@ -581,6 +587,9 @@ mod tests {
                 ContextSummaryMessage {
                     id: id("summary_new"),
                     text: "new summary".to_owned(),
+                    model: None,
+                    usage: None,
+                    compacted_usage: None,
                 },
             )]),
         };

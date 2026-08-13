@@ -3,9 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, AttachmentSummary, ConfigurationStatus, IdempotencyKey, InputId,
-    ModelConfiguration, ModelKey, RunId, RunSnapshot, RuntimeLifecycle, SessionId,
-    SessionListFilter, SessionSummary, WorkspaceId, WorkspaceSummary,
+    AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, AttachmentId,
+    AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus, IdempotencyKey,
+    InputId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionFileSummary, RunId,
+    RunSnapshot, RuntimeLifecycle, SessionId, SessionListFilter, SessionSummary, WorkspaceId,
+    WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -53,6 +55,51 @@ pub struct ReloadConfigRequest {}
 pub struct ReloadConfigResult {
     /// 本次 reload 原子交换出的配置总体状态。
     pub status: ConfigurationStatus,
+}
+
+/// 以 Session 为入口显式重载 Global、可选 Workspace 和 Session 权限文件。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReloadPermissionsRequest {
+    pub session_id: SessionId,
+}
+
+/// 权限 cohort 的重载结果；只有 `applied` 为 true 时才替换内存快照。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReloadPermissionsResult {
+    pub session_id: SessionId,
+    pub applied: bool,
+    pub files: Vec<PermissionFileSummary>,
+    pub diagnostics: Vec<PermissionDiagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListPendingApprovalsRequest {
+    /// 仅查询这个 Session 当前仍可决策的审批。
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListPendingApprovalsResult {
+    /// 按创建时间稳定排序的内存审批快照。
+    pub approvals: Vec<ApprovalSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecideApprovalRequest {
+    /// 审批所属 Session；防止跨 Session 猜测标识。
+    pub session_id: SessionId,
+    /// 要原子消费的待处理审批。
+    pub approval_id: ApprovalId,
+    /// 用户从 `available_decisions` 中选择的决定。
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecideApprovalResult {
+    /// 已消费的审批标识。
+    pub approval_id: ApprovalId,
+    /// 已经应用到等待 Tool Call 的决定。
+    pub decision: ApprovalDecision,
 }
 
 /// 显式验证一个已配置模型的基本连接与协议响应。
@@ -243,6 +290,8 @@ pub struct SubmitInputRequest {
     pub session_id: SessionId,
     /// 原样进入规范 UserMessage 的文本；Runtime 负责非空白校验。
     pub message: String,
+    /// 本次输入实际使用的 Agent 变体；不能由 Session 展示状态代替。
+    pub variant: AgentVariant,
     /// 按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
@@ -320,6 +369,39 @@ pub struct ListRunsResult {
     pub runs: Vec<RunSnapshot>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListChildTasksRequest {
+    pub session_id: SessionId,
+    pub parent_run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListChildTasksResult {
+    pub tasks: Vec<ChildTaskSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetChildTaskRequest {
+    pub session_id: SessionId,
+    pub child_task_id: ChildTaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GetChildTaskResult {
+    pub task: ChildTaskSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CancelChildTaskRequest {
+    pub session_id: SessionId,
+    pub child_task_id: ChildTaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CancelChildTaskResult {
+    pub task: ChildTaskSnapshot,
+}
+
 /// 把完全空闲的活动 Session 转为只读归档状态。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ArchiveSessionRequest {
@@ -354,12 +436,38 @@ pub struct SetSessionModelResult {
     pub session: SessionSummary,
 }
 
+/// 只更新 Session 当前展示和下次提交默认使用的 Agent 变体。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionVariantRequest {
+    pub session_id: SessionId,
+    pub variant: AgentVariant,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionVariantResult {
+    pub session: SessionSummary,
+}
+
+/// 更新 Session 后续 Run 捕获的审批模式。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionApprovalModeRequest {
+    pub session_id: SessionId,
+    pub approval_mode: ApprovalMode,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetSessionApprovalModeResult {
+    pub session: SessionSummary,
+}
+
 /// 从历史 User Message 位置提交一条全新输入并销毁原目标及尾段。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReenterFromUserMessageRequest {
     pub session_id: SessionId,
     pub message_id: crate::MessageId,
     pub message: String,
+    /// 本次重新输入实际使用的 Agent 变体。
+    pub variant: AgentVariant,
     /// 替换消息按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
@@ -412,6 +520,10 @@ pub enum RuntimeCommand {
     GetModel(GetModelRequest),
     /// 显式重新加载配置。
     ReloadConfig(ReloadConfigRequest),
+    /// 显式重新加载目标 Session 的权限 cohort。
+    ReloadPermissions(ReloadPermissionsRequest),
+    ListPendingApprovals(ListPendingApprovalsRequest),
+    DecideApproval(DecideApprovalRequest),
     /// 显式验证指定模型连接。
     ValidateModelConnection(ValidateModelConnectionRequest),
     /// 登记或恢复 Workspace。
@@ -444,12 +556,19 @@ pub enum RuntimeCommand {
     GetRun(GetRunRequest),
     /// 列出 Session 的全部 Run。
     ListRuns(ListRunsRequest),
+    ListChildTasks(ListChildTasksRequest),
+    GetChildTask(GetChildTaskRequest),
+    CancelChildTask(CancelChildTaskRequest),
     /// 归档 Session。
     ArchiveSession(ArchiveSessionRequest),
     /// 恢复归档 Session。
     RestoreSession(RestoreSessionRequest),
     /// 切换 Session 模型。
     SetSessionModel(SetSessionModelRequest),
+    /// 切换 Session 当前 Agent 变体。
+    SetSessionVariant(SetSessionVariantRequest),
+    /// 切换 Session 当前审批模式。
+    SetSessionApprovalMode(SetSessionApprovalModeRequest),
     /// 从历史 User Message 重新输入。
     ReenterFromUserMessage(ReenterFromUserMessageRequest),
     /// 取消 Run。
@@ -470,6 +589,10 @@ pub enum RuntimeCommandResult {
     GetModel(GetModelResult),
     /// 配置已重新加载并返回新状态。
     ReloadConfig(ReloadConfigResult),
+    /// 权限 cohort 重载已完成。
+    ReloadPermissions(ReloadPermissionsResult),
+    ListPendingApprovals(ListPendingApprovalsResult),
+    DecideApproval(DecideApprovalResult),
     /// 模型连接验证已完成。
     ValidateModelConnection(ValidateModelConnectionResult),
     /// Workspace 已登记或恢复。
@@ -502,12 +625,19 @@ pub enum RuntimeCommandResult {
     GetRun(GetRunResult),
     /// Run 列表已返回。
     ListRuns(ListRunsResult),
+    ListChildTasks(ListChildTasksResult),
+    GetChildTask(GetChildTaskResult),
+    CancelChildTask(CancelChildTaskResult),
     /// Session 已归档。
     ArchiveSession(ArchiveSessionResult),
     /// Session 已恢复。
     RestoreSession(RestoreSessionResult),
     /// Session 模型已切换。
     SetSessionModel(SetSessionModelResult),
+    /// Session 当前 Agent 变体已切换。
+    SetSessionVariant(SetSessionVariantResult),
+    /// Session 当前审批模式已切换。
+    SetSessionApprovalMode(SetSessionApprovalModeResult),
     /// 历史重新输入已接受。
     ReenterFromUserMessage(ReenterFromUserMessageResult),
     /// 取消请求已接受。
@@ -528,6 +658,8 @@ mod tests {
             title: "Session 1".to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
             lifecycle: crate::SessionLifecycle::Active,
+            current_variant: AgentVariant::Build,
+            approval_mode: ApprovalMode::Ask,
             workspace_id: None,
             active_run_id: None,
             message_count: 0,
@@ -543,11 +675,31 @@ mod tests {
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
             status: crate::RunStatus::Accepted,
+            variant: AgentVariant::Build,
+            approval_mode: ApprovalMode::Ask,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,
+        }
+    }
+
+    fn child_task_snapshot() -> ChildTaskSnapshot {
+        ChildTaskSnapshot {
+            child_task_id: ChildTaskId::new("child-1").expect("child id"),
+            session_id: SessionId::new("session-1").expect("session id"),
+            parent_run_id: RunId::new("run-1").expect("run id"),
+            parent_tool_call_id: crate::ToolCallId::new("call-1").expect("call id"),
+            title: "Inspect".to_owned(),
+            status: crate::ChildTaskStatus::Completed,
+            variant: AgentVariant::Build,
+            cancel_requested: false,
+            final_text: "done".to_owned(),
+            error: None,
+            created_at_ms: 1,
+            started_at_ms: Some(2),
+            finished_at_ms: Some(3),
         }
     }
 
@@ -592,11 +744,33 @@ mod tests {
         }
     }
 
+    fn approval_snapshot() -> ApprovalSnapshot {
+        ApprovalSnapshot {
+            approval_id: ApprovalId::new("approval-1").expect("approval id"),
+            session_id: SessionId::new("session-1").expect("session id"),
+            run_id: RunId::new("run-1").expect("run id"),
+            child_task_id: None,
+            call_id: crate::ToolCallId::new("call-1").expect("call id"),
+            variant: AgentVariant::Build,
+            approval_mode: ApprovalMode::Ask,
+            subject: crate::ToolApprovalSubject::General {
+                tool_name: "echo_text".to_owned(),
+            },
+            available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
+            exact_rule_preview: crate::ToolApprovalSubject::General {
+                tool_name: "echo_text".to_owned(),
+            },
+            status: crate::ApprovalStatus::Pending,
+            created_at_ms: 1,
+        }
+    }
+
     #[test]
     fn command_uses_explicit_type_and_payload_tags() {
         let command = RuntimeCommand::SubmitInput(SubmitInputRequest {
             session_id: SessionId::new("session-1").expect("session id"),
             message: "hello".to_owned(),
+            variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
             idempotency_key: None,
         });
@@ -608,7 +782,8 @@ mod tests {
                 "type": "submit_input",
                 "payload": {
                     "session_id": "session-1",
-                    "message": "hello"
+                    "message": "hello",
+                    "variant": "build"
                 }
             })
         );
@@ -619,17 +794,25 @@ mod tests {
     }
 
     #[test]
-    fn input_attachment_ids_are_ordered_and_default_to_empty() {
-        let legacy = serde_json::from_value::<SubmitInputRequest>(json!({
+    fn input_variant_is_required_and_attachment_ids_default_to_empty() {
+        let missing_variant = serde_json::from_value::<SubmitInputRequest>(json!({
             "session_id": "session-1",
             "message": "hello"
+        }));
+        assert!(missing_variant.is_err());
+
+        let minimal = serde_json::from_value::<SubmitInputRequest>(json!({
+            "session_id": "session-1",
+            "message": "hello",
+            "variant": "plan"
         }))
-        .expect("legacy input request");
-        assert!(legacy.attachment_ids.is_empty());
+        .expect("minimal input request");
+        assert!(minimal.attachment_ids.is_empty());
 
         let request = SubmitInputRequest {
             session_id: SessionId::new("session-1").expect("session id"),
             message: "compare".to_owned(),
+            variant: AgentVariant::Plan,
             attachment_ids: vec![
                 AttachmentId::new("attachment-2").expect("attachment id"),
                 AttachmentId::new("attachment-1").expect("attachment id"),
@@ -686,6 +869,26 @@ mod tests {
                 "reload_config",
             ),
             (
+                RuntimeCommand::ReloadPermissions(ReloadPermissionsRequest {
+                    session_id: session_id.clone(),
+                }),
+                "reload_permissions",
+            ),
+            (
+                RuntimeCommand::ListPendingApprovals(ListPendingApprovalsRequest {
+                    session_id: session_id.clone(),
+                }),
+                "list_pending_approvals",
+            ),
+            (
+                RuntimeCommand::DecideApproval(DecideApprovalRequest {
+                    session_id: session_id.clone(),
+                    approval_id: ApprovalId::new("approval-1").expect("approval id"),
+                    decision: ApprovalDecision::AllowOnce,
+                }),
+                "decide_approval",
+            ),
+            (
                 RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
                     model_key: ModelKey::new("model-1").expect("model key"),
                 }),
@@ -714,6 +917,19 @@ mod tests {
                 "remove_workspace",
             ),
             (
+                RuntimeCommand::GetAttachment(GetAttachmentRequest {
+                    session_id: session_id.clone(),
+                    attachment_id: AttachmentId::new("attachment-1").expect("attachment id"),
+                }),
+                "get_attachment",
+            ),
+            (
+                RuntimeCommand::ListAttachments(ListAttachmentsRequest {
+                    session_id: session_id.clone(),
+                }),
+                "list_attachments",
+            ),
+            (
                 RuntimeCommand::CreateSession(CreateSessionRequest::default()),
                 "create_session",
             ),
@@ -731,6 +947,7 @@ mod tests {
                 RuntimeCommand::SubmitInput(SubmitInputRequest {
                     session_id: session_id.clone(),
                     message: "hello".to_owned(),
+                    variant: AgentVariant::Build,
                     attachment_ids: Vec::new(),
                     idempotency_key: None,
                 }),
@@ -770,6 +987,27 @@ mod tests {
                 "list_runs",
             ),
             (
+                RuntimeCommand::ListChildTasks(ListChildTasksRequest {
+                    session_id: session_id.clone(),
+                    parent_run_id: run_id.clone(),
+                }),
+                "list_child_tasks",
+            ),
+            (
+                RuntimeCommand::GetChildTask(GetChildTaskRequest {
+                    session_id: session_id.clone(),
+                    child_task_id: ChildTaskId::new("child-1").expect("child id"),
+                }),
+                "get_child_task",
+            ),
+            (
+                RuntimeCommand::CancelChildTask(CancelChildTaskRequest {
+                    session_id: session_id.clone(),
+                    child_task_id: ChildTaskId::new("child-1").expect("child id"),
+                }),
+                "cancel_child_task",
+            ),
+            (
                 RuntimeCommand::ArchiveSession(ArchiveSessionRequest {
                     session_id: session_id.clone(),
                 }),
@@ -789,10 +1027,25 @@ mod tests {
                 "set_session_model",
             ),
             (
+                RuntimeCommand::SetSessionVariant(SetSessionVariantRequest {
+                    session_id: session_id.clone(),
+                    variant: AgentVariant::Plan,
+                }),
+                "set_session_variant",
+            ),
+            (
+                RuntimeCommand::SetSessionApprovalMode(SetSessionApprovalModeRequest {
+                    session_id: session_id.clone(),
+                    approval_mode: ApprovalMode::Auto,
+                }),
+                "set_session_approval_mode",
+            ),
+            (
                 RuntimeCommand::ReenterFromUserMessage(ReenterFromUserMessageRequest {
                     session_id: session_id.clone(),
                     message_id: crate::MessageId::new("message-1").expect("message id"),
                     message: "replacement".to_owned(),
+                    variant: AgentVariant::Plan,
                     attachment_ids: Vec::new(),
                     idempotency_key: Some(
                         IdempotencyKey::new("replace-1").expect("idempotency key"),
@@ -801,7 +1054,10 @@ mod tests {
                 "reenter_from_user_message",
             ),
             (
-                RuntimeCommand::CancelRun(CancelRunRequest { session_id, run_id }),
+                RuntimeCommand::CancelRun(CancelRunRequest {
+                    session_id: session_id.clone(),
+                    run_id,
+                }),
                 "cancel_run",
             ),
             (
@@ -844,6 +1100,31 @@ mod tests {
                 "reload_config",
             ),
             (
+                RuntimeCommandResult::ReloadPermissions(ReloadPermissionsResult {
+                    session_id: session_id.clone(),
+                    applied: true,
+                    files: vec![crate::PermissionFileSummary {
+                        scope: crate::PermissionScope::Global,
+                        status: crate::PermissionFileStatus::Empty,
+                    }],
+                    diagnostics: Vec::new(),
+                }),
+                "reload_permissions",
+            ),
+            (
+                RuntimeCommandResult::ListPendingApprovals(ListPendingApprovalsResult {
+                    approvals: vec![approval_snapshot()],
+                }),
+                "list_pending_approvals",
+            ),
+            (
+                RuntimeCommandResult::DecideApproval(DecideApprovalResult {
+                    approval_id: ApprovalId::new("approval-1").expect("approval id"),
+                    decision: ApprovalDecision::AllowSession,
+                }),
+                "decide_approval",
+            ),
+            (
                 RuntimeCommandResult::ValidateModelConnection(ValidateModelConnectionResult {
                     model_key: ModelKey::new("model-1").expect("model key"),
                     outcome: ConnectionValidationOutcome::Failed(ConnectionValidationFailure {
@@ -876,6 +1157,26 @@ mod tests {
                     workspace: workspace_summary(),
                 }),
                 "remove_workspace",
+            ),
+            (
+                RuntimeCommandResult::GetAttachment(GetAttachmentResult {
+                    attachment: AttachmentSummary {
+                        attachment_id: AttachmentId::new("attachment-1").expect("attachment id"),
+                        session_id: session_id.clone(),
+                        original_name: "reference.txt".to_owned(),
+                        size_bytes: 9,
+                        agent_readable_path: "/session/attachments/reference.txt".to_owned(),
+                        state: crate::AttachmentState::Ready,
+                        created_at_ms: 1,
+                    },
+                }),
+                "get_attachment",
+            ),
+            (
+                RuntimeCommandResult::ListAttachments(ListAttachmentsResult {
+                    attachments: Vec::new(),
+                }),
+                "list_attachments",
             ),
             (
                 RuntimeCommandResult::CreateSession(CreateSessionResult {
@@ -933,6 +1234,24 @@ mod tests {
                 "list_runs",
             ),
             (
+                RuntimeCommandResult::ListChildTasks(ListChildTasksResult {
+                    tasks: vec![child_task_snapshot()],
+                }),
+                "list_child_tasks",
+            ),
+            (
+                RuntimeCommandResult::GetChildTask(GetChildTaskResult {
+                    task: child_task_snapshot(),
+                }),
+                "get_child_task",
+            ),
+            (
+                RuntimeCommandResult::CancelChildTask(CancelChildTaskResult {
+                    task: child_task_snapshot(),
+                }),
+                "cancel_child_task",
+            ),
+            (
                 RuntimeCommandResult::ArchiveSession(ArchiveSessionResult {
                     session: session_summary(),
                 }),
@@ -949,6 +1268,18 @@ mod tests {
                     session: session_summary(),
                 }),
                 "set_session_model",
+            ),
+            (
+                RuntimeCommandResult::SetSessionVariant(SetSessionVariantResult {
+                    session: session_summary(),
+                }),
+                "set_session_variant",
+            ),
+            (
+                RuntimeCommandResult::SetSessionApprovalMode(SetSessionApprovalModeResult {
+                    session: session_summary(),
+                }),
+                "set_session_approval_mode",
             ),
             (
                 RuntimeCommandResult::ReenterFromUserMessage(ReenterFromUserMessageResult {

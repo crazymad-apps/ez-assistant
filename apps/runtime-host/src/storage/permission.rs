@@ -1,0 +1,202 @@
+//! 三层权限文件的固定路径解析、revision 与 CAS 原子替换。
+//!
+//! 权限文件允许用户直接编辑，因此写入不能只依赖进程内锁：Host 用内容 SHA-256 作为
+//! revision，写临时文件并在 rename 前再次比较目标 revision。这样既避免半文件，也能发现
+//! 读取后到提交前发生的外部编辑。
+
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+
+use assistant_protocol::PermissionDiagnosticCode;
+use assistant_runtime::{
+    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PermissionSourceDiagnostic,
+    StoreError, StoreErrorKind,
+};
+use sha2::{Digest, Sha256};
+
+use super::{PRIVATE_FILE_MODE, StorageEngine, StorageResult, internal_error, sync_directory};
+use crate::config_source::prepare_private_directory;
+
+const PERMISSION_FILE: &str = "permissions.json";
+const MAX_PERMISSION_FILE_BYTES: u64 = 1024 * 1024;
+
+impl StorageEngine {
+    pub(super) fn load_permission_file(
+        &self,
+        scope: &PermissionFileScope,
+    ) -> StorageResult<PermissionFileLoad> {
+        let path = self.permission_file_path(scope)?;
+        load_path(&path)
+    }
+
+    pub(super) fn replace_permission_file(
+        &self,
+        scope: &PermissionFileScope,
+        expected_revision: &PermissionFileRevision,
+        content: &[u8],
+    ) -> StorageResult<PermissionFileRevision> {
+        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PERMISSION_FILE_BYTES {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "permission file is too large",
+            ));
+        }
+        let path = self.permission_file_path(scope)?;
+        // 第一次 CAS 检查快速拒绝以旧 revision 发起的写入。
+        let current = load_path(&path)?.revision;
+        if &current != expected_revision {
+            return Err(StoreError::new(
+                StoreErrorKind::Conflict,
+                "permission file revision changed",
+            ));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            StoreError::new(
+                StoreErrorKind::InvalidData,
+                "permission file parent is invalid",
+            )
+        })?;
+        prepare_private_directory(parent).map_err(|source| {
+            internal_error("permission file directory could not be prepared", source)
+        })?;
+
+        // 临时文件与目标位于同一目录，后续 rename 才能保持同一文件系统内的原子替换语义。
+        let (temporary, mut file) = create_temporary_file(parent)?;
+        let write_result = (|| -> StorageResult<()> {
+            file.write_all(content).map_err(|source| {
+                internal_error("permission temporary file could not be written", source)
+            })?;
+            file.sync_all().map_err(|source| {
+                internal_error(
+                    "permission temporary file could not be synchronized",
+                    source,
+                )
+            })?;
+            // 文件 I/O 期间用户仍可能保存新内容，所以 rename 前必须再做一次 CAS；
+            // 只做入口检查会静默覆盖这段竞态窗口中的外部修改。
+            if &load_path(&path)?.revision != expected_revision {
+                return Err(StoreError::new(
+                    StoreErrorKind::Conflict,
+                    "permission file revision changed",
+                ));
+            }
+            fs::rename(&temporary, &path).map_err(|source| {
+                internal_error("permission file could not be replaced", source)
+            })?;
+            // rename 持久化的是目录项变化；同步父目录后，成功返回才代表替换已进入耐久边界。
+            sync_directory(parent)
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        write_result?;
+        Ok(revision(content))
+    }
+
+    fn permission_file_path(&self, scope: &PermissionFileScope) -> StorageResult<PathBuf> {
+        match scope {
+            PermissionFileScope::Global => Ok(self.runtime_home.join(PERMISSION_FILE)),
+            PermissionFileScope::Workspace(workspace_id) => {
+                let workspace = self.get_workspace(workspace_id)?;
+                Ok(Path::new(&workspace.agent_directory).join(PERMISSION_FILE))
+            }
+            PermissionFileScope::Session(session_id) => {
+                let environment = self.load_session_environment(session_id)?;
+                Ok(Path::new(&environment.session_private_directory).join(PERMISSION_FILE))
+            }
+        }
+    }
+}
+
+fn load_path(path: &Path) -> StorageResult<PermissionFileLoad> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(PermissionFileLoad {
+                content: None,
+                revision: PermissionFileRevision::Missing,
+                diagnostics: Vec::new(),
+            });
+        }
+        Err(source) => {
+            return Err(internal_error(
+                "permission file metadata could not be read",
+                source,
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(StoreError::new(
+            StoreErrorKind::InvalidData,
+            "permission path is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_PERMISSION_FILE_BYTES {
+        return Err(StoreError::new(
+            StoreErrorKind::InvalidData,
+            "permission file is too large",
+        ));
+    }
+    let content = fs::read(path)
+        .map_err(|source| internal_error("permission file could not be read", source))?;
+    let diagnostics = if metadata.permissions().mode() & 0o077 == 0 {
+        Vec::new()
+    } else {
+        vec![PermissionSourceDiagnostic {
+            code: PermissionDiagnosticCode::UnsafePermissions,
+            message: "permission file is accessible beyond the current user",
+        }]
+    };
+    Ok(PermissionFileLoad {
+        revision: revision(&content),
+        content: Some(content),
+        diagnostics,
+    })
+}
+
+fn revision(content: &[u8]) -> PermissionFileRevision {
+    PermissionFileRevision::Content(format!("{:x}", Sha256::digest(content)))
+}
+
+fn create_temporary_file(parent: &Path) -> StorageResult<(PathBuf, fs::File)> {
+    for _ in 0..16 {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).map_err(|source| {
+            internal_error("permission temporary name could not be generated", source)
+        })?;
+        let path = parent.join(format!(".permissions-{}.tmp", hex(&random)));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(PRIVATE_FILE_MODE)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(internal_error(
+                    "permission temporary file could not be created",
+                    source,
+                ));
+            }
+        }
+    }
+    Err(StoreError::new(
+        StoreErrorKind::Internal,
+        "permission temporary name could not be allocated",
+    ))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        value.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    value
+}

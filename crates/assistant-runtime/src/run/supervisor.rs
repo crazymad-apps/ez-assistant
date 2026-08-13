@@ -11,24 +11,25 @@ use assistant_protocol::{
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::broadcast;
 
-use crate::{RuntimeError, RuntimeResult, RuntimeStore, session::SessionController};
+use crate::{RuntimeError, RuntimeResult, session::SessionController};
 
-use super::{RunModelDiagnostics, RunRecord, is_active_run, settlement::settle_run};
+use super::{RunModelDiagnostics, RunRecord, is_active_run};
 
-/// 同时排空可用观察事件并等待可靠 completion，随后只结算一次 Runtime Run。
-pub(crate) async fn supervise_run(
+/// 同时排空一次 Core execution 的观察事件并等待可靠 completion。
+///
+/// `CompactionRequired` 不是业务 Run 终态；调用方拿到 outcome 后可以压缩并启动下一次
+/// Core execution，只有最终 outcome 才交给 settlement。
+pub(crate) async fn observe_run_execution(
     session: Arc<SessionController>,
     run_id: RunId,
     mut events: AgentEventStream,
     completion: CompletionFuture,
     event_sender: broadcast::Sender<RuntimeEvent>,
-    store: Arc<dyn RuntimeStore>,
     model_diagnostics: Arc<RunModelDiagnostics>,
-) {
+) -> ExecutionObservation {
     let completion = AssertUnwindSafe(completion).catch_unwind();
     tokio::pin!(completion);
     let mut events_open = true;
-
     let outcome = loop {
         tokio::select! {
             biased;
@@ -52,29 +53,11 @@ pub(crate) async fn supervise_run(
     };
     drop(events);
 
-    match settle_run(
-        &session,
-        &run_id,
-        outcome,
-        store.as_ref(),
-        Some(model_diagnostics.as_ref()),
-    )
-    .await
-    {
-        Ok(snapshot) => {
-            let _ = event_sender.send(RuntimeEvent::RunFinished {
-                session_id: snapshot.session_id,
-                run_id: snapshot.run_id,
-                status: snapshot.status,
-                error: snapshot.error,
-            });
-        }
-        Err(_) => {
-            // 结算失败不能被当成正常 supervisor 退出；即使锁已中毒而无法写入，后续
-            // 查询也会显式返回错误，不能让新输入继续修改该 Session。
-            let _ = session.mark_faulted();
-        }
-    }
+    ExecutionObservation { outcome }
+}
+
+pub(crate) struct ExecutionObservation {
+    pub(crate) outcome: Option<agent_core::ExecutionOutcome>,
 }
 
 fn project_agent_event(
@@ -234,8 +217,45 @@ fn project_agent_event(
             model_diagnostics.mark_step_started();
             Ok(None)
         }
-        AgentEvent::GuardrailTriggered { .. }
-        | AgentEvent::ExecutionCompleted { .. }
+        AgentEvent::GuardrailTriggered {
+            kind,
+            mode,
+            threshold,
+            observed,
+            call_id,
+        } => {
+            let call_id = ProtocolToolCallId::new(call_id.as_str()).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "runtime guardrail tool call id",
+                }
+            })?;
+            let kind = match kind {
+                agent_core::GuardrailKind::RepeatedInvocation => {
+                    assistant_protocol::GuardrailKind::RepeatedInvocation
+                }
+                agent_core::GuardrailKind::ConsecutiveFailures => {
+                    assistant_protocol::GuardrailKind::ConsecutiveFailures
+                }
+            };
+            let mode = match mode {
+                agent_core::ActiveGuardrailMode::Observe => {
+                    assistant_protocol::GuardrailMode::Observe
+                }
+                agent_core::ActiveGuardrailMode::Enforce => {
+                    assistant_protocol::GuardrailMode::Enforce
+                }
+            };
+            Ok(Some(RuntimeEvent::GuardrailTriggered {
+                session_id,
+                run_id: run_id.clone(),
+                call_id,
+                kind,
+                mode,
+                threshold: threshold.get(),
+                observed,
+            }))
+        }
+        AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }
         | AgentEvent::ExecutionCancelled { .. }
         | AgentEvent::ExecutionCompactionRequired { .. } => Ok(None),

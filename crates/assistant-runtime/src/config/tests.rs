@@ -1,6 +1,6 @@
 use super::domain::{ModelProfile, ModelSecret};
 use super::*;
-use agent_core::ExecutionBudget;
+use agent_core::{ActiveGuardrailMode, ExecutionBudget};
 use assistant_protocol::ModelKey;
 use std::time::Duration;
 
@@ -95,6 +95,24 @@ fn omitted_optional_tables_keep_defaults_and_no_hidden_limits() {
     );
     assert!(active.retry_policy().is_none());
     assert_eq!(active.budget(), &ExecutionBudget::default());
+    assert_eq!(
+        active
+            .guardrails()
+            .repeated_invocation
+            .expect("default repeated guardrail")
+            .threshold
+            .get(),
+        4
+    );
+    assert_eq!(
+        active
+            .guardrails()
+            .consecutive_failures
+            .expect("default failure guardrail")
+            .threshold
+            .get(),
+        5
+    );
     let model = active.models().values().next().expect("compiled model");
     assert_eq!(model.provider().as_str(), "302-ai");
     assert_eq!(
@@ -102,6 +120,120 @@ fn omitted_optional_tables_keep_defaults_and_no_hidden_limits() {
         ModelProfile::Standard
     );
     assert_eq!(model.generation().max_output_tokens, Some(4_096));
+
+    let delegation = active.delegation();
+    assert_eq!(delegation.max_tasks_per_run().get(), 8);
+    assert_eq!(delegation.max_concurrent_tasks().get(), 4);
+    assert_eq!(delegation.task_timeout(), Duration::from_secs(900));
+    assert_eq!(delegation.max_steps().get(), 40);
+    assert_eq!(delegation.max_tool_calls().get(), 100);
+    assert_eq!(delegation.max_output_tokens().get(), 16_384);
+}
+
+#[test]
+fn delegation_limits_compile_and_reject_invalid_combinations() {
+    let document = format!(
+        r#"
+schema_version = 1
+default_model = "standard"
+
+[agent.defaults.delegation]
+max_tasks_per_run = 6
+max_concurrent_tasks = 3
+task_timeout_ms = 120000
+max_steps = 20
+max_tool_calls = 30
+max_output_tokens = 2048
+{}
+"#,
+        model_table("standard", "acme", 4096)
+    );
+    let compilation = compile_runtime_config(&document);
+    let delegation = compilation
+        .active()
+        .expect("valid delegation configuration")
+        .delegation();
+    assert_eq!(delegation.max_tasks_per_run().get(), 6);
+    assert_eq!(delegation.max_concurrent_tasks().get(), 3);
+    assert_eq!(delegation.task_timeout(), Duration::from_secs(120));
+    assert_eq!(delegation.max_steps().get(), 20);
+    assert_eq!(delegation.max_tool_calls().get(), 30);
+    assert_eq!(delegation.max_output_tokens().get(), 2_048);
+    assert_eq!(compilation.projection().delegation, Some(delegation));
+
+    for invalid_fields in [
+        "max_tasks_per_run = 0\nmax_concurrent_tasks = 1",
+        "max_tasks_per_run = 2\nmax_concurrent_tasks = 3",
+        "max_tasks_per_run = 2\nmax_concurrent_tasks = 1\ntask_timeout_ms = 0",
+    ] {
+        let invalid = compile_runtime_config(&format!(
+            "schema_version = 1\ndefault_model = \"standard\"\n[agent.defaults.delegation]\n{invalid_fields}\n{}",
+            model_table("standard", "acme", 4096)
+        ));
+        assert_eq!(invalid.state(), ConfigState::Invalid);
+        assert!(
+            invalid
+                .issues()
+                .iter()
+                .any(|issue| issue.code() == ConfigIssueCode::InvalidLimit)
+        );
+    }
+
+    let unknown = compile_runtime_config(&format!(
+        "schema_version = 1\ndefault_model = \"standard\"\n[agent.defaults.delegation]\nunknown = 1\n{}",
+        model_table("standard", "acme", 4096)
+    ));
+    assert_eq!(unknown.state(), ConfigState::Invalid);
+    assert!(
+        unknown
+            .issues()
+            .iter()
+            .any(|issue| issue.code() == ConfigIssueCode::UnknownField)
+    );
+}
+
+#[test]
+fn guardrail_modes_compile_without_a_core_off_variant() {
+    let document = format!(
+        r#"
+schema_version = 1
+default_model = "standard"
+
+[agent.defaults.guardrails]
+repeated_invocation = {{ mode = "off", threshold = 9 }}
+consecutive_failures = {{ mode = "observe", threshold = 3 }}
+{}
+"#,
+        model_table("standard", "acme", 4096)
+    );
+    let compilation = compile_runtime_config(&document);
+    let active = compilation.active().expect("active configuration");
+    assert!(active.guardrails().repeated_invocation.is_none());
+    let failures = active
+        .guardrails()
+        .consecutive_failures
+        .expect("failure guardrail");
+    assert_eq!(failures.mode, ActiveGuardrailMode::Observe);
+    assert_eq!(failures.threshold.get(), 3);
+
+    let invalid = compile_runtime_config(&format!(
+        r#"
+schema_version = 1
+default_model = "standard"
+
+[agent.defaults.guardrails]
+repeated_invocation = {{ mode = "enforce", threshold = 0 }}
+{}
+"#,
+        model_table("standard", "acme", 4096)
+    ));
+    assert_eq!(invalid.state(), ConfigState::Invalid);
+    assert!(
+        invalid
+            .issues()
+            .iter()
+            .any(|issue| issue.code() == ConfigIssueCode::InvalidLimit)
+    );
 }
 
 #[test]

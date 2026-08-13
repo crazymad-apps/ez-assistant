@@ -36,9 +36,6 @@ pub(crate) struct ServeArguments {
     /// Positive Runtime event buffer capacity; defaults to 256.
     #[arg(long, value_name = "COUNT")]
     event_capacity: Option<NonZeroUsize>,
-    /// UNSAFE: enable unrestricted local file and shell tools. The Workspace is not a sandbox; use only with isolated test data.
-    #[arg(long)]
-    unsafe_unrestricted_local_tools: bool,
     /// Serve the private browser validation page from this Host instance.
     #[cfg(feature = "web-demo")]
     #[arg(long)]
@@ -50,7 +47,6 @@ pub(crate) struct ServeConfig {
     pub(crate) runtime_home: PathBuf,
     pub(crate) config_path: PathBuf,
     pub(crate) event_capacity: NonZeroUsize,
-    pub(crate) unsafe_unrestricted_local_tools: bool,
     pub(crate) web_demo: bool,
 }
 
@@ -82,7 +78,6 @@ impl ServeConfig {
             event_capacity: arguments.event_capacity.unwrap_or_else(|| {
                 NonZeroUsize::new(DEFAULT_EVENT_CAPACITY).expect("static capacity is non-zero")
             }),
-            unsafe_unrestricted_local_tools: arguments.unsafe_unrestricted_local_tools,
             #[cfg(feature = "web-demo")]
             web_demo: arguments.web_demo,
             #[cfg(not(feature = "web-demo"))]
@@ -176,37 +171,7 @@ mod tests {
         let config = ServeConfig::resolve(arguments).expect("config");
         assert_eq!(config.runtime_home, home);
         assert_eq!(config.config_path, home.join(CONFIG_FILE));
-        assert!(!config.unsafe_unrestricted_local_tools);
         assert!(!config.web_demo);
-    }
-
-    #[test]
-    fn unrestricted_local_tools_require_the_explicit_risk_named_switch() {
-        let home = std::env::temp_dir().join("runtime-host-config-test");
-        let arguments = expect_serve(
-            parse_cli([
-                OsString::from("serve"),
-                OsString::from("--runtime-home"),
-                home.into_os_string(),
-                OsString::from("--unsafe-unrestricted-local-tools"),
-            ])
-            .expect("parse"),
-        );
-        assert!(
-            ServeConfig::resolve(arguments)
-                .expect("config")
-                .unsafe_unrestricted_local_tools
-        );
-    }
-
-    #[test]
-    fn unrestricted_switch_help_states_that_workspace_is_not_a_sandbox() {
-        let error = parse_cli([OsString::from("serve"), OsString::from("--help")])
-            .expect_err("help exits through clap");
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        let help = error.to_string();
-        assert!(help.contains("--unsafe-unrestricted-local-tools"));
-        assert!(help.contains("Workspace is not a sandbox"));
     }
 
     #[test]

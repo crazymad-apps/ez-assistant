@@ -1,9 +1,10 @@
 //! Agent 工具 SPI、resolved invocation、注册表、派发器与标准工具壳。
 //!
 //! - [`Tool`]：类型化工具抽象；serde 输入校验后执行无副作用 resolve，实际
-//!   resolved input 只进入一次性执行器。
+//!   resolved input 只进入一次性执行器；[`ToolExecutionMode`] 是注册时冻结、
+//!   不进入模型定义的 Core 调度属性。
 //! - [`ToolRegistry`] / [`ToolSetSnapshot`]：装配期注册（重名拒绝）、执行期不可变
-//!   快照；空快照是合法输入（最小可执行 Agent 不含工具）。
+//!   快照；空快照是合法输入，快照可消费式追加新工具以派生稳定工具集。
 //! - [`Dispatcher`] / [`ResolvedToolBatch`]：整批无副作用解析与按位置一次性执行；
 //!   未知名、校验失败、resolve 失败和执行失败都形成绑定原 call ID 的结果。
 //!
@@ -55,8 +56,8 @@ pub use standard::{
     shell::{ResolvedShellInput, ShellExecTool, ShellExecToolConfig, ShellInput},
 };
 pub use tool::{
-    Tool, ToolContext, ToolError, ToolExecuteFuture, ToolInputDefaults, ToolJsonFuture,
-    ToolOutputChannel, ToolOutputChunk, ToolOutputSink,
+    Tool, ToolContext, ToolError, ToolExecuteFuture, ToolExecutionMode, ToolInputDefaults,
+    ToolJsonFuture, ToolOutputChannel, ToolOutputChunk, ToolOutputSink,
 };
 
 #[cfg(test)]

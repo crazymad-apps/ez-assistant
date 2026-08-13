@@ -10,10 +10,14 @@
 mod append_effect;
 mod attachment;
 mod attachment_io;
+mod child_task;
+mod context_replacement;
 mod conversation;
 mod engine;
 mod filesystem;
 mod input_state;
+mod mode;
+mod permission;
 mod recovery;
 mod run_projection;
 mod run_state;
@@ -35,8 +39,9 @@ pub(crate) use worker::LocalRuntimeStore;
 
 use engine::StorageEngine;
 use filesystem::{
-    body_path, conflict, create_new_private_file, database_write_error, internal_error,
-    invalid_data, invalid_data_with_source, non_negative_u64, positive_u64, sync_directory, to_i64,
+    body_path, child_body_path, child_task_directory, child_tasks_directory, conflict,
+    create_new_private_file, database_write_error, internal_error, invalid_data,
+    invalid_data_with_source, non_negative_u64, positive_u64, sync_directory, to_i64,
 };
 
 const DATA_DIRECTORY: &str = "data";

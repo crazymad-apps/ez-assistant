@@ -116,6 +116,16 @@ define_identifier!(
     "run_id"
 );
 define_identifier!(
+    /// Runtime 中一个受父 Run 管理的子任务不透明标识。
+    ChildTaskId,
+    "child_task_id"
+);
+define_identifier!(
+    /// Runtime 中一次待处理工具审批的不透明标识。
+    ApprovalId,
+    "approval_id"
+);
+define_identifier!(
     /// Runtime 中一次已接受用户输入的不透明标识。
     InputId,
     "input_id"
@@ -312,6 +322,8 @@ mod tests {
             "session_id"
         );
         assert!(RunId::new("").is_err());
+        assert!(ChildTaskId::new(" ").is_err());
+        assert!(ApprovalId::new(" ").is_err());
         assert!(WorkspaceId::new(" ").is_err());
         assert!(InputId::new(" ").is_err());
         assert!(MessageId::new("\n").is_err());
@@ -330,6 +342,16 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RunId::new("run-1").expect("run id")).expect("serialize run id"),
             "run-1"
+        );
+        assert_eq!(
+            serde_json::to_value(ChildTaskId::new("child-1").expect("child task id"))
+                .expect("serialize child task id"),
+            "child-1"
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalId::new("approval-1").expect("approval id"))
+                .expect("serialize approval id"),
+            "approval-1"
         );
         assert_eq!(
             serde_json::to_value(WorkspaceId::new("workspace-1").expect("workspace id"))

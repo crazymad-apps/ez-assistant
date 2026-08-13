@@ -8,6 +8,7 @@ use rusqlite::{TransactionBehavior, params};
 use super::{
     StorageEngine, StorageResult, conflict, database_write_error, internal_error, invalid_data,
     invalid_data_with_source,
+    mode::{agent_variant_value, approval_mode_value, parse_agent_variant},
 };
 
 impl StorageEngine {
@@ -35,10 +36,17 @@ impl StorageEngine {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| internal_error("input acceptance could not begin", source))?;
-        transaction.execute("INSERT INTO inputs (input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6)", params![input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms]).map_err(|source| database_write_error("input could not be accepted", source))?;
+        transaction.execute("INSERT INTO inputs (input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7)", params![input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant)]).map_err(|source| database_write_error("input could not be accepted", source))?;
         let queue_order = u64::try_from(transaction.last_insert_rowid())
             .map_err(|source| internal_error("queue order exceeds storage range", source))?;
-        transaction.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, 1, 'accepted', 0, NULL, NULL, ?4, NULL, NULL)", params![input.run_id.as_str(), input.session_id.as_str(), input.input_id.as_str(), input.accepted_at_ms]).map_err(|source| database_write_error("run could not be accepted", source))?;
+        transaction.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, 1, 'accepted', 0, ?4, NULL, NULL, ?5, NULL, NULL)", params![input.run_id.as_str(), input.session_id.as_str(), input.input_id.as_str(), approval_mode_value(input.approval_mode), input.accepted_at_ms]).map_err(|source| database_write_error("run could not be accepted", source))?;
+        let changed = transaction.execute(
+            "UPDATE sessions SET current_variant = ?1, updated_at_ms = ?2 WHERE session_id = ?3 AND lifecycle = 'active'",
+            params![agent_variant_value(input.agent_variant), input.accepted_at_ms, input.session_id.as_str()],
+        ).map_err(|source| database_write_error("session variant could not be updated", source))?;
+        if changed != 1 {
+            return Err(conflict("input session is not active"));
+        }
         transaction.commit().map_err(|source| {
             database_write_error("input acceptance could not be committed", source)
         })?;
@@ -47,6 +55,7 @@ impl StorageEngine {
             input_id: input.input_id.clone(),
             session_id: input.session_id.clone(),
             idempotency_key: input.idempotency_key,
+            agent_variant: input.agent_variant,
             user_message_id: input.message.id.clone(),
             state: StoredInputState::Queued,
             queued_message: Some(input.message),
@@ -58,6 +67,8 @@ impl StorageEngine {
             input_id: input.input_id,
             attempt: 1,
             status: RunStatus::Accepted,
+            agent_variant: input.agent_variant,
+            approval_mode: input.approval_mode,
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),
@@ -93,7 +104,7 @@ impl StorageEngine {
     }
 
     pub(super) fn load_inputs(&self) -> StorageResult<Vec<StoredInput>> {
-        let mut statement = self.connection.prepare("SELECT queue_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms FROM inputs ORDER BY queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
+        let mut statement = self.connection.prepare("SELECT queue_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant FROM inputs ORDER BY queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -105,6 +116,7 @@ impl StorageEngine {
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|source| internal_error("runtime inputs could not be read", source))?;
@@ -118,6 +130,7 @@ impl StorageEngine {
                 state,
                 message_json,
                 accepted_at_ms,
+                agent_variant,
             ) = row
                 .map_err(|source| internal_error("runtime input row could not be read", source))?;
             let state = match state.as_str() {
@@ -148,6 +161,7 @@ impl StorageEngine {
                 idempotency_key: key.map(IdempotencyKey::new).transpose().map_err(|source| {
                     invalid_data_with_source("stored idempotency key is invalid", source)
                 })?,
+                agent_variant: parse_agent_variant(&agent_variant)?,
                 user_message_id: MessageId::new(message_id).map_err(|source| {
                     invalid_data_with_source("stored user message id is invalid", source)
                 })?,

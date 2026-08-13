@@ -28,7 +28,7 @@ Assistant Runtime
 ├── Conversation Journal
 ├── Session Prompt Snapshot / Pinned Memory Store
 ├── RecallSource 与记忆工具能力装配
-├── 权限记录与审计
+├── 权限规则、审批与工具中断恢复
 └── 本地或远程能力适配器装配
           │ ExecutionSpec + ExecutionInput + bound services
           ▼
@@ -250,6 +250,9 @@ Provider-neutral 的模型重试只允许包装 `ModelService::stream()` 的建�
 - 每个 attempt 使用完全相同的 `ModelRequest`，属于同一个 Core Model Step。
 - attempt 数、等待和取消必须可观察；等待与下一次请求都必须响应取消。
 - `stream()` 一旦返回事件流，任何后续 `TurnFailed` 都结束当前 Step，不透明重试或拼接输出。
+- 流式 Transport 的请求超时必须表达响应建立/相邻 chunk 空闲上限，而不是整个 SSE 生命周期
+  的固定总时长；持续收到正文或心跳 chunk 时可以长期运行。若确需模型 Step 或 Run 总时长上限，
+  必须使用独立的执行预算，不能复用 Transport 空闲超时。
 - Config、Auth、Protocol、ToolArguments、ContextOverflow 和 Cancelled 不进入通用重试。
 - Tool、Recorder、Pinned Store 和 RecallSource 不因模型重试能力获得通用自动重试。
 
@@ -425,7 +428,7 @@ v0.4.0 首期只实现完全相同调用和连续失败；无进展检测在没�
 
 ### 10.4 权限与审批
 
-Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 ToolResult（回喂模型、驱动循环继续的唯一载体是 error ToolResult），对应工具不执行，循环继续。工具名查找、类型化参数校验、模型可见默认值落实和确定性路径解析必须先形成 resolved invocation；Authorizer、Guardrail 和执行器使用同一份冻结事实，未知工具和无效输入不进入授权。Core 只保证逐 Tool Call 独立过闸，并提供按顺序组合类型化策略与最终 Authorizer 的通用机制；审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现，authorize 时可观察本轮 resolved batch。`Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成；`ApprovalService` 归 Runtime/Adapter。Plan/Build 等能力上限必须先于 Ask/Auto fallback，Auto 不能覆盖上层明确 Deny。规则保存、UI 交互、无人值守策略和审计属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
+Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 ToolResult（回喂模型、驱动循环继续的唯一载体是 error ToolResult），对应工具不执行，循环继续。工具名查找、类型化参数校验、模型可见默认值落实和确定性路径解析必须先形成 resolved invocation；Authorizer、Guardrail 和执行器使用同一份冻结事实，未知工具和无效输入不进入授权。Core 保证每个 Tool Call 独立过闸，并提供按顺序组合类型化策略与最终 Authorizer 的通用机制；普通工具逐项授权执行，只有连续且显式标记为 `ParallelEligible` 的调用可以同时等待授权并并发执行。审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现，authorize 时可观察本轮 resolved batch。`Ask` 不进 Core 词汇表：审批由 Runtime 的 authorizer 实现内部挂起、经 Runtime 侧审批交互代理完成；`ApprovalService` 归 Runtime/Adapter。Plan/Build 等能力上限必须先于 Ask/Auto fallback，Auto 不能覆盖上层明确 Deny。规则保存、UI 交互、无人值守策略和工具中断恢复属于 Runtime/Adapter；模型输出不得绕过安全决策直接触发工具副作用。
 
 ## 十一、工具边界
 
@@ -441,7 +444,7 @@ Core 授权决策仅 `Allow` / `Deny`：`Deny` 在授权闸处转换为错误 To
 - 文件 read/list/search/write/delete/edit 共享文件能力实现；`grep`/`rg` 是 `search` 的内部后端。
 - Shell 是独立通用工具，其当前用户权限能力不能被描述为文件沙盒。
 - 真实文件与 Shell 机制位于独立本地基础设施 Adapter；Runtime 负责装配工作目录、
-  能力策略、审批、环境过滤和审计。真实网络和桌面工具同样位于 Runtime/Adapter，
+  能力策略、审批、环境过滤和中断恢复。真实网络和桌面工具同样位于 Runtime/Adapter，
   均不进入 Agent Engine。
 
 ## 十二、Context 与 Memory 的边界
@@ -564,6 +567,38 @@ Host storage worker/connection owner 分别观察本层 task 的 panic/JoinError
 M4 在该持久化闭环上增加 Session 生命周期和破坏性历史替换：归档只改变结构化生命周期并保留
 只读事实；model key 只在 active/idle 状态下切换，已渲染 System Prompt 不变；从历史 User
 Message 重新输入通过完整新 generation 与 SQLite 单事务销毁目标及尾段关联，不产生隐式分支。
+
+v0.13.0 在不改变 Core Recorder 契约的前提下增加单层子任务存储目标。父 Run 与每个 child
+分别拥有独立 Conversation Journal 和 mutation gate，但共享同一两阶段 Recorder、规范消息编码、
+staged append 和 pending tool exchange 算法。SQLite 只保存父子关系、状态和跨介质提交临时事实，
+child 正文仍是独立 JSONL；子任务调度和公开观察契约按版本里程碑逐步接入。
+
+M2 的父 Runtime 工具通过现有 AgentExecution 同步启动一个非递归 child：Parent ToolSet 是
+Base ToolSet 的单向派生，Child ToolSet 保持 Base 原样。child 只接收自包含任务和显式背景，
+复用冻结模型、Context、权限和 Guardrail；其终态提交先于父 Tool Result。M2 保持串行且每个
+父 Run 最多一个 child，并发、独立取消、timeout 和公共观察不提前下沉进 Core。
+
+M3 将 `delegate_task` 标记为显式并行资格，并在每个父 Run 内用独立 Semaphore 二次限制实际运行
+child 数。child 在取得 permit 前只持有已落盘关系与取消句柄，取得后才创建临时目录并开始计时；
+step、tool 与 output 上限由父级通用配置和 delegation 配置取较小值。父取消使用派生 token 级联，
+单独取消只发布目标 token；审批仍复用既有三层权限并以可选 child ID 区分归属。父 Conversation
+只接收按原 Tool Call 顺序形成的 Tool Result，child 正文和 usage 不复制到父 Run。
+
+M4 把恢复与观察闭环接到上述执行模型：Host 启动先修复 child 自身可靠点并将非终态 child 标记为
+`interrupted`，再用 child 终态重建父委派 Tool Result，最后中断父 Run；不自动续跑或重放历史
+副作用。公共 list/get/cancel 和嵌套 child 事件严格携带所有权，SSE 只负责实时观察，断线后从
+Store Snapshot 与独立 child Conversation 重建。Session 归档/恢复保留 child 关系和正文，child
+不会伪装成普通 Session 或 Run。
+
+父 Run 与 child 都由 Runtime 处理 Core 的 `CompactionRequired` 可靠终态。Runtime 使用终态携带的
+已消费 Step/实际 dispatch 工具数计算剩余预算，调用 `agent-context` 形成 Rolling Summary，完成
+generation 原子切换后继续同一逻辑执行；不得从可能丢失的实时事件反推预算。Provider overflow
+允许摘要已经形成完整 Tool Exchange 的活动 Turn，并用持久化 Injected User continuation 锚点维持
+后续 Assistant 的规范 User Turn 归属。
+
+M5 的客户端验证层不新增 usage 权威：父和各 child 的实际 usage 仍随各自规范 Conversation
+保存，合计只在页面根据父子关系动态计算。长任务的实时事件按帧合并；折叠 child 不缓存无限
+正文或工具 DOM，展开和断线恢复都重新读取权威状态。
 
 ## 十四、Harness 验证
 

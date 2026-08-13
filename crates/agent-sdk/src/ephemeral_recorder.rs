@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
-use agent_types::{AssistantMessage, ToolMessage};
+use agent_types::{AssistantMessage, AssistantPart, ToolCallId, ToolMessage};
 
 /// 一个执行内尚未结算的工具交换。
 struct PendingExchange {
@@ -54,6 +54,31 @@ impl ExecutionRecorder for EphemeralExecutionRecorder {
                 assistant,
             });
             Ok(receipt)
+        })
+    }
+
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        receipt: &'a ExchangeReceipt,
+        call_id: &'a ToolCallId,
+    ) -> RecordFuture<'a, ()> {
+        Box::pin(async move {
+            let pending = self.lock_pending()?;
+            let Some(exchange) = pending.as_ref() else {
+                return Err(RecordError {
+                    message: "ephemeral recorder has no pending exchange".to_owned(),
+                });
+            };
+            if exchange.receipt != *receipt
+                || !exchange.assistant.parts.iter().any(
+                    |part| matches!(part, AssistantPart::ToolCall(call) if call.id == *call_id),
+                )
+            {
+                return Err(RecordError {
+                    message: "tool execution start does not match pending exchange".to_owned(),
+                });
+            }
+            Ok(())
         })
     }
 

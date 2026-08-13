@@ -109,6 +109,19 @@
   `ModelFailureKind`、attempt 和重试决定，不携带 Provider 原始消息。最终 Run 使用
   `ModelExecutionFailed` 稳定错误码和安全摘要，现有客户端仍可按普通 Run 失败处理。
 
+## v0.13.0 子任务增量契约
+
+- M1 先增加不透明 `ChildTaskId` 与独立生命周期状态，避免把 child 伪装成普通 Session 或 Run。
+- M3 只为既有审批快照及 resolved/cancelled 事件增加可选 `child_task_id`；父 Run 自身审批省略该字段，
+  保持旧客户端可忽略新增字段。`timeout` 与 `cancelled` 是可稳定持久化的 Runtime 错误分类。
+- `delegate_task` 审批使用专门的 `Delegation` subject 展示受限 title/task 摘要，避免 UI 只能看到
+  通用工具名；持久规则预览仍是只匹配工具名的 `General`，不把任务正文写入权限文件。
+- M4 增加 child list/get/cancel、`ChildTaskSnapshot`、`ChildTaskNotFound` 和嵌套
+  `RuntimeEvent::ChildTaskEvent`。嵌套 envelope 明确携带 Session、父 Run 和 child ID，payload
+  覆盖生命周期、text/reasoning、usage 及工具活动；不得用父 Run 的 delta 冒充 child 事件。
+- child 的完整 Conversation 仍不是公共协议 DTO。SSE 可以丢失，客户端必须用 list/get 和 Host
+  私有 Conversation 查询重建；取消先形成持久请求事实，终态重复取消幂等返回当前快照。
+
 ## Harness 验证
 
 - 序列化 round-trip。

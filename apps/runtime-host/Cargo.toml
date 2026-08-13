@@ -43,9 +43,9 @@ sha2 = "0.10.9"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt-multi-thread", "signal"] }
 tokio-util.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 agent-testkit = { path = "../../crates/agent-testkit" }
 reqwest = { workspace = true, features = ["blocking", "multipart"] }
-tempfile.workspace = true
 toml.workspace = true

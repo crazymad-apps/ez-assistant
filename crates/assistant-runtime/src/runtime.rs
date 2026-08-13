@@ -1,9 +1,12 @@
 //! AssistantRuntime 生命周期门禁和 Session Registry。
 
+mod approval;
 mod attachment;
 mod connection_validation;
+mod delegation;
 mod input;
 mod model;
+mod permission;
 mod recovery;
 mod session_management;
 mod shutdown;
@@ -21,12 +24,12 @@ use std::{
 use agent_sdk::ContextWindowEvaluator;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    AttachmentId, CancelRunRequest, CancelRunResult, ConfigurationStatus, CreateSessionRequest,
-    CreateSessionResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
-    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
-    ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
-    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeLifecycle, SessionId,
-    SessionSummary, WorkspaceId,
+    AgentVariant, ApprovalMode, AttachmentId, CancelRunRequest, CancelRunResult,
+    ConfigurationStatus, CreateSessionRequest, CreateSessionResult, GetConfigStatusRequest,
+    GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest, GetRunResult,
+    GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult, ListSessionsRequest,
+    ListSessionsResult, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeLifecycle,
+    SessionId, SessionSummary, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -35,12 +38,15 @@ use self::model::resolve_session_model_key;
 use self::recovery::recover_registries;
 use self::tasks::RuntimeTasks;
 use crate::{
-    ModelServiceFactory, NewStoredSession, RecoveredRuntime, RunToolFactory, RuntimeConfig,
-    RuntimeConfigSource, RuntimeError, RuntimeResult, RuntimeStore, SessionEnvironmentFactory,
-    SessionEnvironmentFactoryRequest, StoreErrorKind, StoredWorkspace, WorkspaceEnvironmentSource,
+    ChildTaskWorkspaceFactory, ModelServiceFactory, NewStoredSession, RecoveredRuntime,
+    RunToolFactory, RuntimeConfig, RuntimeConfigSource, RuntimeError, RuntimeResult, RuntimeStore,
+    SessionEnvironmentFactory, SessionEnvironmentFactoryRequest, StoreErrorKind, StoredWorkspace,
+    WorkspaceEnvironmentSource,
     config::{
         ConfigRegistry, ConfigSnapshot, project_model_by_key, project_models, project_status,
     },
+    delegation::ChildTaskRegistry,
+    permission::{PermissionCoordinator, PermissionFileScope, VolatilePermissionFileStore},
     session::{SessionController, allocate_session_id},
 };
 
@@ -70,9 +76,13 @@ pub struct AssistantRuntime {
     operation_gate: AsyncRwLock<()>,
     workspace_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
+    permission_coordinator: Arc<PermissionCoordinator>,
+    approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn ModelServiceFactory>,
     session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
     run_tool_factory: Arc<dyn RunToolFactory>,
+    child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
+    child_tasks: Arc<ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     event_sender: broadcast::Sender<RuntimeEvent>,
     root_cancellation: CancellationToken,
@@ -89,14 +99,22 @@ impl AssistantRuntime {
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         run_tool_factory: Arc<dyn RunToolFactory>,
+        child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     ) -> Self {
+        let permission_store = Arc::new(VolatilePermissionFileStore::default());
+        let permission_coordinator = Arc::new(PermissionCoordinator::empty(permission_store));
+        permission_coordinator
+            .register_empty_scope(PermissionFileScope::Global)
+            .expect("empty global permission scope is valid");
         Self::from_recovered(
             config,
             config_source,
             model_factory,
             session_environment_factory,
             run_tool_factory,
+            child_task_workspace_factory,
             Arc::new(crate::storage::VolatileRuntimeStore::default()),
+            permission_coordinator,
             RecoveredRuntime::default(),
         )
         .expect("empty volatile runtime state is valid")
@@ -110,19 +128,26 @@ impl AssistantRuntime {
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         run_tool_factory: Arc<dyn RunToolFactory>,
+        child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
         store: Arc<dyn RuntimeStore>,
+        permission_store: Arc<dyn crate::PermissionFileStore>,
     ) -> RuntimeResult<Self> {
         let recovered = store
             .load_runtime()
             .await
             .map_err(|source| RuntimeError::from_store("recover runtime", source))?;
+        let permission_scopes = permission_scopes(&recovered);
+        let permission_coordinator =
+            Arc::new(PermissionCoordinator::open(permission_store, permission_scopes).await);
         Self::from_recovered(
             config,
             config_source,
             model_factory,
             session_environment_factory,
             run_tool_factory,
+            child_task_workspace_factory,
             store,
+            permission_coordinator,
             recovered,
         )
     }
@@ -134,7 +159,9 @@ impl AssistantRuntime {
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         run_tool_factory: Arc<dyn RunToolFactory>,
+        child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
         store: Arc<dyn RuntimeStore>,
+        permission_coordinator: Arc<PermissionCoordinator>,
         recovered: RecoveredRuntime,
     ) -> RuntimeResult<Self> {
         let (event_sender, _) = broadcast::channel(config.event_capacity.get());
@@ -149,9 +176,13 @@ impl AssistantRuntime {
             operation_gate: AsyncRwLock::new(()),
             workspace_mutation_gate: AsyncMutex::new(()),
             config_registry: Arc::new(ConfigRegistry::new(config_source)),
+            permission_coordinator,
+            approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
             session_environment_factory,
             run_tool_factory,
+            child_task_workspace_factory,
+            child_tasks: Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks)),
             context_window: Arc::new(
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
                     .expect("static context window threshold is valid"),
@@ -273,6 +304,8 @@ impl AssistantRuntime {
                 model_key,
                 system_prompt: prepared.system_prompt,
                 environment: prepared.environment,
+                current_variant: AgentVariant::Build,
+                approval_mode: ApprovalMode::Ask,
                 created_at_ms: now_ms()?,
             })
             .await
@@ -284,6 +317,8 @@ impl AssistantRuntime {
                 }
                 RuntimeError::from_store("create session", source)
             })?;
+        self.permission_coordinator
+            .register_empty_scope(PermissionFileScope::Session(session_id.clone()))?;
         let session = Arc::new(SessionController::new(stored));
         let mut sessions =
             self.sessions
@@ -380,6 +415,8 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
+        self.cancel_run_approvals(&request.session_id, &request.run_id)
+            .await?;
         let (snapshot, cancellation) = {
             let mut state = session.lock_state()?;
             let existing =
@@ -471,6 +508,25 @@ impl AssistantRuntime {
     fn session_for_test(&self, session_id: &SessionId) -> Arc<SessionController> {
         self.session(session_id).expect("session exists")
     }
+}
+
+fn permission_scopes(recovered: &RecoveredRuntime) -> Vec<PermissionFileScope> {
+    let mut scopes = vec![PermissionFileScope::Global];
+    scopes.extend(
+        recovered
+            .workspaces
+            .iter()
+            .map(|workspace| PermissionFileScope::Workspace(workspace.workspace_id.clone())),
+    );
+    scopes.extend(
+        recovered
+            .sessions
+            .iter()
+            .map(|session| PermissionFileScope::Session(session.session_id.clone())),
+    );
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 #[cfg(test)]

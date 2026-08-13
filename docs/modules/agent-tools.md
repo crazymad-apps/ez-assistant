@@ -14,6 +14,9 @@
 - 类型化 Tool 抽象与类型擦除：输入经 serde 反序列化即校验，确定性参数在无副作用
   resolve 阶段冻结，JSON Schema 由 schemars 派生并允许工具实例补充实际默认值。
 - `ToolRegistry`（构建期注册，重名拒绝；定义注册时冻结）与 `ToolSetSnapshot`（不可变，随 `ExecutionSpec` 进入执行）。
+- 工具注册时冻结内部 `Serial` / `ParallelEligible` 执行属性；默认串行，属性不进入模型可见
+  Tool Definition 或授权事实。`ToolSetSnapshot` 支持消费式追加一个新工具，派生时保留既有
+  定义、顺序与实现句柄，并继续执行重名和定义校验。
 - 整批规范 Tool Call 无副作用解析：按原数量和顺序形成 Valid/Invalid item；Valid
   同时持有只读 resolved invocation 与不可公开、不可替换的一次性 executor。
 - `ResolvedToolBatch` 可被 Send authorizer future 安全持有只读引用；可执行
@@ -43,11 +46,14 @@
   替换 call ID；任何 Dispatcher 合约错误仍绑定原调用 ID，不能破坏 Call/Result
   配对。
 - `ToolDefinition` 在注册时读取一次并与工具句柄共同冻结；重名检查、快照定义与名称索引都基于冻结定义。
+- 执行属性同样只在注册时读取一次；调用方不能在执行期间修改，也不能根据工具名或参数临时推断并行安全性。
 - `ToolError` 只分 `InvalidInput`（校验/参数失败）与 `Execution`（执行失败）两类；
   Execution 可携带受控的结构化 details（例如 Shell 超时的已截断 stdout/stderr），
   两类都转为错误 `ToolResult` 回喂模型；取消不是 `ToolError`，由
   `ToolContext.cancellation` 观察处理；工具收到取消后必须完成资源清理再解析
   future。
+- Core dispatch 时把原始 Tool Call ID 绑定进 `ToolContext`；需要建立上层业务关系的工具可以
+  只读访问该 ID。直接工具单测允许没有 call ID，工具不得修改它，也不得把它当成模型输入参数。
 - resolve 只允许类型校验、默认值落实、词法路径解析和纯授权事实生成，不得检查文件
   是否存在、解析符号链接、读取文件或启动进程。
 - 能力契约只描述能力形状与错误语义，不含任何业务安全策略（权限、确认、审计归

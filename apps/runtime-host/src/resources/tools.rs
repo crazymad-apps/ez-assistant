@@ -1,4 +1,8 @@
-//! 基于 Session 冻结目录为每个 Run 组装工具快照和授权闸。
+//! 基于 Session 冻结目录为每个 Run 组装工具快照和基础设施策略。
+//!
+//! Host 始终为 Plan/Build 注册同一组工具定义，防止切换变体时改变 Provider 请求中的
+//! tool definitions 并使提示缓存失效。这里的 policy 只表达 Host 掌握的基础设施硬限制；
+//! Plan 边界、三层权限文件和交互审批统一由 `assistant-runtime` 的 Authorizer 决策。
 
 use std::{
     ffi::OsString,
@@ -8,46 +12,34 @@ use std::{
     time::Duration,
 };
 
-use agent_core::{AuthorizationFuture, ToolAuthorization, ToolAuthorizer};
+use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
     AbsolutePath, FileAuthorizationFacts, FileOperation, FsDeleteTool, FsEditTool, FsFindTool,
-    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, GeneralAuthorizationFacts,
-    ReadFileToolConfig, ResolvedToolBatch, ResolvedToolInvocation, SearchFilesToolConfig,
-    SessionPathResolver, ShellAuthorizationFacts, ShellExecTool, ShellExecToolConfig, Tool,
-    ToolContext, ToolError, ToolExecuteFuture, ToolRegistry, ToolResolution,
+    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ReadFileToolConfig, ResolvedToolBatch,
+    ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver, ShellExecTool,
+    ShellExecToolConfig, Tool, ToolRegistry,
 };
 use agent_tools_local::{
     EnvironmentPolicy, LocalFileSystem, LocalFileSystemConfig, LocalShell, LocalShellConfig,
 };
-use agent_types::ToolName;
 use assistant_runtime::{
     RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
     SessionExecutionEnvironment,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const ECHO_TOOL_NAME: &str = "echo_text";
 const MAX_TEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_BYTES: u64 = 1024 * 1024;
 const MAX_SEARCH_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_SEARCH_STDERR_BYTES: u64 = 64 * 1024;
 const MAX_SHELL_OUTPUT_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LocalToolMode {
-    Safe,
-    UnsafeUnrestricted,
-}
-
 pub(super) struct HostRunToolFactory {
-    mode: LocalToolMode,
-    unrestricted: Option<UnrestrictedResources>,
+    resources: LocalToolResources,
     sessions_root: AbsolutePath,
 }
 
-struct UnrestrictedResources {
+struct LocalToolResources {
     filesystem: Arc<LocalFileSystem>,
     shell: Arc<LocalShell>,
     read_config: ReadFileToolConfig,
@@ -56,16 +48,11 @@ struct UnrestrictedResources {
 }
 
 impl HostRunToolFactory {
-    pub(super) fn new(mode: LocalToolMode, runtime_home: &Path) -> Result<Self, ToolResourceError> {
-        let unrestricted = match mode {
-            LocalToolMode::Safe => None,
-            LocalToolMode::UnsafeUnrestricted => Some(UnrestrictedResources::new()?),
-        };
+    pub(super) fn new(runtime_home: &Path) -> Result<Self, ToolResourceError> {
         let sessions_root = AbsolutePath::new(runtime_home.join("data/sessions"))
             .map_err(ToolResourceError::path)?;
         Ok(Self {
-            mode,
-            unrestricted,
+            resources: LocalToolResources::new()?,
             sessions_root,
         })
     }
@@ -77,18 +64,12 @@ impl RunToolFactory for HostRunToolFactory {
         environment: &SessionExecutionEnvironment,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
         let resolver = checked_resolver(environment)?;
-        match self.mode {
-            LocalToolMode::Safe => safe_bundle(),
-            LocalToolMode::UnsafeUnrestricted => self
-                .unrestricted
-                .as_ref()
-                .expect("unrestricted mode has resources")
-                .compile(environment, resolver, self.sessions_root.clone()),
-        }
+        self.resources
+            .compile(environment, resolver, self.sessions_root.clone())
     }
 }
 
-impl UnrestrictedResources {
+impl LocalToolResources {
     fn new() -> Result<Self, ToolResourceError> {
         let read_config = ReadFileToolConfig::new(nonzero32(1), nonzero32(200), nonzero32(2_000))
             .map_err(ToolResourceError::configuration)?;
@@ -126,8 +107,8 @@ impl UnrestrictedResources {
         resolver: SessionPathResolver,
         sessions_root: AbsolutePath,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
+        // 注册顺序也是 Provider 可见请求的一部分，保持固定顺序可让相同工具集稳定序列化。
         let mut registry = ToolRegistry::new();
-        register(&mut registry, EchoTextTool)?;
         register(
             &mut registry,
             FsReadTool::new(self.filesystem.clone(), resolver.clone(), self.read_config),
@@ -175,7 +156,7 @@ impl UnrestrictedResources {
         })?;
         Ok(RunToolBundle::new(
             registry.snapshot(),
-            Arc::new(UnrestrictedLocalAuthorizer { sessions_root }),
+            vec![Arc::new(AttachmentMutationPolicy { sessions_root })],
         ))
     }
 }
@@ -200,72 +181,39 @@ fn checked_resolver(
     Ok(SessionPathResolver::new(workdir))
 }
 
-fn safe_bundle() -> Result<RunToolBundle, RunToolFactoryError> {
-    let mut registry = ToolRegistry::new();
-    register(&mut registry, EchoTextTool)?;
-    Ok(RunToolBundle::new(
-        registry.snapshot(),
-        Arc::new(EchoOnlyAuthorizer),
-    ))
-}
-
 fn register<T: Tool>(registry: &mut ToolRegistry, tool: T) -> Result<(), RunToolFactoryError> {
     registry.register(tool).map_err(|source| {
         RunToolFactoryError::with_source(RunToolFactoryErrorKind::InvalidConfiguration, source)
     })
 }
 
-struct EchoOnlyAuthorizer;
-
-impl ToolAuthorizer for EchoOnlyAuthorizer {
-    fn authorize<'a>(
-        &'a self,
-        invocation: &'a ResolvedToolInvocation,
-        _batch: &'a ResolvedToolBatch,
-    ) -> AuthorizationFuture<'a> {
-        let decision = if invocation.tool_name().as_str() == ECHO_TOOL_NAME {
-            ToolAuthorization::Allow
-        } else {
-            ToolAuthorization::Deny {
-                reason: "this Runtime Host only permits echo_text in safe mode".to_owned(),
-            }
-        };
-        Box::pin(std::future::ready(decision))
-    }
-}
-
-struct UnrestrictedLocalAuthorizer {
+struct AttachmentMutationPolicy {
     sessions_root: AbsolutePath,
 }
 
-impl ToolAuthorizer for UnrestrictedLocalAuthorizer {
-    fn authorize<'a>(
-        &'a self,
-        invocation: &'a ResolvedToolInvocation,
-        _batch: &'a ResolvedToolBatch,
-    ) -> AuthorizationFuture<'a> {
-        let decision = if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
+impl ToolPolicy for AttachmentMutationPolicy {
+    fn evaluate(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        _batch: &ResolvedToolBatch,
+    ) -> PolicyEvaluation {
+        // 附件是 Session 的静态参考文件。只阻止结构化文件工具修改；Shell 仍以当前用户
+        // 权限运行，所以这是一条应用策略，不应被描述成 OS 沙箱或不可绕过隔离。
+        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
             if is_mutation(facts.operation) && self.is_session_attachment_path(&facts.path) {
-                ToolAuthorization::Deny {
+                PolicyEvaluation::Decide(ToolAuthorization::Deny {
                     reason: "session attachments are static and cannot be written, edited, or deleted by structured file tools".to_owned(),
-                }
+                })
             } else {
-                ToolAuthorization::Allow
+                PolicyEvaluation::Continue
             }
-        } else if invocation.facts::<ShellAuthorizationFacts>().is_some()
-            || invocation.facts::<GeneralAuthorizationFacts>().is_some()
-        {
-            ToolAuthorization::Allow
         } else {
-            ToolAuthorization::Deny {
-                reason: "tool authorization facts are unsupported by this Runtime Host".to_owned(),
-            }
-        };
-        Box::pin(std::future::ready(decision))
+            PolicyEvaluation::Continue
+        }
     }
 }
 
-impl UnrestrictedLocalAuthorizer {
+impl AttachmentMutationPolicy {
     fn is_session_attachment_path(&self, path: &AbsolutePath) -> bool {
         let Ok(relative) = path.as_path().strip_prefix(self.sessions_root.as_path()) else {
             return false;
@@ -286,49 +234,6 @@ fn is_mutation(operation: FileOperation) -> bool {
         operation,
         FileOperation::Write | FileOperation::Edit | FileOperation::Delete
     )
-}
-
-#[derive(Clone, Copy)]
-struct EchoTextTool;
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-struct EchoTextInput {
-    text: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct EchoTextOutput {
-    text: String,
-}
-
-impl Tool for EchoTextTool {
-    type Input = EchoTextInput;
-    type ResolvedInput = EchoTextInput;
-    type Output = EchoTextOutput;
-
-    fn name(&self) -> ToolName {
-        ToolName::new(ECHO_TOOL_NAME).expect("static tool name is valid")
-    }
-
-    fn description(&self) -> String {
-        "Return the provided text without accessing files, processes, network, or storage."
-            .to_owned()
-    }
-
-    fn resolve(
-        &self,
-        input: Self::Input,
-    ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
-        Ok(ToolResolution::general(input))
-    }
-
-    fn execute<'a>(
-        &'a self,
-        input: Self::ResolvedInput,
-        _context: ToolContext,
-    ) -> ToolExecuteFuture<'a, Self::Output> {
-        Box::pin(std::future::ready(Ok(EchoTextOutput { text: input.text })))
-    }
 }
 
 fn nonzero32(value: u32) -> NonZeroU32 {
@@ -361,10 +266,11 @@ impl ToolResourceError {
 
 #[cfg(test)]
 mod tests {
+    use agent_core::{AllowAllAuthorizer, ComposedToolAuthorizer, ToolAuthorizer};
     use agent_model::{ModelCapabilities, SystemPromptSnapshot};
     use agent_sdk::{AgentBuilder, ContextWindowEvaluator, ExecutionInput, ExecutionOutcome};
     use agent_testkit::{ModelScript, ScriptedModelService, message_events};
-    use agent_tools::{Dispatcher, ResolvedBatchItemRef};
+    use agent_tools::{Dispatcher, ResolvedBatchItemRef, ToolContext};
     use agent_types::{
         AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
         FileReferencesPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
@@ -399,50 +305,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn safe_mode_exposes_only_echo_and_requires_a_live_working_directory() {
-        let root = TempDir::new().expect("tempdir");
-        std::fs::create_dir(root.path().join("work")).expect("workdir");
-        let environment = environment(&root, "work");
-        let factory = HostRunToolFactory::new(LocalToolMode::Safe, root.path()).expect("factory");
-        let (tools, _) = factory
-            .compile(&environment)
-            .expect("safe bundle")
-            .into_parts();
-        assert_eq!(
-            tools
-                .definitions()
-                .iter()
-                .map(|definition| definition.name.as_str())
-                .collect::<Vec<_>>(),
-            [ECHO_TOOL_NAME]
-        );
-
-        std::fs::remove_dir(root.path().join("work")).expect("remove workdir");
-        let error = match factory.compile(&environment) {
-            Ok(_) => panic!("missing workdir must fail"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.kind(),
-            RunToolFactoryErrorKind::WorkingDirectoryUnavailable
-        );
-    }
-
     #[tokio::test]
-    async fn unrestricted_mode_reads_real_files_and_denies_structured_attachment_mutation() {
+    async fn default_bundle_reads_real_files_and_denies_structured_attachment_mutation() {
         let root = TempDir::new().expect("tempdir");
         std::fs::create_dir(root.path().join("work")).expect("workdir");
         let environment = environment(&root, "work");
         let attachment =
             std::path::Path::new(&environment.session_attachment_directory).join("reference.txt");
         std::fs::write(&attachment, "stable-token-42\n").expect("attachment");
-        let factory = HostRunToolFactory::new(LocalToolMode::UnsafeUnrestricted, root.path())
-            .expect("factory");
-        let (tools, authorizer) = factory
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
+        let (tools, policies) = factory
             .compile(&environment)
-            .expect("unrestricted bundle")
+            .expect("tool bundle")
             .into_parts();
+        let authorizer = test_authorizer(policies);
         assert_eq!(
             tools
                 .definitions()
@@ -450,7 +326,6 @@ mod tests {
                 .map(|definition| definition.name.as_str())
                 .collect::<Vec<_>>(),
             [
-                "echo_text",
                 "read_file",
                 "list_directory",
                 "find_files",
@@ -583,12 +458,12 @@ mod tests {
         let attachment =
             std::path::Path::new(&environment.session_attachment_directory).join("reference.txt");
         std::fs::write(&attachment, "provider-visible-token-73\n").expect("attachment");
-        let factory = HostRunToolFactory::new(LocalToolMode::UnsafeUnrestricted, root.path())
-            .expect("factory");
-        let (tools, authorizer) = factory
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
+        let (tools, policies) = factory
             .compile(&environment)
-            .expect("unrestricted bundle")
+            .expect("tool bundle")
             .into_parts();
+        let authorizer = test_authorizer(policies);
 
         let model = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
@@ -680,8 +555,7 @@ mod tests {
         let root = TempDir::new().expect("root");
         std::fs::create_dir(root.path().join("first")).expect("first work");
         std::fs::create_dir(root.path().join("second")).expect("second work");
-        let factory = HostRunToolFactory::new(LocalToolMode::UnsafeUnrestricted, root.path())
-            .expect("factory");
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
         let (first_tools, _) = factory
             .compile(&environment(&root, "first"))
             .expect("first bundle")
@@ -718,10 +592,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeated_compilation_keeps_tool_definitions_byte_equivalent() {
+        let root = TempDir::new().expect("root");
+        std::fs::create_dir(root.path().join("work")).expect("workdir");
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
+        let environment = environment(&root, "work");
+        let (first, _) = factory
+            .compile(&environment)
+            .expect("first bundle")
+            .into_parts();
+        let (second, _) = factory
+            .compile(&environment)
+            .expect("second bundle")
+            .into_parts();
+        assert_eq!(
+            serde_json::to_vec(first.definitions()).expect("first definitions"),
+            serde_json::to_vec(second.definitions()).expect("second definitions")
+        );
+    }
+
     fn model_identity() -> ModelIdentity {
         ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
             "fixture-model",
         )
+    }
+
+    fn test_authorizer(policies: Vec<Arc<dyn ToolPolicy>>) -> Arc<dyn ToolAuthorizer> {
+        Arc::new(ComposedToolAuthorizer::new(
+            policies,
+            Arc::new(AllowAllAuthorizer),
+        ))
     }
 }

@@ -86,14 +86,16 @@ impl AssistantRuntime {
         for session in sessions {
             // 与 supervisor/cancel 的 Store await 边界串行，避免终态提交期间再次改写取消投影。
             let _mutation = session.mutation().await;
-            let mut state = session.lock_state()?;
-            let Some((run_id, cancellation)) = state
+            let Some((run_id, cancellation)) = session
+                .lock_state()?
                 .active_run
                 .as_ref()
                 .map(|active| (active.run_id.clone(), active.cancellation.clone()))
             else {
                 continue;
             };
+            self.cancel_run_approvals(session.id(), &run_id).await?;
+            let mut state = session.lock_state()?;
             let first_request = state
                 .runs
                 .get_mut(&run_id)

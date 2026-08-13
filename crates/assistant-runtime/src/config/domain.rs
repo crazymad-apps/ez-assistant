@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, fmt, time::Duration};
 
-use agent_core::ExecutionBudget;
+use agent_core::{ExecutionBudget, GuardrailConfig};
 use agent_model::{GenerationConfig, ModelRetryPolicy};
 use agent_types::ProviderId;
 use assistant_protocol::ModelKey;
@@ -134,13 +134,50 @@ pub struct RuntimeModelTransportConfig {
     pub(super) request_timeout: Duration,
 }
 
+/// 已校验的单层子任务委派上限；所有字段都显式大于零。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DelegationConfig {
+    pub(super) max_tasks_per_run: std::num::NonZeroU32,
+    pub(super) max_concurrent_tasks: std::num::NonZeroU32,
+    pub(super) task_timeout: Duration,
+    pub(super) max_steps: std::num::NonZeroU32,
+    pub(super) max_tool_calls: std::num::NonZeroU32,
+    pub(super) max_output_tokens: std::num::NonZeroU32,
+}
+
+impl DelegationConfig {
+    pub fn max_tasks_per_run(self) -> std::num::NonZeroU32 {
+        self.max_tasks_per_run
+    }
+
+    pub fn max_concurrent_tasks(self) -> std::num::NonZeroU32 {
+        self.max_concurrent_tasks
+    }
+
+    pub fn task_timeout(self) -> Duration {
+        self.task_timeout
+    }
+
+    pub fn max_steps(self) -> std::num::NonZeroU32 {
+        self.max_steps
+    }
+
+    pub fn max_tool_calls(self) -> std::num::NonZeroU32 {
+        self.max_tool_calls
+    }
+
+    pub fn max_output_tokens(self) -> std::num::NonZeroU32 {
+        self.max_output_tokens
+    }
+}
+
 impl RuntimeModelTransportConfig {
     /// 建立连接的最长等待时间。
     pub fn connect_timeout(&self) -> Duration {
         self.connect_timeout
     }
 
-    /// 单次模型请求的最长等待时间。
+    /// 等待响应建立及相邻流 chunk 的最长时间；不限制流式响应总时长。
     pub fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
@@ -255,6 +292,8 @@ pub struct ResolvedConfig {
     pub(super) transport: RuntimeModelTransportConfig,
     pub(super) retry_policy: Option<ModelRetryPolicy>,
     pub(super) budget: ExecutionBudget,
+    pub(super) guardrails: GuardrailConfig,
+    pub(super) delegation: DelegationConfig,
     pub(super) models: BTreeMap<ModelKey, ResolvedModelConfig>,
 }
 
@@ -282,6 +321,16 @@ impl ResolvedConfig {
     /// Agent 全局执行预算；未配置字段保持 None。
     pub fn budget(&self) -> &ExecutionBudget {
         &self.budget
+    }
+
+    /// Agent 全局 Guardrail；每个 Run 从配置快照冻结一次。
+    pub fn guardrails(&self) -> &GuardrailConfig {
+        &self.guardrails
+    }
+
+    /// 单层子任务委派的模型无关调度与执行上限。
+    pub fn delegation(&self) -> DelegationConfig {
+        self.delegation
     }
 
     /// 按 key 确定性排序的有效模型集合。
@@ -343,6 +392,8 @@ pub struct ConfigProjection {
     pub schema_version: Option<u32>,
     /// 合法的默认模型 key。
     pub default_model: Option<ModelKey>,
+    /// 已成功编译的委派上限；全局配置无效或缺失时不存在。
+    pub delegation: Option<DelegationConfig>,
     /// 按配置 key 确定性排序的模型投影。
     pub models: Vec<ModelConfigProjection>,
     /// 全部安全诊断。
@@ -371,6 +422,7 @@ impl ConfigCompilation {
                 state: ConfigState::Missing,
                 schema_version: None,
                 default_model: None,
+                delegation: None,
                 models: Vec::new(),
                 issues: Vec::new(),
             },
@@ -395,6 +447,7 @@ impl ConfigCompilation {
                 state: ConfigState::Invalid,
                 schema_version: None,
                 default_model: None,
+                delegation: None,
                 models: Vec::new(),
                 issues: vec![issue],
             },

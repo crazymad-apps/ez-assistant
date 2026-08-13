@@ -42,7 +42,7 @@ fn configured_model_reads_a_real_attachment_through_the_formal_host() {
     let source = workspace.path().join("reference.txt");
     fs::write(&source, &marker).expect("write isolated reference file");
 
-    let host = HostProcess::start_unrestricted(runtime_home.path());
+    let host = HostProcess::start(runtime_home.path());
     let access_token = host.access_token().to_owned();
     let mut client = host.connect();
     let configuration = client.runtime("get_config_status", json!({}));
@@ -70,12 +70,17 @@ fn configured_model_reads_a_real_attachment_through_the_formal_host() {
         }),
     );
     let session_id = text(&created["session"]["session_id"]);
+    client.runtime(
+        "set_session_approval_mode",
+        json!({ "session_id": session_id, "approval_mode": "auto" }),
+    );
     let attachment_id = upload(&host, &session_id, &source);
     let submitted = client.runtime(
         "submit_input",
         json!({
             "session_id": session_id,
             "message": "Use the read_file tool to read the attached file. Do not guess. Reply with only the exact file content.",
+            "variant": "build",
             "attachment_ids": [attachment_id],
             "idempotency_key": "real-llm-file-smoke"
         }),

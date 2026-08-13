@@ -58,7 +58,8 @@ Worker 池。
 - 普通日志不得记录完整 prompt、模型响应、文件内容、Shell 输出或工具参数。
 - Host 通过 `RunToolFactory` 为每个 Run 同时冻结工具集和 Authorizer；未知或未匹配能力不得
   隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
-- 默认 Host 只允许低风险 `echo_text`，不得因验证模式引入通用 Allow All 产品默认值。
+- 默认 Host 注册正式文件与 Shell 工具，并统一交给 Runtime Authorizer 决策；不得因验证模式
+  引入绕过权限规则或审批的 Allow All 产品路径。
 
 ## 不应放在本模块的内容
 
@@ -156,16 +157,22 @@ Worker 池。
   Host 启动开放 HTTP 前修复缺失的已知视图，并把无法安全修复的附件标记为 `unavailable`。
 - M3 不增加 Message/Part 表；File References 直接随完整 User Message 进入既有
   `queued_message_json` 和 Conversation JSONL，Host Store 只沿用现有原子提交与 generation 切换语义。
-- M4 由 Host 顶层直接装配 `agent-tools-local`。默认 `serve` 仍只提供 `echo_text` 并
-  fail-closed；只有显式 `--unsafe-unrestricted-local-tools` 才为每个 Run 注册标准文件工具
-  和 Shell，且启动帮助和 stderr 必须说明 Shell 使用当前用户权限、Workspace 不是沙箱。
-- 显式验证模式中的相对路径固定解析到该 Session 冻结工作目录；绝对附件路径可供文件工具
+- v0.12.0 M3 由 Host 顶层固定装配 `agent-tools-local`；默认 `serve` 为每个 Run 注册
+  标准文件工具和 Shell，再由 Runtime 唯一 Authorizer 完成 Plan 硬边界、
+  分层规则和审批决策。Host 不保留“安全工具集/危险工具集”双轨，也不提供绕过审批的启动开关。
+- v0.12.0 M4 在 `pending_tool_exchanges` 下增加级联的 `pending_tool_starts`，只保存
+  receipt、call ID 和开始时间。正式 Tool Result 通过 staged append 提交并清理 pending 时，
+  started 记录一并清理；不形成永久工具审计表。
+- 启动恢复先完成 staged append，再修复 begun/ready pending：没有 started 的调用形成
+  “重启前尚未执行”错误 Tool Result，已有 started 但没有可靠结果的调用形成
+  `outcome_unknown`，ready 结果按实际成功或失败结算；恢复不重新执行工具。
+- 相对路径固定解析到该 Session 冻结工作目录；绝对附件路径可供文件工具
   按需读取。结构化文件 Authorizer 对 Runtime Home 下任意 Session 的附件目录执行
   Write/Edit/Delete 均拒绝，但允许 Read/List/Search。该逻辑路径规则不能阻止 Shell、同一
   OS 用户或 symlink 目标绕过，因此不得描述为不可绕过的附件隔离。
 - 新 Session 的基础 System Prompt 只要求按需使用本 Run 可用工具，不把某一种 Host 模式或
   工具名单冻结进正文；旧 Session 已持久化的 Prompt 不在恢复时改写。
-- M5 扩展私有 Web Demo，覆盖 Workspace 登记与选择、Session 创建、附件先上传后提交、
+- v0.11.0 M5 扩展私有 Web Demo，覆盖 Workspace 登记与选择、Session 创建、附件先上传后提交、
   历史 File References 可见投影、流式 Assistant 消息以及 Session 归档恢复。Demo 只读取
   正式 HTTP 快照和 SSE，不持有第二份业务状态。
 - Web Demo 展示当前 Session 最近一次完整模型请求的 Input、Output、Provider Total 和
@@ -176,6 +183,15 @@ Worker 池。
   权威 Conversation 覆盖临时投影。Reasoning 使用独立可见区域消费实时 `reasoning_delta`，
   并从权威 Assistant Reasoning Part 恢复历史内容；模型 attempt/retry 状态和最终脱敏失败
   摘要同步展示。
+- v0.12.0 M5 在同一私有 Web Demo 中增加 Plan/Build、Ask/Auto、权限显式重载和 pending
+  approval 投影。页面只按 `available_decisions` 生成决策按钮；模式切换写入 Runtime，提交仍
+  显式携带当次 variant，“继续调整计划”和“开始实施”只填充普通输入，不引入工作流协议。
+- 页面刷新、SSE gap 或重连后，Demo 必须重新读取 Session、Run、Conversation、Attachment 和
+  pending approval 权威快照；不得用页面内存恢复审批或推断当前变体。Permission reload 只展示
+  Runtime 返回的文件状态和安全诊断，不在前端解析或合并权限规则。
+- Web Demo 的高频正文、reasoning 和工具输出增量必须按浏览器帧合并，不能逐 chunk 重写累计
+  全文或强制同步布局；历史快照应离屏构建并限制同时挂载的展示规模。展示裁剪只影响私有 Demo，
+  不能修改 Runtime Conversation、持久化内容或公共协议。
 - v0.11.0 正式端到端验收必须至少启动两次产品 Host，通过正式 HTTP 接口完成 Workspace、
   Attachment、File References、真实文件工具和归档恢复，并在关闭进程后只读核对 SQLite、
   Conversation JSONL、Blob 与稳定视图。不得用 Demo 私有状态替代该证据。
@@ -184,6 +200,36 @@ Worker 池。
 - 默认忽略的真实 LLM smoke 可以只读使用用户显式提供或 Runtime Home 中的模型配置，但所有
   Runtime 数据、Workspace 和测试文件必须位于临时目录；错误与 Host 输出不得包含配置源文本、
   API Key、访问 Token、测试文件内容、Prompt 或完整模型回复。
+
+## v0.13.0 子任务存储基础
+
+- SQLite 只保存 `child_tasks` 关系/状态以及 child 版 pending、started、staged append 临时事实；
+  子 Conversation 继续使用规范 `ConversationMessage` JSONL，位于所属 Session 的
+  `child-tasks/<child_task_id>/body-<generation>.jsonl`，正文不复制进 SQLite。
+- 父 Run 与 child 共用同一 staged append 和 pending tool exchange 状态机。目标适配只选择表、
+  所有权与正文路径；begin、started、ready、commit 和重启补偿算法不得复制成两套实现。
+- `child_task_id` 全局唯一，一个父 Tool Call 只拥有一个 child；所有创建、读取、工具交换和结算
+  都核对 Session 所有权。旧数据库通过兼容性新增表和投影校验升级，不改写旧 Session/Run 行。
+- Host storage worker 继续独占 SQLite 与文件 I/O；M1 自动测试只使用隔离临时 Runtime Home，
+  不启动真实子 Agent、不访问真实 Provider 或用户业务数据库。
+- M2 由 Host 实现 `ChildTaskWorkspaceFactory`：在系统临时根创建每任务独占目录，Runtime 只获得
+  lease 和 UTF-8 绝对路径；子终态可靠提交后 Drop lease 清理目录。该临时目录不进入 Runtime Home、
+  SQLite 或公共协议，也不能替代 Workspace/Session 私有持久目录。
+- M3 不增加第二套 Host 调度器：并发 permit、活动 child 与取消原因都由 Runtime 持有，Host 继续只
+  装配临时目录和 Store Adapter。SQLite Run 错误码投影兼容 `timeout`/`cancelled`。
+- M4 启动恢复严格先修 child staged append/内部 pending tool exchange，再中断非终态 child，最后
+  根据 child 终态修复父 `delegate_task` 结果并中断父 Run；缺失关系不伪造 child，已完成 child
+  从其最终规范 Assistant Message 重建父成功结果，任何步骤都不重放副作用。
+- M4 的 `/commands`、`/events` 继续只是 Runtime 公共 child 查询/取消/事件的薄适配。完整 child
+  Conversation 只通过 Host-private 查询服务 Web Demo 验收，不公开物理 JSONL 路径，也不提升为
+  `assistant-protocol` 的产品 DTO。
+- M5 的私有 Web Demo 使用公共 child list/cancel 与 SSE 事件，并仅用 Host-private child
+  Conversation 查询重建展开内容；前端按父 Run 动态汇总父、子 usage，不向 Runtime 写入聚合字段。
+- 父 Run 与 child 共用 Runtime 自动 Rolling Summary；Host Store 只提供 generation 原子切换和
+  规范正文提交，不在存储层复制窗口判断、摘要策略或剩余预算计算。
+- child 卡片折叠时不累计正文和工具输出 DOM；展开后从权威 Conversation 加载稳定内容，实时增量按
+  animation frame 批量写入，工具输出仅保留有界展示尾段。页面刷新和 SSE gap 后均重新查询，不能
+  根据本地事件推断终态。
 
 ## 验证
 

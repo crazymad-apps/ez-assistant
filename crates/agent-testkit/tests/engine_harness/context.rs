@@ -159,6 +159,7 @@ async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
         ExecutionOutcome::CompactionRequired {
             reason: CompactionReason::ThresholdReached,
             step: 1,
+            consumption: ExecutionConsumption::default(),
         }
     );
     assert_eq!(
@@ -168,6 +169,7 @@ async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 1,
+                consumption: ExecutionConsumption::default(),
                 dropped_events: 0,
             },
         ]
@@ -208,6 +210,10 @@ async fn establishment_context_overflow_converges_to_compaction_terminal() {
         ExecutionOutcome::CompactionRequired {
             reason: CompactionReason::ProviderOverflow,
             step: 1,
+            consumption: ExecutionConsumption {
+                steps: 1,
+                tool_calls: 0,
+            },
         }
     );
     assert_eq!(
@@ -218,6 +224,10 @@ async fn establishment_context_overflow_converges_to_compaction_terminal() {
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ProviderOverflow,
                 step: 1,
+                consumption: ExecutionConsumption {
+                    steps: 1,
+                    tool_calls: 0,
+                },
                 dropped_events: 0,
             },
         ]
@@ -297,6 +307,10 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
         ExecutionOutcome::CompactionRequired {
             reason: CompactionReason::ProviderOverflow,
             step: 1,
+            consumption: ExecutionConsumption {
+                steps: 1,
+                tool_calls: 0,
+            },
         }
     );
     assert!(events.contains(&AgentEvent::ReasoningDelta {
@@ -322,6 +336,10 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
         Some(&AgentEvent::ExecutionCompactionRequired {
             reason: CompactionReason::ProviderOverflow,
             step: 1,
+            consumption: ExecutionConsumption {
+                steps: 1,
+                tool_calls: 0,
+            },
             dropped_events: 0,
         })
     );
@@ -365,6 +383,10 @@ async fn overflow_after_completed_tool_exchange_does_not_replay_side_effects() {
         ExecutionOutcome::CompactionRequired {
             reason: CompactionReason::ProviderOverflow,
             step: 2,
+            consumption: ExecutionConsumption {
+                steps: 2,
+                tool_calls: 1,
+            },
         }
     );
     assert_eq!(
@@ -382,7 +404,73 @@ async fn overflow_after_completed_tool_exchange_does_not_replay_side_effects() {
         Some(&AgentEvent::ExecutionCompactionRequired {
             reason: CompactionReason::ProviderOverflow,
             step: 2,
+            consumption: ExecutionConsumption {
+                steps: 2,
+                tool_calls: 1,
+            },
             dropped_events: 0,
         })
     );
+}
+
+#[tokio::test]
+async fn compaction_consumption_does_not_depend_on_droppable_observation_events() {
+    let log = OrderLog::new();
+    let turn1 = calls_message("message_tool", vec![call("call_1", "chatty", json!({}))]);
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&turn1)),
+            ModelScript::FailEstablishment(ModelError::ContextOverflow {
+                message: "second step exceeds context window".to_owned(),
+            }),
+        ],
+    ));
+    let chunks = (0..300)
+        .map(|index| ToolOutputChunk {
+            channel: ToolOutputChannel::Stdout,
+            delta: format!("line {index}"),
+        })
+        .collect();
+    let tools = snapshot_of(vec![
+        ScriptedTool::succeed("chatty", json!({"ok": true}), log.clone())
+            .with_output_chunks(chunks),
+    ]);
+    let (input, _) = make_input(vec![]);
+    let AgentExecution {
+        events,
+        completion,
+        control: _,
+    } = AgentExecution::start(
+        make_spec(model, tools, ExecutionBudget::default()),
+        input,
+        make_context(
+            Arc::new(InMemoryRecorder::new(log)),
+            Arc::new(ScriptedAuthorizer::allow_all(OrderLog::new())),
+        ),
+    );
+
+    // 故意等 Core 结束后才排空事件，确保普通事件通道已经发生背压丢弃。
+    let outcome = completion.await;
+    let events = events.collect::<Vec<_>>().await;
+    let expected = ExecutionConsumption {
+        steps: 2,
+        tool_calls: 1,
+    };
+    assert!(matches!(
+        outcome,
+        ExecutionOutcome::CompactionRequired {
+            consumption,
+            ..
+        } if consumption == expected
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::ExecutionCompactionRequired {
+            consumption,
+            dropped_events,
+            ..
+        }) if *consumption == expected && *dropped_events > 0
+    ));
 }

@@ -91,6 +91,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: summary.to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             ConversationMessage::User(UserMessage {
                 id: id("user_1"),
@@ -148,6 +151,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "summary".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             ConversationMessage::User(UserMessage {
                 id: id("user_1"),

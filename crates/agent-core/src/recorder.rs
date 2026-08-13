@@ -3,7 +3,9 @@
 //! Core 以两阶段 tool exchange 提交自己产生的规范消息：
 //!
 //! 1. 工具副作用前 `begin_tool_exchange(AssistantMessage)`，持久化 pending；
-//! 2. 整批调用结算后 `complete_tool_exchange(receipt, Vec<ToolMessage>)`，原子完成。
+//! 2. 每个已获 Allow 的调用在执行副作用前
+//!    `mark_tool_execution_started(receipt, call_id)`；
+//! 3. 整批调用结算后 `complete_tool_exchange(receipt, Vec<ToolMessage>)`，原子完成。
 //!
 //! pending exchange 是恢复事实，不是可投影的规范对话。Runtime 构建
 //! `ConversationSnapshot` 时只投影 completed exchange；complete 失败时保留 pending，
@@ -11,7 +13,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use agent_types::{AssistantMessage, ToolMessage};
+use agent_types::{AssistantMessage, ToolCallId, ToolMessage};
 use thiserror::Error;
 
 /// 一次 Recorder 调用的 Future。
@@ -67,6 +69,16 @@ pub trait ExecutionRecorder: Send + Sync {
         &'a self,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt>;
+
+    /// 在指定 Tool Call 的任何外部副作用前可靠记录 execution started。
+    ///
+    /// 失败时 Core 必须跳过工具执行，并为该调用形成错误 Tool Result。receipt 与 call ID
+    /// 必须属于同一 pending exchange；Recorder 不得把重复 started 当成第二次执行。
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        receipt: &'a ExchangeReceipt,
+        call_id: &'a ToolCallId,
+    ) -> RecordFuture<'a, ()>;
 
     /// 原子写入完整、有序的 ToolMessage 批次并把 exchange 转为 completed。
     ///

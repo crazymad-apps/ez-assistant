@@ -8,8 +8,8 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    IdempotencyKey, InputId, ModelKey, RunId, RunSnapshot, SessionId, SessionLifecycle,
-    SessionSummary,
+    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, RunId, RunSnapshot, SessionId,
+    SessionLifecycle, SessionSummary,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
@@ -31,6 +31,8 @@ pub(crate) struct SessionController {
 
 pub(crate) struct SessionState {
     pub(crate) model_key: ModelKey,
+    pub(crate) current_variant: AgentVariant,
+    pub(crate) approval_mode: ApprovalMode,
     pub(crate) lifecycle: SessionLifecycle,
     pub(crate) journal: Option<InMemoryJournal>,
     pub(crate) persisted_message_count: usize,
@@ -84,6 +86,8 @@ impl SessionController {
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 model_key: stored.model_key,
+                current_variant: stored.current_variant,
+                approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
                 journal: Some(InMemoryJournal::new()),
                 persisted_message_count: 0,
@@ -146,6 +150,8 @@ impl SessionController {
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 model_key: stored.model_key,
+                current_variant: stored.current_variant,
+                approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
                 journal: None,
                 persisted_message_count: 0,
@@ -170,6 +176,8 @@ impl SessionController {
             title: self.title.clone(),
             model_key: state.model_key.clone(),
             lifecycle: state.lifecycle,
+            current_variant: state.current_variant,
+            approval_mode: state.approval_mode,
             workspace_id: self.environment.workspace_id.clone(),
             active_run_id: state
                 .active_run
@@ -183,6 +191,15 @@ impl SessionController {
                 .count() as u64,
             resume_required: state.resume_required,
         })
+    }
+
+    pub(crate) fn permission_scopes(&self) -> Vec<crate::PermissionFileScope> {
+        let mut scopes = vec![crate::PermissionFileScope::Global];
+        if let Some(workspace_id) = self.environment.workspace_id.clone() {
+            scopes.push(crate::PermissionFileScope::Workspace(workspace_id));
+        }
+        scopes.push(crate::PermissionFileScope::Session(self.id.clone()));
+        scopes
     }
 
     pub(crate) fn find_idempotent(

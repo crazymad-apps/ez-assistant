@@ -85,6 +85,18 @@ impl ContextLayout {
 
     /// 按 Rolling Summary 的最少近期轮次要求计算唯一 head/tail 边界。
     pub fn partition(&self, minimum_recent_user_turns: u32) -> ContextPartition<'_> {
+        self.partition_for_continuation(minimum_recent_user_turns, true)
+    }
+
+    /// 为需要在当前活动 Turn 内续跑的宿主计算边界。
+    ///
+    /// 默认调用方应保留 `protect_active_turn=true`。只有 Runtime 已决定用摘要承接整个
+    /// 活动工具链并立即 continuation 时，才允许设为 false。
+    pub fn partition_for_continuation(
+        &self,
+        minimum_recent_user_turns: u32,
+        protect_active_turn: bool,
+    ) -> ContextPartition<'_> {
         let mut split_index = self.blocks.len();
         let mut remaining = usize::try_from(minimum_recent_user_turns).unwrap_or(usize::MAX);
 
@@ -102,12 +114,11 @@ impl ContextLayout {
             }
         }
 
-        if let Some((index, _)) = self
-            .blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, block)| block.kind == ContextBlockKind::UserTurn && block.is_active())
+        if protect_active_turn
+            && let Some((index, _)) =
+                self.blocks.iter().enumerate().rev().find(|(_, block)| {
+                    block.kind == ContextBlockKind::UserTurn && block.is_active()
+                })
         {
             split_index = split_index.min(index);
         }
@@ -346,6 +357,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "summary".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             user("user_1"),
             assistant("assistant_1"),
@@ -407,6 +421,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "summary".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             user("user_1"),
             assistant("assistant_1"),
@@ -451,10 +468,16 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "first".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_2"),
                 text: "second".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
         ]);
         assert_eq!(
@@ -468,6 +491,9 @@ mod tests {
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_1"),
                 text: "late".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
             }),
         ]);
         assert_eq!(

@@ -6,13 +6,17 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use assistant_protocol::{InputId, SessionId};
+use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
-    AcceptedInput, ArchiveChange, CompletedToolExchange, ConversationRewrite, ModelChange,
-    NewAttachmentUpload, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingToolExchange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredRun, StoredRunSettlement,
-    StoredSession, StoredWorkspace, UserMessageCommit, WorkspaceRemoval,
+    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
+    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
+    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
+    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PermissionFileStore,
+    PermissionStoreFuture, RecoveredRuntime, RewriteResult, RuntimeStore, StoreError,
+    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredRun, StoredRunSettlement, StoredSession, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -44,6 +48,44 @@ enum Command {
         session: NewStoredSession,
         reply: oneshot::Sender<Result<StoredSession, StoreError>>,
     },
+    CreateChildTask {
+        task: NewStoredChildTask,
+        reply: oneshot::Sender<Result<StoredChildTask, StoreError>>,
+    },
+    StartChildTask {
+        start: ChildTaskStart,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    BeginChildToolExchange {
+        pending: PendingChildToolExchange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    MarkChildToolExecutionStarted {
+        start: ChildToolExecutionStart,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CompleteChildToolExchange {
+        completed: CompletedChildToolExchange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SettleChildTask {
+        settlement: StoredChildTaskSettlement,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    RequestChildTaskCancellation {
+        session_id: SessionId,
+        child_task_id: ChildTaskId,
+        reply: oneshot::Sender<Result<StoredChildTask, StoreError>>,
+    },
+    LoadChildConversation {
+        session_id: SessionId,
+        child_task_id: ChildTaskId,
+        reply: oneshot::Sender<Result<agent_types::ConversationSnapshot, StoreError>>,
+    },
+    ReplaceContext {
+        replacement: ContextReplacement,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     AcceptInput {
         input: NewStoredInput,
         reply: oneshot::Sender<Result<AcceptedInput, StoreError>>,
@@ -63,6 +105,10 @@ enum Command {
     },
     BeginToolExchange {
         pending: PendingToolExchange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    MarkToolExecutionStarted {
+        start: ToolExecutionStart,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     CompleteToolExchange {
@@ -85,13 +131,67 @@ enum Command {
         change: ModelChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    SetSessionVariant {
+        change: VariantChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetSessionApprovalMode {
+        change: ApprovalModeChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     RewriteFromUser {
         rewrite: ConversationRewrite,
         reply: oneshot::Sender<Result<RewriteResult, StoreError>>,
     },
+    LoadPermissionFile {
+        scope: PermissionFileScope,
+        reply: oneshot::Sender<Result<PermissionFileLoad, StoreError>>,
+    },
+    ReplacePermissionFile {
+        scope: PermissionFileScope,
+        expected_revision: PermissionFileRevision,
+        content: Vec<u8>,
+        reply: oneshot::Sender<Result<PermissionFileRevision, StoreError>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+}
+
+impl PermissionFileStore for LocalRuntimeStore {
+    fn load_permission_file(
+        &self,
+        scope: &PermissionFileScope,
+    ) -> PermissionStoreFuture<'_, PermissionFileLoad> {
+        let scope = scope.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadPermissionFile { scope, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn replace_permission_file(
+        &self,
+        scope: &PermissionFileScope,
+        expected_revision: &PermissionFileRevision,
+        content: Vec<u8>,
+    ) -> PermissionStoreFuture<'_, PermissionFileRevision> {
+        let scope = scope.clone();
+        let expected_revision = expected_revision.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ReplacePermissionFile {
+                scope,
+                expected_revision,
+                content,
+                reply,
+            })
+            .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
 }
 
 /// Host 本地 RuntimeStore；所有阻塞 I/O 均由其拥有的命名线程执行。
@@ -243,6 +343,113 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::CreateChildTask { task, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn start_child_task(&self, start: ChildTaskStart) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::StartChildTask { start, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn begin_child_tool_exchange(&self, pending: PendingChildToolExchange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::BeginChildToolExchange { pending, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn mark_child_tool_execution_started(
+        &self,
+        start: ChildToolExecutionStart,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::MarkChildToolExecutionStarted { start, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn complete_child_tool_exchange(
+        &self,
+        completed: CompletedChildToolExchange,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::CompleteChildToolExchange { completed, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn settle_child_task(&self, settlement: StoredChildTaskSettlement) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SettleChildTask { settlement, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn request_child_task_cancellation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, StoredChildTask> {
+        let session_id = session_id.clone();
+        let child_task_id = child_task_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::RequestChildTaskCancellation {
+                session_id,
+                child_task_id,
+                reply,
+            })
+            .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn load_child_conversation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, agent_types::ConversationSnapshot> {
+        let session_id = session_id.clone();
+        let child_task_id = child_task_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadChildConversation {
+                session_id,
+                child_task_id,
+                reply,
+            })
+            .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ReplaceContext { replacement, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
@@ -306,6 +513,15 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn mark_tool_execution_started(&self, start: ToolExecutionStart) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::MarkToolExecutionStarted { start, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
@@ -341,6 +557,24 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SetSessionModel { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSessionVariant { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_session_approval_mode(&self, change: ApprovalModeChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSessionApprovalMode { change, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -413,6 +647,42 @@ fn run_worker(
             Command::CreateSession { session, reply } => {
                 let _ = reply.send(engine.create_session(session));
             }
+            Command::CreateChildTask { task, reply } => {
+                let _ = reply.send(engine.create_child_task(task));
+            }
+            Command::StartChildTask { start, reply } => {
+                let _ = reply.send(engine.start_child_task(start));
+            }
+            Command::BeginChildToolExchange { pending, reply } => {
+                let _ = reply.send(engine.begin_child_tool_exchange(pending));
+            }
+            Command::MarkChildToolExecutionStarted { start, reply } => {
+                let _ = reply.send(engine.mark_child_tool_execution_started(start));
+            }
+            Command::CompleteChildToolExchange { completed, reply } => {
+                let _ = reply.send(engine.complete_child_tool_exchange(completed));
+            }
+            Command::SettleChildTask { settlement, reply } => {
+                let _ = reply.send(engine.settle_child_task(settlement));
+            }
+            Command::RequestChildTaskCancellation {
+                session_id,
+                child_task_id,
+                reply,
+            } => {
+                let _ =
+                    reply.send(engine.request_child_task_cancellation(&session_id, &child_task_id));
+            }
+            Command::LoadChildConversation {
+                session_id,
+                child_task_id,
+                reply,
+            } => {
+                let _ = reply.send(engine.load_child_conversation(&session_id, &child_task_id));
+            }
+            Command::ReplaceContext { replacement, reply } => {
+                let _ = reply.send(engine.replace_context(replacement));
+            }
             Command::AcceptInput { input, reply } => {
                 let _ = reply.send(engine.accept_input(input));
             }
@@ -432,6 +702,9 @@ fn run_worker(
             Command::BeginToolExchange { pending, reply } => {
                 let _ = reply.send(engine.begin_tool_exchange(pending));
             }
+            Command::MarkToolExecutionStarted { start, reply } => {
+                let _ = reply.send(engine.mark_tool_execution_started(start));
+            }
             Command::CompleteToolExchange { completed, reply } => {
                 let _ = reply.send(engine.complete_tool_exchange(completed));
             }
@@ -447,8 +720,29 @@ fn run_worker(
             Command::SetSessionModel { change, reply } => {
                 let _ = reply.send(engine.set_session_model(change));
             }
+            Command::SetSessionVariant { change, reply } => {
+                let _ = reply.send(engine.set_session_variant(change));
+            }
+            Command::SetSessionApprovalMode { change, reply } => {
+                let _ = reply.send(engine.set_session_approval_mode(change));
+            }
             Command::RewriteFromUser { rewrite, reply } => {
                 let _ = reply.send(engine.rewrite_from_user(rewrite));
+            }
+            Command::LoadPermissionFile { scope, reply } => {
+                let _ = reply.send(engine.load_permission_file(&scope));
+            }
+            Command::ReplacePermissionFile {
+                scope,
+                expected_revision,
+                content,
+                reply,
+            } => {
+                let _ = reply.send(engine.replace_permission_file(
+                    &scope,
+                    &expected_revision,
+                    &content,
+                ));
             }
             Command::Shutdown { reply } => {
                 let _ = reply.send(Ok(()));

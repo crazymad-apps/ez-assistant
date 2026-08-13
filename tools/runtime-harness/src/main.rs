@@ -298,7 +298,7 @@ async fn run_chat(
                 }
                 break;
             }
-            if let ExecutionOutcome::CompactionRequired { reason, step } = outcome {
+            if let ExecutionOutcome::CompactionRequired { reason, step, .. } = outcome {
                 match start_continuation_run(
                     &mut runtime,
                     &resources,

@@ -11,7 +11,7 @@ use std::{
 use agent_types::{ToolCallId, ToolName, ToolResult};
 use serde_json::Value;
 
-use crate::{ToolContext, ToolJsonFuture};
+use crate::{ToolContext, ToolExecutionMode, ToolJsonFuture};
 
 /// resolved invocation 对外暴露的类型安全授权事实。
 ///
@@ -73,6 +73,7 @@ pub struct ResolvedToolInvocation {
     resolved_arguments: Arc<Value>,
     authorization_facts: Arc<dyn ToolAuthorizationFacts>,
     fingerprint: ToolFingerprint,
+    execution_mode: ToolExecutionMode,
 }
 
 impl std::fmt::Debug for ResolvedToolInvocation {
@@ -83,6 +84,7 @@ impl std::fmt::Debug for ResolvedToolInvocation {
             .field("tool_name", &self.tool_name)
             .field("resolved_arguments", &self.resolved_arguments)
             .field("fingerprint", &self.fingerprint)
+            .field("execution_mode", &self.execution_mode)
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +96,7 @@ impl ResolvedToolInvocation {
         resolved_arguments: Value,
         authorization_facts: Arc<dyn ToolAuthorizationFacts>,
         fingerprint: ToolFingerprint,
+        execution_mode: ToolExecutionMode,
     ) -> Self {
         Self {
             call_id,
@@ -101,6 +104,7 @@ impl ResolvedToolInvocation {
             resolved_arguments: Arc::new(resolved_arguments),
             authorization_facts,
             fingerprint,
+            execution_mode,
         }
     }
 
@@ -130,6 +134,11 @@ impl ResolvedToolInvocation {
     /// 用于语义重复比较的稳定指纹。
     pub fn fingerprint(&self) -> &ToolFingerprint {
         &self.fingerprint
+    }
+
+    /// 注册时冻结的内部执行属性；不进入 Tool Definition 或授权事实。
+    pub fn execution_mode(&self) -> ToolExecutionMode {
+        self.execution_mode
     }
 }
 

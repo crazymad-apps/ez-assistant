@@ -6,7 +6,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use agent_core::{AuthorizationFuture, ToolAuthorization, ToolAuthorizer};
@@ -28,6 +31,7 @@ use crate::order::LogEntry;
 #[derive(Clone, Default)]
 pub struct AuthorizeGate {
     entered: Arc<Notify>,
+    entered_count: Arc<AtomicUsize>,
     released: CancellationToken,
 }
 
@@ -39,7 +43,20 @@ impl AuthorizeGate {
 
     /// 等待第一个 `authorize` 进入；已发生时立即返回。
     pub async fn wait_entered(&self) {
-        self.entered.notified().await;
+        self.wait_for_entered(1).await;
+    }
+
+    /// 等到至少 `count` 个授权 future 已经进入；已达到时立即返回。
+    pub async fn wait_for_entered(&self, count: usize) {
+        loop {
+            let notified = self.entered.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.entered_count.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// 放行：当前挂起与后续的授权全部立即通过；幂等。
@@ -49,7 +66,8 @@ impl AuthorizeGate {
 
     /// 通知进入并挂起直到放行（authorizer 侧）。
     async fn hang_until_released(&self) {
-        self.entered.notify_one();
+        self.entered_count.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_waiters();
         self.released.cancelled().await;
     }
 }
@@ -254,9 +272,8 @@ mod tests {
 
     #[tokio::test]
     async fn entered_before_wait_still_unblocks_the_test() {
-        // notify_one 的许可存储：先进入后等待也能立即返回。
         let gate = AuthorizeGate::new();
-        gate.entered.notify_one();
+        gate.entered_count.store(1, Ordering::SeqCst);
         gate.wait_entered().await;
     }
 }

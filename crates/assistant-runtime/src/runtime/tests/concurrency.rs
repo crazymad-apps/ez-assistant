@@ -14,9 +14,12 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
         .create_session(CreateSessionRequest::default())
         .await
         .expect("second session");
+    set_auto_approval(&runtime, &first.session.session_id).await;
+    set_auto_approval(&runtime, &second.session.session_id).await;
 
     let first_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
@@ -29,6 +32,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
         .expect("first run entered tool");
     let second_run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
@@ -91,6 +95,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
 
     let reused = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
             message: "reuse first session".to_owned(),
             attachment_ids: Vec::new(),
@@ -175,10 +180,13 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
         .create_session(CreateSessionRequest::default())
         .await
         .expect("second session");
+    set_auto_approval(&runtime, &first.session.session_id).await;
+    set_auto_approval(&runtime, &second.session.session_id).await;
     let mut runs = Vec::new();
     for session_id in [&first.session.session_id, &second.session.session_id] {
         let run = runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message: "hang".to_owned(),
                 attachment_ids: Vec::new(),
@@ -263,6 +271,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
         .expect("session");
     let run = runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "never completes".to_owned(),
             attachment_ids: Vec::new(),
@@ -355,6 +364,7 @@ async fn force_settlement_failure_still_shuts_down_store() {
         .expect("session");
     runtime
         .submit_input(SubmitInputRequest {
+            variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id,
             message: "never completes".to_owned(),
             attachment_ids: Vec::new(),
@@ -398,6 +408,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
         start_barrier.wait().await;
         start_runtime
             .submit_input(SubmitInputRequest {
+                variant: assistant_protocol::AgentVariant::Build,
                 session_id,
                 message: "race".to_owned(),
                 attachment_ids: Vec::new(),

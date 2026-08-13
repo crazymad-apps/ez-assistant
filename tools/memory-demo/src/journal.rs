@@ -168,6 +168,30 @@ impl ExecutionRecorder for DemoJournal {
         })
     }
 
+    fn mark_tool_execution_started<'a>(
+        &'a self,
+        receipt: &'a ExchangeReceipt,
+        call_id: &'a agent_types::ToolCallId,
+    ) -> RecordFuture<'a, ()> {
+        Box::pin(async move {
+            let state = self.state.lock().await;
+            let pending = state.pending_exchange.as_ref().ok_or_else(|| RecordError {
+                message: "tool execution start has no pending exchange".to_owned(),
+            })?;
+            let matches = pending.receipt == receipt.as_str()
+                && tool_call_ids(&pending.assistant)
+                    .into_iter()
+                    .any(|candidate| candidate == call_id);
+            if matches {
+                Ok(())
+            } else {
+                Err(RecordError {
+                    message: "tool execution start does not match pending exchange".to_owned(),
+                })
+            }
+        })
+    }
+
     fn complete_tool_exchange<'a>(
         &'a self,
         receipt: &'a ExchangeReceipt,

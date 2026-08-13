@@ -36,10 +36,14 @@ impl AssistantRuntime {
         }
         session.ensure_healthy()?;
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
-        let message = create_user_message(request.message, files)?;
-        let (input_id, run_id) = {
+        let message = create_user_message(request.message, files, request.variant)?;
+        let (input_id, run_id, approval_mode) = {
             let state = session.lock_state()?;
-            (self.allocate_input_id(&state)?, allocate_run_id(&state)?)
+            (
+                self.allocate_input_id(&state)?,
+                allocate_run_id(&state)?,
+                state.approval_mode,
+            )
         };
         let accepted = self
             .store
@@ -48,6 +52,8 @@ impl AssistantRuntime {
                 run_id: run_id.clone(),
                 session_id: session.id().clone(),
                 idempotency_key: request.idempotency_key,
+                agent_variant: request.variant,
+                approval_mode,
                 message,
                 accepted_at_ms: super::super::now_ms()?,
             })
@@ -73,10 +79,13 @@ impl AssistantRuntime {
                 accepted.run.run_id.clone(),
                 session.id().clone(),
                 accepted.input.input_id.clone(),
-                1,
+                accepted.run.attempt,
+                accepted.run.agent_variant,
+                accepted.run.approval_mode,
                 Vec::new(),
             );
             let snapshot = record.snapshot();
+            state.current_variant = accepted.input.agent_variant;
             state.runs.insert(accepted.run.run_id.clone(), record);
             state
                 .runnable_inputs
@@ -186,7 +195,7 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
-        let (input_id, new_run_id) = {
+        let (input_id, new_run_id, approval_mode) = {
             let state = session.lock_state()?;
             let source =
                 state
@@ -217,7 +226,11 @@ impl AssistantRuntime {
                     session_id: request.session_id.clone(),
                 });
             }
-            (source.input_id().clone(), allocate_run_id(&state)?)
+            (
+                source.input_id().clone(),
+                allocate_run_id(&state)?,
+                state.approval_mode,
+            )
         };
         let stored = self
             .store
@@ -225,6 +238,7 @@ impl AssistantRuntime {
                 run_id: new_run_id.clone(),
                 source_run_id: request.run_id,
                 session_id: request.session_id,
+                approval_mode,
                 created_at_ms: super::super::now_ms()?,
             })
             .await
@@ -236,6 +250,8 @@ impl AssistantRuntime {
                 stored.session_id.clone(),
                 input_id.clone(),
                 stored.attempt,
+                stored.agent_variant,
+                stored.approval_mode,
                 Vec::new(),
             );
             let snapshot = record.snapshot();

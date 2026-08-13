@@ -6,10 +6,11 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
     time::Duration,
 };
 
-use agent_core::ExecutionBudget;
+use agent_core::{ActiveGuardrailMode, ExecutionBudget, GuardrailCheckConfig, GuardrailConfig};
 use agent_model::{GenerationConfig, ModelRetryPolicy, ModelRetryReason};
 use assistant_protocol::ModelKey;
 
@@ -20,7 +21,8 @@ use super::{
     },
     model::compile_model,
     schema::{
-        RawConfig, RawExecutionLimits, RawGenerationConfig, RawModelRetryConfig, RawRuntimeConfig,
+        RawConfig, RawDelegationConfig, RawExecutionLimits, RawGenerationConfig, RawGuardrailCheck,
+        RawGuardrailConfig, RawGuardrailMode, RawModelRetryConfig, RawRuntimeConfig,
     },
 };
 
@@ -73,6 +75,8 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
         &raw.runtime,
         &raw.agent.defaults.generation,
         &raw.agent.defaults.execution_limits,
+        &raw.agent.defaults.guardrails,
+        &raw.agent.defaults.delegation,
     ) {
         Ok(global) => global,
         Err(issues) => {
@@ -83,6 +87,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
                     state: ConfigState::Invalid,
                     schema_version: Some(raw.schema_version),
                     default_model: ModelKey::new(raw.default_model).ok(),
+                    delegation: None,
                     models: Vec::new(),
                     issues,
                 },
@@ -139,6 +144,8 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
         transport: global.transport,
         retry_policy: global.retry_policy,
         budget: global.budget,
+        guardrails: global.guardrails,
+        delegation: global.delegation,
         models: valid_models,
     };
     ConfigCompilation {
@@ -148,6 +155,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
             state,
             schema_version: Some(raw.schema_version),
             default_model,
+            delegation: Some(global.delegation),
             models: model_projections,
             issues: all_issues,
         },
@@ -158,7 +166,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
 ///
 /// generation 在单模型编译时还要与模型输出硬上限合并，因此此处暂不作为最终请求配置。
 struct CompiledGlobalConfig {
-    /// Runtime 统一控制的连接和请求超时。
+    /// Runtime 统一控制的连接、响应建立和流空闲超时。
     transport: RuntimeModelTransportConfig,
     /// 显式配置才存在的有限建流前重试策略。
     retry_policy: Option<ModelRetryPolicy>,
@@ -166,6 +174,10 @@ struct CompiledGlobalConfig {
     generation: GenerationConfig,
     /// 与模型上下文窗口、模型输出硬上限相互独立的执行预算。
     budget: ExecutionBudget,
+    /// 已映射到 Core 的显式 Guardrail 配置。
+    guardrails: GuardrailConfig,
+    /// 单层子任务委派的显式产品上限。
+    delegation: super::domain::DelegationConfig,
 }
 
 /// 校验 Runtime/Agent 全局字段并直接映射到已有领域类型。
@@ -176,9 +188,12 @@ fn compile_global(
     runtime: &RawRuntimeConfig,
     generation: &RawGenerationConfig,
     limits: &RawExecutionLimits,
+    guardrails: &RawGuardrailConfig,
+    delegation: &RawDelegationConfig,
 ) -> Result<CompiledGlobalConfig, Vec<ConfigIssue>> {
     let mut issues = Vec::new();
-    // request timeout 必须覆盖 connect timeout，否则连接阶段可能拥有比整个请求更长的预算。
+    // request timeout 同时约束等待响应建立；必须覆盖 connect timeout，避免连接阶段
+    // 拥有更长的预算。流建立后该值改为相邻 chunk 的空闲上限，不限制流的总时长。
     let transport = &runtime.model_transport;
     if transport.connect_timeout_ms == 0
         || transport.request_timeout_ms == 0
@@ -214,6 +229,29 @@ fn compile_global(
         ));
     }
 
+    if guardrails.repeated_invocation.threshold == 0
+        || guardrails.consecutive_failures.threshold == 0
+    {
+        issues.push(global_issue(
+            ConfigIssueCode::InvalidLimit,
+            "agent guardrail thresholds must be positive",
+        ));
+    }
+
+    if delegation.max_tasks_per_run == 0
+        || delegation.max_concurrent_tasks == 0
+        || delegation.task_timeout_ms == 0
+        || delegation.max_steps == 0
+        || delegation.max_tool_calls == 0
+        || delegation.max_output_tokens == 0
+        || delegation.max_concurrent_tasks > delegation.max_tasks_per_run
+    {
+        issues.push(global_issue(
+            ConfigIssueCode::InvalidLimit,
+            "agent delegation limits are invalid",
+        ));
+    }
+
     let retry_policy = match runtime.model_retry.as_ref() {
         Some(retry) => compile_retry_policy(retry, &mut issues),
         None => None,
@@ -238,6 +276,36 @@ fn compile_global(
             max_steps: limits.max_steps,
             max_tool_calls: limits.max_tool_calls,
         },
+        guardrails: GuardrailConfig {
+            repeated_invocation: compile_guardrail_check(&guardrails.repeated_invocation),
+            consecutive_failures: compile_guardrail_check(&guardrails.consecutive_failures),
+        },
+        delegation: super::domain::DelegationConfig {
+            max_tasks_per_run: NonZeroU32::new(delegation.max_tasks_per_run)
+                .expect("delegation task limit was validated"),
+            max_concurrent_tasks: NonZeroU32::new(delegation.max_concurrent_tasks)
+                .expect("delegation concurrency was validated"),
+            task_timeout: Duration::from_millis(delegation.task_timeout_ms),
+            max_steps: NonZeroU32::new(delegation.max_steps)
+                .expect("delegation step limit was validated"),
+            max_tool_calls: NonZeroU32::new(delegation.max_tool_calls)
+                .expect("delegation tool limit was validated"),
+            max_output_tokens: NonZeroU32::new(delegation.max_output_tokens)
+                .expect("delegation output limit was validated"),
+        },
+    })
+}
+
+fn compile_guardrail_check(raw: &RawGuardrailCheck) -> Option<GuardrailCheckConfig> {
+    let mode = match raw.mode {
+        RawGuardrailMode::Off => return None,
+        RawGuardrailMode::Observe => ActiveGuardrailMode::Observe,
+        RawGuardrailMode::Enforce => ActiveGuardrailMode::Enforce,
+    };
+    Some(GuardrailCheckConfig {
+        mode,
+        threshold: NonZeroU32::new(raw.threshold)
+            .expect("guardrail threshold was validated before compilation"),
     })
 }
 
@@ -345,6 +413,7 @@ fn invalid_compilation(
             state: ConfigState::Invalid,
             schema_version,
             default_model,
+            delegation: None,
             models: Vec::new(),
             issues: vec![issue],
         },

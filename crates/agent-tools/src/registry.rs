@@ -43,19 +43,11 @@ impl ToolRegistry {
 
     /// 注册一个类型化工具，并一次冻结名称、描述、Schema 和默认值。
     pub fn register<T: Tool>(&mut self, tool: T) -> Result<(), RegisterToolError> {
-        let name = tool.name();
-        let definition = frozen_definition(&tool, name.clone()).map_err(|message| {
-            RegisterToolError::InvalidDefinition {
-                name: name.clone(),
-                message,
-            }
-        })?;
+        let (definition, tool) = freeze_tool(tool)?;
         if !self.names.insert(definition.name.as_str().to_owned()) {
             return Err(RegisterToolError::DuplicateName(definition.name));
         }
-        let tool = Arc::new(tool);
-        self.tools
-            .push((definition, Arc::new(TypedToolErasure::new(tool))));
+        self.tools.push((definition, tool));
         Ok(())
     }
 
@@ -86,6 +78,27 @@ pub struct ToolSetSnapshot {
 }
 
 impl ToolSetSnapshot {
+    /// 消费当前快照并在尾部追加一个新工具，生成派生快照。
+    ///
+    /// 已有定义、顺序和执行句柄保持不变；新工具仍经过与 Registry 相同的定义冻结和
+    /// 重名校验。该接口用于上层从同一基础快照派生工具集，而无需解析或重建既有工具。
+    ///
+    /// # Errors
+    ///
+    /// 新工具定义无效或与已有冻结名称重复时返回 [`RegisterToolError`]。
+    pub fn try_with_tool<T: Tool>(mut self, tool: T) -> Result<Self, RegisterToolError> {
+        let (definition, tool) = freeze_tool(tool)?;
+        if self.by_name.contains_key(definition.name.as_str()) {
+            return Err(RegisterToolError::DuplicateName(definition.name));
+        }
+        let index = self.tools.len();
+        self.by_name
+            .insert(definition.name.as_str().to_owned(), index);
+        self.definitions.push(definition);
+        self.tools.push(tool);
+        Ok(self)
+    }
+
     /// 按注册顺序返回模型可见工具定义。
     pub fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
@@ -108,6 +121,24 @@ impl ToolSetSnapshot {
     }
 }
 
+fn freeze_tool<T: Tool>(
+    tool: T,
+) -> Result<(ToolDefinition, Arc<dyn ErasedTool>), RegisterToolError> {
+    let name = tool.name();
+    let definition = frozen_definition(&tool, name.clone()).map_err(|message| {
+        RegisterToolError::InvalidDefinition {
+            name: name.clone(),
+            message,
+        }
+    })?;
+    let execution_mode = tool.execution_mode();
+    let tool = Arc::new(tool);
+    Ok((
+        definition,
+        Arc::new(TypedToolErasure::new(tool, execution_mode)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -120,7 +151,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ToolContext, ToolError, ToolExecuteFuture, ToolInputDefaults, ToolResolution,
+        Dispatcher, ResolvedBatchItemRef, ToolContext, ToolError, ToolExecuteFuture,
+        ToolExecutionMode, ToolInputDefaults, ToolResolution,
         testutil::{AddTool, FailTool},
     };
 
@@ -265,6 +297,7 @@ mod tests {
         name_calls: Arc<AtomicUsize>,
         description_calls: Arc<AtomicUsize>,
         defaults_calls: Arc<AtomicUsize>,
+        execution_mode_calls: Arc<AtomicUsize>,
     }
 
     impl crate::Tool for CountingDefinitionTool {
@@ -285,6 +318,11 @@ mod tests {
         fn input_defaults(&self) -> ToolInputDefaults {
             self.defaults_calls.fetch_add(1, Ordering::SeqCst);
             ToolInputDefaults::new().with("limit", 10_u32)
+        }
+
+        fn execution_mode(&self) -> ToolExecutionMode {
+            self.execution_mode_calls.fetch_add(1, Ordering::SeqCst);
+            ToolExecutionMode::Serial
         }
 
         fn resolve(
@@ -308,12 +346,14 @@ mod tests {
         let name_calls = Arc::new(AtomicUsize::new(0));
         let description_calls = Arc::new(AtomicUsize::new(0));
         let defaults_calls = Arc::new(AtomicUsize::new(0));
+        let execution_mode_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::new();
         registry
             .register(CountingDefinitionTool {
                 name_calls: name_calls.clone(),
                 description_calls: description_calls.clone(),
                 defaults_calls: defaults_calls.clone(),
+                execution_mode_calls: execution_mode_calls.clone(),
             })
             .expect("register counting tool");
         let snapshot = registry.snapshot();
@@ -322,5 +362,83 @@ mod tests {
         assert_eq!(name_calls.load(Ordering::SeqCst), 1);
         assert_eq!(description_calls.load(Ordering::SeqCst), 1);
         assert_eq!(defaults_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(execution_mode_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct ParallelTool;
+
+    impl crate::Tool for ParallelTool {
+        type Input = OptionalInput;
+        type ResolvedInput = OptionalInput;
+        type Output = OptionalInput;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("parallel_tool").expect("valid name")
+        }
+
+        fn description(&self) -> String {
+            "parallel tool".to_owned()
+        }
+
+        fn execution_mode(&self) -> ToolExecutionMode {
+            ToolExecutionMode::ParallelEligible
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            Ok(ToolResolution::general(input))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(input)))
+        }
+    }
+
+    #[test]
+    fn consuming_derivation_preserves_base_and_freezes_internal_execution_mode() {
+        let mut registry = ToolRegistry::new();
+        registry.register(AddTool).expect("register base tool");
+        let base = registry.snapshot();
+        let base_definition = base.definitions()[0].clone();
+
+        let derived = base
+            .clone()
+            .try_with_tool(ParallelTool)
+            .expect("derive tool set");
+        assert_eq!(base.len(), 1);
+        assert_eq!(derived.len(), 2);
+        assert_eq!(derived.definitions()[0], base_definition);
+        assert_eq!(derived.definitions()[1].name.as_str(), "parallel_tool");
+
+        let encoded = serde_json::to_value(derived.definitions()).expect("serialize definitions");
+        assert!(
+            !encoded.to_string().contains("execution_mode"),
+            "execution mode must not enter provider-visible definitions"
+        );
+
+        let call = crate::testutil::tool_call("parallel_tool", serde_json::json!({"limit": 1}));
+        let batch = Dispatcher::resolve_batch(&derived, &[call]);
+        let Some(ResolvedBatchItemRef::Valid(invocation)) = batch.get(0) else {
+            panic!("parallel tool resolves");
+        };
+        assert_eq!(
+            invocation.execution_mode(),
+            ToolExecutionMode::ParallelEligible
+        );
+
+        let duplicate = match derived.try_with_tool(ParallelTool) {
+            Ok(_) => panic!("derived snapshot must reject duplicate names"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            duplicate,
+            RegisterToolError::DuplicateName(ToolName::new("parallel_tool").expect("valid name"))
+        );
     }
 }

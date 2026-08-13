@@ -61,10 +61,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 prepare_runtime_home(&config.runtime_home)?;
                 // 单实例锁必须先于 Store；HTTP 端口与发现文件在 Runtime 恢复后才发布。
                 let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
-                let resources = HostResources::new(
-                    &config.runtime_home,
-                    config.unsafe_unrestricted_local_tools,
-                )?;
+                let resources = HostResources::new(&config.runtime_home)?;
                 let store = Arc::new(
                     LocalRuntimeStore::open(&config.runtime_home, STORAGE_QUEUE_CAPACITY).await?,
                 );
@@ -74,6 +71,8 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     resources.model_factory,
                     resources.session_environment_factory,
                     resources.run_tool_factory,
+                    resources.child_task_workspace_factory,
+                    store.clone(),
                     store.clone(),
                 )
                 .await
@@ -102,11 +101,6 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 );
                 if config.web_demo {
                     println!("Private Web Demo: {}/demo/", endpoint.base_url());
-                }
-                if config.unsafe_unrestricted_local_tools {
-                    eprintln!(
-                        "WARNING: unrestricted local file and shell tools are enabled. Shell runs with current-user permissions; the Workspace is not a sandbox. Use only with isolated test data."
-                    );
                 }
                 RuntimeServer::new(endpoint, runtime, config.runtime_home, config.web_demo)
                     .serve()

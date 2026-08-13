@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId, WorkspaceId,
+    AttachmentId, ChildTaskId, InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId,
+    WorkspaceId,
 };
 
 /// Runtime 对外可见的生命周期状态。
@@ -26,6 +27,73 @@ pub enum SessionLifecycle {
     Active,
     /// 只允许查询，等待显式恢复。
     Archived,
+}
+
+/// Agent 在一次用户输入中采用的行为变体。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentVariant {
+    /// 直接实施用户请求。
+    #[default]
+    Build,
+    /// 先调查并形成实施计划；只可在 Agent 私有空间写入分析产物。
+    Plan,
+}
+
+/// 一份权限文件所属的业务层级。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionScope {
+    Global,
+    Workspace,
+    Session,
+}
+
+/// 显式重载时观察到的单个权限文件状态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionFileStatus {
+    Empty,
+    Ready,
+    Invalid,
+    Unavailable,
+}
+
+/// 权限文件诊断的稳定分类。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDiagnosticCode {
+    InvalidDocument,
+    UnsupportedSchema,
+    InvalidRule,
+    UnsafePermissions,
+    Unavailable,
+}
+
+/// 不回显文件正文或内部路径的权限诊断。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PermissionDiagnostic {
+    pub scope: PermissionScope,
+    pub code: PermissionDiagnosticCode,
+    pub message: String,
+}
+
+/// 一次 cohort reload 中某层权限文件的投影。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PermissionFileSummary {
+    pub scope: PermissionScope,
+    pub status: PermissionFileStatus,
+}
+
+/// Session 当前的审批交互方式。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// 需要授权时询问用户。
+    #[default]
+    Ask,
+    /// 按已配置规则自动决定，不发起临时询问。
+    Auto,
 }
 
 /// Session 列表的生命周期过滤条件。
@@ -105,7 +173,8 @@ pub enum RunStatus {
     Cancelled,
     /// Runtime 重启前没有可靠终结；不会自动恢复执行。
     Interrupted,
-    /// Core 要求上层进行上下文压缩；本版本不自动续跑。
+    /// Core 要求上层进行上下文压缩；正式 Runtime 通常在业务 Run 内部消费该交接，
+    /// 该状态保留给不具备自动 continuation 的宿主及历史兼容读取。
     CompactionRequired,
 }
 
@@ -121,6 +190,52 @@ impl RunStatus {
                 | Self::CompactionRequired
         )
     }
+}
+
+/// 父 Run 管理的子任务生命周期。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildTaskStatus {
+    /// 父委派已可靠创建关系，尚未启动子执行。
+    Accepted,
+    /// 子任务正文已经写入，子执行正在运行。
+    Running,
+    /// 子任务正常形成最终 Assistant Message。
+    Completed,
+    /// 子任务因模型、预算、Guardrail、存储或超时失败。
+    Failed,
+    /// 子任务收到取消并完成协作式收敛。
+    Cancelled,
+    /// Runtime 重启前没有可靠终态，不自动续跑。
+    Interrupted,
+}
+
+impl ChildTaskStatus {
+    /// 判断子任务是否已经不可再次改变。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
+
+/// 一个单层子任务的可重建业务快照。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChildTaskSnapshot {
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub parent_run_id: RunId,
+    pub parent_tool_call_id: ToolCallId,
+    pub title: String,
+    pub status: ChildTaskStatus,
+    pub variant: AgentVariant,
+    pub cancel_requested: bool,
+    pub final_text: String,
+    pub error: Option<RuntimeErrorInfo>,
+    pub created_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
 }
 
 /// 工具调用在 Run 观察投影中的状态。
@@ -147,6 +262,100 @@ pub enum ToolOutputChannel {
     Stderr,
 }
 
+/// Runtime Guardrail 的稳定检测类别。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailKind {
+    RepeatedInvocation,
+    ConsecutiveFailures,
+}
+
+/// Guardrail 达到阈值后的产品层行为。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailMode {
+    Observe,
+    Enforce,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    /// 只允许当前待执行 Tool Call。
+    AllowOnce,
+    /// 写入当前 Session 权限文件后允许当前调用。
+    AllowSession,
+    /// 写入已绑定 Workspace 权限文件后允许当前调用。
+    AllowWorkspace,
+    /// 拒绝当前 Tool Call，不产生持久规则。
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    /// 可以由一个客户端原子取得决策权。
+    Pending,
+    /// 一个决策正在完成持久化及唤醒操作。
+    Resolving,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolApprovalSubject {
+    /// 不带文件或进程专属授权事实的工具调用。
+    General { tool_name: String },
+    /// 创建单层子任务的委派调用；目标只保留受限展示摘要。
+    Delegation {
+        tool_name: String,
+        title: String,
+        task_summary: String,
+    },
+    /// 已解析为绝对路径的结构化文件操作。
+    File {
+        tool_name: String,
+        operation: String,
+        path: String,
+    },
+    /// 已解析完整命令和工作目录的 Shell 操作。
+    Shell {
+        tool_name: String,
+        command: String,
+        working_directory: String,
+        timeout_ms: u64,
+        process_mode: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ApprovalSnapshot {
+    /// Runtime 内存中一次审批的不透明标识。
+    pub approval_id: crate::ApprovalId,
+    /// 审批所属 Session。
+    pub session_id: SessionId,
+    /// 审批所属 Run。
+    pub run_id: RunId,
+    /// 子任务内部调用的审批归属；父 Run 自身调用保持为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_task_id: Option<crate::ChildTaskId>,
+    /// 等待执行的 Tool Call。
+    pub call_id: ToolCallId,
+    /// 当前 Run 冻结的 Agent 变体。
+    pub variant: AgentVariant,
+    /// 当前 Run 冻结的审批方式；显式 Ask 规则也可能在 Auto 中产生审批。
+    pub approval_mode: ApprovalMode,
+    /// 用于客户端展示的已解析调用事实。
+    pub subject: ToolApprovalSubject,
+    /// 服务端按当前作用域计算出的合法决定。
+    pub available_decisions: Vec<ApprovalDecision>,
+    /// 持久允许将写入的精确匹配语义预览。
+    pub exact_rule_preview: ToolApprovalSubject,
+    /// 当前是否仍可直接取得决策权。
+    pub status: ApprovalStatus,
+    /// Runtime 创建审批的 Unix 毫秒时间。
+    pub created_at_ms: i64,
+}
+
 /// 一个 Session 的稳定摘要。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionSummary {
@@ -158,6 +367,12 @@ pub struct SessionSummary {
     pub model_key: ModelKey,
     /// Session 当前是活动还是归档状态。
     pub lifecycle: SessionLifecycle,
+    /// UI 当前选中的 Agent 变体；具体 Run 仍以提交 Input 携带的值为准。
+    #[serde(default)]
+    pub current_variant: AgentVariant,
+    /// 后续 Run 捕获的当前审批模式。
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     /// 创建 Session 时冻结的 Workspace 绑定；`None` 表示普通未绑定会话。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<WorkspaceId>,
@@ -212,6 +427,12 @@ pub struct RunSnapshot {
     pub attempt: u32,
     /// 当前活动态或终态。
     pub status: RunStatus,
+    /// 本次 Run 继承的 Input Agent 变体。
+    #[serde(default)]
+    pub variant: AgentVariant,
+    /// 本次 Run 创建时捕获的 Session 审批模式。
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     /// 是否已经接受过取消请求。
     pub cancel_requested: bool,
     /// 截至快照时观察到的 reasoning；运行中可能因事件丢失而不完整。
@@ -250,6 +471,30 @@ mod tests {
             assert_eq!(
                 serde_json::from_str::<RunStatus>(&format!("\"{wire}\""))
                     .expect("deserialize status"),
+                status
+            );
+            assert_eq!(status.is_terminal(), terminal);
+        }
+    }
+
+    #[test]
+    fn child_task_status_serialization_and_terminal_semantics_are_stable() {
+        let cases = [
+            (ChildTaskStatus::Accepted, "accepted", false),
+            (ChildTaskStatus::Running, "running", false),
+            (ChildTaskStatus::Completed, "completed", true),
+            (ChildTaskStatus::Failed, "failed", true),
+            (ChildTaskStatus::Cancelled, "cancelled", true),
+            (ChildTaskStatus::Interrupted, "interrupted", true),
+        ];
+        for (status, wire, terminal) in cases {
+            assert_eq!(
+                serde_json::to_string(&status).expect("serialize child status"),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<ChildTaskStatus>(&format!("\"{wire}\""))
+                    .expect("deserialize child status"),
                 status
             );
             assert_eq!(status.is_terminal(), terminal);
@@ -313,6 +558,8 @@ mod tests {
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
             status: RunStatus::Failed,
+            variant: AgentVariant::Plan,
+            approval_mode: ApprovalMode::Auto,
             cancel_requested: false,
             reasoning: "checked".to_owned(),
             text: "partial".to_owned(),
@@ -332,5 +579,100 @@ mod tests {
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
         let decoded: RunSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn legacy_session_and_run_snapshots_default_to_build_and_ask() {
+        let session = serde_json::json!({
+            "session_id": "session-1",
+            "title": "Legacy",
+            "model_key": "model-1",
+            "lifecycle": "active",
+            "active_run_id": null,
+            "message_count": 0,
+            "queued_input_count": 0,
+            "resume_required": false
+        });
+        let session: SessionSummary = serde_json::from_value(session).expect("legacy session");
+        assert_eq!(session.current_variant, AgentVariant::Build);
+        assert_eq!(session.approval_mode, ApprovalMode::Ask);
+
+        let run = serde_json::json!({
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "input_id": "input-1",
+            "attempt": 1,
+            "status": "completed",
+            "cancel_requested": false,
+            "reasoning": "",
+            "text": "done",
+            "tools": [],
+            "error": null
+        });
+        let run: RunSnapshot = serde_json::from_value(run).expect("legacy run");
+        assert_eq!(run.variant, AgentVariant::Build);
+        assert_eq!(run.approval_mode, ApprovalMode::Ask);
+    }
+
+    #[test]
+    fn approval_snapshot_preserves_subject_and_available_decisions() {
+        let snapshot = ApprovalSnapshot {
+            approval_id: crate::ApprovalId::new("approval-1").expect("approval id"),
+            session_id: SessionId::new("session-1").expect("session id"),
+            run_id: RunId::new("run-1").expect("run id"),
+            child_task_id: None,
+            call_id: ToolCallId::new("call-1").expect("call id"),
+            variant: AgentVariant::Plan,
+            approval_mode: ApprovalMode::Ask,
+            subject: ToolApprovalSubject::Shell {
+                tool_name: "shell".to_owned(),
+                command: "git status".to_owned(),
+                working_directory: "/workspace".to_owned(),
+                timeout_ms: 30_000,
+                process_mode: "managed".to_owned(),
+            },
+            available_decisions: vec![
+                ApprovalDecision::AllowOnce,
+                ApprovalDecision::AllowSession,
+                ApprovalDecision::Deny,
+            ],
+            exact_rule_preview: ToolApprovalSubject::Shell {
+                tool_name: "shell".to_owned(),
+                command: "git status".to_owned(),
+                working_directory: "/workspace".to_owned(),
+                timeout_ms: 30_000,
+                process_mode: "managed".to_owned(),
+            },
+            status: ApprovalStatus::Pending,
+            created_at_ms: 10,
+        };
+
+        let value = serde_json::to_value(&snapshot).expect("serialize approval");
+        assert_eq!(value["subject"]["type"], "shell");
+        assert_eq!(value["available_decisions"][1], "allow_session");
+        assert!(value.get("child_task_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<ApprovalSnapshot>(value).expect("deserialize approval"),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn delegation_approval_subject_round_trips_as_an_additive_variant() {
+        let subject = ToolApprovalSubject::Delegation {
+            tool_name: "delegate_task".to_owned(),
+            title: "Inspect storage".to_owned(),
+            task_summary: "Review the storage boundary and report risks.".to_owned(),
+        };
+
+        let value = serde_json::to_value(&subject).expect("serialize delegation subject");
+        assert_eq!(value["type"], "delegation");
+        assert_eq!(value["tool_name"], "delegate_task");
+        assert_eq!(value["title"], "Inspect storage");
+        assert_eq!(
+            serde_json::from_value::<ToolApprovalSubject>(value)
+                .expect("deserialize delegation subject"),
+            subject
+        );
     }
 }

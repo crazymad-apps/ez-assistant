@@ -62,4 +62,4 @@ pub use record::{
 pub use recorder::InMemoryRecorder;
 pub use script::{ModelScript, ScriptedModelService, message_events};
 pub use shell::{FakeShellCompletion, FakeShellScript, FakeShellTool};
-pub use tool::ScriptedTool;
+pub use tool::{ScriptedTool, ToolExecutionGate};

@@ -12,8 +12,8 @@ use agent_types::{
     UserMessage,
 };
 use assistant_protocol::{
-    AttachmentId, IdempotencyKey, InputId, ModelKey, RunId, RunStatus, RuntimeErrorInfo, SessionId,
-    WorkspaceId,
+    AgentVariant, ApprovalMode, AttachmentId, ChildTaskId, ChildTaskStatus, IdempotencyKey,
+    InputId, ModelKey, RunId, RunStatus, RuntimeErrorInfo, SessionId, ToolCallId, WorkspaceId,
 };
 
 use crate::SessionExecutionEnvironment;
@@ -193,6 +193,8 @@ pub struct NewStoredSession {
     pub model_key: ModelKey,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
+    pub current_variant: AgentVariant,
+    pub approval_mode: ApprovalMode,
     pub created_at_ms: i64,
 }
 
@@ -205,6 +207,8 @@ pub struct StoredSession {
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
     pub lifecycle: StoredSessionLifecycle,
+    pub current_variant: AgentVariant,
+    pub approval_mode: ApprovalMode,
     pub body_generation: u64,
     pub message_count: u64,
     pub created_at_ms: i64,
@@ -246,6 +250,16 @@ pub struct CompletedToolExchange {
     pub completed_at_ms: i64,
 }
 
+/// Core 已获授权、即将进入工具副作用前的可靠 started 记录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolExecutionStart {
+    pub receipt: ExchangeReceipt,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub call_id: ToolCallId,
+    pub started_at_ms: i64,
+}
+
 /// Input 是否已经进入规范 Conversation。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredInputState {
@@ -262,6 +276,7 @@ pub struct StoredInput {
     pub input_id: InputId,
     pub session_id: SessionId,
     pub idempotency_key: Option<IdempotencyKey>,
+    pub agent_variant: AgentVariant,
     pub user_message_id: MessageId,
     pub state: StoredInputState,
     pub queued_message: Option<UserMessage>,
@@ -275,6 +290,8 @@ pub struct NewStoredInput {
     pub run_id: RunId,
     pub session_id: SessionId,
     pub idempotency_key: Option<IdempotencyKey>,
+    pub agent_variant: AgentVariant,
+    pub approval_mode: ApprovalMode,
     pub message: UserMessage,
     pub accepted_at_ms: i64,
 }
@@ -293,6 +310,7 @@ pub struct NewStoredRunAttempt {
     pub run_id: RunId,
     pub source_run_id: RunId,
     pub session_id: SessionId,
+    pub approval_mode: ApprovalMode,
     pub created_at_ms: i64,
 }
 
@@ -317,12 +335,105 @@ pub struct StoredRun {
     pub input_id: InputId,
     pub attempt: u32,
     pub status: RunStatus,
+    pub agent_variant: AgentVariant,
+    pub approval_mode: ApprovalMode,
     pub cancel_requested: bool,
     pub error: Option<RuntimeErrorInfo>,
     pub message_ids: Vec<MessageId>,
     pub created_at_ms: i64,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
+}
+
+/// 创建 accepted 子任务关系及空独立正文所需的冻结事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewStoredChildTask {
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub parent_run_id: RunId,
+    pub parent_tool_call_id: ToolCallId,
+    pub title: String,
+    pub system_prompt: SystemPromptSnapshot,
+    pub agent_variant: AgentVariant,
+    pub created_at_ms: i64,
+}
+
+/// Runtime 从 Store 恢复或创建完成的子任务结构化投影。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredChildTask {
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub parent_run_id: RunId,
+    pub parent_tool_call_id: ToolCallId,
+    pub title: String,
+    pub system_prompt: SystemPromptSnapshot,
+    pub agent_variant: AgentVariant,
+    pub status: ChildTaskStatus,
+    pub cancel_requested: bool,
+    pub body_generation: u64,
+    pub message_count: u64,
+    pub final_message_id: Option<MessageId>,
+    pub error: Option<RuntimeErrorInfo>,
+    pub created_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    /// 子任务独立正文是否可以安全读取；不额外持久化到 SQLite。
+    pub conversation_state: StoredConversationState,
+}
+
+/// 把子任务初始 User Message 可靠写入独立正文并切到 running。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildTaskStart {
+    pub operation_id: String,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub message: UserMessage,
+    pub started_at_ms: i64,
+}
+
+/// 子任务工具副作用前必须保存的完整 Assistant Tool Call 批次。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingChildToolExchange {
+    pub receipt: ExchangeReceipt,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub assistant: AssistantMessage,
+    pub created_at_ms: i64,
+}
+
+/// 子任务 Core 已获授权、即将进入工具副作用前的可靠 started 记录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildToolExecutionStart {
+    pub receipt: ExchangeReceipt,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub call_id: ToolCallId,
+    pub started_at_ms: i64,
+}
+
+/// 子任务工具结果齐备后的可靠完整批次提交。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedChildToolExchange {
+    pub operation_id: String,
+    pub receipt: ExchangeReceipt,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub results: Vec<ToolMessage>,
+    pub completed_at_ms: i64,
+}
+
+/// 子任务最终状态及尚未写入独立正文的完整消息批次。
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredChildTaskSettlement {
+    pub operation_id: String,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub status: ChildTaskStatus,
+    pub cancel_requested: bool,
+    pub error: Option<RuntimeErrorInfo>,
+    pub messages: Vec<ConversationMessage>,
+    pub final_message_id: Option<MessageId>,
+    pub finished_at_ms: i64,
 }
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -333,6 +444,7 @@ pub struct RecoveredRuntime {
     pub sessions: Vec<StoredSession>,
     pub inputs: Vec<StoredInput>,
     pub runs: Vec<StoredRun>,
+    pub child_tasks: Vec<StoredChildTask>,
 }
 
 /// 原子切换 Session 归档状态。
@@ -351,6 +463,22 @@ pub struct ModelChange {
     pub changed_at_ms: i64,
 }
 
+/// 原子切换 Session 当前 Agent 变体。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VariantChange {
+    pub session_id: SessionId,
+    pub variant: AgentVariant,
+    pub changed_at_ms: i64,
+}
+
+/// 原子切换 Session 当前审批模式。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalModeChange {
+    pub session_id: SessionId,
+    pub approval_mode: ApprovalMode,
+    pub changed_at_ms: i64,
+}
+
 /// 历史重新输入所需的完整新正文和结构化关联。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConversationRewrite {
@@ -358,6 +486,27 @@ pub struct ConversationRewrite {
     pub target_user_message_id: MessageId,
     pub conversation: ConversationSnapshot,
     pub input: NewStoredInput,
+    pub changed_at_ms: i64,
+}
+
+/// 自动压缩要原子替换的正文所有者；Run 与 child 都必须仍处于活动执行期。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextReplacementTarget {
+    Run {
+        session_id: SessionId,
+        run_id: RunId,
+    },
+    ChildTask {
+        session_id: SessionId,
+        child_task_id: ChildTaskId,
+    },
+}
+
+/// 使用新 generation 替换当前有效 Conversation，不改写历史 Input/Run/child 关系。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextReplacement {
+    pub target: ContextReplacementTarget,
+    pub conversation: ConversationSnapshot,
     pub changed_at_ms: i64,
 }
 
@@ -391,6 +540,47 @@ pub trait RuntimeStore: Send + Sync {
     /// 创建 Session 稳定事实及其空 Conversation。
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;
 
+    /// 创建 accepted 子任务关系及其空的 generation 1 正文。
+    fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask>;
+
+    /// 写入初始 User Message，并把 accepted 子任务可靠切到 running。
+    fn start_child_task(&self, start: ChildTaskStart) -> StoreFuture<'_, ()>;
+
+    /// 在任何子任务工具副作用前保存完整 Tool Call 批次。
+    fn begin_child_tool_exchange(&self, pending: PendingChildToolExchange) -> StoreFuture<'_, ()>;
+
+    /// 在子任务 Tool SPI 产生副作用前写入 started 标记。
+    fn mark_child_tool_execution_started(
+        &self,
+        start: ChildToolExecutionStart,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 提交子任务完整工具结果并清除对应 pending 事实。
+    fn complete_child_tool_exchange(
+        &self,
+        completed: CompletedChildToolExchange,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 可靠写入最终消息并结算子任务终态。
+    fn settle_child_task(&self, settlement: StoredChildTaskSettlement) -> StoreFuture<'_, ()>;
+
+    /// 在发布活动 child 取消令牌前可靠记录取消意图；终态任务幂等返回原投影。
+    fn request_child_task_cancellation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, StoredChildTask>;
+
+    /// 加载子任务独立的完整规范 Conversation，同时核对 Session 所有权。
+    fn load_child_conversation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, ConversationSnapshot>;
+
+    /// 可靠切换父 Run 或 child 的压缩后有效正文 generation。
+    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()>;
+
     /// 原子创建 Input 与首次 Accepted Run，或返回同 Session 幂等 key 的首次结果。
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
 
@@ -410,6 +600,9 @@ pub trait RuntimeStore: Send + Sync {
     /// 在任何工具副作用前保存完整 Tool Call 批次并返回确认。
     fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()>;
 
+    /// 在 Tool SPI 产生任何外部副作用前写入临时 started 标记。
+    fn mark_tool_execution_started(&self, start: ToolExecutionStart) -> StoreFuture<'_, ()>;
+
     /// 保存完整结果、整批提交正文并清除对应 pending 事实。
     fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()>;
 
@@ -424,6 +617,12 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 原子切换 Session 后续 Run 使用的模型 key。
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()>;
+
+    /// 原子切换 Session 当前 Agent 变体。
+    fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()>;
+
+    /// 原子切换 Session 当前审批模式。
+    fn set_session_approval_mode(&self, change: ApprovalModeChange) -> StoreFuture<'_, ()>;
 
     /// 原子切换正文 generation、销毁目标及尾段关联，并创建新的 committed Input/Run。
     fn rewrite_from_user(&self, rewrite: ConversationRewrite) -> StoreFuture<'_, RewriteResult>;

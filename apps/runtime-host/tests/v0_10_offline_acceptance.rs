@@ -2,7 +2,12 @@
 
 mod support;
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -98,14 +103,56 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
 
     let tool = submit(&mut client, &session_id, "TOOL_CASE", "tool-submit");
     let tool_run = string(&tool["run"]["run_id"]);
+    let pending = wait_for_pending_approval(&mut client, &session_id);
+    assert_eq!(pending["subject"]["type"], "file");
+    assert_eq!(pending["subject"]["tool_name"], "list_directory");
+    assert_eq!(pending["subject"]["operation"], "list");
+    assert_eq!(
+        pending["available_decisions"],
+        json!(["allow_once", "allow_session", "deny"])
+    );
+    client.runtime(
+        "decide_approval",
+        json!({
+            "session_id": session_id,
+            "approval_id": pending["approval_id"],
+            "decision": "allow_session"
+        }),
+    );
     assert_eq!(
         client.wait_for_status("tool run", &session_id, &tool_run, &["completed"])["status"],
         "completed"
     );
     let tool_conversation = client.conversation(&session_id);
     let tool_json = serialized(&tool_conversation);
-    assert!(tool_json.contains("call-echo-1"));
-    assert!(tool_json.contains("offline echo"));
+    assert!(tool_json.contains("call-list-directory-1"));
+    assert!(tool_json.contains("list_directory"));
+
+    let repeated_tool = submit(
+        &mut client,
+        &session_id,
+        "TOOL_CASE",
+        "tool-submit-after-session-allow",
+    );
+    let repeated_tool_run = string(&repeated_tool["run"]["run_id"]);
+    assert_eq!(
+        client.wait_for_status(
+            "tool run covered by session rule",
+            &session_id,
+            &repeated_tool_run,
+            &["completed"],
+        )["status"],
+        "completed"
+    );
+    assert!(
+        client.runtime(
+            "list_pending_approvals",
+            json!({ "session_id": session_id })
+        )["approvals"]
+            .as_array()
+            .expect("approval list")
+            .is_empty()
+    );
 
     let cancelling = submit(&mut client, &session_id, "CANCEL_CASE", "cancel-submit");
     let cancelling_run = string(&cancelling["run"]["run_id"]);
@@ -142,6 +189,7 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
             "session_id": session_id,
             "message_id": target_message_id,
             "message": "REPLACEMENT_CASE",
+            "variant": "build",
             "idempotency_key": "replacement-submit"
         }),
     );
@@ -203,9 +251,28 @@ fn submit(client: &mut Client, session_id: &str, message: &str, key: &str) -> Va
         json!({
             "session_id": session_id,
             "message": message,
+            "variant": "build",
             "idempotency_key": key
         }),
     )
+}
+
+fn wait_for_pending_approval(client: &mut Client, session_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let mut approvals = client.runtime(
+            "list_pending_approvals",
+            json!({ "session_id": session_id }),
+        )["approvals"]
+            .as_array()
+            .expect("approval list")
+            .clone();
+        if let Some(approval) = approvals.pop() {
+            return approval;
+        }
+        assert!(Instant::now() < deadline, "approval did not become pending");
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn assert_run_status(result: &Value, run_id: &str, expected: &str) {
@@ -283,7 +350,6 @@ fn assert_output_is_safe(output: &std::process::Output) {
         "FIRST_CASE",
         "BLOCK_FOR_RESTART",
         "REPLACEMENT_CASE",
-        "offline echo",
     ] {
         assert!(
             !output.contains(secret),

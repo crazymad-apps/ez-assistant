@@ -12,19 +12,30 @@ use futures_util::FutureExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use super::{AssistantRuntime, model::compile_run_agent};
+use super::{
+    AssistantRuntime,
+    model::{RunAuthorizationInput, RunCompilationResources, compile_run_agent},
+};
 use crate::{
     RuntimeResult, RuntimeStore, StoredInputState, StoredRunSettlement, UserMessageCommit,
     config::ConfigRegistry,
-    run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, supervise_run},
+    context_compaction::{
+        MAX_AUTOMATIC_COMPACTIONS, compact_parent_context, compaction_reason_label,
+        consume_execution_budget,
+    },
+    run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, observe_run_execution},
     session::SessionController,
 };
 
 #[derive(Clone)]
 struct QueueDriverContext {
     config_registry: Arc<ConfigRegistry>,
+    permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
+    approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn crate::ModelServiceFactory>,
     run_tool_factory: Arc<dyn crate::RunToolFactory>,
+    child_task_workspace_factory: Arc<dyn crate::ChildTaskWorkspaceFactory>,
+    child_tasks: Arc<crate::delegation::ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
     events: broadcast::Sender<assistant_protocol::RuntimeEvent>,
@@ -61,8 +72,12 @@ impl AssistantRuntime {
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
             config_registry: self.config_registry.clone(),
+            permission_coordinator: self.permission_coordinator.clone(),
+            approval_registry: self.approval_registry.clone(),
             model_factory: self.model_factory.clone(),
             run_tool_factory: self.run_tool_factory.clone(),
+            child_task_workspace_factory: self.child_task_workspace_factory.clone(),
+            child_tasks: self.child_tasks.clone(),
             context_window: self.context_window.clone(),
             store: self.store.clone(),
             events: self.event_sender.clone(),
@@ -156,18 +171,33 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             next.2.run_id.clone(),
             context.events.clone(),
         ));
+        let run_cancellation = context.root_cancellation.child_token();
         let start_error = match context.config_registry.snapshot().and_then(|config| {
             compile_run_agent(
-                &session,
+                session.clone(),
                 &config,
-                context.model_factory.as_ref(),
-                context.context_window.clone(),
-                context.run_tool_factory.as_ref(),
+                RunCompilationResources {
+                    model_factory: context.model_factory.as_ref(),
+                    context_window: context.context_window.clone(),
+                    run_tool_factory: context.run_tool_factory.as_ref(),
+                    child_task_workspace_factory: context.child_task_workspace_factory.clone(),
+                    child_tasks: context.child_tasks.clone(),
+                    store: context.store.clone(),
+                },
+                RunAuthorizationInput {
+                    permission_coordinator: context.permission_coordinator.clone(),
+                    approval_registry: context.approval_registry.clone(),
+                    variant: next.2.variant,
+                    approval_mode: next.2.approval_mode,
+                    run_id: next.2.run_id.clone(),
+                    cancellation: run_cancellation.clone(),
+                    events: context.events.clone(),
+                },
                 Some(model_diagnostics.clone()),
             )
         }) {
             Ok(compiled) => {
-                let (agent, authorizer) = compiled.into_parts();
+                let (agent, authorizer, compactor) = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     next.1.stored.queued_message.clone()
                 } else {
@@ -203,7 +233,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     fault_driver(&session);
                     return;
                 }
-                let (input, cancellation) = {
+                let (mut input, cancellation) = {
                     let mut state = match session.lock_state() {
                         Ok(state) => state,
                         Err(_) => return,
@@ -239,7 +269,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             .expect("run exists")
                             .extend_message_ids([message.id]);
                     }
-                    let cancellation = context.root_cancellation.child_token();
+                    let cancellation = run_cancellation;
                     state.active_run = Some(ActiveRun {
                         run_id: next.2.run_id.clone(),
                         cancellation: cancellation.clone(),
@@ -258,51 +288,120 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     next.2.run_id.clone(),
                     context.store.clone(),
                 ));
-                match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    agent.start(
-                        input,
-                        ExecutionContext {
-                            cancellation,
-                            recorder,
-                            authorizer,
-                        },
-                    )
-                })) {
-                    Ok(AgentExecution {
+                let mut compaction_count = 0_u32;
+                let mut remaining_budget = agent.execution_budget().clone();
+                let (outcome, forced_error) = loop {
+                    let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        agent.start_with_budget(
+                            input.clone(),
+                            ExecutionContext {
+                                cancellation: cancellation.clone(),
+                                recorder: recorder.clone(),
+                                authorizer: authorizer.clone(),
+                            },
+                            remaining_budget.clone(),
+                        )
+                    }));
+                    let Ok(AgentExecution {
                         events,
                         completion,
                         control: _,
-                    }) => {
-                        supervise_run(
-                            session.clone(),
-                            next.2.run_id.clone(),
-                            events,
-                            completion,
-                            context.events.clone(),
-                            context.store.clone(),
-                            model_diagnostics,
-                        )
-                        .await;
-                        continue;
+                    }) = execution
+                    else {
+                        break (None, None);
+                    };
+                    let observed = observe_run_execution(
+                        session.clone(),
+                        next.2.run_id.clone(),
+                        events,
+                        completion,
+                        context.events.clone(),
+                        model_diagnostics.clone(),
+                    )
+                    .await;
+                    let Some(agent_core::ExecutionOutcome::CompactionRequired {
+                        reason,
+                        consumption,
+                        ..
+                    }) = observed.outcome.as_ref()
+                    else {
+                        break (observed.outcome, None);
+                    };
+                    consume_execution_budget(
+                        &mut remaining_budget,
+                        consumption.steps,
+                        consumption.tool_calls,
+                    );
+                    if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
+                        break (
+                            None,
+                            Some(RuntimeErrorInfo::new(
+                                assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
+                                format!(
+                                    "context compaction recovery limit reached (reason={})",
+                                    compaction_reason_label(*reason)
+                                ),
+                            )),
+                        );
                     }
-                    Err(_) => {
-                        match crate::run::settle_run(
-                            &session,
-                            &next.2.run_id,
-                            None,
-                            context.store.as_ref(),
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(snapshot) => {
-                                let _ = context.events.send(crate::run::finished_event(snapshot));
-                            }
-                            Err(_) => fault_driver(&session),
+                    compaction_count += 1;
+                    match compact_parent_context(
+                        compactor.as_ref(),
+                        &session,
+                        &next.2.run_id,
+                        context.store.as_ref(),
+                        cancellation.clone(),
+                    )
+                    .await
+                    {
+                        Ok(replacement) => {
+                            input = ExecutionInput {
+                                conversation: replacement,
+                            };
                         }
-                        continue;
+                        Err(error) if error.is_cancelled() || cancellation.is_cancelled() => {
+                            break (Some(agent_core::ExecutionOutcome::Cancelled), None);
+                        }
+                        Err(_) => {
+                            break (
+                                None,
+                                Some(RuntimeErrorInfo::new(
+                                    assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
+                                    format!(
+                                        "context compaction failed (reason={})",
+                                        compaction_reason_label(*reason)
+                                    ),
+                                )),
+                            );
+                        }
                     }
+                };
+                let settled = if let Some(error) = forced_error {
+                    crate::run::settle_run_with_error(
+                        &session,
+                        &next.2.run_id,
+                        error,
+                        context.store.as_ref(),
+                        Some(model_diagnostics.as_ref()),
+                    )
+                    .await
+                } else {
+                    crate::run::settle_run(
+                        &session,
+                        &next.2.run_id,
+                        outcome,
+                        context.store.as_ref(),
+                        Some(model_diagnostics.as_ref()),
+                    )
+                    .await
+                };
+                match settled {
+                    Ok(snapshot) => {
+                        let _ = context.events.send(crate::run::finished_event(snapshot));
+                    }
+                    Err(_) => fault_driver(&session),
                 }
+                continue;
             }
             Err(error) => Some(error.to_protocol_info()),
         };

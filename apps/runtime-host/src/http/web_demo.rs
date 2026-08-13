@@ -14,6 +14,7 @@ use super::{HttpState, auth::validate_demo_host};
 
 const INDEX_HTML: &str = include_str!("web_demo/index.html");
 const APP_JS: &str = include_str!("web_demo/app.js");
+const CHILD_TASKS_JS: &str = include_str!("web_demo/child-tasks.js");
 const STYLES_CSS: &str = include_str!("web_demo/styles.css");
 
 pub(super) fn router(state: HttpState) -> Router<HttpState> {
@@ -21,6 +22,7 @@ pub(super) fn router(state: HttpState) -> Router<HttpState> {
         .route("/demo", get(|| async { Redirect::permanent("/demo/") }))
         .route("/demo/", get(index))
         .route("/demo/app.js", get(javascript))
+        .route("/demo/child-tasks.js", get(child_tasks_javascript))
         .route("/demo/styles.css", get(styles))
         .layer(middleware::from_fn_with_state(state, validate_request))
 }
@@ -42,6 +44,10 @@ async fn index() -> Response {
 
 async fn javascript() -> Response {
     static_response("text/javascript; charset=utf-8", APP_JS, false)
+}
+
+async fn child_tasks_javascript() -> Response {
+    static_response("text/javascript; charset=utf-8", CHILD_TASKS_JS, false)
 }
 
 async fn styles() -> Response {
