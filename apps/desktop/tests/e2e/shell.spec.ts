@@ -21,12 +21,36 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   });
   expect(retired_demo.status).toBe(404);
   await page.addInitScript(({ serialized_bootstrap, workspace_directory }) => {
+    let callback_id = 0;
     Object.defineProperty(globalThis, "isTauri", { value: true });
+    Object.defineProperty(globalThis, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
+      value: { unregisterListener() {} },
+    });
     Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
       value: {
+        transformCallback() {
+          callback_id += 1;
+          return callback_id;
+        },
         invoke(command: string) {
+          if (command === "plugin:event|listen") {
+            callback_id += 1;
+            return Promise.resolve(callback_id);
+          }
+          if (command === "plugin:event|unlisten") {
+            return Promise.resolve();
+          }
           if (command === "bootstrap_runtime") {
             return Promise.resolve(JSON.parse(serialized_bootstrap));
+          }
+          if (command === "desktop_platform") {
+            return Promise.resolve("unsupported");
+          }
+          if (command === "take_pending_desktop_lifecycle_intent") {
+            return Promise.resolve(null);
+          }
+          if (command === "update_native_runtime_state") {
+            return Promise.resolve();
           }
           if (command === "load_desktop_preferences") {
             return Promise.resolve({

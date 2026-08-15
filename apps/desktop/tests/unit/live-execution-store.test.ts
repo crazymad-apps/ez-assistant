@@ -381,6 +381,86 @@ describe("LiveExecutionStore", () => {
     expect(store.runForSession("session-1")).toBeNull();
   });
 
+  it("keeps a terminal error visible until the next run starts", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.buffer(envelope(1, {
+      type: "model_attempt_failed",
+      session_id: "session-1",
+      run_id: "run-1",
+      attempt: 1,
+      kind: "authentication",
+      will_retry: false,
+    }));
+    store.buffer(envelope(1, {
+      type: "run_finished",
+      session_id: "session-1",
+      run_id: "run-1",
+      status: "failed",
+      error: { code: "model_execution_failed", message: "API Key 无效" },
+    }));
+    const failed_callback = frame as FrameRequestCallback | null;
+    failed_callback?.(0);
+
+    store.reconcileSession({
+      session: { session_id: "session-1" },
+      active_run: null,
+      conversation: { items: [] },
+    } as unknown as SessionViewSnapshot);
+
+    expect(store.runForSession("session-1")).toMatchObject({
+      run_id: "run-1",
+      status: "failed",
+      error_code: "model_execution_failed",
+      error_message: "API Key 无效",
+      model_failure_kind: "authentication",
+    });
+
+    store.buffer(envelope(2, {
+      type: "run_accepted",
+      session_id: "session-1",
+      run_id: "run-2",
+    }));
+    const accepted_callback = frame as FrameRequestCallback | null;
+    accepted_callback?.(0);
+
+    expect(store.runForSession("session-1")?.run_id).toBe("run-2");
+    expect(store.runs.size).toBe(1);
+  });
+
+  it("clears a retried model failure once the stream is established", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.buffer(envelope(1, {
+      type: "model_attempt_failed",
+      session_id: "session-1",
+      run_id: "run-1",
+      attempt: 1,
+      kind: "connection",
+      will_retry: true,
+    }));
+    store.buffer(envelope(2, {
+      type: "model_stream_established",
+      session_id: "session-1",
+      run_id: "run-1",
+      attempt: 2,
+    }));
+    const callback = frame as FrameRequestCallback | null;
+    callback?.(0);
+
+    expect(store.runForSession("session-1")?.model_failure_kind).toBeNull();
+  });
+
   it("applies buffered terminal events before reconciling a newer session view", () => {
     let frame: FrameRequestCallback | null = null;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

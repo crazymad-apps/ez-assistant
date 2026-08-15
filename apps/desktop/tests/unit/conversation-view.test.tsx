@@ -303,6 +303,40 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.getByText("当前为实时详情，可靠记录同步后可查看完整内容。")).toBeInTheDocument();
   });
 
+  it("shows one actionable failure state without leaking runtime diagnostics", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = conversationStore();
+    emitLive(store, [{
+      type: "model_attempt_failed",
+      session_id: "session-1",
+      run_id: "run-failed",
+      attempt: 1,
+      kind: "configuration",
+      will_retry: false,
+    }, {
+      type: "run_finished",
+      session_id: "session-1",
+      run_id: "run-failed",
+      status: "failed",
+      error: {
+        code: "model_execution_failed",
+        message: "model execution failed before stream establishment",
+      },
+    }], () => frame);
+
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("当前模型配置无法用于此会话，请检查配置或切换模型后重试。");
+    expect(screen.queryByText("正在准备…")).not.toBeInTheDocument();
+    expect(screen.queryByText(/model execution failed before stream establishment/)).not.toBeInTheDocument();
+    expect(screen.queryByText("执行失败")).not.toBeInTheDocument();
+  });
+
   it("opens a formal child task branch from the parent turn", () => {
     const store = conversationStore();
     store.projection.applySessionSnapshot({

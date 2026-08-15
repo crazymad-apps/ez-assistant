@@ -25,11 +25,12 @@ use assistant_runtime::{
     ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
     PendingChildToolExchange, PendingToolExchange, PermissionDocument, PermissionEffect,
-    PermissionFileRevision, PermissionFileScope, PermissionFileStore, QueuePriorityChange,
-    RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork, SessionPinnedChange,
-    SessionTitleChange, StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement,
-    StoredConversationState, StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    PermissionFileOperation, PermissionFileRevision, PermissionFileScope, PermissionFileStore,
+    QueuePriorityChange, RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreErrorKind, StoredAttachmentState,
+    StoredChildTaskSettlement, StoredConversationState, StoredRunSettlement, StoredSession,
+    StoredSessionLifecycle, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -80,6 +81,68 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         created_at_ms: 1_000,
     }
+}
+
+fn assert_default_session_permissions(session: &StoredSession) {
+    let document = PermissionDocument::parse(
+        &fs::read(
+            Path::new(&session.environment.session_private_directory).join("permissions.json"),
+        )
+        .expect("default session permissions"),
+    )
+    .expect("valid default session permissions");
+    assert_eq!(document.rules.len(), 11);
+    assert!(
+        document
+            .rules
+            .iter()
+            .all(|rule| rule.effect == PermissionEffect::Allow)
+    );
+    assert_eq!(
+        document
+            .rules
+            .iter()
+            .filter(|rule| rule.variants == [assistant_protocol::AgentVariant::Build])
+            .count(),
+        3
+    );
+    assert_eq!(
+        document
+            .rules
+            .iter()
+            .filter(|rule| {
+                matches!(
+                    &rule.matcher,
+                    assistant_runtime::PermissionMatcher::File(matcher)
+                        if matcher.path == session.environment.session_private_directory
+                            && matcher.path_match == assistant_runtime::PathMatch::Recursive
+                )
+            })
+            .count(),
+        7
+    );
+    assert_eq!(
+        document
+            .rules
+            .iter()
+            .filter(|rule| {
+                matches!(
+                    &rule.matcher,
+                    assistant_runtime::PermissionMatcher::File(matcher)
+                        if matcher.path == session.environment.session_attachment_directory
+                            && matcher.path_match == assistant_runtime::PathMatch::Recursive
+                            && matches!(
+                                matcher.operation,
+                                PermissionFileOperation::Read
+                                    | PermissionFileOperation::List
+                                    | PermissionFileOperation::Find
+                                    | PermissionFileOperation::Search
+                            )
+                )
+            })
+            .count(),
+        4
+    );
 }
 
 fn user_message(value: &str, text: &str) -> ConversationMessage {
@@ -428,6 +491,7 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
         .expect("fork session");
     assert_eq!(forked.session.session_id, forked_id);
     assert_eq!(forked.session.body_generation, 1);
+    assert_default_session_permissions(&forked.session);
     assert_eq!(forked.conversation, source_conversation);
     assert_eq!(
         engine
@@ -1258,6 +1322,54 @@ fn runtime_recovery_backfills_only_missing_workspace_permission_files() {
 }
 
 #[test]
+fn session_creation_preserves_an_existing_permission_file() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = new_session("s-custom-permissions", &engine.sessions_directory);
+    let permission_path =
+        Path::new(&session.environment.session_private_directory).join("permissions.json");
+    fs::create_dir_all(permission_path.parent().expect("permission parent"))
+        .expect("session private directory");
+    let custom = br#"{"schema_version":1,"rules":[]}
+"#;
+    fs::write(&permission_path, custom).expect("custom permissions");
+
+    engine.create_session(session).expect("create session");
+
+    assert_eq!(
+        fs::read(permission_path).expect("custom file remains"),
+        custom
+    );
+}
+
+#[test]
+fn runtime_recovery_backfills_only_missing_session_permission_files() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    let first = engine
+        .create_session(new_session("s-backfill-default", &sessions_directory))
+        .expect("create first session");
+    let second = engine
+        .create_session(new_session("s-backfill-custom", &sessions_directory))
+        .expect("create second session");
+    let first_path =
+        Path::new(&first.environment.session_private_directory).join("permissions.json");
+    let second_path =
+        Path::new(&second.environment.session_private_directory).join("permissions.json");
+    fs::remove_file(&first_path).expect("simulate legacy missing permissions");
+    let custom = br#"{"schema_version":1,"rules":[]}
+"#;
+    fs::write(&second_path, custom).expect("custom permissions");
+    drop(engine);
+
+    let _recovered = open_engine(&root);
+
+    assert_default_session_permissions(&first);
+    assert_eq!(fs::read(second_path).expect("custom file remains"), custom);
+}
+
+#[test]
 fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_prompt_rewrite() {
     let root = TempDir::new().expect("runtime home");
     let user_directory = TempDir::new().expect("user workspace");
@@ -1281,6 +1393,7 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
     );
     assert!(Path::new(&created.environment.session_attachment_directory).is_dir());
     assert!(Path::new(&created.environment.session_private_directory).is_dir());
+    assert_default_session_permissions(&created);
 
     let mut second_bound = new_session("s-bound-two", &engine.sessions_directory);
     second_bound.environment.workspace_id = Some(workspace.workspace_id.clone());
@@ -1546,7 +1659,10 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
             .load_permission_file(scope)
             .await
             .expect("load current permission");
-        if matches!(scope, PermissionFileScope::Workspace(_)) {
+        if matches!(
+            scope,
+            PermissionFileScope::Workspace(_) | PermissionFileScope::Session(_)
+        ) {
             assert!(matches!(
                 current.revision,
                 PermissionFileRevision::Content(_)

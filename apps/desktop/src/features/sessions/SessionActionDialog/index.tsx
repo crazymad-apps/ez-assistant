@@ -1,5 +1,5 @@
-import { useEffect, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import type { ReactNode } from "react";
+import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
 import styles from "./index.module.scss";
 
@@ -22,26 +22,14 @@ export function SessionActionDialog({
   on_cancel,
   on_confirm,
 }: SessionActionDialogProps) {
-  useEffect(() => {
-    const handle_key_down = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !is_pending) {
-        on_cancel();
-      }
-    };
-    window.addEventListener("keydown", handle_key_down);
-    return () => window.removeEventListener("keydown", handle_key_down);
-  }, [is_pending, on_cancel]);
-
-  return createPortal(
-    <div
-      className={styles.backdrop}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !is_pending) {
-          on_cancel();
-        }
-      }}
+  return (
+    <Dialog
+      aria_labelledby="session-action-title"
+      backdrop_class_name={styles.backdrop}
+      dialog_class_name={styles.dialog}
+      dismissible={!is_pending}
+      on_close={on_cancel}
     >
-      <section aria-labelledby="session-action-title" aria-modal="true" className={styles.dialog} role="dialog">
         <header className={styles.header}>
           <h2 id="session-action-title">{title}</h2>
           <button aria-label="关闭" disabled={is_pending} onClick={on_cancel} type="button">
@@ -60,8 +48,6 @@ export function SessionActionDialog({
             {is_pending ? "正在处理…" : confirm_label}
           </button>
         </footer>
-      </section>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }

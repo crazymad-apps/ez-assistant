@@ -207,8 +207,8 @@ pub enum ModelKeyError {
     /// 首字符必须是 ASCII 字母或数字。
     #[error("model_key must start with an ASCII letter or digit")]
     InvalidStart,
-    /// 后续字符只能是 ASCII 字母、数字、连字符或下划线。
-    #[error("model_key may contain only ASCII letters, digits, hyphens, and underscores")]
+    /// 后续字符只能是 ASCII 字母、数字、点号、连字符或下划线。
+    #[error("model_key may contain only ASCII letters, digits, dots, hyphens, and underscores")]
     InvalidCharacter,
 }
 
@@ -218,7 +218,7 @@ pub enum ModelKeyError {
 pub struct ModelKey(String);
 
 impl ModelKey {
-    /// 按 `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` 校验并构造 key。
+    /// 按 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` 校验并构造 key。
     pub fn new(value: impl Into<String>) -> Result<Self, ModelKeyError> {
         let value = value.into();
         let bytes = value.as_bytes();
@@ -233,7 +233,7 @@ impl ModelKey {
         }
         if !bytes[1..]
             .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
         {
             return Err(ModelKeyError::InvalidCharacter);
         }
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn model_key_enforces_the_configuration_grammar() {
-        for valid in ["a", "A1", "deepseek-chat", "local_model"] {
+        for valid in ["a", "A1", "deepseek-chat", "local_model", "qwen3.8-max"] {
             let key = ModelKey::new(valid).expect("valid model key");
             assert_eq!(key.as_str(), valid);
         }
@@ -412,7 +412,7 @@ mod tests {
             ModelKeyError::InvalidStart
         );
         assert_eq!(
-            ModelKey::new("model.key").unwrap_err(),
+            ModelKey::new("model key").unwrap_err(),
             ModelKeyError::InvalidCharacter
         );
         assert_eq!(

@@ -1,13 +1,15 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.14.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "npm run check:protocol && tsc && vite build",
     "generate:icon:macos": "node scripts/generate-macos-icon.mjs",
     "check:icon:macos": "node scripts/generate-macos-icon.mjs --check",
+    "generate:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs",
+    "check:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs --check",
     "generate:protocol": "cargo run -p assistant-protocol --example export_typescript",
     "check:protocol": "cargo run -p assistant-protocol --example export_typescript -- --check",
     "lint": "oxlint --ignore-pattern src/generated/** src tests vite.config.ts vitest.config.ts playwright.config.ts",

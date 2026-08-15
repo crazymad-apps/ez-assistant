@@ -1,4 +1,4 @@
-import { action, makeObservable, observable, runInAction } from "mobx";
+import { action, makeObservable, observable, reaction, runInAction, type IReactionDisposer } from "mobx";
 import type {
   AgentVariant,
   AttachmentId,
@@ -21,18 +21,22 @@ import type {
 import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import { RuntimeClientError } from "../runtime-client/RuntimeClient";
 import { ConnectionStore } from "./ConnectionStore";
+import { DesktopLifecycleStore } from "./DesktopLifecycleStore";
 import { LiveExecutionStore } from "./LiveExecutionStore";
 import { NavigationStore } from "./NavigationStore";
 import { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
 import { RuntimeProjectionStore } from "./RuntimeProjectionStore";
 import { RunInteractionController } from "./RunInteractionController";
 import { SessionManagementController } from "./SessionManagementController";
+import { SettingsStore } from "./SettingsStore";
 
 export class RootStore {
   readonly connection = new ConnectionStore();
   readonly projection = new RuntimeProjectionStore();
   readonly live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
+  readonly settings: SettingsStore;
+  readonly desktop_lifecycle: DesktopLifecycleStore;
   pending_session_action = false;
   pending_workspace_action = false;
   composer_pending = false;
@@ -45,6 +49,7 @@ export class RootStore {
   readonly #session_management: SessionManagementController;
   #disposed = false;
   #preferences_save_timer: number | null = null;
+  #runtime_state_disposer: IReactionDisposer;
 
   constructor() {
     this.#runtime = new RuntimeLifecycleCoordinator({
@@ -55,6 +60,33 @@ export class RootStore {
       report_interaction_error: (message) => {
         this.interaction_error = message;
       },
+    });
+    this.desktop_lifecycle = new DesktopLifecycleStore({
+      get_application: () => this.projection.application,
+      prepare_runtime_mutation: (kind) => this.#runtime.prepareForNativeRuntimeMutation(kind),
+      reconnect_runtime: (bootstrap) => this.#runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
+      mark_runtime_stopped: () => this.connection.markRuntimeStopped(),
+      save_preferences: () => this.#schedulePreferencesSave(),
+    });
+    this.desktop_lifecycle.start();
+    this.#runtime_state_disposer = reaction(
+      () => this.connection.state,
+      (state) => this.desktop_lifecycle.syncRuntimeState(state),
+      { fireImmediately: true },
+    );
+    this.settings = new SettingsStore({
+      get_client: () => this.#runtime.client,
+      get_permission_context: () => {
+        const session_id = this.navigation.selected_session_id;
+        const session = this.projection.application?.active_sessions.find(
+          (candidate) => candidate.session_id === session_id,
+        );
+        return {
+          session_id,
+          workspace_id: session?.workspace_id ?? null,
+        };
+      },
+      refresh_application: () => this.#runtime.loadApplication(),
     });
     this.#session_management = new SessionManagementController({
       connection: this.connection,
@@ -132,7 +164,10 @@ export class RootStore {
     try {
       const preferences = await loadDesktopPreferences();
       if (!this.#disposed) {
-        runInAction(() => this.navigation.applyPreferences(preferences));
+        runInAction(() => {
+          this.navigation.applyPreferences(preferences);
+          this.desktop_lifecycle.applyPreferences(preferences);
+        });
       }
     } catch {
       // Missing/corrupt device preferences intentionally fall back to design defaults.
@@ -385,6 +420,8 @@ export class RootStore {
   dispose(): void {
     this.#disposed = true;
     this.#runtime.dispose();
+    this.desktop_lifecycle.dispose();
+    this.#runtime_state_disposer();
     if (this.#preferences_save_timer !== null) {
       window.clearTimeout(this.#preferences_save_timer);
       this.#preferences_save_timer = null;
@@ -401,6 +438,7 @@ export class RootStore {
         left_sidebar_open: this.navigation.left_sidebar_open,
         right_sidebar_open: this.navigation.right_sidebar_open,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
+        close_behavior: this.desktop_lifecycle.close_behavior,
       }).catch(() => undefined);
     }, 120);
   }

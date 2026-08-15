@@ -16,7 +16,7 @@ import styles from "./index.module.scss";
 
 type DropdownMenuContextValue = {
   readonly content_id: string;
-  readonly focus_first_item_on_open_ref: RefObject<boolean>;
+  readonly focus_item_on_open_ref: RefObject<"first" | "last" | null>;
   readonly menu_ref: RefObject<HTMLDivElement | null>;
   readonly open: boolean;
   readonly setOpen: (open: boolean) => void;
@@ -46,7 +46,7 @@ const DropdownMenuContext = createContext<DropdownMenuContextValue | null>(null)
 export function DropdownMenu(props: DropdownMenuProps) {
   const [open, setOpen] = useState(false);
   const content_id = useId();
-  const focus_first_item_on_open_ref = useRef(false);
+  const focus_item_on_open_ref = useRef<"first" | "last" | null>(null);
   const trigger_ref = useRef<HTMLButtonElement>(null);
   const menu_ref = useRef<HTMLDivElement>(null);
 
@@ -84,7 +84,7 @@ export function DropdownMenu(props: DropdownMenuProps) {
 
   const context: DropdownMenuContextValue = {
     content_id,
-    focus_first_item_on_open_ref,
+    focus_item_on_open_ref,
     menu_ref,
     open,
     setOpen,
@@ -102,7 +102,7 @@ export function DropdownMenu(props: DropdownMenuProps) {
 
 export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
   const menu = useDropdownMenu();
-  const { onClick, ...button_props } = props;
+  const { onClick, onKeyDown, ...button_props } = props;
 
   return (
     <button
@@ -115,9 +115,17 @@ export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
         onClick?.(event);
         if (!event.defaultPrevented) {
           if (!menu.open) {
-            menu.focus_first_item_on_open_ref.current = event.detail === 0;
+            menu.focus_item_on_open_ref.current = event.detail === 0 ? "first" : null;
           }
           menu.setOpen(!menu.open);
+        }
+      }}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (!event.defaultPrevented && !menu.open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+          event.preventDefault();
+          menu.focus_item_on_open_ref.current = event.key === "ArrowDown" ? "first" : "last";
+          menu.setOpen(true);
         }
       }}
       ref={menu.trigger_ref}
@@ -173,12 +181,14 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
     if (!menu.open || !position.ready) {
       return;
     }
-    if (menu.focus_first_item_on_open_ref.current) {
-      content_ref.current
-        ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
-        ?.focus();
+    const focus_intent = menu.focus_item_on_open_ref.current;
+    if (focus_intent) {
+      const items = getMenuItems(content_ref.current);
+      const target = focus_intent === "first" ? items[0] : items.at(-1);
+      target?.focus();
+      menu.focus_item_on_open_ref.current = null;
     }
-  }, [content_ref, menu.focus_first_item_on_open_ref, menu.open, position.ready]);
+  }, [content_ref, menu.focus_item_on_open_ref, menu.open, position.ready]);
 
   if (!menu.open) {
     return null;
@@ -192,6 +202,26 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
       className={[styles.content, className].filter(Boolean).join(" ")}
       data-position-ready={position.ready}
       id={menu.content_id}
+      onKeyDown={(event) => {
+        content_props.onKeyDown?.(event);
+        if (event.defaultPrevented) {
+          return;
+        }
+        const items = getMenuItems(content_ref.current);
+        if (items.length === 0) {
+          return;
+        }
+        const current_index = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+        let next_index: number | null = null;
+        if (event.key === "ArrowDown") next_index = (current_index + 1) % items.length;
+        if (event.key === "ArrowUp") next_index = (current_index - 1 + items.length) % items.length;
+        if (event.key === "Home") next_index = 0;
+        if (event.key === "End") next_index = items.length - 1;
+        if (next_index !== null) {
+          event.preventDefault();
+          items[next_index]?.focus();
+        }
+      }}
       ref={content_ref}
       role="menu"
       style={{ ...style, left: position.left, top: position.top }}
@@ -224,4 +254,10 @@ function useDropdownMenu(): DropdownMenuContextValue {
     throw new Error("DropdownMenu compound components must be used within DropdownMenu");
   }
   return context;
+}
+
+function getMenuItems(container: HTMLElement | null): HTMLButtonElement[] {
+  return container
+    ? Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+    : [];
 }

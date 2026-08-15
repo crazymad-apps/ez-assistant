@@ -178,6 +178,12 @@ Worker 池。
   按需读取。结构化文件 Authorizer 对 Runtime Home 下任意 Session 的附件目录执行
   Write/Edit/Delete 均拒绝，但允许 Read/List/Search。该逻辑路径规则不能阻止 Shell、同一
   OS 用户或 symlink 目标绕过，因此不得描述为不可绕过的附件隔离。
+- Workspace 与 Session 的默认信任均由 Host 生成的普通 `permissions.json` 表达，不在 Runtime
+  Authorizer 中隐式放行。Session 创建、Fork 和启动恢复只在文件缺失时生成：Plan/Build 默认读取
+  当前 Session 私有目录及附件目录，Build 默认变更 Session 私有目录；不得覆盖或合并既有文件，
+  不得授权 Session 父目录或其他 Session。Session 权限文件位于可写私有目录中，因此 Host
+  infrastructure policy 必须拒绝结构化 Write/Edit/Delete 直接修改该控制文件；Shell 边界仍按
+  当前用户权限如实说明。
 - 新 Session 的基础 System Prompt 只要求按需使用本 Run 可用工具，不把某一种 Host 模式或
   工具名单冻结进正文；旧 Session 已持久化的 Prompt 不在恢复时改写。
 - v0.11.0 M5 扩展私有 Web Demo，覆盖 Workspace 登记与选择、Session 创建、附件先上传后提交、

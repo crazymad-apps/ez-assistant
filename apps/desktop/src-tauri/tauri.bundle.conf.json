@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "active": true,
     "externalBin": ["binaries/ez-assistant-runtime"]
   }
 }

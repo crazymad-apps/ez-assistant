@@ -16,9 +16,7 @@ async fn connection_validation_uses_only_the_fixed_minimal_request_and_creates_n
     );
 
     let result = runtime
-        .validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
         .expect("validation result");
     assert_eq!(result.outcome, ConnectionValidationOutcome::Succeeded);
@@ -60,6 +58,46 @@ async fn connection_validation_uses_only_the_fixed_minimal_request_and_creates_n
 }
 
 #[tokio::test]
+async fn candidate_connection_validation_uses_unsaved_form_values_without_persisting_them() {
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
+    let model: Arc<dyn ModelService> = Arc::new(ScriptedModelService::completing(
+        model_capabilities(false),
+        8_192,
+        assistant_text("validation-response", "OK"),
+    ));
+    let factory = Arc::new(RecordingModelFactory::new([model]));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source.clone(),
+        factory.clone(),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .expect("initial reload");
+    let original = source.document.lock().expect("source lock").clone();
+
+    let result = runtime
+        .validate_model_connection(ValidateModelConnectionRequest {
+            target: ModelConnectionTarget::Candidate(model_input(
+                "candidate",
+                "https://api.example.test/v1",
+                assistant_protocol::ModelCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("candidate-secret".to_owned()),
+                ),
+            )),
+        })
+        .await
+        .expect("candidate validation result");
+    assert_eq!(result.outcome, ConnectionValidationOutcome::Succeeded);
+    assert_eq!(factory.api_keys(), ["candidate-secret"]);
+    assert_eq!(*source.document.lock().expect("source lock"), original);
+}
+
+#[tokio::test]
 async fn deepseek_connection_validation_injects_only_its_required_profile_options() {
     let model = Arc::new(ScriptedModelService::completing(
         model_capabilities(false),
@@ -79,9 +117,7 @@ async fn deepseek_connection_validation_injects_only_its_required_profile_option
     );
 
     let result = runtime
-        .validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
         .expect("validation result");
     assert_eq!(result.outcome, ConnectionValidationOutcome::Succeeded);
@@ -165,9 +201,7 @@ async fn connection_validation_maps_structured_model_failures_without_exposing_m
         ));
         let runtime = runtime(model);
         let result = runtime
-            .validate_model_connection(ValidateModelConnectionRequest {
-                model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-            })
+            .validate_model_connection(configured_validation_request())
             .await
             .expect("classified validation result");
         let ConnectionValidationOutcome::Failed(failure) = result.outcome else {
@@ -184,9 +218,7 @@ async fn connection_validation_maps_structured_model_failures_without_exposing_m
         32,
     );
     let result = runtime
-        .validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
         .expect("factory failure is a validation result");
     assert!(matches!(
@@ -219,9 +251,7 @@ async fn connection_validation_reuses_retry_policy_and_rejects_malformed_streams
         ),
     );
     let retried = retry_runtime
-        .validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
         .expect("retried validation");
     assert_eq!(retried.outcome, ConnectionValidationOutcome::Succeeded);
@@ -233,9 +263,7 @@ async fn connection_validation_reuses_retry_policy_and_rejects_malformed_streams
         [ModelScript::Events(Vec::new())],
     ));
     let malformed = runtime(malformed_model)
-        .validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
         .expect("malformed stream result");
     assert!(matches!(
@@ -260,9 +288,7 @@ async fn connection_validation_enforces_timeout_and_shutdown_cancellation() {
     );
     let timed_out = tokio::time::timeout(
         Duration::from_secs(1),
-        timeout_runtime.validate_model_connection(ValidateModelConnectionRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        }),
+        timeout_runtime.validate_model_connection(configured_validation_request()),
     )
     .await
     .expect("runtime timeout completes")
@@ -284,9 +310,7 @@ async fn connection_validation_enforces_timeout_and_shutdown_cancellation() {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .validate_model_connection(ValidateModelConnectionRequest {
-                    model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-                })
+                .validate_model_connection(configured_validation_request())
                 .await
         })
     };

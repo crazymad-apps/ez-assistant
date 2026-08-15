@@ -102,7 +102,11 @@ export class LiveExecutionStore {
     for (const [key, run] of this.runs) {
       const is_current_session = run.session_id === view.session.session_id;
       const is_authoritatively_active = view.active_run?.run_id === run.run_id;
-      if (is_current_session && (!view.active_run || (run.status !== "accepted" && !is_authoritatively_active))) {
+      const retain_terminal_error = !view.active_run
+        && run.error_message !== null
+        && (run.status === "failed" || run.status === "interrupted" || run.status === "compaction_required");
+      if (is_current_session && (!view.active_run || (run.status !== "accepted" && !is_authoritatively_active))
+        && !retain_terminal_error) {
         this.runs.delete(key);
         continue;
       }
@@ -273,6 +277,12 @@ export class LiveExecutionStore {
     let next = current;
     switch (event.type) {
       case "run_accepted":
+        for (const [existing_key, existing_run] of this.runs) {
+          if (existing_key !== key && existing_run.session_id === event.session_id
+            && existing_run.error_message !== null) {
+            this.runs.delete(existing_key);
+          }
+        }
         next = { ...current, status: "accepted" };
         break;
       case "run_started":
@@ -280,6 +290,15 @@ export class LiveExecutionStore {
         break;
       case "run_cancelling":
         next = { ...current, status: "cancelling" };
+        break;
+      case "model_attempt_failed":
+        next = {
+          ...current,
+          model_failure_kind: event.will_retry ? current.model_failure_kind : event.kind,
+        };
+        break;
+      case "model_stream_established":
+        next = { ...current, model_failure_kind: null };
         break;
       case "step_started":
         next = {
@@ -326,7 +345,9 @@ export class LiveExecutionStore {
         next = {
           ...current,
           status: event.status,
-          error_message: event.error?.message ?? current.error_message,
+          error_code: event.error?.code ?? null,
+          error_message: event.error?.message ?? null,
+          model_failure_kind: event.status === "failed" ? current.model_failure_kind : null,
         };
         break;
       default:
@@ -363,6 +384,7 @@ export class LiveExecutionStore {
       this.runs.set(key, {
         ...current,
         status: snapshot.status,
+        error_code: snapshot.error?.code ?? current.error_code,
         error_message: snapshot.error?.message ?? current.error_message,
         active_step,
         steps,
@@ -392,7 +414,9 @@ export class LiveExecutionStore {
       active_step,
       steps: segments.length > 0 ? [{ step: active_step, segments }] : [],
       usage: null,
+      error_code: snapshot.error?.code ?? null,
       error_message: snapshot.error?.message ?? null,
+      model_failure_kind: null,
     });
   }
 }
@@ -403,6 +427,8 @@ function isLiveExecutionEvent(envelope: RuntimeEventEnvelope): boolean {
     "run_accepted",
     "run_started",
     "run_cancelling",
+    "model_attempt_failed",
+    "model_stream_established",
     "step_started",
     "text_delta",
     "reasoning_delta",

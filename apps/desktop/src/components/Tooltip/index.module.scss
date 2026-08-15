@@ -1,0 +1,24 @@
+.anchor {
+  display: contents;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: var(--ez-z-popover);
+  max-width: min(260px, calc(100vw - 16px));
+  padding: 5px 8px;
+  border-radius: 6px;
+  opacity: 0;
+  color: #fff;
+  background: #30343d;
+  box-shadow: var(--ez-shadow-small);
+  font-size: var(--ez-font-small);
+  line-height: 1.35;
+  pointer-events: none;
+  transition: opacity var(--ez-motion-fast) var(--ez-ease-standard);
+  white-space: normal;
+
+  &[data-position-ready="true"] {
+    opacity: 1;
+  }
+}

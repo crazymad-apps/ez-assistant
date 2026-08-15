@@ -8,38 +8,43 @@ mod error;
 mod event;
 mod host;
 mod id;
+mod permission;
 mod product;
 mod snapshot;
 
 pub use command::{
     ArchiveSessionRequest, ArchiveSessionResult, CancelChildTaskRequest, CancelChildTaskResult,
     CancelQueuedInputRequest, CancelQueuedInputResult, CancelRunRequest, CancelRunResult,
-    ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    CreateSessionRequest, CreateSessionResult, DecideApprovalRequest, DecideApprovalResult,
-    DeleteSessionImpact, DeleteSessionRequest, DeleteSessionResult, ForkSessionRequest,
-    ForkSessionResult, GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest,
-    GetChildTaskResult, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
-    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
-    GetWorkspaceRequest, GetWorkspaceResult, ListAttachmentsRequest, ListAttachmentsResult,
-    ListChildTasksRequest, ListChildTasksResult, ListModelsRequest, ListModelsResult,
-    ListPendingApprovalsRequest, ListPendingApprovalsResult, ListRunsRequest, ListRunsResult,
-    ListSessionsRequest, ListSessionsResult, ListWorkspacesRequest, ListWorkspacesResult,
-    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
-    ReenterFromUserMessageResult, RegisterWorkspaceRequest, RegisterWorkspaceResult,
-    ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest, ReloadPermissionsResult,
-    RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
+    ConfigurationMutationResult, ConnectionValidationFailure, ConnectionValidationFailureKind,
+    ConnectionValidationOutcome, CreateModelRequest, CreateSessionRequest, CreateSessionResult,
+    DecideApprovalRequest, DecideApprovalResult, DeleteModelRequest, DeleteSessionImpact,
+    DeleteSessionRequest, DeleteSessionResult, ForkSessionRequest, ForkSessionResult,
+    GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest, GetChildTaskResult,
+    GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult,
+    GetPermissionDocumentRequest, GetPermissionDocumentResult, GetRunRequest, GetRunResult,
+    GetSessionRequest, GetSessionResult, GetWorkspaceRequest, GetWorkspaceResult,
+    ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
+    ListModelsRequest, ListModelsResult, ListPendingApprovalsRequest, ListPendingApprovalsResult,
+    ListRunsRequest, ListRunsResult, ListSessionsRequest, ListSessionsResult,
+    ListWorkspacesRequest, ListWorkspacesResult, ModelConfigurationInput, ModelConnectionTarget,
+    ModelCredentialChange, PrepareDeleteSessionRequest, PrepareDeleteSessionResult,
+    ReenterFromUserMessageRequest, ReenterFromUserMessageResult, RegisterWorkspaceRequest,
+    RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest,
+    ReloadPermissionsResult, RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest,
+    RenameSessionResult, ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult,
     RestoreSessionRequest, RestoreSessionResult, ResumeSessionRequest, ResumeSessionResult,
-    RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult,
-    SetEmptySessionWorkspaceRequest, SetEmptySessionWorkspaceResult, SetMessageFeedbackRequest,
-    SetMessageFeedbackResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
-    SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
-    SetSessionVariantRequest, SetSessionVariantResult, ShutdownRuntimeRequest,
-    ShutdownRuntimeResult, SubmitInputRequest, SubmitInputResult, UploadAttachmentResult,
-    ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult, SecretValue,
+    SetDefaultModelRequest, SetEmptySessionWorkspaceRequest, SetEmptySessionWorkspaceResult,
+    SetMessageFeedbackRequest, SetMessageFeedbackResult, SetSessionApprovalModeRequest,
+    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
+    SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionVariantRequest,
+    SetSessionVariantResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, SubmitInputRequest,
+    SubmitInputResult, UpdateModelRequest, UploadAttachmentResult, ValidateModelConnectionRequest,
+    ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
-    ModelConfiguration,
+    ModelConfiguration, ModelConfigurationOrigin,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{ChildTaskEvent, RuntimeEvent, RuntimeEventEnvelope};
@@ -50,6 +55,13 @@ pub use id::{
     ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, IdempotencyKey,
     IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId, ResourceRefId, RunId,
     SessionId, ToolCallId, WorkspaceId,
+};
+pub use permission::{
+    PermissionCommandMatch, PermissionDocumentDraft, PermissionDocumentRevision,
+    PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileMatcher,
+    PermissionFileOperationDefinition, PermissionGeneralMatcher, PermissionPathMatch,
+    PermissionProcessModeDefinition, PermissionRuleDefinition, PermissionRuleEffect,
+    PermissionRuleMatcher, PermissionShellMatcher,
 };
 pub use product::{
     ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,

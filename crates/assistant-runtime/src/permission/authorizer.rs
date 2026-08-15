@@ -24,30 +24,42 @@ pub(crate) type ApprovalFuture<'a> = Pin<Box<dyn Future<Output = ApprovalResolut
 #[derive(Clone, Debug)]
 pub(crate) struct ApprovalResolution {
     authorization: ToolAuthorization,
+    recheck_ask_rules: bool,
 }
 
 impl ApprovalResolution {
     pub(crate) fn allowed(_approval_id: ApprovalId, _decision: ApprovalDecision) -> Self {
         Self {
             authorization: ToolAuthorization::Allow,
+            recheck_ask_rules: false,
+        }
+    }
+
+    pub(crate) fn allowed_by_rule(_approval_id: ApprovalId) -> Self {
+        Self {
+            authorization: ToolAuthorization::Allow,
+            recheck_ask_rules: true,
         }
     }
 
     pub(crate) fn user_denied(_approval_id: ApprovalId, _decision: ApprovalDecision) -> Self {
         Self {
             authorization: deny("tool call was denied by the user"),
+            recheck_ask_rules: false,
         }
     }
 
     pub(crate) fn cancelled(_approval_id: ApprovalId, reason: &'static str) -> Self {
         Self {
             authorization: deny(reason),
+            recheck_ask_rules: false,
         }
     }
 
     pub(crate) fn denied(reason: &'static str) -> Self {
         Self {
             authorization: deny(reason),
+            recheck_ask_rules: false,
         }
     }
 }
@@ -207,7 +219,10 @@ impl RuntimeToolAuthorizer {
         }
         // 审批可能等待很久。期间用户可以 reload 新规则，Session/Host 状态也可能变化；
         // 因此旧的 Allow 只是继续检查的许可，不能直接成为最终执行许可。
-        if let Some(evaluation) = self.current_hard_or_rule_denial(invocation, batch).await {
+        if let Some(evaluation) = self
+            .current_hard_or_rule_denial(invocation, batch, resolution.recheck_ask_rules)
+            .await
+        {
             evaluation
         } else {
             resolution.authorization
@@ -218,6 +233,7 @@ impl RuntimeToolAuthorizer {
         &self,
         invocation: &ResolvedToolInvocation,
         batch: &ResolvedToolBatch,
+        recheck_ask_rules: bool,
     ) -> Option<ToolAuthorization> {
         if self.variant == AgentVariant::Plan
             && let Some(facts) = invocation.facts::<FileAuthorizationFacts>()
@@ -249,7 +265,8 @@ impl RuntimeToolAuthorizer {
                 ));
             };
             if document.rules.iter().any(|rule| {
-                rule.effect == super::PermissionEffect::Deny
+                (rule.effect == super::PermissionEffect::Deny
+                    || (recheck_ask_rules && rule.effect == super::PermissionEffect::Ask))
                     && matches_rule(rule, self.variant, invocation)
             }) {
                 return Some(deny("tool call became denied while approval was pending"));

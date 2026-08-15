@@ -178,8 +178,36 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ReloadConfig(runtime.reload_config(request).await?),
             false,
         ),
+        RuntimeCommand::CreateModel(request) => (
+            RuntimeCommandResult::CreateModel(runtime.create_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::UpdateModel(request) => (
+            RuntimeCommandResult::UpdateModel(runtime.update_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::DeleteModel(request) => (
+            RuntimeCommandResult::DeleteModel(runtime.delete_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetDefaultModel(request) => (
+            RuntimeCommandResult::SetDefaultModel(runtime.set_default_model(request).await?),
+            false,
+        ),
         RuntimeCommand::ReloadPermissions(request) => (
             RuntimeCommandResult::ReloadPermissions(runtime.reload_permissions(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetPermissionDocument(request) => (
+            RuntimeCommandResult::GetPermissionDocument(
+                runtime.get_permission_document(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ReplacePermissionDocument(request) => (
+            RuntimeCommandResult::ReplacePermissionDocument(
+                runtime.replace_permission_document(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::ListPendingApprovals(request) => (

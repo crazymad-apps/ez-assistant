@@ -200,7 +200,8 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("fork session", source))?;
         self.permission_coordinator
-            .register_empty_scope(crate::PermissionFileScope::Session(session_id.clone()))?;
+            .register_scope(crate::PermissionFileScope::Session(session_id.clone()))
+            .await?;
         let controller = std::sync::Arc::new(crate::session::SessionController::recovered(
             stored.session,
             Vec::new(),
@@ -687,6 +688,7 @@ impl AssistantRuntime {
         request: SetSessionModelRequest,
     ) -> RuntimeResult<SetSessionModelResult> {
         let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;

@@ -42,8 +42,14 @@ use crate::{
 
 struct PendingApproval {
     snapshot: ApprovalSnapshot,
+    invocation: ResolvedToolInvocation,
     // sender 只允许被成功的决策路径取走一次。删除 Registry 项本身不代表 Core 已收到决策。
-    sender: Option<oneshot::Sender<ApprovalDecision>>,
+    sender: Option<oneshot::Sender<ApprovalSignal>>,
+}
+
+enum ApprovalSignal {
+    User(ApprovalDecision),
+    Rule,
 }
 
 struct ApprovalContext {
@@ -76,7 +82,7 @@ impl ApprovalRegistry {
         &self,
         context: ApprovalContext,
         invocation: &ResolvedToolInvocation,
-    ) -> RuntimeResult<(ApprovalSnapshot, oneshot::Receiver<ApprovalDecision>)> {
+    ) -> RuntimeResult<(ApprovalSnapshot, oneshot::Receiver<ApprovalSignal>)> {
         let approval_id = ApprovalId::new(id::generate("a").map_err(|_| {
             RuntimeError::InternalStateUnavailable {
                 component: "approval id random source",
@@ -123,6 +129,7 @@ impl ApprovalRegistry {
                 approval_id,
                 PendingApproval {
                     snapshot: snapshot.clone(),
+                    invocation: invocation.clone(),
                     sender: Some(sender),
                 },
             );
@@ -147,6 +154,28 @@ impl ApprovalRegistry {
                 .then_with(|| left.approval_id.cmp(&right.approval_id))
         });
         Ok(approvals)
+    }
+
+    pub(crate) fn head_with_invocation(
+        &self,
+        session_id: &SessionId,
+    ) -> RuntimeResult<Option<(ApprovalSnapshot, ResolvedToolInvocation)>> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "approval registry",
+            })?;
+        Ok(entries
+            .values()
+            .filter(|entry| &entry.snapshot.session_id == session_id)
+            .min_by(|left, right| {
+                left.snapshot
+                    .created_at_ms
+                    .cmp(&right.snapshot.created_at_ms)
+                    .then_with(|| left.snapshot.approval_id.cmp(&right.snapshot.approval_id))
+            })
+            .map(|entry| (entry.snapshot.clone(), entry.invocation.clone())))
     }
 
     pub(crate) fn begin_resolution(
@@ -244,7 +273,36 @@ impl ApprovalRegistry {
             .ok_or_else(|| RuntimeError::ApprovalExpired {
                 approval_id: approval_id.clone(),
             })?
-            .send(decision)
+            .send(ApprovalSignal::User(decision))
+            .map_err(|_| RuntimeError::ApprovalExpired {
+                approval_id: approval_id.clone(),
+            })?;
+        self.bump_revision(&snapshot.session_id);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn resolve_by_rule(
+        &self,
+        approval_id: &ApprovalId,
+    ) -> RuntimeResult<ApprovalSnapshot> {
+        let mut entry = self
+            .entries
+            .lock()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "approval registry",
+            })?
+            .remove(approval_id)
+            .ok_or_else(|| RuntimeError::ApprovalExpired {
+                approval_id: approval_id.clone(),
+            })?;
+        let snapshot = entry.snapshot.clone();
+        entry
+            .sender
+            .take()
+            .ok_or_else(|| RuntimeError::ApprovalExpired {
+                approval_id: approval_id.clone(),
+            })?
+            .send(ApprovalSignal::Rule)
             .map_err(|_| RuntimeError::ApprovalExpired {
                 approval_id: approval_id.clone(),
             })?;
@@ -443,11 +501,14 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
             });
             tokio::select! {
                 decision = receiver => match decision {
-                    Ok(decision @ (ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession | ApprovalDecision::AllowWorkspace)) => {
+                    Ok(ApprovalSignal::User(decision @ (ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession | ApprovalDecision::AllowWorkspace))) => {
                         super::authorizer::ApprovalResolution::allowed(approval_id, decision)
                     }
-                    Ok(decision @ ApprovalDecision::Deny) => {
+                    Ok(ApprovalSignal::User(decision @ ApprovalDecision::Deny)) => {
                         super::authorizer::ApprovalResolution::user_denied(approval_id, decision)
+                    }
+                    Ok(ApprovalSignal::Rule) => {
+                        super::authorizer::ApprovalResolution::allowed_by_rule(approval_id)
                     }
                     Err(_) => super::authorizer::ApprovalResolution::cancelled(
                         approval_id,

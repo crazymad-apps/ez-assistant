@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import type {
   ToolDetailSnapshot,
   ToolFileReference,
   ToolInputSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { Dialog } from "../../../components/Dialog";
 import {
   NativeResourceFailure,
   openToolFileInSystem,
@@ -52,16 +52,6 @@ export function ToolDetailDialog({ detail, error, initial_file_ref_id, is_loadin
     }
     setSelectedFile(detail.files.find((file) => file.resource_ref_id === initial_file_ref_id) ?? null);
   }, [detail, initial_file_ref_id]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        on_close();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [on_close]);
 
   useEffect(() => {
     if (!selected_file || !session_id || !detail?.message_id || selected_file.state !== "available") {
@@ -126,13 +116,13 @@ export function ToolDetailDialog({ detail, error, initial_file_ref_id, is_loadin
     }
   }
 
-  return createPortal(
-    <div className={styles.backdrop} onMouseDown={(event) => {
-      if (event.target === event.currentTarget) {
-        on_close();
-      }
-    }}>
-      <section aria-labelledby="tool-detail-title" aria-modal="true" className={styles.dialog} role="dialog">
+  return (
+    <Dialog
+      aria_labelledby="tool-detail-title"
+      backdrop_class_name={styles.backdrop}
+      dialog_class_name={styles.dialog}
+      on_close={on_close}
+    >
         <header className={styles.header}>
           <div className={styles.title_group}>
             <span className={styles.tool_icon}><Icon name="terminal" size={17} /></span>
@@ -218,9 +208,7 @@ export function ToolDetailDialog({ detail, error, initial_file_ref_id, is_loadin
             </>
           )}
         </div>
-      </section>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }
 

@@ -85,6 +85,12 @@ pub enum RuntimeError {
     /// 当前配置没有可供业务使用的 active 快照。
     #[error("runtime configuration is unavailable")]
     ConfigurationUnavailable,
+    /// 配置文件 revision 已被另一个写入者更新。
+    #[error("runtime configuration changed before the operation was applied")]
+    ConfigurationConflict,
+    /// Runtime 无法持久化已通过编译的配置 candidate。
+    #[error("runtime configuration could not be persisted")]
+    ConfigurationPersistenceFailed,
     /// 用户指定的模型 key 不存在。
     #[error("model `{model_key}` was not found")]
     ModelNotFound { model_key: ModelKey },
@@ -222,6 +228,14 @@ impl RuntimeError {
             Self::ConfigurationUnavailable => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ConfigurationUnavailable,
                 "runtime configuration is unavailable",
+            ),
+            Self::ConfigurationConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ConfigurationConflict,
+                "configuration changed; reload and review the latest values",
+            ),
+            Self::ConfigurationPersistenceFailed => RuntimeErrorInfo::new(
+                RuntimeErrorCode::Internal,
+                "configuration could not be persisted",
             ),
             Self::ModelNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::ModelNotFound, "model was not found")

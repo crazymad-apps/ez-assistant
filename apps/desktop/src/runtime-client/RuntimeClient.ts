@@ -43,6 +43,7 @@ export class RuntimeClient {
   readonly instance_id: string;
   readonly capabilities: RuntimeHostCapabilities;
   readonly started_runtime: boolean;
+  readonly address: string;
 
   readonly #base_url: string;
   readonly #access_token: string;
@@ -53,6 +54,7 @@ export class RuntimeClient {
     this.instance_id = bootstrap.instance_id;
     this.capabilities = bootstrap.capabilities;
     this.started_runtime = bootstrap.started_runtime;
+    this.address = new URL(bootstrap.base_url).origin;
   }
 
   async command<TType extends RuntimeCommand["type"]>(

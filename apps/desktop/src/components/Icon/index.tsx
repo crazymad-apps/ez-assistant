@@ -10,6 +10,7 @@ export type IconName =
   | "chevron-left"
   | "chevron-right"
   | "copy"
+  | "edit"
   | "folder"
   | "fork"
   | "menu"
@@ -18,12 +19,15 @@ export type IconName =
   | "paperclip"
   | "pin"
   | "plus"
+  | "refresh"
   | "search"
+  | "settings"
   | "sidebar-left"
   | "sidebar-right"
   | "shield"
   | "stop"
   | "terminal"
+  | "trash"
   | "thumb-down"
   | "thumb-up"
   | "x";
@@ -45,6 +49,7 @@ const paths: Record<IconName, ReactNode> = {
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,
+  edit: <><path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" /><path d="m13.7 7.5 3 3" /></>,
   folder: <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />,
   fork: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6 7v2c0 3 2 4 6 4s6-1 6-4V7M12 13v4" /></>,
   menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
@@ -65,12 +70,15 @@ const paths: Record<IconName, ReactNode> = {
     />
   ),
   plus: <path d="M12 5v14M5 12h14" />,
+  refresh: <><path d="M20 7v5h-5" /><path d="M18.1 16A7 7 0 1 1 19.6 9L20 12" /></>,
   search: <><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></>,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></>,
   "sidebar-left": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
   "sidebar-right": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   shield: <path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6z" />,
   stop: <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none" />,
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
+  trash: <><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></>,
   "thumb-down": <path d="M7 4v10H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h3Zm0 9 4 7a2 2 0 0 0 3-2v-4h4.4a2 2 0 0 0 2-2.4L19 6a2 2 0 0 0-2-2H7" />,
   "thumb-up": <path d="M7 20V10H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h3Zm0-9 4-7a2 2 0 0 1 3 2v4h4.4a2 2 0 0 1 2 2.4L19 18a2 2 0 0 1-2 2H7" />,
   x: <path d="m7 7 10 10M17 7 7 17" />,

@@ -2,15 +2,17 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use assistant_runtime::{
-    ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    RuntimeConfigSource,
+    ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
+    ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture, RuntimeConfigSource,
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -133,6 +135,27 @@ impl RuntimeConfigSource for LocalConfigSource {
             }
         })
     }
+
+    fn replace(
+        &self,
+        expected_revision: Option<String>,
+        document: String,
+    ) -> ConfigSourceReplaceFuture<'_> {
+        let path = self.path.clone();
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || {
+                replace_private_config(&path, expected_revision.as_deref(), &document)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+                    ConfigSourceFailureKind::Read,
+                    "configuration write task failed",
+                )),
+            }
+        })
+    }
 }
 
 fn read_private_config(path: &Path) -> ConfigSourceLoad {
@@ -227,8 +250,7 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
     }
 
     let mut bytes = Vec::new();
-    if file
-        .by_ref()
+    if Read::by_ref(&mut file)
         .take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
         .is_err()
@@ -245,12 +267,109 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
         );
     }
     match String::from_utf8(bytes) {
-        Ok(document) => ConfigSourceLoad::Document(document),
+        Ok(document) => {
+            let revision = configuration_revision(document.as_bytes());
+            ConfigSourceLoad::Document(ConfigDocument::new(document, revision))
+        }
         Err(_) => unavailable(
             ConfigSourceFailureKind::Read,
             "configuration file is not valid UTF-8",
         ),
     }
+}
+
+fn replace_private_config(
+    path: &Path,
+    expected_revision: Option<&str>,
+    document: &str,
+) -> ConfigSourceReplace {
+    if document.len() as u64 > MAX_CONFIG_BYTES {
+        return ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+            ConfigSourceFailureKind::Unsafe,
+            "configuration candidate exceeds the size limit",
+        ));
+    }
+
+    let current = read_private_config(path);
+    let current_matches = match &current {
+        ConfigSourceLoad::Missing => expected_revision.is_none(),
+        ConfigSourceLoad::Document(current) => Some(current.revision()) == expected_revision,
+        ConfigSourceLoad::Unavailable(failure) => {
+            return ConfigSourceReplace::Unavailable(*failure);
+        }
+    };
+    if !current_matches {
+        return ConfigSourceReplace::Conflict(current);
+    }
+
+    let parent = match path.parent() {
+        Some(parent) => parent,
+        None => {
+            return ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+                ConfigSourceFailureKind::Read,
+                "configuration parent directory is unavailable",
+            ));
+        }
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp_path = parent.join(format!(".config.toml.{}.{}.tmp", std::process::id(), nonce));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut temp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(PRIVATE_CONFIG_MODE)
+            .open(&temp_path)?;
+        temp.write_all(document.as_bytes())?;
+        temp.sync_all()?;
+
+        let latest = read_private_config(path);
+        let still_matches = match latest {
+            ConfigSourceLoad::Missing => expected_revision.is_none(),
+            ConfigSourceLoad::Document(latest) => Some(latest.revision()) == expected_revision,
+            ConfigSourceLoad::Unavailable(_) => false,
+        };
+        if !still_matches {
+            return Err(std::io::Error::other("configuration revision changed"));
+        }
+
+        fs::rename(&temp_path, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+        let latest = read_private_config(path);
+        let conflict = match &latest {
+            ConfigSourceLoad::Missing => expected_revision.is_some(),
+            ConfigSourceLoad::Document(latest) => Some(latest.revision()) != expected_revision,
+            ConfigSourceLoad::Unavailable(_) => false,
+        };
+        return if conflict {
+            ConfigSourceReplace::Conflict(latest)
+        } else {
+            ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+                ConfigSourceFailureKind::Read,
+                "configuration file could not be replaced",
+            ))
+        };
+    }
+
+    match read_private_config(path) {
+        ConfigSourceLoad::Document(document) => ConfigSourceReplace::Applied(document),
+        ConfigSourceLoad::Missing => ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+            ConfigSourceFailureKind::Read,
+            "configuration file disappeared after replacement",
+        )),
+        ConfigSourceLoad::Unavailable(failure) => ConfigSourceReplace::Unavailable(failure),
+    }
+}
+
+fn configuration_revision(contents: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(contents))
 }
 
 fn unavailable(kind: ConfigSourceFailureKind, message: &'static str) -> ConfigSourceLoad {
@@ -325,7 +444,7 @@ mod tests {
         let ConfigSourceLoad::Document(document) = source.load().await else {
             panic!("document");
         };
-        assert_eq!(document, "version = 1\n");
+        assert_eq!(document.contents(), "version = 1\n");
     }
 
     #[tokio::test]
@@ -339,7 +458,7 @@ mod tests {
         else {
             panic!("normalized document");
         };
-        assert_eq!(document, "secret");
+        assert_eq!(document.contents(), "secret");
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
             PRIVATE_CONFIG_MODE
@@ -365,6 +484,42 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
             .expect("permissions");
         assert_unsafe(LocalConfigSource::new(path).load().await);
+    }
+
+    #[tokio::test]
+    async fn replaces_config_with_revision_cas_and_private_permissions() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        let source = LocalConfigSource::new(path.clone());
+
+        let ConfigSourceReplace::Applied(created) = source
+            .replace(None, "schema_version = 1\n".to_owned())
+            .await
+        else {
+            panic!("created");
+        };
+        assert_eq!(created.contents(), "schema_version = 1\n");
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            PRIVATE_CONFIG_MODE
+        );
+
+        assert!(matches!(
+            source
+                .replace(Some("stale".to_owned()), "other = true\n".to_owned())
+                .await,
+            ConfigSourceReplace::Conflict(_)
+        ));
+        let ConfigSourceReplace::Applied(updated) = source
+            .replace(
+                Some(created.revision().to_owned()),
+                "schema_version = 2\n".to_owned(),
+            )
+            .await
+        else {
+            panic!("updated");
+        };
+        assert_eq!(updated.contents(), "schema_version = 2\n");
     }
 
     fn assert_unsafe(load: ConfigSourceLoad) {

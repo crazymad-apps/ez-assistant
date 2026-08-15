@@ -4,7 +4,7 @@
 
   display: grid;
   height: 100%;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   max-height: 100%;
@@ -14,7 +14,7 @@
 }
 
 .sidebar[data-search-open="true"] {
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .primary_actions {
@@ -147,6 +147,24 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 12px 18px;
+}
+
+.settings_button {
+  display: grid;
+  min-height: 40px;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px;
+  border: 0;
+  border-top: 1px solid var(--ez-border);
+  color: var(--ez-text-secondary);
+  background: transparent;
+  text-align: left;
+
+  &:hover { color: var(--ez-text); background: var(--ez-surface-muted); }
+
+  svg:last-child { justify-self: end; color: var(--ez-text-muted); }
 }
 
 .section_header {

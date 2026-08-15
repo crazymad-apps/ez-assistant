@@ -16,6 +16,16 @@ pub(crate) struct DesktopPreferences {
     right_sidebar_open: bool,
     #[serde(default)]
     expanded_workspace_ids: Option<Vec<String>>,
+    #[serde(default)]
+    close_behavior: DesktopCloseBehavior,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopCloseBehavior {
+    #[default]
+    HideToTray,
+    QuitDesktop,
 }
 
 impl Default for DesktopPreferences {
@@ -24,8 +34,18 @@ impl Default for DesktopPreferences {
             left_sidebar_open: true,
             right_sidebar_open: true,
             expanded_workspace_ids: None,
+            close_behavior: DesktopCloseBehavior::HideToTray,
         }
     }
+}
+
+pub(crate) fn load_close_behavior<R: tauri::Runtime>(app: &AppHandle<R>) -> DesktopCloseBehavior {
+    let Ok(directory) = app.path().app_config_dir() else {
+        return DesktopCloseBehavior::default();
+    };
+    load_from_directory(&directory)
+        .map(|preferences| preferences.close_behavior)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Error, Serialize)]
@@ -120,12 +140,14 @@ mod tests {
             left_sidebar_open: false,
             right_sidebar_open: true,
             expanded_workspace_ids: Some(vec!["workspace-b".to_owned(), "workspace-a".to_owned()]),
+            close_behavior: DesktopCloseBehavior::QuitDesktop,
         };
         save_to_directory(directory.path(), preferences).expect("save");
         let loaded = load_from_directory(directory.path()).expect("load");
 
         assert!(!loaded.left_sidebar_open);
         assert!(loaded.right_sidebar_open);
+        assert_eq!(loaded.close_behavior, DesktopCloseBehavior::QuitDesktop);
         assert_eq!(
             loaded
                 .expanded_workspace_ids

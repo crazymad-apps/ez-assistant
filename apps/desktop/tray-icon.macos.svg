@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="132.5 140 247 247" role="img" aria-labelledby="title desc">
+  <title id="title">EZ Assistant menu bar icon</title>
+  <desc id="desc">A compact rocket silhouette designed for the macOS menu bar.</desc>
+
+  <defs>
+    <mask id="rocket-window" maskUnits="userSpaceOnUse" x="132.5" y="140" width="247" height="247">
+      <rect x="132.5" y="140" width="247" height="247" fill="white" />
+      <circle cx="256" cy="226" r="19" fill="black" />
+    </mask>
+  </defs>
+
+  <path
+    d="M256 150C222 188 207 233 218 279L188 313Q177 328 199 332L230 328L248 362Q256 377 264 362L282 328L313 332Q335 328 324 313L294 279C305 233 290 188 256 150Z"
+    fill="black"
+    mask="url(#rocket-window)"
+  />
+</svg>

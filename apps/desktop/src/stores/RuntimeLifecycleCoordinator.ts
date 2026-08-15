@@ -8,7 +8,11 @@ import type {
   RuntimeEventEnvelope,
   SessionId,
 } from "../generated/assistant-protocol";
-import { bootstrapRuntime, type RuntimeBootstrapFailure } from "../native-bridge/runtimeBootstrap";
+import {
+  bootstrapRuntime,
+  type RuntimeBootstrap,
+  type RuntimeBootstrapFailure,
+} from "../native-bridge/runtimeBootstrap";
 import { RuntimeClient, RuntimeClientError } from "../runtime-client/RuntimeClient";
 import type { ConnectionStore } from "./ConnectionStore";
 import type { LiveExecutionStore } from "./LiveExecutionStore";
@@ -43,7 +47,7 @@ export class RuntimeLifecycleCoordinator {
     return this.#client;
   }
 
-  connect(): Promise<void> {
+  connect(bootstrap?: RuntimeBootstrap): Promise<void> {
     if (this.#disposed) {
       this.#disposed = false;
       this.#connect_promise = null;
@@ -53,7 +57,7 @@ export class RuntimeLifecycleCoordinator {
     }
     const generation = ++this.#lifecycle_generation;
     this.dependencies.connection.beginInitialConnection();
-    const connect_promise = this.#establishConnection(false, generation).finally(() => {
+    const connect_promise = this.#establishConnection(false, generation, bootstrap).finally(() => {
       if (this.#connect_promise === connect_promise) {
         this.#connect_promise = null;
       }
@@ -67,6 +71,22 @@ export class RuntimeLifecycleCoordinator {
     this.#reconnect_attempt = 0;
     this.dependencies.connection.beginReconnect();
     void this.#establishConnection(true, this.#lifecycle_generation);
+  }
+
+  prepareForNativeRuntimeMutation(kind: "stop" | "restart"): void {
+    this.#lifecycle_generation += 1;
+    this.#connect_promise = null;
+    this.#event_abort?.abort();
+    this.#event_abort = null;
+    this.#client = null;
+    this.#clearReconnectTimer();
+    this.dependencies.connection.beginRuntimeMutation(kind);
+    this.dependencies.projection.markStale();
+  }
+
+  reconnectAfterNativeRuntimeMutation(bootstrap?: RuntimeBootstrap): Promise<void> {
+    this.#reconnect_attempt = 0;
+    return this.connect(bootstrap);
   }
 
   async selectInitialSession(): Promise<void> {
@@ -176,7 +196,11 @@ export class RuntimeLifecycleCoordinator {
     this.dependencies.live_execution.dispose();
   }
 
-  async #establishConnection(is_reconnect: boolean, generation: number): Promise<void> {
+  async #establishConnection(
+    is_reconnect: boolean,
+    generation: number,
+    prepared_bootstrap?: RuntimeBootstrap,
+  ): Promise<void> {
     if (!this.#isActiveGeneration(generation)) {
       return;
     }
@@ -184,7 +208,7 @@ export class RuntimeLifecycleCoordinator {
       this.dependencies.connection.beginReconnect();
     }
     try {
-      const bootstrap = await bootstrapRuntime();
+      const bootstrap = prepared_bootstrap ?? await bootstrapRuntime();
       if (!this.#isActiveGeneration(generation)) {
         return;
       }
@@ -224,7 +248,11 @@ export class RuntimeLifecycleCoordinator {
         }
       }
       runInAction(() => {
-        this.dependencies.connection.markConnected(client.instance_id, client.capabilities);
+        this.dependencies.connection.markConnected(
+          client.instance_id,
+          client.capabilities,
+          client.address,
+        );
         this.#reconnect_attempt = 0;
       });
       await this.selectInitialSession();
@@ -239,9 +267,9 @@ export class RuntimeLifecycleCoordinator {
       const failure = normalizeFailure(error);
       runInAction(() => {
         if (failure.code === "component_mismatch") {
-          this.dependencies.connection.markComponentMismatch(failure.message);
+          this.dependencies.connection.markComponentMismatch(failure.message, failure.code);
         } else {
-          this.dependencies.connection.markDisconnected(failure.message);
+          this.dependencies.connection.markDisconnected(failure.message, failure.code);
         }
         this.dependencies.projection.markStale();
       });

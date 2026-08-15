@@ -25,6 +25,8 @@ use crate::config_source::prepare_private_directory;
 const PERMISSION_FILE: &str = "permissions.json";
 const MAX_PERMISSION_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_WORKSPACE_RULE_PREFIX: &str = "default-workspace-";
+const DEFAULT_SESSION_PRIVATE_RULE_PREFIX: &str = "default-session-private-";
+const DEFAULT_SESSION_ATTACHMENT_RULE_PREFIX: &str = "default-session-attachment-";
 
 impl StorageEngine {
     pub(super) fn ensure_workspace_permission_file(
@@ -43,6 +45,25 @@ impl StorageEngine {
             }
         }
         let content = default_workspace_permission_document(&workspace.user_directory)?;
+        write_default_permission_file(&path, &content)
+    }
+
+    pub(super) fn ensure_session_permission_file(
+        &self,
+        environment: &assistant_runtime::SessionExecutionEnvironment,
+    ) -> StorageResult<bool> {
+        let path = Path::new(&environment.session_private_directory).join(PERMISSION_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(false),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(internal_error(
+                    "session permission metadata could not be read",
+                    source,
+                ));
+            }
+        }
+        let content = default_session_permission_document(environment)?;
         write_default_permission_file(&path, &content)
     }
 
@@ -134,6 +155,31 @@ impl StorageEngine {
 }
 
 fn default_workspace_permission_document(workspace_path: &str) -> StorageResult<Vec<u8>> {
+    let rules = default_file_permission_rules(DEFAULT_WORKSPACE_RULE_PREFIX, workspace_path, true);
+    render_default_permission_document(rules, "default workspace permissions could not be encoded")
+}
+
+fn default_session_permission_document(
+    environment: &assistant_runtime::SessionExecutionEnvironment,
+) -> StorageResult<Vec<u8>> {
+    let mut rules = default_file_permission_rules(
+        DEFAULT_SESSION_PRIVATE_RULE_PREFIX,
+        &environment.session_private_directory,
+        true,
+    );
+    rules.extend(default_file_permission_rules(
+        DEFAULT_SESSION_ATTACHMENT_RULE_PREFIX,
+        &environment.session_attachment_directory,
+        false,
+    ));
+    render_default_permission_document(rules, "default session permissions could not be encoded")
+}
+
+fn default_file_permission_rules(
+    rule_prefix: &str,
+    path: &str,
+    include_mutations: bool,
+) -> Vec<PermissionRule> {
     let operations = [
         PermissionFileOperation::Read,
         PermissionFileOperation::List,
@@ -143,47 +189,48 @@ fn default_workspace_permission_document(workspace_path: &str) -> StorageResult<
         PermissionFileOperation::Edit,
         PermissionFileOperation::Delete,
     ];
-    let rules = operations
+    operations
         .into_iter()
+        .filter(|operation| include_mutations || !is_mutation(*operation))
         .map(|operation| PermissionRule {
-            id: format!(
-                "{DEFAULT_WORKSPACE_RULE_PREFIX}{}",
-                operation_name(operation)
-            ),
+            id: format!("{rule_prefix}{}", operation_name(operation)),
             effect: PermissionEffect::Allow,
-            variants: match operation {
-                PermissionFileOperation::Write
-                | PermissionFileOperation::Edit
-                | PermissionFileOperation::Delete => {
-                    vec![assistant_protocol::AgentVariant::Build]
-                }
-                PermissionFileOperation::Read
-                | PermissionFileOperation::List
-                | PermissionFileOperation::Find
-                | PermissionFileOperation::Search => vec![
+            variants: if is_mutation(operation) {
+                vec![assistant_protocol::AgentVariant::Build]
+            } else {
+                vec![
                     assistant_protocol::AgentVariant::Plan,
                     assistant_protocol::AgentVariant::Build,
-                ],
+                ]
             },
             matcher: PermissionMatcher::File(FilePermissionMatcher {
                 operation,
-                path: workspace_path.to_owned(),
+                path: path.to_owned(),
                 path_match: PathMatch::Recursive,
             }),
         })
-        .collect();
+        .collect()
+}
+
+fn render_default_permission_document(
+    rules: Vec<PermissionRule>,
+    message: &'static str,
+) -> StorageResult<Vec<u8>> {
     PermissionDocument {
         schema_version: 1,
         rules,
     }
     .render()
-    .map_err(|source| {
-        StoreError::with_source(
-            StoreErrorKind::Internal,
-            "default workspace permissions could not be encoded",
-            source,
-        )
-    })
+    .map_err(|source| StoreError::with_source(StoreErrorKind::Internal, message, source))
+}
+
+fn is_mutation(operation: PermissionFileOperation) -> bool {
+    matches!(
+        operation,
+        PermissionFileOperation::Write
+            | PermissionFileOperation::Edit
+            | PermissionFileOperation::Delete
+    )
 }
 
 fn operation_name(operation: PermissionFileOperation) -> &'static str {
@@ -209,28 +256,22 @@ fn write_default_permission_file(path: &Path, content: &[u8]) -> StorageResult<b
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(source) => {
             return Err(internal_error(
-                "default workspace permission file could not be created",
+                "default permission file could not be created",
                 source,
             ));
         }
     };
     let result = (|| -> StorageResult<()> {
         file.write_all(content).map_err(|source| {
-            internal_error(
-                "default workspace permission file could not be written",
-                source,
-            )
+            internal_error("default permission file could not be written", source)
         })?;
         file.sync_all().map_err(|source| {
-            internal_error(
-                "default workspace permission file could not be synchronized",
-                source,
-            )
+            internal_error("default permission file could not be synchronized", source)
         })?;
         let parent = path.parent().ok_or_else(|| {
             StoreError::new(
                 StoreErrorKind::InvalidData,
-                "workspace permission parent is invalid",
+                "permission file parent is invalid",
             )
         })?;
         sync_directory(parent)

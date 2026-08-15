@@ -13,17 +13,23 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use assistant_protocol::{
     GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult, RuntimeHostCapabilities,
-    RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus, WorkspaceId,
+    RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus, ShutdownRuntimeRequest,
+    WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 use thiserror::Error;
 use url::Url;
+
+use crate::desktop_lifecycle::{DesktopLifecycleCoordinator, NativeRuntimeState};
 
 const DISCOVERY_RELATIVE_PATH: &str = "run/runtime.json";
 const MAX_DISCOVERY_BYTES: u64 = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
     RuntimeHostFeature::EventEnvelopes,
@@ -67,6 +73,7 @@ enum RuntimeBootstrapErrorCode {
     RuntimeStartFailed,
     RuntimeUnavailable,
     ComponentMismatch,
+    RuntimeStopFailed,
 }
 
 #[derive(Debug, Error)]
@@ -165,6 +172,54 @@ impl RuntimeBootstrapCoordinator {
         }
     }
 
+    pub(crate) async fn shutdown(&self) -> Result<(), RuntimeBootstrapError> {
+        let bootstrap = self.discover(false).await?;
+        self.send_runtime_command(
+            "desktop-stop-runtime",
+            RuntimeCommand::ShutdownRuntime(ShutdownRuntimeRequest::default()),
+        )
+        .await?;
+        self.wait_for_instance_to_stop(&bootstrap.instance_id).await
+    }
+
+    pub(crate) async fn restart(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+        let previous = self.discover(false).await?;
+        self.send_runtime_command(
+            "desktop-restart-runtime",
+            RuntimeCommand::ShutdownRuntime(ShutdownRuntimeRequest::default()),
+        )
+        .await?;
+        self.wait_for_instance_to_stop(&previous.instance_id)
+            .await?;
+        self.launch()?;
+
+        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            if let Ok(bootstrap) = self.discover(true).await
+                && bootstrap.instance_id != previous.instance_id
+            {
+                return Ok(bootstrap);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(bootstrap_error(
+                    RuntimeBootstrapErrorCode::RuntimeUnavailable,
+                    "Runtime 重启后未能在限定时间内就绪。",
+                ));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    fn runtime_home(&self) -> Result<&Path, RuntimeBootstrapError> {
+        if self.runtime_home.as_os_str().is_empty() || !self.runtime_home.is_dir() {
+            return Err(bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
+                "Runtime Home 当前不可用。",
+            ));
+        }
+        Ok(&self.runtime_home)
+    }
+
     pub(crate) async fn workspace_directory(
         &self,
         workspace_id: WorkspaceId,
@@ -216,6 +271,75 @@ impl RuntimeBootstrapCoordinator {
                 RuntimeBootstrapErrorCode::ComponentMismatch,
                 "Runtime 返回了不匹配的 Workspace 结果。",
             )),
+        }
+    }
+
+    async fn send_runtime_command(
+        &self,
+        request_id: &str,
+        command: RuntimeCommand,
+    ) -> Result<RuntimeCommandResult, RuntimeBootstrapError> {
+        #[derive(Serialize)]
+        struct CommandRequest {
+            request_id: String,
+            command: CommandScope,
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
+        enum CommandScope {
+            Runtime(RuntimeCommand),
+        }
+        #[derive(Deserialize)]
+        struct CommandResponse {
+            result: ResultScope,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
+        enum ResultScope {
+            Runtime(Box<RuntimeCommandResult>),
+        }
+
+        let bootstrap = self.discover(false).await?;
+        let response = self
+            .http
+            .post(format!("{}/commands", bootstrap.base_url))
+            .timeout(CONTROL_COMMAND_TIMEOUT)
+            .bearer_auth(&bootstrap.access_token)
+            .json(&CommandRequest {
+                request_id: request_id.to_owned(),
+                command: CommandScope::Runtime(command),
+            })
+            .send()
+            .await
+            .map_err(runtime_stop_failed)?
+            .error_for_status()
+            .map_err(runtime_stop_failed)?
+            .json::<CommandResponse>()
+            .await
+            .map_err(runtime_stop_failed)?;
+        match response.result {
+            ResultScope::Runtime(result) => Ok(*result),
+        }
+    }
+
+    async fn wait_for_instance_to_stop(
+        &self,
+        instance_id: &str,
+    ) -> Result<(), RuntimeBootstrapError> {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        loop {
+            match read_discovery(&self.runtime_home) {
+                Ok(discovery)
+                    if discovery.instance_id == instance_id && process_is_alive(discovery.pid) => {}
+                _ => return Ok(()),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(bootstrap_error(
+                    RuntimeBootstrapErrorCode::RuntimeStopFailed,
+                    "Runtime 未能在限定时间内受控停止。",
+                ));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -320,8 +444,68 @@ impl RuntimeBootstrapCoordinator {
 #[tauri::command]
 pub(crate) async fn bootstrap_runtime(
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    lifecycle: State<'_, DesktopLifecycleCoordinator>,
 ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
-    coordinator.bootstrap().await
+    lifecycle.update_runtime_state(NativeRuntimeState::Connecting);
+    let result = coordinator.bootstrap().await;
+    lifecycle.update_runtime_state(if result.is_ok() {
+        NativeRuntimeState::Connected
+    } else {
+        NativeRuntimeState::Disconnected
+    });
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn stop_runtime(
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    lifecycle: State<'_, DesktopLifecycleCoordinator>,
+) -> Result<(), RuntimeBootstrapError> {
+    lifecycle.update_runtime_state(NativeRuntimeState::Stopping);
+    let result = coordinator.shutdown().await;
+    lifecycle.update_runtime_state(if result.is_ok() {
+        NativeRuntimeState::Stopped
+    } else {
+        NativeRuntimeState::Disconnected
+    });
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn restart_runtime(
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    lifecycle: State<'_, DesktopLifecycleCoordinator>,
+) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+    lifecycle.update_runtime_state(NativeRuntimeState::Restarting);
+    let result = coordinator.restart().await;
+    lifecycle.update_runtime_state(if result.is_ok() {
+        NativeRuntimeState::Connected
+    } else {
+        NativeRuntimeState::Disconnected
+    });
+    result
+}
+
+#[tauri::command]
+pub(crate) fn open_runtime_home(
+    app: tauri::AppHandle,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+) -> Result<(), RuntimeBootstrapError> {
+    let runtime_home = coordinator.runtime_home()?;
+    let runtime_home = runtime_home.to_str().ok_or_else(|| {
+        bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
+            "Runtime Home 路径无法交给系统文件管理器处理。",
+        )
+    })?;
+    app.opener()
+        .open_path(runtime_home, None::<&str>)
+        .map_err(|_| {
+            bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
+                "无法使用系统文件管理器打开 Runtime Home。",
+            )
+        })
 }
 
 fn resolve_runtime_executable() -> Result<PathBuf, RuntimeBootstrapError> {
@@ -433,6 +617,13 @@ fn runtime_unavailable(_: reqwest::Error) -> RuntimeBootstrapError {
     bootstrap_error(
         RuntimeBootstrapErrorCode::RuntimeUnavailable,
         "无法连接本地 Runtime。",
+    )
+}
+
+fn runtime_stop_failed(_: reqwest::Error) -> RuntimeBootstrapError {
+    bootstrap_error(
+        RuntimeBootstrapErrorCode::RuntimeStopFailed,
+        "无法向 Runtime 发送受控停止请求。",
     )
 }
 

@@ -6,6 +6,7 @@
 
 mod compile;
 mod domain;
+mod editor;
 mod model;
 mod protocol;
 mod registry;
@@ -21,10 +22,11 @@ pub use domain::{
     RuntimeModelTransportConfig,
 };
 pub use source::{
-    ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    RuntimeConfigSource,
+    ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
+    ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture, RuntimeConfigSource,
 };
 
+pub(crate) use editor::{ConfigMutation, edit_config_document};
 pub(crate) use protocol::{project_model_by_key, project_models, project_status};
 pub(crate) use registry::{ConfigRegistry, ConfigSnapshot};
 

@@ -1,4 +1,6 @@
 import type {
+  ModelFailureKind,
+  RuntimeErrorCode,
   RunStatus,
   SessionId,
   TokenUsageSnapshot,
@@ -49,7 +51,9 @@ export type LiveRunProjection = Readonly<{
   active_step: number;
   steps: readonly LiveExecutionStep[];
   usage: TokenUsageSnapshot | null;
+  error_code: RuntimeErrorCode | null;
   error_message: string | null;
+  model_failure_kind: ModelFailureKind | null;
 }>;
 
 export function emptyRun(
@@ -65,7 +69,9 @@ export function emptyRun(
     active_step: 0,
     steps: [],
     usage: null,
+    error_code: null,
     error_message: null,
+    model_failure_kind: null,
   };
 }
 

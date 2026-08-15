@@ -127,6 +127,7 @@ function applicationSnapshot(): ApplicationSnapshot {
     runtime_lifecycle: "running",
     configuration: {
       config_path: null,
+      revision: "fixture-revision",
       state: "ready",
       schema_version: 1,
       default_model: "fixture",

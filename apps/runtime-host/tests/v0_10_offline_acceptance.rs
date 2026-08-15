@@ -101,6 +101,20 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
         "completed"
     );
 
+    fs::write(
+        runtime_home
+            .path()
+            .join("data/sessions")
+            .join(&session_id)
+            .join("private/permissions.json"),
+        b"{\"schema_version\":1,\"rules\":[]}",
+    )
+    .expect("remove default Session trust for explicit approval case");
+    assert_eq!(
+        client.runtime("reload_permissions", json!({ "session_id": session_id }))["applied"],
+        true
+    );
+
     let tool = submit(&mut client, &session_id, "TOOL_CASE", "tool-submit");
     let tool_run = string(&tool["run"]["run_id"]);
     let pending = wait_for_pending_approval(&mut client, &session_id);

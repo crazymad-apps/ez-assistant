@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useId, useState } from "react";
 import type {
   AssistantSegment,
   ChildTaskTreeItemSnapshot,
@@ -59,7 +59,9 @@ export function LiveSteps(props: Readonly<{
 }>) {
   const [reasoning_open, setReasoningOpen] = useState<Record<string, boolean>>({});
   if (props.run.steps.every((step) => step.segments.length === 0)) {
-    return <p className={styles.waiting_text}>正在准备…</p>;
+    return props.run.status === "accepted" || props.run.status === "running"
+      ? <p className={styles.waiting_text}>正在准备…</p>
+      : null;
   }
   return props.run.steps.map((step) => (
     <div className={styles.assistant_step} key={`${props.run.run_id}:step:${step.step}`}>
@@ -97,13 +99,20 @@ function LiveSegmentView(props: Readonly<{
 }
 
 function ReasoningBox(props: Readonly<{ text: string; is_open: boolean; on_toggle: () => void }>) {
+  const content_id = useId();
   return (
     <section className={styles.reasoning} data-open={props.is_open}>
-      <button aria-expanded={props.is_open} className={styles.reasoning_header} onClick={props.on_toggle} type="button">
+      <button
+        aria-controls={content_id}
+        aria-expanded={props.is_open}
+        className={styles.reasoning_header}
+        onClick={props.on_toggle}
+        type="button"
+      >
         <span>思考过程</span>
         <Icon name="chevron-down" size={15} />
       </button>
-      {props.is_open && <div className={styles.reasoning_content}>{props.text}</div>}
+      {props.is_open && <div className={styles.reasoning_content} id={content_id}>{props.text}</div>}
     </section>
   );
 }

@@ -176,6 +176,51 @@ impl PermissionCoordinator {
         self.registry.replace_scope(load)
     }
 
+    /// 读取磁盘上的单份权限文档，不改变当前生效快照。
+    pub(crate) async fn load_document(
+        &self,
+        scope: PermissionFileScope,
+    ) -> RuntimeResult<CompiledPermissionLoad> {
+        let _gate = self.mutation_gate.lock().await;
+        let load = self
+            .store
+            .load_permission_file(&scope)
+            .await
+            .map_err(|_| RuntimeError::PermissionPersistenceFailed)?;
+        Ok(CompiledPermissionLoad::compile(scope, load))
+    }
+
+    /// 校验完整 candidate，以 revision CAS 替换文件，并在成功后原子更新生效快照。
+    pub(crate) async fn replace_document(
+        &self,
+        scope: PermissionFileScope,
+        expected_revision: PermissionFileRevision,
+        document: PermissionDocument,
+    ) -> RuntimeResult<CompiledPermissionLoad> {
+        let _gate = self.mutation_gate.lock().await;
+        let content = document
+            .render()
+            .map_err(|_| RuntimeError::PermissionFileInvalid)?;
+        let next_revision = self
+            .store
+            .replace_permission_file(&scope, &expected_revision, content.clone())
+            .await
+            .map_err(|error| match error.kind() {
+                StoreErrorKind::Conflict => RuntimeError::PermissionFileConflict,
+                _ => RuntimeError::PermissionPersistenceFailed,
+            })?;
+        let next = CompiledPermissionLoad::compile(
+            scope,
+            PermissionFileLoad {
+                content: Some(content),
+                revision: next_revision,
+                diagnostics: Vec::new(),
+            },
+        );
+        self.registry.replace_scope(next.clone())?;
+        Ok(next)
+    }
+
     /// 读取一次调用所需的完整 cohort。Registry 替换只持有短暂写锁，
     /// 因此活动 Run 的下一次工具调用会自然看到 reload 后的新快照。
     pub(crate) fn snapshot(

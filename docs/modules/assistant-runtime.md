@@ -226,6 +226,12 @@ Runtime Host 进程
 - Workspace 的产品默认信任通过 Host 生成的普通 Workspace 权限文档表达，不进入 Authorizer
   硬编码：Plan/Build 可读取，Build 可变更 Workspace。Runtime 注册 Workspace scope 时加载 Store
   中的实际文档；既有用户文档、无效文档和缺失文档的诊断语义不得被默认值静默覆盖。
+- Session 的产品默认信任使用同一装配策略：Host 在 Session 创建、Fork 和旧数据恢复时，仅在
+  `private/permissions.json` 缺失时生成普通 Session 权限文档。Plan/Build 可读取 Session 私有目录
+  与该 Session 的附件目录，Build 可变更 Session 私有目录；附件 mutation 继续由 Host 基础设施
+  策略拒绝。Runtime 创建或 Fork Session 后必须加载 Store 中的实际文档，不得先注册空 scope 或
+  在 Authorizer 中硬编码放行。既有 Session 权限文件不得覆盖或合并，权限文件本身不得被结构化
+  文件工具修改。
 - Plan 对结构化文件 mutation 施加不可由规则或审批覆盖的能力上限：只允许进入 Session 和可选
   Workspace Agent 私有目录的普通权限决策，并对现有路径祖先做物理解析以拒绝 symlink 逃逸。
   Shell 仍是当前用户权限下的通用工具，不能被表述为 OS 沙箱。

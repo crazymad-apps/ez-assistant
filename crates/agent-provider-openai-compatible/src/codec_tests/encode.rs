@@ -175,6 +175,24 @@ fn encode_system_and_multi_turn_conversation_preserves_order() {
 }
 
 #[test]
+fn standard_profile_omits_reasoning_from_cross_provider_history() {
+    let req = request(vec![
+        user_message("message_1", &["first"]),
+        assistant_message(vec![
+            reasoning_part("provider-private reasoning"),
+            text_part("portable answer"),
+        ]),
+        user_message("message_2", &["continue"]),
+    ]);
+
+    let encoded = encode_request(&req, &base_profile(), MODEL)
+        .expect("cross-provider history remains encodable");
+    let json = serde_json::to_value(&encoded).expect("serialize request");
+    assert_eq!(json["messages"][1]["content"], json!("portable answer"));
+    assert!(json["messages"][1].get("reasoning_content").is_none());
+}
+
+#[test]
 fn encode_tools_and_tool_choice_follow_wire_shape() {
     let profile = base_profile();
     let tool = || ToolDefinition {
@@ -387,13 +405,15 @@ fn encode_generation_reasoning_and_provider_options() {
 }
 
 #[test]
-fn encode_rejects_reasoning_content_without_profile_field() {
-    let result = encode_request(
+fn encode_omits_reasoning_content_without_profile_field() {
+    let encoded = encode_request(
         &request(vec![assistant_message(vec![reasoning_part("think")])]),
         &base_profile(),
         MODEL,
-    );
-    assert!(matches!(result, Err(ModelError::Config(_))));
+    )
+    .unwrap();
+    let json = serde_json::to_value(encoded).unwrap();
+    assert!(json["messages"][0].get("reasoning_content").is_none());
 }
 
 #[test]

@@ -3,6 +3,8 @@ import type {
   AssistantSegment,
   ConversationItem,
   MessageId,
+  ModelFailureKind,
+  RuntimeErrorCode,
   ToolActivityStatus,
   ToolInputSnapshot,
   UserMessageSnapshot,
@@ -129,6 +131,40 @@ export function runStatusLabel(status: LiveRunProjection["status"]): string {
     interrupted: "已中断",
     compaction_required: "正在整理上下文",
   }[status];
+}
+
+export function runFailureMessage(
+  kind: ModelFailureKind | null,
+  code: RuntimeErrorCode | null,
+): string {
+  const kind_message: Partial<Record<ModelFailureKind, string>> = {
+    configuration: "当前模型配置无法用于此会话，请检查配置或切换模型后重试。",
+    authentication: "模型认证失败，请检查 API Key 和访问权限。",
+    connection: "无法连接模型服务，请检查网络和 Endpoint。",
+    timeout: "模型响应超时，请稍后重试。",
+    stream_interrupted: "模型响应意外中断，请重试本轮。",
+    provider_rejected: "模型服务拒绝了本次请求，请检查模型能力与请求参数。",
+    rate_limited: "模型服务请求过于频繁，请稍后重试。",
+    service_unavailable: "模型服务暂时不可用，请稍后重试。",
+    context_overflow: "当前会话超出模型上下文窗口，请整理上下文后重试。",
+    protocol: "模型服务返回了无法识别的响应。",
+    tool_arguments: "模型生成的工具参数无效，请重试本轮。",
+    cancelled: "本轮已取消。",
+  };
+  if (kind) {
+    return kind_message[kind] ?? "本轮执行失败，请重试。";
+  }
+  const code_message: Partial<Record<RuntimeErrorCode, string>> = {
+    configuration_unavailable: "模型配置当前不可用，请检查配置后重试。",
+    model_not_found: "当前模型不存在，请重新选择模型。",
+    model_unavailable: "当前模型不可用，请检查配置或切换模型。",
+    model_build_failed: "当前模型配置无法加载，请检查配置后重试。",
+    model_execution_failed: "模型执行失败，请检查模型配置或稍后重试。",
+    agent_build_failed: "Agent 无法启动，请检查模型和会话配置。",
+    timeout: "本轮执行超时，请稍后重试。",
+    cancelled: "本轮已取消。",
+  };
+  return (code && code_message[code]) || "本轮执行失败，请重试。";
 }
 
 export function formatTime(timestamp: number | null): string {

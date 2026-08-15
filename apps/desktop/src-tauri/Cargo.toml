@@ -22,9 +22,10 @@ base64.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["image-png", "tray-icon"] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
+tauri-plugin-window-state = "2"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { workspace = true, features = ["io"] }

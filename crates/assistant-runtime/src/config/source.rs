@@ -5,6 +5,32 @@
 
 use std::{future::Future, pin::Pin};
 
+/// 已通过 Host 安全读取并带内容修订的配置文档。
+///
+/// 本类型刻意不实现 `Debug`，避免原文凭据进入调试输出。
+pub struct ConfigDocument {
+    contents: String,
+    revision: String,
+}
+
+impl ConfigDocument {
+    pub fn new(contents: String, revision: String) -> Self {
+        Self { contents, revision }
+    }
+
+    pub fn contents(&self) -> &str {
+        &self.contents
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    pub fn into_contents(self) -> String {
+        self.contents
+    }
+}
+
 /// 配置源无法交付文档时的安全分类。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigSourceFailureKind {
@@ -45,13 +71,23 @@ pub enum ConfigSourceLoad {
     /// 配置文件不存在。
     Missing,
     /// 已完成文件安全检查的 UTF-8 TOML 文档。
-    Document(String),
+    Document(ConfigDocument),
     /// 文件存在但无法安全读取。
     Unavailable(ConfigSourceFailure),
 }
 
 /// 一次异步配置读取。
 pub type ConfigSourceFuture<'a> = Pin<Box<dyn Future<Output = ConfigSourceLoad> + Send + 'a>>;
+
+/// 配置源原子替换的结果。
+pub enum ConfigSourceReplace {
+    Applied(ConfigDocument),
+    Conflict(ConfigSourceLoad),
+    Unavailable(ConfigSourceFailure),
+}
+
+pub type ConfigSourceReplaceFuture<'a> =
+    Pin<Box<dyn Future<Output = ConfigSourceReplace> + Send + 'a>>;
 
 /// Runtime 唯一配置文档来源。
 pub trait RuntimeConfigSource: Send + Sync {
@@ -62,4 +98,18 @@ pub trait RuntimeConfigSource: Send + Sync {
 
     /// 读取当前配置；实现不得把原始文档或底层敏感错误写入日志。
     fn load(&self) -> ConfigSourceFuture<'_>;
+
+    /// 以当前内容修订为 CAS 条件原子替换配置文档。
+    fn replace(
+        &self,
+        _expected_revision: Option<String>,
+        _document: String,
+    ) -> ConfigSourceReplaceFuture<'_> {
+        Box::pin(std::future::ready(ConfigSourceReplace::Unavailable(
+            ConfigSourceFailure::new(
+                ConfigSourceFailureKind::Unsafe,
+                "configuration source is read-only",
+            ),
+        )))
+    }
 }

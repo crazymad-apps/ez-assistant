@@ -71,6 +71,17 @@ pub(crate) fn matches_rule(
         }
 }
 
+/// 只有能完整表达一次已解析调用事实的 Allow 规则才可以用于审批队列自动重核。
+/// General、递归路径和命令前缀都可能覆盖用户尚未查看的其他调用，不能作为 drain 依据。
+pub(crate) fn is_exact_allow_rule(rule: &PermissionRule) -> bool {
+    rule.effect == super::PermissionEffect::Allow
+        && match &rule.matcher {
+            PermissionMatcher::General(_) => false,
+            PermissionMatcher::File(matcher) => matcher.path_match == PathMatch::Exact,
+            PermissionMatcher::Shell(matcher) => matcher.command_match == CommandMatch::Exact,
+        }
+}
+
 fn file_operation(operation: FileOperation) -> PermissionFileOperation {
     match operation {
         FileOperation::Read => PermissionFileOperation::Read,

@@ -11,11 +11,12 @@ use crate::{
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, IdempotencyKey, InputId, InterruptRunRequest,
     InterruptRunResult, ListConversationPageRequest, ListConversationPageResult, MessageFeedback,
-    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionFileSummary,
-    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
-    RunSnapshot, RuntimeLifecycle, SessionId, SessionListFilter, SessionSummary, WorkspaceId,
-    WorkspaceSummary,
+    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionDocumentDraft,
+    PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
+    PermissionFileSummary, PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult,
+    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
+    ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle, SessionId, SessionListFilter,
+    SessionSummary, WorkspaceId, WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -73,6 +74,92 @@ pub struct ReloadConfigResult {
     pub status: ConfigurationStatus,
 }
 
+/// 只允许在命令请求体中出现的敏感字符串。
+///
+/// JSON 仍使用普通字符串传输，但 Rust 调试输出始终脱敏。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SecretValue(String);
+
+impl SecretValue {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// 编辑模型时对既有凭据采取的显式动作。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "mode", content = "value", rename_all = "snake_case")]
+pub enum ModelCredentialChange {
+    Unchanged,
+    Replace(#[ts(type = "string")] SecretValue),
+    Clear,
+}
+
+/// 设置表单提交给 Runtime 的完整模型 candidate。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ModelConfigurationInput {
+    pub model_key: ModelKey,
+    pub display_name: String,
+    pub protocol: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub model: String,
+    pub context_window_tokens: u64,
+    pub max_output_tokens: u32,
+    pub credential: ModelCredentialChange,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConfigurationMutationResult {
+    pub status: ConfigurationStatus,
+    pub models: Vec<ModelConfiguration>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CreateModelRequest {
+    pub model: ModelConfigurationInput,
+    pub expected_revision: Option<String>,
+    pub set_default: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UpdateModelRequest {
+    pub model: ModelConfigurationInput,
+    pub expected_revision: String,
+    pub set_default: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeleteModelRequest {
+    pub model_key: ModelKey,
+    pub expected_revision: String,
+    pub replacement_default: Option<ModelKey>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetDefaultModelRequest {
+    pub model_key: ModelKey,
+    pub expected_revision: String,
+}
+
 /// 以 Session 为入口显式重载 Global、可选 Workspace 和 Session 权限文件。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -88,6 +175,32 @@ pub struct ReloadPermissionsResult {
     pub applied: bool,
     pub files: Vec<PermissionFileSummary>,
     pub diagnostics: Vec<PermissionDiagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetPermissionDocumentRequest {
+    pub scope: PermissionDocumentScope,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetPermissionDocumentResult {
+    pub document: PermissionDocumentSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReplacePermissionDocumentRequest {
+    pub scope: PermissionDocumentScope,
+    pub expected_revision: PermissionDocumentRevision,
+    pub document: PermissionDocumentDraft,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReplacePermissionDocumentResult {
+    pub document: PermissionDocumentSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -128,8 +241,16 @@ pub struct DecideApprovalResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ValidateModelConnectionRequest {
-    /// 要验证的用户 model key。
-    pub model_key: ModelKey,
+    /// 已保存模型或尚未写入配置的表单 candidate。
+    pub target: ModelConnectionTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum ModelConnectionTarget {
+    Configured { model_key: ModelKey },
+    Candidate(ModelConfigurationInput),
 }
 
 /// 连接验证失败的稳定分类。
@@ -735,8 +856,20 @@ pub enum RuntimeCommand {
     GetModel(GetModelRequest),
     /// 显式重新加载配置。
     ReloadConfig(ReloadConfigRequest),
+    /// 在唯一配置源中新建模型。
+    CreateModel(CreateModelRequest),
+    /// 更新唯一配置源中的模型。
+    UpdateModel(UpdateModelRequest),
+    /// 从唯一配置源删除模型。
+    DeleteModel(DeleteModelRequest),
+    /// 设置后续新会话使用的默认模型。
+    SetDefaultModel(SetDefaultModelRequest),
     /// 显式重新加载目标 Session 的权限 cohort。
     ReloadPermissions(ReloadPermissionsRequest),
+    /// 查询一份权限文档的安全产品投影。
+    GetPermissionDocument(GetPermissionDocumentRequest),
+    /// 以 revision CAS 替换 Session 或 Workspace 权限文档。
+    ReplacePermissionDocument(ReplacePermissionDocumentRequest),
     ListPendingApprovals(ListPendingApprovalsRequest),
     DecideApproval(DecideApprovalRequest),
     /// 显式验证指定模型连接。
@@ -829,8 +962,14 @@ pub enum RuntimeCommandResult {
     GetModel(GetModelResult),
     /// 配置已重新加载并返回新状态。
     ReloadConfig(ReloadConfigResult),
+    CreateModel(ConfigurationMutationResult),
+    UpdateModel(ConfigurationMutationResult),
+    DeleteModel(ConfigurationMutationResult),
+    SetDefaultModel(ConfigurationMutationResult),
     /// 权限 cohort 重载已完成。
     ReloadPermissions(ReloadPermissionsResult),
+    GetPermissionDocument(GetPermissionDocumentResult),
+    ReplacePermissionDocument(ReplacePermissionDocumentResult),
     ListPendingApprovals(ListPendingApprovalsResult),
     DecideApproval(DecideApprovalResult),
     /// 模型连接验证已完成。
@@ -982,6 +1121,7 @@ mod tests {
     fn configuration_status() -> ConfigurationStatus {
         ConfigurationStatus {
             config_path: Some("/private/runtime/config.toml".to_owned()),
+            revision: Some("revision-1".to_owned()),
             state: crate::ConfigurationState::Ready,
             schema_version: Some(1),
             default_model: Some(ModelKey::new("model-1").expect("model key")),
@@ -1002,6 +1142,9 @@ mod tests {
             agent_max_output_tokens: None,
             effective_max_output_tokens: Some(4_096),
             api_key_configured: true,
+            origin: crate::ModelConfigurationOrigin::ConfigurationFile,
+            editable: true,
+            deletable: true,
             is_default: true,
             is_valid: true,
             issues: Vec::new(),
@@ -1154,7 +1297,9 @@ mod tests {
             ),
             (
                 RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
-                    model_key: ModelKey::new("model-1").expect("model key"),
+                    target: ModelConnectionTarget::Configured {
+                        model_key: ModelKey::new("model-1").expect("model key"),
+                    },
                 }),
                 "validate_model_connection",
             ),

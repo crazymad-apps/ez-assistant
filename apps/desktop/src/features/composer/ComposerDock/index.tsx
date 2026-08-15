@@ -6,6 +6,7 @@ import type {
   SessionViewSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { Tooltip } from "../../../components/Tooltip";
 import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
@@ -249,16 +250,17 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
                 value={draft}
               />
               <footer className={styles.composer_actions}>
-                <button
-                  aria-label="添加附件"
-                  className={styles.icon_button}
-                  disabled={store.composer_pending || attachment_flow.pending}
-                  onClick={() => void attachment_flow.choose()}
-                  title="添加附件"
-                  type="button"
-                >
-                  <Icon name="paperclip" size={16} />
-                </button>
+                <Tooltip content="添加附件">
+                  <button
+                    aria-label="添加附件"
+                    className={styles.icon_button}
+                    disabled={store.composer_pending || attachment_flow.pending}
+                    onClick={() => void attachment_flow.choose()}
+                    type="button"
+                  >
+                    <Icon name="paperclip" size={16} />
+                  </button>
+                </Tooltip>
                 <SelectionPopover
                   aria_label="切换执行模式"
                   content_width="content"

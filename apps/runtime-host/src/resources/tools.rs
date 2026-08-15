@@ -156,7 +156,12 @@ impl LocalToolResources {
         })?;
         Ok(RunToolBundle::new(
             registry.snapshot(),
-            vec![Arc::new(AttachmentMutationPolicy { sessions_root })],
+            vec![
+                Arc::new(AttachmentMutationPolicy {
+                    sessions_root: sessions_root.clone(),
+                }),
+                Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
+            ],
         ))
     }
 }
@@ -225,6 +230,56 @@ impl AttachmentMutationPolicy {
         matches!(
             components.next(),
             Some(std::path::Component::Normal(name)) if name == "attachments"
+        )
+    }
+}
+
+/// Session 权限文件位于 Agent 可写的私有目录中，但它是 Host 控制面文件，不是普通业务文件。
+/// 防止结构化文件工具借助默认私有目录写权限修改自己的授权边界。
+struct SessionPermissionFileMutationPolicy {
+    sessions_root: AbsolutePath,
+}
+
+impl ToolPolicy for SessionPermissionFileMutationPolicy {
+    fn evaluate(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        _batch: &ResolvedToolBatch,
+    ) -> PolicyEvaluation {
+        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
+            if is_mutation(facts.operation) && self.is_session_permission_file(&facts.path) {
+                PolicyEvaluation::Decide(ToolAuthorization::Deny {
+                    reason: "session permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned(),
+                })
+            } else {
+                PolicyEvaluation::Continue
+            }
+        } else {
+            PolicyEvaluation::Continue
+        }
+    }
+}
+
+impl SessionPermissionFileMutationPolicy {
+    fn is_session_permission_file(&self, path: &AbsolutePath) -> bool {
+        let Ok(relative) = path.as_path().strip_prefix(self.sessions_root.as_path()) else {
+            return false;
+        };
+        let mut components = relative.components();
+        let Some(std::path::Component::Normal(_session_id)) = components.next() else {
+            return false;
+        };
+        matches!(
+            (
+                components.next(),
+                components.next(),
+                components.next()
+            ),
+            (
+                Some(std::path::Component::Normal(private)),
+                Some(std::path::Component::Normal(permission_file)),
+                None
+            ) if private == "private" && permission_file == "permissions.json"
         )
     }
 }
@@ -306,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_bundle_reads_real_files_and_denies_structured_attachment_mutation() {
+    async fn default_bundle_reads_real_files_and_denies_managed_session_storage_mutation() {
         let root = TempDir::new().expect("tempdir");
         std::fs::create_dir(root.path().join("work")).expect("workdir");
         let environment = environment(&root, "work");
@@ -446,6 +501,33 @@ mod tests {
         };
         assert!(matches!(
             authorizer.authorize(other_write, &other_write_batch).await,
+            ToolAuthorization::Deny { .. }
+        ));
+
+        let permission_file =
+            std::path::Path::new(&environment.session_private_directory).join("permissions.json");
+        std::fs::write(&permission_file, r#"{"schema_version":1,"rules":[]}"#)
+            .expect("permission file");
+        let permission_write_batch = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "write_file",
+                json!({
+                    "path": permission_file.to_string_lossy(),
+                    "content": r#"{"schema_version":1,"rules":[{"id":"self-grant"}]}"#
+                }),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(permission_write) = permission_write_batch
+            .get(0)
+            .expect("permission write item")
+        else {
+            panic!("permission write resolves");
+        };
+        assert!(matches!(
+            authorizer
+                .authorize(permission_write, &permission_write_batch)
+                .await,
             ToolAuthorization::Deny { .. }
         ));
     }

@@ -16,6 +16,7 @@ pub(super) struct PreparedSessionDirectories {
     pub session_directory: std::path::PathBuf,
     pub attachment_directory: std::path::PathBuf,
     pub private_directory: std::path::PathBuf,
+    pub permission_file_created: bool,
 }
 
 impl StorageEngine {
@@ -70,7 +71,17 @@ impl StorageEngine {
         session: &NewStoredSession,
     ) -> StorageResult<PreparedSessionDirectories> {
         self.validate_new_session_environment(session)?;
-        self.prepare_session_directories(&session.session_id)
+        let mut paths = self.prepare_session_directories(&session.session_id)?;
+        match self.ensure_session_permission_file(&session.environment) {
+            Ok(created) => {
+                paths.permission_file_created = created;
+                Ok(paths)
+            }
+            Err(error) => {
+                remove_created_session_directories(&paths);
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn insert_session_resources(
@@ -236,6 +247,7 @@ impl StorageEngine {
             {
                 return Err(invalid_data("stored session directory is invalid"));
             }
+            let _ = self.ensure_session_permission_file(&environment)?;
         }
         Ok(())
     }
@@ -281,11 +293,15 @@ impl StorageEngine {
             session_directory,
             attachment_directory,
             private_directory,
+            permission_file_created: false,
         })
     }
 }
 
 pub(super) fn remove_created_session_directories(paths: &PreparedSessionDirectories) {
+    if paths.permission_file_created {
+        let _ = fs::remove_file(paths.private_directory.join("permissions.json"));
+    }
     let _ = fs::remove_dir(&paths.attachment_directory);
     let _ = fs::remove_dir(&paths.private_directory);
     let _ = fs::remove_dir(&paths.session_directory);

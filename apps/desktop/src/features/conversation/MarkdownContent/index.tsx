@@ -53,26 +53,29 @@ function SafeLink({ href, children, ...props }: ComponentProps<"a">) {
 
 function useMarkdownPlugins(text: string): PluginConfig {
   const [plugins, setPlugins] = useState<PluginConfig>({});
+  const needs_code = /```[a-zA-Z0-9_-]*\n/.test(text);
+  const needs_math = /(^|[^\\])\$\$?[\s\S]*?\$\$?/.test(text);
+  const needs_mermaid = /```mermaid\b/.test(text);
 
   useEffect(() => {
     let active = true;
     const tasks: Promise<void>[] = [];
-    if (/```[a-zA-Z0-9_-]*\n/.test(text)) {
-      tasks.push(import("@streamdown/code").then(({ code }) => {
+    if (needs_code) {
+      tasks.push(loadCodePlugin().then((code) => {
         if (active) {
           setPlugins((current) => ({ ...current, code }));
         }
       }).catch(() => undefined));
     }
-    if (/(^|[^\\])\$\$?[\s\S]*?\$\$?/.test(text)) {
-      tasks.push(import("@streamdown/math").then(({ math }) => {
+    if (needs_math) {
+      tasks.push(loadMathPlugin().then((math) => {
         if (active) {
           setPlugins((current) => ({ ...current, math }));
         }
       }).catch(() => undefined));
     }
-    if (/```mermaid\b/.test(text)) {
-      tasks.push(import("@streamdown/mermaid").then(({ mermaid }) => {
+    if (needs_mermaid) {
+      tasks.push(loadMermaidPlugin().then((mermaid) => {
         if (active) {
           setPlugins((current) => ({ ...current, mermaid }));
         }
@@ -82,9 +85,28 @@ function useMarkdownPlugins(text: string): PluginConfig {
     return () => {
       active = false;
     };
-  }, [text]);
+  }, [needs_code, needs_math, needs_mermaid]);
 
   return plugins;
+}
+
+let code_plugin_promise: Promise<NonNullable<PluginConfig["code"]>> | null = null;
+let math_plugin_promise: Promise<NonNullable<PluginConfig["math"]>> | null = null;
+let mermaid_plugin_promise: Promise<NonNullable<PluginConfig["mermaid"]>> | null = null;
+
+function loadCodePlugin(): Promise<NonNullable<PluginConfig["code"]>> {
+  code_plugin_promise ??= import("@streamdown/code").then(({ code }) => code);
+  return code_plugin_promise;
+}
+
+function loadMathPlugin(): Promise<NonNullable<PluginConfig["math"]>> {
+  math_plugin_promise ??= import("@streamdown/math").then(({ math }) => math);
+  return math_plugin_promise;
+}
+
+function loadMermaidPlugin(): Promise<NonNullable<PluginConfig["mermaid"]>> {
+  mermaid_plugin_promise ??= import("@streamdown/mermaid").then(({ mermaid }) => mermaid);
+  return mermaid_plugin_promise;
 }
 
 function isSafeHttpUrl(url: string): boolean {

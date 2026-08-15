@@ -290,8 +290,10 @@ fn push_xml_text(output: &mut String, value: &str) {
 /// 把规范 assistant 消息编码为原生 assistant 消息。
 ///
 /// Reasoning parts 按序拼接进 Profile 声明的 reasoning 字段；Text parts 按序拼接为
-/// content；ToolCall parts 按序进入 `tool_calls`。消息带有 reasoning 内容而 Profile
-/// 未声明 reasoning 字段时返回 [`ModelError::Config`]，不静默丢弃。
+/// content；ToolCall parts 按序进入 `tool_calls`。规范 Conversation 可能由另一个
+/// Provider 方言产生；目标 Profile 未声明 reasoning 字段时，reasoning 作为不可移植的
+/// 辅助内容在 wire 投影中省略，正文和工具交换仍按规范回放。`ProviderState` 不具备这种
+/// 通用降级语义，仍然显式失败。
 ///
 /// Profile 声明 [`Profile::tool_calls_require_reasoning`] 时（DeepSeek thinking 模式：
 /// 带 tool calls 的 assistant 消息必须在后续请求中回传 `reasoning_content`，
@@ -343,13 +345,9 @@ fn encode_assistant_message(
     } else {
         None
     };
-    if let Some(reasoning) = reasoning_to_encode {
-        let Some(field) = &profile.reasoning_content_field else {
-            return Err(ModelError::Config(
-                "assistant message requires a reasoning field but the profile declares no reasoning content field"
-                    .to_owned(),
-            ));
-        };
+    if let Some(reasoning) = reasoning_to_encode
+        && let Some(field) = &profile.reasoning_content_field
+    {
         extra.insert(field.clone(), Value::String(reasoning.to_owned()));
     }
 

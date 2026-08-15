@@ -12,7 +12,14 @@ export function App(props: AppProps) {
   useEffect(() => {
     void props.store.initializePreferences();
     void props.store.connect();
-    return () => props.store.dispose();
+
+    // The RootStore owns process-lifetime projections and native listeners. React
+    // StrictMode intentionally mounts effects twice in development, so disposing
+    // it from a simulated component unmount leaves the second mount disconnected.
+    // Release it when the document itself is going away instead.
+    const dispose = () => props.store.dispose();
+    window.addEventListener("pagehide", dispose);
+    return () => window.removeEventListener("pagehide", dispose);
   }, [props.store]);
 
   return (

@@ -21,8 +21,9 @@ mod storage;
 mod workspace;
 
 pub use config::{
-    ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigSourceFailure,
-    ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad, ConfigState, DelegationConfig,
+    ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
+    ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
+    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig,
     ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig, RuntimeConfig,
     RuntimeConfigSource, RuntimeModelTransportConfig, compile_runtime_config,
 };

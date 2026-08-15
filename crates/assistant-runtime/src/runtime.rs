@@ -27,12 +27,13 @@ use agent_sdk::ContextWindowEvaluator;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CancelRunRequest, CancelRunResult,
-    ConfigurationStatus, CreateSessionRequest, CreateSessionResult, DeleteConfirmationToken,
-    DeleteSessionImpact, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
-    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
-    ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
-    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
-    SessionId, SessionSummary, WorkspaceId,
+    ConfigurationMutationResult, ConfigurationStatus, CreateModelRequest, CreateSessionRequest,
+    CreateSessionResult, DeleteConfirmationToken, DeleteModelRequest, DeleteSessionImpact,
+    GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest,
+    GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult,
+    ListSessionsRequest, ListSessionsResult, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent,
+    RuntimeEventEnvelope, RuntimeLifecycle, SessionId, SessionLifecycle, SessionSummary,
+    SetDefaultModelRequest, UpdateModelRequest, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +80,7 @@ pub struct AssistantRuntime {
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: AsyncRwLock<()>,
+    model_binding_gate: AsyncRwLock<()>,
     workspace_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<PermissionCoordinator>,
@@ -187,6 +189,7 @@ impl AssistantRuntime {
             delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
             operation_gate: AsyncRwLock::new(()),
+            model_binding_gate: AsyncRwLock::new(()),
             workspace_mutation_gate: AsyncMutex::new(()),
             config_registry: Arc::new(ConfigRegistry::new(config_source)),
             permission_coordinator,
@@ -267,6 +270,7 @@ impl AssistantRuntime {
         &self,
         _request: ReloadConfigRequest,
     ) -> RuntimeResult<ReloadConfigResult> {
+        let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
         let snapshot = self.config_registry.reload().await?;
         self.publish(RuntimeEvent::ConfigChanged);
@@ -275,12 +279,151 @@ impl AssistantRuntime {
         })
     }
 
+    pub async fn create_model(
+        &self,
+        request: CreateModelRequest,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.write().await;
+        self.ensure_running()?;
+        let snapshot = self
+            .config_registry
+            .mutate(
+                request.expected_revision,
+                crate::config::ConfigMutation::Create {
+                    model: request.model,
+                    set_default: request.set_default,
+                },
+            )
+            .await?;
+        self.configuration_mutated(&snapshot)
+    }
+
+    pub async fn update_model(
+        &self,
+        request: UpdateModelRequest,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.write().await;
+        self.ensure_running()?;
+        self.ensure_model_not_in_flight(&request.model.model_key)?;
+        let snapshot = self
+            .config_registry
+            .mutate(
+                Some(request.expected_revision),
+                crate::config::ConfigMutation::Update {
+                    model: request.model,
+                    set_default: request.set_default,
+                },
+            )
+            .await?;
+        self.configuration_mutated(&snapshot)
+    }
+
+    pub async fn delete_model(
+        &self,
+        request: DeleteModelRequest,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.write().await;
+        self.ensure_running()?;
+        self.ensure_model_not_referenced(&request.model_key)?;
+        let snapshot = self
+            .config_registry
+            .mutate(
+                Some(request.expected_revision),
+                crate::config::ConfigMutation::Delete {
+                    model_key: request.model_key,
+                    replacement_default: request.replacement_default,
+                },
+            )
+            .await?;
+        self.configuration_mutated(&snapshot)
+    }
+
+    pub async fn set_default_model(
+        &self,
+        request: SetDefaultModelRequest,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.write().await;
+        self.ensure_running()?;
+        let snapshot = self
+            .config_registry
+            .mutate(
+                Some(request.expected_revision),
+                crate::config::ConfigMutation::SetDefault {
+                    model_key: request.model_key,
+                },
+            )
+            .await?;
+        self.configuration_mutated(&snapshot)
+    }
+
+    fn configuration_mutated(
+        &self,
+        snapshot: &ConfigSnapshot,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        self.publish(RuntimeEvent::ConfigChanged);
+        Ok(ConfigurationMutationResult {
+            status: self.configuration_status(snapshot),
+            models: project_models(snapshot.projection()),
+        })
+    }
+
+    fn ensure_model_not_in_flight(
+        &self,
+        model_key: &assistant_protocol::ModelKey,
+    ) -> RuntimeResult<()> {
+        for session in self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .values()
+        {
+            let summary = session.summary()?;
+            if &summary.model_key == model_key
+                && (summary.active_run_id.is_some() || summary.queued_input_count > 0)
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "model is used by an active or queued run",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_model_not_referenced(
+        &self,
+        model_key: &assistant_protocol::ModelKey,
+    ) -> RuntimeResult<()> {
+        for session in self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .values()
+        {
+            let summary = session.summary()?;
+            if &summary.model_key == model_key && summary.lifecycle == SessionLifecycle::Active {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "model is referenced by an active session",
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// 创建一个带初始 model key、冻结 System Prompt 和空 Conversation 的 Session。
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
     ) -> RuntimeResult<CreateSessionResult> {
         let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
@@ -344,7 +487,8 @@ impl AssistantRuntime {
                 RuntimeError::from_store("create session", source)
             })?;
         self.permission_coordinator
-            .register_empty_scope(PermissionFileScope::Session(session_id.clone()))?;
+            .register_scope(PermissionFileScope::Session(session_id.clone()))
+            .await?;
         let session = Arc::new(SessionController::new(stored));
         let mut sessions =
             self.sessions
@@ -569,7 +713,11 @@ impl AssistantRuntime {
     }
 
     fn configuration_status(&self, snapshot: &ConfigSnapshot) -> ConfigurationStatus {
-        project_status(snapshot.projection(), self.config_registry.display_path())
+        project_status(
+            snapshot.projection(),
+            self.config_registry.display_path(),
+            snapshot.revision().map(str::to_owned),
+        )
     }
 
     #[cfg(test)]

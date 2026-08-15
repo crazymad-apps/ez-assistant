@@ -29,6 +29,7 @@ type SelectionPopoverProps<T extends string> = Readonly<{
   title?: string;
   trigger_content?: ReactNode;
   trigger_class_name?: string;
+  trigger_variant?: "unstyled" | "field" | "compact";
 }>;
 
 export function SelectionPopover<T extends string>(props: SelectionPopoverProps<T>) {
@@ -37,14 +38,17 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
   const popover_ref = useRef<HTMLDivElement>(null);
   const selected_index = Math.max(0, props.options.findIndex((option) => option.value === props.selected));
   const active_index_ref = useRef(selected_index);
+  const focus_index_on_open_ref = useRef<number | null>(null);
 
   useEffect(() => {
     if (!props.open) {
       return undefined;
     }
-    active_index_ref.current = selected_index;
-    const selected_node = popover_ref.current?.querySelector<HTMLElement>(`[data-option-index="${selected_index}"]`);
-    requestAnimationFrame(() => {
+    const initial_index = focus_index_on_open_ref.current ?? selected_index;
+    focus_index_on_open_ref.current = null;
+    active_index_ref.current = initial_index;
+    const selected_node = popover_ref.current?.querySelector<HTMLElement>(`[data-option-index="${initial_index}"]`);
+    const focus_frame = requestAnimationFrame(() => {
       selected_node?.focus();
       selected_node?.scrollIntoView?.({ block: "nearest" });
     });
@@ -56,7 +60,10 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
       }
     }
     document.addEventListener("pointerdown", closeOnOutsidePointer, true);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => {
+      cancelAnimationFrame(focus_frame);
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    };
   }, [props.open, props.on_open_change, selected_index]);
 
   function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -66,12 +73,18 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
       trigger_ref.current?.focus();
       return;
     }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+    if (props.options.length === 0) {
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") {
       return;
     }
     event.preventDefault();
-    const direction = event.key === "ArrowDown" ? 1 : -1;
-    const next_index = (active_index_ref.current + direction + props.options.length) % props.options.length;
+    let next_index = event.key === "Home" ? 0 : props.options.length - 1;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      next_index = (active_index_ref.current + direction + props.options.length) % props.options.length;
+    }
     active_index_ref.current = next_index;
     const next = popover_ref.current?.querySelector<HTMLElement>(`[data-option-index="${next_index}"]`);
     next?.focus();
@@ -85,9 +98,17 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
         aria-expanded={props.open}
         aria-haspopup="listbox"
         aria-label={props.aria_label}
-        className={props.trigger_class_name}
+        className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(" ")}
+        data-variant={props.trigger_variant ?? "unstyled"}
         disabled={props.disabled}
         onClick={() => props.on_open_change(!props.open)}
+        onKeyDown={(event) => {
+          if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !props.open && props.options.length > 0) {
+            event.preventDefault();
+            focus_index_on_open_ref.current = event.key === "ArrowDown" ? selected_index : props.options.length - 1;
+            props.on_open_change(true);
+          }
+        }}
         ref={trigger_ref}
         type="button"
       >
@@ -97,6 +118,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
       {props.open && (
         <SelectionPortal
           id={listbox_id}
+          aria_label={props.aria_label}
           content_width={props.content_width ?? "default"}
           on_key_down={handleListKeyDown}
           on_select={(value) => {
@@ -118,6 +140,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
 }
 
 function SelectionPortal<T extends string>(props: Readonly<{
+  aria_label: string;
   content_width: "default" | "content";
   id: string;
   on_key_down: (event: React.KeyboardEvent<HTMLDivElement>) => void;
@@ -145,7 +168,15 @@ function SelectionPortal<T extends string>(props: Readonly<{
         Math.max(viewport_padding, preferred_left),
         window.innerWidth - popover_rect.width - viewport_padding,
       );
-      const top = Math.max(viewport_padding, trigger_rect.top - popover_rect.height - 6);
+      const gap = 6;
+      const room_above = trigger_rect.top - viewport_padding;
+      const preferred_top = room_above >= popover_rect.height + gap
+        ? trigger_rect.top - popover_rect.height - gap
+        : trigger_rect.bottom + gap;
+      const top = Math.min(
+        Math.max(viewport_padding, preferred_top),
+        window.innerHeight - popover_rect.height - viewport_padding,
+      );
       setPosition({ left, top, ready: true });
     }
     updatePosition();
@@ -161,6 +192,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
   return createPortal(
     <div
       className={styles.popover}
+      aria-label={props.aria_label}
       data-position-ready={position.ready}
       data-width={props.content_width}
       id={props.id}

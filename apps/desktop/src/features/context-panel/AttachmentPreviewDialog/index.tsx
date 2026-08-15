@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import type { AttachmentSummary } from "../../../generated/assistant-protocol";
 import {
   NativeResourceFailure,
@@ -9,6 +8,7 @@ import {
   type AttachmentPreview,
 } from "../../../native-bridge/nativeResource";
 import { Icon } from "../../../components/Icon";
+import { Dialog } from "../../../components/Dialog";
 import styles from "./index.module.scss";
 
 export function AttachmentPreviewDialog(props: Readonly<{
@@ -43,12 +43,6 @@ export function AttachmentPreviewDialog(props: Readonly<{
     return () => { active = false; };
   }, [props.attachment.attachment_id, props.attachment.session_id]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => event.key === "Escape" && props.on_close();
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [props.on_close]);
-
   async function openInSystem() {
     setAction("open");
     setActionError(null);
@@ -73,13 +67,13 @@ export function AttachmentPreviewDialog(props: Readonly<{
     }
   }
 
-  return createPortal(
-    <div className={styles.backdrop} onMouseDown={(event) => {
-      if (event.target === event.currentTarget) {
-        props.on_close();
-      }
-    }}>
-      <section aria-labelledby="attachment-preview-title" aria-modal="true" className={styles.dialog} role="dialog">
+  return (
+    <Dialog
+      aria_labelledby="attachment-preview-title"
+      backdrop_class_name={styles.backdrop}
+      dialog_class_name={styles.dialog}
+      on_close={props.on_close}
+    >
         <header>
           <div>
             <span><Icon name="paperclip" size={17} /></span>
@@ -117,9 +111,7 @@ export function AttachmentPreviewDialog(props: Readonly<{
           </button>
           <button onClick={props.on_close} type="button">关闭</button>
         </footer>
-      </section>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }
 

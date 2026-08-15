@@ -391,3 +391,86 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
         assistant_protocol::ConfigurationIssueCode::UnsafeConfigSource
     );
 }
+
+#[tokio::test]
+async fn model_mutations_use_revision_cas_and_never_publish_invalid_candidates() {
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source.clone(),
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    let initial = runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .expect("initial reload");
+    let initial_revision = initial.status.revision.expect("initial revision");
+
+    let created = runtime
+        .create_model(CreateModelRequest {
+            model: model_input(
+                "secondary",
+                "https://api.example.test/v1",
+                assistant_protocol::ModelCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
+                ),
+            ),
+            expected_revision: Some(initial_revision),
+            set_default: false,
+        })
+        .await
+        .expect("create model");
+    let created_revision = created.status.revision.clone().expect("created revision");
+    assert!(created.models.iter().any(|model| {
+        model
+            .model_key
+            .as_ref()
+            .is_some_and(|key| key.as_str() == "secondary")
+            && model.is_valid
+    }));
+    let serialized = serde_json::to_string(&created).expect("serialize mutation result");
+    assert!(!serialized.contains("secondary-secret"));
+
+    let persisted_before_invalid = source.document.lock().expect("source lock").clone();
+    let invalid = runtime
+        .create_model(CreateModelRequest {
+            model: model_input(
+                "invalid",
+                "https://api.example.test/v1?credential=unsafe",
+                assistant_protocol::ModelCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("must-not-persist".to_owned()),
+                ),
+            ),
+            expected_revision: Some(created_revision.clone()),
+            set_default: false,
+        })
+        .await;
+    assert!(matches!(invalid, Err(RuntimeError::InvalidRequest { .. })));
+    assert_eq!(
+        *source.document.lock().expect("source lock"),
+        persisted_before_invalid
+    );
+
+    let mut external = persisted_before_invalid.expect("persisted document");
+    external.push_str("\n# external edit\n");
+    source.replace(Some(external.clone()));
+    let secondary = assistant_protocol::ModelKey::new("secondary").expect("secondary key");
+    let conflict = runtime
+        .set_default_model(SetDefaultModelRequest {
+            model_key: secondary,
+            expected_revision: created_revision,
+        })
+        .await;
+    assert!(matches!(conflict, Err(RuntimeError::ConfigurationConflict)));
+    assert_eq!(
+        runtime
+            .get_config_status(GetConfigStatusRequest::default())
+            .expect("status after conflict")
+            .status
+            .revision,
+        Some(test_config_revision(&external))
+    );
+}

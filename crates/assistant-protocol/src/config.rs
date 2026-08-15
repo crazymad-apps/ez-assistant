@@ -79,6 +79,8 @@ pub struct ConfigurationIssue {
 pub struct ConfigurationStatus {
     /// Host 允许展示的配置文件路径；抽象测试源可以没有路径。
     pub config_path: Option<String>,
+    /// 当前原始配置文档的内容修订；文件缺失时为空。
+    pub revision: Option<String>,
     /// 当前配置可用程度。
     pub state: ConfigurationState,
     /// 成功读取到的 schema version。
@@ -87,6 +89,15 @@ pub struct ConfigurationStatus {
     pub default_model: Option<ModelKey>,
     /// 不归属于单个合法 model key 的全局诊断。
     pub issues: Vec<ConfigurationIssue>,
+}
+
+/// 模型配置的权威来源。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelConfigurationOrigin {
+    /// Runtime Home 中的唯一 `config.toml`。
+    ConfigurationFile,
 }
 
 /// 单条模型配置的脱敏投影。
@@ -115,6 +126,12 @@ pub struct ModelConfiguration {
     pub effective_max_output_tokens: Option<u32>,
     /// 只代表 credential 已通过本地非空校验，不代表 Provider 已验证。
     pub api_key_configured: bool,
+    /// 该条目来自哪个权威配置源。
+    pub origin: ModelConfigurationOrigin,
+    /// 当前客户端是否允许编辑该条目。
+    pub editable: bool,
+    /// 当前客户端是否允许发起删除流程。
+    pub deletable: bool,
     /// 是否对应当前默认 model key。
     pub is_default: bool,
     /// 是否可进入当前有效模型快照。
@@ -141,6 +158,9 @@ mod tests {
             agent_max_output_tokens: Some(4_096),
             effective_max_output_tokens: Some(4_096),
             api_key_configured: true,
+            origin: ModelConfigurationOrigin::ConfigurationFile,
+            editable: true,
+            deletable: true,
             is_default: true,
             is_valid: true,
             issues: Vec::new(),

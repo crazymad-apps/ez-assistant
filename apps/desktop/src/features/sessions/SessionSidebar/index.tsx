@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from "../../../components/DropdownMenu";
 import { Icon } from "../../../components/Icon";
+import { Tooltip } from "../../../components/Tooltip";
 import type { SessionSummary } from "../../../generated/assistant-protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { sessionTime, workspaceDisplayName } from "../sessionFormatters";
@@ -219,20 +220,21 @@ export const SessionSidebar = observer(function SessionSidebar() {
               >
                 工作空间
               </button>
-              <button
-                aria-label="添加工作空间"
-                className={styles.section_action}
-                disabled={
-                  store.connection.state !== "connected" ||
-                  store.pending_workspace_action ||
-                  store.pending_session_action
-                }
-                onClick={() => void store.addWorkspace()}
-                title="添加工作空间"
-                type="button"
-              >
-                <Icon name="plus" size={14} />
-              </button>
+              <Tooltip content="添加工作空间">
+                <button
+                  aria-label="添加工作空间"
+                  className={styles.section_action}
+                  disabled={
+                    store.connection.state !== "connected" ||
+                    store.pending_workspace_action ||
+                    store.pending_session_action
+                  }
+                  onClick={() => void store.addWorkspace()}
+                  type="button"
+                >
+                  <Icon name="plus" size={14} />
+                </button>
+              </Tooltip>
               <button
                 aria-expanded={workspace_section_open}
                 aria-label={workspace_section_open ? "收起工作空间" : "展开工作空间"}
@@ -264,20 +266,21 @@ export const SessionSidebar = observer(function SessionSidebar() {
                     独立会话
                   </button>
                   {store.navigation.list_mode === "active" && (
-                    <button
-                      aria-label="新建独立会话"
-                      className={styles.section_action}
-                      disabled={
-                        store.connection.state !== "connected" ||
-                        store.pending_session_action ||
-                        store.pending_workspace_action
-                      }
-                      onClick={() => void store.createSession(null)}
-                      title="新建独立会话"
-                      type="button"
-                    >
-                      <Icon name="plus" size={14} />
-                    </button>
+                    <Tooltip content="新建独立会话">
+                      <button
+                        aria-label="新建独立会话"
+                        className={styles.section_action}
+                        disabled={
+                          store.connection.state !== "connected" ||
+                          store.pending_session_action ||
+                          store.pending_workspace_action
+                        }
+                        onClick={() => void store.createSession(null)}
+                        type="button"
+                      >
+                        <Icon name="plus" size={14} />
+                      </button>
+                    </Tooltip>
                   )}
                   <button
                     aria-expanded={unbound_section_open}
@@ -298,6 +301,11 @@ export const SessionSidebar = observer(function SessionSidebar() {
           </>
         )}
       </div>
+      <button className={styles.settings_button} onClick={() => store.settings.open()} type="button">
+        <Icon name="settings" size={16} />
+        <span>设置</span>
+        <Icon name="chevron-right" size={14} />
+      </button>
     </aside>
   );
 });

@@ -26,6 +26,32 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  &[data-platform="linux"] {
+    grid-template-columns: 32px minmax(0, 1fr) auto auto;
+    padding-right: 0;
+  }
+}
+
+.app_title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+
+  > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.app_version {
+  flex: 0 0 auto;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+  font-weight: 500;
 }
 
 .title_icon {
@@ -39,6 +65,61 @@
   background: transparent;
 
   &:hover { background: var(--ez-surface-muted); }
+}
+
+.window_controls {
+  display: flex;
+  height: 100%;
+  align-self: stretch;
+
+  button {
+    display: grid;
+    width: 42px;
+    height: 100%;
+    place-items: center;
+    border: 0;
+    border-radius: 0;
+    color: var(--ez-text-muted);
+    background: transparent;
+
+    &:hover {
+      color: var(--ez-text);
+      background: var(--ez-surface-muted);
+    }
+  }
+
+  .close_window:hover {
+    color: white;
+    background: #c42b1c;
+  }
+}
+
+.minimize_icon {
+  width: 11px;
+  height: 1px;
+  background: currentColor;
+}
+
+.maximize_icon {
+  width: 10px;
+  height: 10px;
+  border: 1px solid currentColor;
+}
+
+.restore_icon {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border: 1px solid currentColor;
+
+  &::before {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border: 1px solid currentColor;
+    content: "";
+    inset: -4px auto auto 2px;
+  }
 }
 
 .app_body {

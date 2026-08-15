@@ -6,6 +6,7 @@ mod approval;
 mod authorizer;
 mod document;
 mod matcher;
+mod projection;
 mod registry;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +22,10 @@ pub use document::{
     CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
     PermissionDocumentError, PermissionEffect, PermissionFileOperation, PermissionMatcher,
     PermissionProcessMode, PermissionRule, ShellPermissionMatcher,
+};
+pub(crate) use matcher::{is_exact_allow_rule, matches_rule};
+pub(crate) use projection::{
+    document_from_protocol, revision_from_protocol, scope_from_protocol, snapshot_from_load,
 };
 pub(crate) use registry::PermissionCoordinator;
 

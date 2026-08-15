@@ -4,7 +4,10 @@ export type DesktopPreferences = {
   readonly left_sidebar_open: boolean;
   readonly right_sidebar_open: boolean;
   readonly expanded_workspace_ids: readonly string[] | null;
+  readonly close_behavior: DesktopCloseBehavior;
 };
+
+export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 
 export async function loadDesktopPreferences(): Promise<DesktopPreferences> {
   if (!isTauri()) {
@@ -12,6 +15,7 @@ export async function loadDesktopPreferences(): Promise<DesktopPreferences> {
       left_sidebar_open: true,
       right_sidebar_open: true,
       expanded_workspace_ids: null,
+      close_behavior: "hide_to_tray",
     };
   }
   return invoke<DesktopPreferences>("load_desktop_preferences");

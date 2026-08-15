@@ -16,7 +16,8 @@ function ExampleMenu() {
       <DropdownMenu>
         <DropdownMenuTrigger aria-label="打开操作">操作</DropdownMenuTrigger>
         <DropdownMenuContent aria-label="操作菜单">
-          <DropdownMenuItem>菜单项</DropdownMenuItem>
+          <DropdownMenuItem>第一项</DropdownMenuItem>
+          <DropdownMenuItem>第二项</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <button type="button">页面空白操作</button>
@@ -42,7 +43,7 @@ describe("DropdownMenu", () => {
 
     await user.click(screen.getByRole("button", { name: "打开操作" }));
 
-    expect(screen.getByRole("menuitem", { name: "菜单项" })).not.toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "第一项" })).not.toHaveFocus();
   });
 
   it("focuses the first item when opened from the keyboard", async () => {
@@ -53,7 +54,21 @@ describe("DropdownMenu", () => {
 
     await user.keyboard("{Enter}");
 
-    expect(screen.getByRole("menuitem", { name: "菜单项" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "第一项" })).toHaveFocus();
+  });
+
+  it("supports arrow, Home, and End navigation", async () => {
+    const user = userEvent.setup();
+    render(<ExampleMenu />);
+    const trigger = screen.getByRole("button", { name: "打开操作" });
+    trigger.focus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menuitem", { name: "第一项" })).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(screen.getByRole("menuitem", { name: "第二项" })).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(screen.getByRole("menuitem", { name: "第一项" })).toHaveFocus();
   });
 
   it("closes with Escape and restores focus to the trigger", async () => {

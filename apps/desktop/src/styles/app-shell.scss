@@ -7,5 +7,6 @@
 
 #overlay-root {
   position: relative;
-  z-index: var(--ez-z-popover);
+  // Portal 内容必须位于应用内模态框之上；具体弹层之间仍由各自 z-index 排序。
+  z-index: calc(var(--ez-z-modal) + 1);
 }

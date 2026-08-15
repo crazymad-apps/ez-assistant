@@ -250,7 +250,23 @@
 .live_message { padding-bottom: 3px; }
 .live_status { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
 .waiting_text { margin: 0; color: var(--ez-text-muted); font-size: var(--ez-font-base); }
-.run_error { margin: 0; color: var(--ez-danger); font-size: var(--ez-font-base); }
+.run_error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--ez-danger);
+  font-size: var(--ez-font-base);
+
+  > span {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    margin-top: 0.55em;
+    border-radius: 50%;
+    background: currentcolor;
+  }
+}
 
 .task_tree {
   display: block;

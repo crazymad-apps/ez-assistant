@@ -12,7 +12,7 @@ use agent_types::{
 };
 use assistant_protocol::{
     ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    ModelConnectionTarget, ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -30,14 +30,32 @@ impl AssistantRuntime {
         request: ValidateModelConnectionRequest,
     ) -> RuntimeResult<ValidateModelConnectionResult> {
         self.ensure_running()?;
-        let snapshot = self.config_registry.snapshot()?;
-        let compiled = match self.compile_model_service(&snapshot, &request.model_key) {
+        let (snapshot, model_key) = match request.target {
+            ModelConnectionTarget::Configured { model_key } => {
+                (self.config_registry.snapshot()?, model_key)
+            }
+            ModelConnectionTarget::Candidate(model) => {
+                let model_key = model.model_key.clone();
+                (
+                    self.config_registry.candidate_snapshot(model).await?,
+                    model_key,
+                )
+            }
+        };
+        let compiled = match self.compile_model_service(&snapshot, &model_key) {
             Ok(compiled) => compiled,
             // 已有有效模型配置但 Host 无法构造服务，属于本次连接验证结果；
             // 顶层配置不可用、key 不存在或条目无效仍使用 Runtime 结构化错误。
             Err(RuntimeError::ModelBuildFailed { .. }) => {
                 return Ok(validation_failed(
-                    request.model_key,
+                    model_key,
+                    ConnectionValidationFailureKind::Configuration,
+                ));
+            }
+            Err(RuntimeError::ModelUnavailable { .. })
+            | Err(RuntimeError::ConfigurationUnavailable) => {
+                return Ok(validation_failed(
+                    model_key,
                     ConnectionValidationFailureKind::Configuration,
                 ));
             }
@@ -69,7 +87,7 @@ impl AssistantRuntime {
 
         match outcome {
             Ok(()) => Ok(ValidateModelConnectionResult {
-                model_key: request.model_key,
+                model_key,
                 outcome: ConnectionValidationOutcome::Succeeded,
             }),
             Err(ModelError::Cancelled) => Err(RuntimeError::RuntimeNotRunning {
@@ -77,7 +95,7 @@ impl AssistantRuntime {
             }),
             Err(error) => {
                 let kind = connection_validation_failure_kind(&error);
-                Ok(validation_failed(request.model_key, kind))
+                Ok(validation_failed(model_key, kind))
             }
         }
     }

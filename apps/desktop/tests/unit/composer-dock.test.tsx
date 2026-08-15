@@ -188,7 +188,7 @@ function renderComposer(overrides: Readonly<{
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
-    configuration: { config_path: null, state: "ready", schema_version: 1, default_model: "fixture", issues: [] },
+    configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, default_model: "fixture", issues: [] },
     models: [
       model("fixture", "本地模型（7B）", true),
       model("alternate", "备用模型", false),
@@ -221,6 +221,9 @@ function model(model_key: string, display_name: string, is_default: boolean): Ap
     agent_max_output_tokens: 4_096,
     effective_max_output_tokens: 4_096,
     api_key_configured: true,
+    origin: "configuration_file",
+    editable: true,
+    deletable: true,
     is_default,
     is_valid: true,
     issues: [],

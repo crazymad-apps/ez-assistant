@@ -2,7 +2,7 @@
 
 use assistant_protocol::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
-    ModelConfiguration, ModelKey,
+    ModelConfiguration, ModelConfigurationOrigin, ModelKey,
 };
 
 use super::domain::{
@@ -12,9 +12,11 @@ use super::domain::{
 pub(crate) fn project_status(
     projection: &ConfigProjection,
     config_path: Option<String>,
+    revision: Option<String>,
 ) -> ConfigurationStatus {
     ConfigurationStatus {
         config_path,
+        revision,
         state: state(projection.state),
         schema_version: projection.schema_version,
         default_model: projection.default_model.clone(),
@@ -55,6 +57,9 @@ fn model(projection: &ModelConfigProjection) -> ModelConfiguration {
         agent_max_output_tokens: projection.agent_max_output_tokens,
         effective_max_output_tokens: projection.effective_max_output_tokens,
         api_key_configured: projection.api_key_configured,
+        origin: ModelConfigurationOrigin::ConfigurationFile,
+        editable: projection.model_key.is_some(),
+        deletable: projection.model_key.is_some(),
         is_default: projection.is_default,
         is_valid: projection.is_valid,
         issues: projection.issues.iter().map(issue).collect(),

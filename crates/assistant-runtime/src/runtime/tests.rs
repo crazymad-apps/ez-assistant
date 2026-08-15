@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    hash::{DefaultHasher, Hash, Hasher},
     num::NonZeroUsize,
     sync::{
         Arc, Mutex,
@@ -22,8 +23,9 @@ use agent_types::{
 };
 use assistant_protocol::{
     ApprovalSnapshot, ConnectionValidationFailure, ConnectionValidationFailureKind,
-    ConnectionValidationOutcome, ListPendingApprovalsRequest, RunId, SetSessionApprovalModeRequest,
-    ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
+    ConnectionValidationOutcome, ListPendingApprovalsRequest, ModelConnectionTarget, RunId,
+    SetSessionApprovalModeRequest, ShutdownRuntimeRequest, SubmitInputRequest,
+    ValidateModelConnectionRequest,
 };
 use serde_json::json;
 use tokio::sync::{Barrier, Notify, broadcast::error::RecvError};
@@ -34,11 +36,11 @@ use super::connection_validation::{
 use super::*;
 use crate::{
     ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
-    ChildTaskWorkspaceLease, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
-    ConfigSourceLoad, ModelServiceFactoryError, ModelServiceFactoryRequest,
-    PreparedSessionEnvironment, RunToolBundle, RunToolFactory, RunToolFactoryError,
-    RunToolFactoryErrorKind, RuntimeConfigSource, SessionEnvironmentFactoryError,
-    SessionExecutionEnvironment,
+    ChildTaskWorkspaceLease, ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind,
+    ConfigSourceFuture, ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture,
+    ModelServiceFactoryError, ModelServiceFactoryRequest, PreparedSessionEnvironment,
+    RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
+    RuntimeConfigSource, SessionEnvironmentFactoryError, SessionExecutionEnvironment,
 };
 
 const TEST_CONFIG: &str = r#"
@@ -161,7 +163,7 @@ impl RuntimeConfigSource for GatedConfigSource {
         Box::pin(async move {
             entered.notify_one();
             release.notified().await;
-            ConfigSourceLoad::Document(document)
+            ConfigSourceLoad::Document(test_config_document(document))
         })
     }
 }
@@ -186,9 +188,49 @@ impl RuntimeConfigSource for MutableConfigSource {
     fn load(&self) -> ConfigSourceFuture<'_> {
         let document = self.document.lock().expect("source lock").clone();
         Box::pin(std::future::ready(match document {
-            Some(document) => ConfigSourceLoad::Document(document),
+            Some(document) => ConfigSourceLoad::Document(test_config_document(document)),
             None => ConfigSourceLoad::Missing,
         }))
+    }
+
+    fn replace(
+        &self,
+        expected_revision: Option<String>,
+        document: String,
+    ) -> ConfigSourceReplaceFuture<'_> {
+        let mut current = self.document.lock().expect("source lock");
+        let observed = current.as_ref().map(|value| test_config_revision(value));
+        if observed != expected_revision {
+            let load = current
+                .clone()
+                .map(test_config_document)
+                .map(ConfigSourceLoad::Document)
+                .unwrap_or(ConfigSourceLoad::Missing);
+            return Box::pin(std::future::ready(ConfigSourceReplace::Conflict(load)));
+        }
+        *current = Some(document.clone());
+        Box::pin(std::future::ready(ConfigSourceReplace::Applied(
+            test_config_document(document),
+        )))
+    }
+}
+
+fn test_config_document(document: String) -> ConfigDocument {
+    let revision = test_config_revision(&document);
+    ConfigDocument::new(document, revision)
+}
+
+fn test_config_revision(document: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    document.hash(&mut hasher);
+    format!("test-{:x}", hasher.finish())
+}
+
+fn configured_validation_request() -> ValidateModelConnectionRequest {
+    ValidateModelConnectionRequest {
+        target: ModelConnectionTarget::Configured {
+            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
+        },
     }
 }
 
@@ -538,6 +580,24 @@ fn empty_model() -> Arc<dyn ModelService> {
 
 fn config_with_api_key(api_key: &str) -> String {
     TEST_CONFIG.replace("unique-test-secret-9f1ca2", api_key)
+}
+
+fn model_input(
+    key: &str,
+    endpoint: &str,
+    credential: assistant_protocol::ModelCredentialChange,
+) -> assistant_protocol::ModelConfigurationInput {
+    assistant_protocol::ModelConfigurationInput {
+        model_key: assistant_protocol::ModelKey::new(key).expect("model key"),
+        display_name: key.to_owned(),
+        protocol: "chat_completions".to_owned(),
+        provider: "fixture".to_owned(),
+        endpoint: endpoint.to_owned(),
+        model: format!("{key}-model"),
+        context_window_tokens: 8_192,
+        max_output_tokens: 4_096,
+        credential,
+    }
 }
 
 fn model_capabilities(has_tools: bool) -> ModelCapabilities {

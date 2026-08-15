@@ -332,6 +332,102 @@ fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host
 }
 
 #[test]
+fn default_session_permissions_apply_immediately_in_the_formal_host() {
+    let provider = FakeProvider::start();
+    let runtime_home = TempDir::new().expect("isolated Runtime Home");
+    write_config(
+        runtime_home.path(),
+        provider.endpoint(),
+        "session-default-secret",
+    );
+    let host = HostProcess::start(runtime_home.path());
+    let mut client = host.connect();
+    let session_id = client.runtime(
+        "create_session",
+        json!({ "title": "Session default permissions", "model_key": "fixture" }),
+    )["session"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let session_directory = runtime_home.path().join("data/sessions").join(&session_id);
+    let permission_document: Value = serde_json::from_slice(
+        &fs::read(session_directory.join("private/permissions.json"))
+            .expect("read Session permissions"),
+    )
+    .expect("parse Session permissions");
+    assert_eq!(
+        permission_document["rules"]
+            .as_array()
+            .expect("default rules")
+            .len(),
+        11
+    );
+
+    for (variant, idempotency_key) in [
+        ("build", "session-default-build-read"),
+        ("plan", "session-default-plan-read"),
+    ] {
+        let submitted = client.runtime(
+            "submit_input",
+            json!({
+                "session_id": session_id,
+                "message": "TOOL_CASE",
+                "variant": variant,
+                "idempotency_key": idempotency_key,
+            }),
+        );
+        let run_id = submitted["run"]["run_id"].as_str().expect("run id");
+        assert_eq!(
+            client.wait_for_status(
+                "Session default read tool",
+                &session_id,
+                run_id,
+                &["completed"]
+            )["status"],
+            "completed"
+        );
+        assert!(
+            client.runtime(
+                "list_pending_approvals",
+                json!({ "session_id": session_id })
+            )["approvals"]
+                .as_array()
+                .expect("approval list")
+                .is_empty()
+        );
+    }
+
+    let submitted = client.runtime(
+        "submit_input",
+        json!({
+            "session_id": session_id,
+            "message": "WRITE_CASE",
+            "variant": "build",
+            "idempotency_key": "session-default-build-write",
+        }),
+    );
+    let run_id = submitted["run"]["run_id"].as_str().expect("run id");
+    assert_eq!(
+        client.wait_for_status(
+            "Session default write tool",
+            &session_id,
+            run_id,
+            &["completed"]
+        )["status"],
+        "completed"
+    );
+    assert_eq!(
+        fs::read_to_string(session_directory.join("private/default-permission-write.txt"))
+            .expect("Build writes inside Session private directory"),
+        "written by default workspace permission"
+    );
+
+    client.runtime("shutdown_runtime", json!({}));
+    drop(client);
+    assert!(host.wait().status.success());
+}
+
+#[test]
 fn pending_approval_is_queryable_but_is_not_restored_after_host_restart() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
@@ -350,6 +446,19 @@ fn pending_approval_is_queryable_but_is_not_restored_after_host_restart() {
         .as_str()
         .expect("session id")
         .to_owned();
+    fs::write(
+        runtime_home
+            .path()
+            .join("data/sessions")
+            .join(&session_id)
+            .join("private/permissions.json"),
+        b"{\"schema_version\":1,\"rules\":[]}",
+    )
+    .expect("remove default Session trust for approval recovery case");
+    assert_eq!(
+        client.runtime("reload_permissions", json!({ "session_id": session_id }))["applied"],
+        true
+    );
     let run_id = client.runtime(
         "submit_input",
         json!({

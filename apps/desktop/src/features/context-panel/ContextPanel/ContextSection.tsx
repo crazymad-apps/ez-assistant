@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useId, type CSSProperties, type ReactNode } from "react";
 import { Icon } from "../../../components/Icon";
 import styles from "./index.module.scss";
 
@@ -8,9 +8,11 @@ export function ContextSection({ children, is_open, on_toggle, title }: Readonly
   on_toggle: () => void;
   title: string;
 }>) {
+  const content_id = useId();
   return (
     <section className={styles.context_section}>
       <button
+        aria-controls={content_id}
         aria-expanded={is_open}
         className={styles.section_heading}
         onClick={on_toggle}
@@ -19,7 +21,7 @@ export function ContextSection({ children, is_open, on_toggle, title }: Readonly
         <span>{title}</span>
         <Icon name={is_open ? "chevron-up" : "chevron-down"} size={14} />
       </button>
-      {is_open && <div className={styles.section_body}>{children}</div>}
+      {is_open && <div className={styles.section_body} id={content_id}>{children}</div>}
     </section>
   );
 }

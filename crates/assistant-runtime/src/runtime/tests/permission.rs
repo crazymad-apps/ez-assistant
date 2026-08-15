@@ -1,11 +1,26 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use agent_testkit::{ModelScript, ScriptedModelService, message_events};
+use agent_tools::{
+    AbsolutePath, FileAuthorizationFacts, FileOperation, Tool, ToolContext, ToolError,
+    ToolExecuteFuture, ToolExecutionMode, ToolRegistry, ToolResolution, ToolSetSnapshot,
+};
+use agent_types::{
+    AssistantMessage, AssistantPart, FinishReason, MessageId, ModelIdentity, ProviderId, ToolCall,
+    ToolCallId, ToolName,
+};
 use assistant_protocol::{
-    CreateSessionRequest, PermissionDiagnosticCode, PermissionFileStatus, PermissionScope,
-    RegisterWorkspaceRequest, ReloadPermissionsRequest, RuntimeEvent,
+    AgentVariant, ApprovalDecision, CreateSessionRequest, DecideApprovalRequest,
+    GetPermissionDocumentRequest, ListPendingApprovalsRequest, PermissionDiagnosticCode,
+    PermissionDocumentDraft, PermissionDocumentRevision, PermissionDocumentScope,
+    PermissionFileMatcher, PermissionFileOperationDefinition, PermissionFileStatus,
+    PermissionPathMatch, PermissionRuleDefinition, PermissionRuleEffect, PermissionRuleMatcher,
+    PermissionScope, RegisterWorkspaceRequest, ReloadPermissionsRequest,
+    ReplacePermissionDocumentRequest, RunStatus, RuntimeEvent, SubmitInputRequest,
 };
 
 use super::*;
@@ -38,6 +53,13 @@ impl Default for MutablePermissionStore {
 }
 
 impl MutablePermissionStore {
+    pub(super) fn writable() -> Self {
+        Self {
+            files: Mutex::new(BTreeMap::new()),
+            replace_behavior: Mutex::new(ReplaceBehavior::Succeed),
+        }
+    }
+
     pub(super) fn conflict_once() -> Self {
         Self {
             files: Mutex::new(BTreeMap::new()),
@@ -69,7 +91,7 @@ impl PermissionFileStore for MutablePermissionStore {
             })
             .map(|files| match files.get(scope) {
                 Some(content) => PermissionFileLoad {
-                    revision: PermissionFileRevision::Content(format!("test-{}", content.len())),
+                    revision: revision_for(content),
                     content: Some(content.clone()),
                     diagnostics: Vec::new(),
                 },
@@ -105,19 +127,31 @@ impl PermissionFileStore for MutablePermissionStore {
                     ))
                 }
                 ReplaceBehavior::Succeed => {
-                    let revision =
-                        PermissionFileRevision::Content(format!("test-{}", content.len()));
-                    self.files
-                        .lock()
-                        .map_err(|_| {
-                            StoreError::new(StoreErrorKind::Unavailable, "file lock failed")
-                        })?
-                        .insert(scope.clone(), content);
+                    let mut files = self.files.lock().map_err(|_| {
+                        StoreError::new(StoreErrorKind::Unavailable, "file lock failed")
+                    })?;
+                    let current_revision = files
+                        .get(scope)
+                        .map_or(PermissionFileRevision::Missing, |current| {
+                            revision_for(current)
+                        });
+                    if &current_revision != _expected_revision {
+                        return Err(StoreError::new(
+                            StoreErrorKind::Conflict,
+                            "scripted permission revision conflict",
+                        ));
+                    }
+                    let revision = revision_for(&content);
+                    files.insert(scope.clone(), content);
                     Ok(revision)
                 }
             });
         Box::pin(async move { result })
     }
+}
+
+fn revision_for(content: &[u8]) -> PermissionFileRevision {
+    PermissionFileRevision::Content(format!("test-{}", content.len()))
 }
 
 async fn runtime_with_permission_store(
@@ -169,6 +203,117 @@ fn global_document(rule_id: &str) -> Vec<u8> {
 "#
     )
     .into_bytes()
+}
+
+fn file_calls_step(message_id: &str, paths: &[&str]) -> ModelScript {
+    ModelScript::Events(message_events(&AssistantMessage {
+        id: MessageId::new(message_id).expect("message id"),
+        model: ModelIdentity::new(
+            ProviderId::new("fixture").expect("provider id"),
+            "fixture-model",
+        ),
+        parts: paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                AssistantPart::ToolCall(ToolCall {
+                    id: ToolCallId::new(format!("{message_id}-call-{index}"))
+                        .expect("tool call id"),
+                    name: ToolName::new("read_file").expect("tool name"),
+                    arguments: serde_json::json!({ "path": path }),
+                })
+            })
+            .collect(),
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    }))
+}
+
+fn file_tools() -> ToolSetSnapshot {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(ParallelReadTool)
+        .expect("register read file tool");
+    registry.snapshot()
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ParallelReadInput {
+    path: String,
+}
+
+#[derive(serde::Serialize)]
+struct ParallelReadOutput {
+    content: &'static str,
+}
+
+struct ParallelReadTool;
+
+impl Tool for ParallelReadTool {
+    type Input = ParallelReadInput;
+    type ResolvedInput = AbsolutePath;
+    type Output = ParallelReadOutput;
+
+    fn name(&self) -> ToolName {
+        ToolName::new("read_file").expect("tool name")
+    }
+
+    fn description(&self) -> String {
+        "Read a file in a permission queue test".to_owned()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::ParallelEligible
+    }
+
+    fn resolve(
+        &self,
+        input: Self::Input,
+    ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+        let path = AbsolutePath::new(std::path::Path::new("/workspace").join(input.path))
+            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        Ok(ToolResolution::with_facts(
+            path.clone(),
+            FileAuthorizationFacts {
+                operation: FileOperation::Read,
+                path: path.clone(),
+            },
+            serde_json::json!({ "path": path }),
+        ))
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _input: Self::ResolvedInput,
+        _context: ToolContext,
+    ) -> ToolExecuteFuture<'a, Self::Output> {
+        Box::pin(std::future::ready(Ok(ParallelReadOutput {
+            content: "content",
+        })))
+    }
+}
+
+async fn wait_for_pending_count(
+    runtime: &AssistantRuntime,
+    session_id: &assistant_protocol::SessionId,
+    count: usize,
+) -> Vec<assistant_protocol::ApprovalSnapshot> {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let approvals = runtime
+                .list_pending_approvals(ListPendingApprovalsRequest {
+                    session_id: session_id.clone(),
+                })
+                .expect("list pending approvals")
+                .approvals;
+            if approvals.len() == count {
+                return approvals;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending approval count reached")
 }
 
 #[tokio::test]
@@ -286,4 +431,285 @@ async fn invalid_member_keeps_the_previous_cohort_intact() {
         .expect("registry")
         .expect("session snapshot");
     assert_eq!(session.status, PermissionFileStatus::Empty);
+}
+
+#[tokio::test]
+async fn permission_documents_are_projected_replaced_and_guarded_by_revision() {
+    let source = Arc::new(MutablePermissionStore::writable());
+    let runtime = runtime_with_permission_store(source).await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let scope = PermissionDocumentScope::Session {
+        session_id: session_id.clone(),
+    };
+
+    let initial = runtime
+        .get_permission_document(GetPermissionDocumentRequest {
+            scope: scope.clone(),
+        })
+        .await
+        .expect("read empty session permission document")
+        .document;
+    assert_eq!(initial.revision, PermissionDocumentRevision::Missing);
+    assert_eq!(initial.status, PermissionFileStatus::Empty);
+    assert!(initial.editable);
+
+    let draft = PermissionDocumentDraft {
+        schema_version: 1,
+        rules: vec![PermissionRuleDefinition {
+            id: "allow-private-read".to_owned(),
+            effect: PermissionRuleEffect::Allow,
+            variants: vec![AgentVariant::Build],
+            matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                operation: PermissionFileOperationDefinition::Read,
+                path: "/private/session".to_owned(),
+                path_match: PermissionPathMatch::Exact,
+            }),
+        }],
+    };
+    let replaced = runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: scope.clone(),
+            expected_revision: initial.revision.clone(),
+            document: draft.clone(),
+        })
+        .await
+        .expect("replace session permission document")
+        .document;
+    assert_eq!(replaced.status, PermissionFileStatus::Ready);
+    assert_eq!(replaced.rules, draft.rules);
+
+    let stale = runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope,
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: draft,
+        })
+        .await
+        .expect_err("stale permission revision must not overwrite content");
+    assert!(matches!(stale, RuntimeError::PermissionFileConflict));
+}
+
+#[tokio::test]
+async fn permission_document_replacement_rejects_global_and_invalid_candidates() {
+    let source = Arc::new(MutablePermissionStore::writable());
+    let runtime = runtime_with_permission_store(source).await;
+    let global = runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Global,
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: Vec::new(),
+            },
+        })
+        .await
+        .expect_err("global permission document is read-only");
+    assert!(matches!(global, RuntimeError::InvalidRequest { .. }));
+
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let invalid = runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Session {
+                session_id: session_id.clone(),
+            },
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: vec![PermissionRuleDefinition {
+                    id: "relative-file-rule".to_owned(),
+                    effect: PermissionRuleEffect::Allow,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                        operation: PermissionFileOperationDefinition::Read,
+                        path: "relative/path".to_owned(),
+                        path_match: PermissionPathMatch::Exact,
+                    }),
+                }],
+            },
+        })
+        .await
+        .expect_err("relative path candidate is invalid");
+    assert!(matches!(invalid, RuntimeError::PermissionFileInvalid));
+
+    let unchanged = runtime
+        .get_permission_document(GetPermissionDocumentRequest {
+            scope: PermissionDocumentScope::Session { session_id },
+        })
+        .await
+        .expect("invalid candidate did not overwrite the document")
+        .document;
+    assert_eq!(unchanged.revision, PermissionDocumentRevision::Missing);
+    assert_eq!(unchanged.status, PermissionFileStatus::Empty);
+}
+
+#[tokio::test]
+async fn saving_an_exact_file_rule_drains_matching_approvals_from_the_queue_head() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("assistant-file-tools", &["repeated.txt", "repeated.txt"]),
+            ModelScript::Events(message_events(&assistant_text("assistant-final", "done"))),
+        ],
+    ));
+    let runtime = runtime_with_permission_components(
+        Arc::new(MutablePermissionStore::writable()),
+        model,
+        file_tools(),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "read twice".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("submit input")
+        .run;
+    assert_eq!(
+        wait_for_pending_count(&runtime, &session_id, 2).await.len(),
+        2
+    );
+
+    runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Session {
+                session_id: session_id.clone(),
+            },
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: vec![PermissionRuleDefinition {
+                    id: "allow-repeated-read".to_owned(),
+                    effect: PermissionRuleEffect::Allow,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                        operation: PermissionFileOperationDefinition::Read,
+                        path: "/workspace/repeated.txt".to_owned(),
+                        path_match: PermissionPathMatch::Exact,
+                    }),
+                }],
+            },
+        })
+        .await
+        .expect("save exact permission rule");
+
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run.run_id)
+            .await
+            .status,
+        RunStatus::Completed
+    );
+    assert!(
+        runtime
+            .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .expect("list approvals")
+            .approvals
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("assistant-file-tool", &["repeated.txt"]),
+            ModelScript::Events(message_events(&assistant_text("assistant-final", "done"))),
+        ],
+    ));
+    let runtime = runtime_with_permission_components(
+        Arc::new(MutablePermissionStore::writable()),
+        model,
+        file_tools(),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "read once".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("submit input")
+        .run;
+    let pending = wait_for_pending_count(&runtime, &session_id, 1)
+        .await
+        .pop()
+        .expect("pending approval");
+
+    runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Session {
+                session_id: session_id.clone(),
+            },
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: vec![PermissionRuleDefinition {
+                    id: "allow-workspace-reads".to_owned(),
+                    effect: PermissionRuleEffect::Allow,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                        operation: PermissionFileOperationDefinition::Read,
+                        path: "/workspace".to_owned(),
+                        path_match: PermissionPathMatch::Recursive,
+                    }),
+                }],
+            },
+        })
+        .await
+        .expect("save recursive permission rule");
+
+    let approvals = runtime
+        .list_pending_approvals(ListPendingApprovalsRequest {
+            session_id: session_id.clone(),
+        })
+        .expect("list approvals after save")
+        .approvals;
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].approval_id, pending.approval_id);
+
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: session_id.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny retained approval");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run.run_id)
+            .await
+            .status,
+        RunStatus::Completed
+    );
 }

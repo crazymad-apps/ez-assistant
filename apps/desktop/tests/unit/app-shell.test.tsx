@@ -8,6 +8,25 @@ import { AppShell } from "../../src/app/AppShell";
 afterEach(cleanup);
 
 describe("AppShell session header", () => {
+  it("shows the milestone version next to the application title", () => {
+    renderShell(storeWithSessions());
+
+    expect(screen.getByText(`v${__APP_VERSION__}`)).toBeVisible();
+  });
+
+  it("opens settings from the sidebar and restores focus after closing", async () => {
+    const store = storeWithSessions();
+    renderShell(store);
+
+    const opener = screen.getByRole("button", { name: "设置" });
+    opener.focus();
+    fireEvent.click(opener);
+    await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it("renames inline and exposes the compact status", () => {
     const store = storeWithSessions();
     const rename = vi.spyOn(store, "renameSession").mockResolvedValue(true);
@@ -124,6 +143,7 @@ function applicationSnapshot(): ApplicationSnapshot {
     runtime_lifecycle: "running",
     configuration: {
       config_path: null,
+      revision: "fixture-revision",
       state: "ready",
       schema_version: 1,
       default_model: "fixture",

@@ -15,6 +15,7 @@ import {
   formatDateTime,
   formatTime,
   runStatusLabel,
+  runFailureMessage,
   segmentStateKey,
 } from "./conversationRows";
 import { AssistantSegmentView, LiveSteps } from "./ToolSegments";
@@ -108,11 +109,11 @@ export function AssistantTurn(props: Readonly<{
           {props.live_run && (
             <LiveSteps child_tasks={props.child_tasks} on_child_open={props.on_child_open} onToolClick={props.onLiveToolClick} run={props.live_run} />
           )}
-          {props.live_run?.error_message && <p className={styles.run_error}>{props.live_run.error_message}</p>}
+          {props.live_run?.status === "failed" && <RunFailure run={props.live_run} />}
           {props.on_child_open && <ChildTaskTree embedded items={unattached_child_tasks} on_open={props.on_child_open} />}
         </div>
       )}
-      {props.live_run ? (
+      {props.live_run?.status === "failed" ? null : props.live_run ? (
         <div className={styles.live_status}><span className={styles.live_dot} />{runStatusLabel(props.live_run.status)}</div>
       ) : (
         <MessageActions
@@ -138,10 +139,19 @@ export function LiveAssistantMessage(props: Readonly<{
     <article className={`${styles.assistant_message} ${styles.live_message}`}>
       <div className={styles.assistant_segments}>
         <LiveSteps child_tasks={props.child_tasks ?? []} on_child_open={props.on_child_open} onToolClick={props.onToolClick} run={props.run} />
-        {props.run.error_message && <p className={styles.run_error}>{props.run.error_message}</p>}
+        {props.run.status === "failed" && <RunFailure run={props.run} />}
       </div>
-      <div className={styles.live_status}><span className={styles.live_dot} />{runStatusLabel(props.run.status)}</div>
+      {props.run.status !== "failed" && <div className={styles.live_status}><span className={styles.live_dot} />{runStatusLabel(props.run.status)}</div>}
     </article>
+  );
+}
+
+function RunFailure(props: Readonly<{ run: LiveRunProjection }>) {
+  return (
+    <p className={styles.run_error} role="alert">
+      <span aria-hidden="true" />
+      {runFailureMessage(props.run.model_failure_kind, props.run.error_code)}
+    </p>
   );
 }
 
