@@ -3,19 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#111827" />
+    <meta name="theme-color" content="#f8f9fb" />
     <title>EZ Assistant</title>
   </head>
   <body>
-    <main id="app">
-      <section class="shell">
-        <p class="eyebrow">EZ ASSISTANT</p>
-        <h1>Agent Runtime is ready.</h1>
-        <p class="description">Tauri 桌面端已经连接 Rust 运行时。</p>
-        <button id="health-check" type="button">检查连接</button>
-        <output id="health-result" aria-live="polite">等待检查</output>
-      </section>
-    </main>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

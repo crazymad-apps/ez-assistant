@@ -174,6 +174,13 @@ impl AssistantRuntime {
                 let snapshot =
                     settle_run(&session, &run_id, None, self.store.as_ref(), None).await?;
                 self.publish(finished_event(snapshot));
+                let generation = session.lock_state()?.body_generation;
+                self.publish(assistant_protocol::RuntimeEvent::ConversationCommitted {
+                    owner: assistant_protocol::ConversationOwner::MainSession {
+                        session_id: session.id().clone(),
+                    },
+                    generation,
+                });
             }
         }
         Ok(())

@@ -1,6 +1,7 @@
 //! Runtime 可查询的只读业务快照和稳定状态。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::{
     AttachmentId, ChildTaskId, InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId,
@@ -8,7 +9,8 @@ use crate::{
 };
 
 /// Runtime 对外可见的生命周期状态。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLifecycle {
     /// Runtime 正常接受业务操作。
@@ -20,7 +22,8 @@ pub enum RuntimeLifecycle {
 }
 
 /// Session 是否仍可接受业务变更。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycle {
     /// 可提交输入、重试、重新输入和切换模型。
@@ -30,7 +33,10 @@ pub enum SessionLifecycle {
 }
 
 /// Agent 在一次用户输入中采用的行为变体。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS,
+)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum AgentVariant {
     /// 直接实施用户请求。
@@ -41,7 +47,8 @@ pub enum AgentVariant {
 }
 
 /// 一份权限文件所属的业务层级。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionScope {
     Global,
@@ -50,7 +57,8 @@ pub enum PermissionScope {
 }
 
 /// 显式重载时观察到的单个权限文件状态。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionFileStatus {
     Empty,
@@ -60,7 +68,8 @@ pub enum PermissionFileStatus {
 }
 
 /// 权限文件诊断的稳定分类。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDiagnosticCode {
     InvalidDocument,
@@ -71,7 +80,8 @@ pub enum PermissionDiagnosticCode {
 }
 
 /// 不回显文件正文或内部路径的权限诊断。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct PermissionDiagnostic {
     pub scope: PermissionScope,
     pub code: PermissionDiagnosticCode,
@@ -79,14 +89,16 @@ pub struct PermissionDiagnostic {
 }
 
 /// 一次 cohort reload 中某层权限文件的投影。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct PermissionFileSummary {
     pub scope: PermissionScope,
     pub status: PermissionFileStatus,
 }
 
 /// Session 当前的审批交互方式。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     /// 需要授权时询问用户。
@@ -97,7 +109,8 @@ pub enum ApprovalMode {
 }
 
 /// Session 列表的生命周期过滤条件。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum SessionListFilter {
     /// 只返回活动 Session。
@@ -109,8 +122,19 @@ pub enum SessionListFilter {
     All,
 }
 
+/// Session 标题的来源，用于决定自动标题是否仍可被 Runtime 更新。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTitleOrigin {
+    #[default]
+    Generated,
+    User,
+}
+
 /// Workspace 是否仍可供新 Session 选择。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceLifecycle {
     /// Workspace 正常登记，可绑定新 Session。
@@ -120,7 +144,8 @@ pub enum WorkspaceLifecycle {
 }
 
 /// 一个 Workspace 的稳定业务投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct WorkspaceSummary {
     /// Runtime 分配的不透明 Workspace 标识。
     pub workspace_id: WorkspaceId,
@@ -136,7 +161,8 @@ pub struct WorkspaceSummary {
 }
 
 /// Attachment 的物理正文和稳定视图当前是否可用。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentState {
     Ready,
@@ -144,7 +170,8 @@ pub enum AttachmentState {
 }
 
 /// 一个 Session Attachment 的客户端可见业务投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct AttachmentSummary {
     pub attachment_id: AttachmentId,
     pub session_id: SessionId,
@@ -156,7 +183,8 @@ pub struct AttachmentSummary {
 }
 
 /// Runtime 业务 Run 的活动态和终态。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     /// Runtime 已原子登记 Run，但 supervisor 尚未开始执行。
@@ -193,7 +221,8 @@ impl RunStatus {
 }
 
 /// 父 Run 管理的子任务生命周期。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ChildTaskStatus {
     /// 父委派已可靠创建关系，尚未启动子执行。
@@ -221,7 +250,8 @@ impl ChildTaskStatus {
 }
 
 /// 一个单层子任务的可重建业务快照。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ChildTaskSnapshot {
     pub child_task_id: ChildTaskId,
     pub session_id: SessionId,
@@ -239,7 +269,8 @@ pub struct ChildTaskSnapshot {
 }
 
 /// 工具调用在 Run 观察投影中的状态。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolActivityStatus {
     /// 模型已提出调用，但调用尚未开始执行。
@@ -253,7 +284,8 @@ pub enum ToolActivityStatus {
 }
 
 /// 工具流式输出的应用层通道。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOutputChannel {
     /// 标准输出。
@@ -263,7 +295,8 @@ pub enum ToolOutputChannel {
 }
 
 /// Runtime Guardrail 的稳定检测类别。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailKind {
     RepeatedInvocation,
@@ -271,14 +304,16 @@ pub enum GuardrailKind {
 }
 
 /// Guardrail 达到阈值后的产品层行为。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailMode {
     Observe,
     Enforce,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     /// 只允许当前待执行 Tool Call。
@@ -291,7 +326,8 @@ pub enum ApprovalDecision {
     Deny,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
     /// 可以由一个客户端原子取得决策权。
@@ -300,7 +336,8 @@ pub enum ApprovalStatus {
     Resolving,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolApprovalSubject {
     /// 不带文件或进程专属授权事实的工具调用。
@@ -327,7 +364,8 @@ pub enum ToolApprovalSubject {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ApprovalSnapshot {
     /// Runtime 内存中一次审批的不透明标识。
     pub approval_id: crate::ApprovalId,
@@ -357,7 +395,8 @@ pub struct ApprovalSnapshot {
 }
 
 /// 一个 Session 的稳定摘要。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SessionSummary {
     /// Session 的不透明标识。
     pub session_id: SessionId,
@@ -384,10 +423,30 @@ pub struct SessionSummary {
     pub queued_input_count: u64,
     /// 重启恢复后队列是否等待用户显式继续。
     pub resume_required: bool,
+    /// 老记录无法可靠恢复时保持为空。
+    #[serde(default)]
+    pub created_at_ms: Option<i64>,
+    /// 最近一次 Run 可靠终结的时间；尚无 Run 时等于创建时间。
+    /// 标题、固定状态、模式等元数据变更不得推进该时间。
+    #[serde(default)]
+    pub updated_at_ms: Option<i64>,
+    #[serde(default)]
+    pub archived_at_ms: Option<i64>,
+    #[serde(default)]
+    pub is_pinned: bool,
+    #[serde(default)]
+    pub title_origin: SessionTitleOrigin,
+    #[serde(default)]
+    pub pending_approval_count: u64,
+    #[serde(default)]
+    pub active_child_count: u64,
+    #[serde(default)]
+    pub active_run_status: Option<RunStatus>,
 }
 
 /// Run 中一个工具调用的当前观察快照。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ToolActivitySnapshot {
     /// 工具调用的不透明标识。
     pub call_id: ToolCallId,
@@ -402,7 +461,8 @@ pub struct ToolActivitySnapshot {
 }
 
 /// 一次完整模型请求由 Provider 最终确认的 token 用量。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct TokenUsageSnapshot {
     /// 本次请求消耗的输入 token。
     pub input_tokens: u64,
@@ -415,7 +475,8 @@ pub struct TokenUsageSnapshot {
 }
 
 /// 一个 Runtime Run 的当前只读快照。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RunSnapshot {
     /// Run 的不透明标识。
     pub run_id: RunId,
@@ -425,6 +486,12 @@ pub struct RunSnapshot {
     pub input_id: InputId,
     /// 同一输入的执行尝试序号，从 1 开始。
     pub attempt: u32,
+    /// Run 被接受的时间；旧记录无法恢复时为空。
+    #[serde(default)]
+    pub created_at_ms: Option<i64>,
+    /// Run 可靠终结的时间；活动 Run 或旧记录无法恢复时为空。
+    #[serde(default)]
+    pub finished_at_ms: Option<i64>,
     /// 当前活动态或终态。
     pub status: RunStatus,
     /// 本次 Run 继承的 Input Agent 变体。
@@ -557,6 +624,8 @@ mod tests {
             session_id: SessionId::new("session-1").expect("session id"),
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
+            created_at_ms: Some(1),
+            finished_at_ms: Some(2),
             status: RunStatus::Failed,
             variant: AgentVariant::Plan,
             approval_mode: ApprovalMode::Auto,
@@ -612,6 +681,8 @@ mod tests {
         let run: RunSnapshot = serde_json::from_value(run).expect("legacy run");
         assert_eq!(run.variant, AgentVariant::Build);
         assert_eq!(run.approval_mode, ApprovalMode::Ask);
+        assert_eq!(run.created_at_ms, None);
+        assert_eq!(run.finished_at_ms, None);
     }
 
     #[test]

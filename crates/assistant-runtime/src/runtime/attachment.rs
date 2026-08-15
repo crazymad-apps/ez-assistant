@@ -68,6 +68,9 @@ impl AssistantRuntime {
                 component: "attachment registry",
             })?
             .insert(stored.attachment_id.clone(), stored);
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: projection.session_id.clone(),
+        });
         Ok(UploadAttachmentResult {
             attachment: projection,
         })
@@ -161,7 +164,7 @@ impl AssistantRuntime {
         Ok(files)
     }
 
-    fn allocate_attachment_id(&self) -> RuntimeResult<AttachmentId> {
+    pub(super) fn allocate_attachment_id(&self) -> RuntimeResult<AttachmentId> {
         let attachments =
             self.attachments
                 .read()

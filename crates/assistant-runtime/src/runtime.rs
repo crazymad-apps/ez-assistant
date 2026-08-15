@@ -7,6 +7,7 @@ mod delegation;
 mod input;
 mod model;
 mod permission;
+mod product;
 mod recovery;
 mod session_management;
 mod shutdown;
@@ -14,10 +15,11 @@ mod tasks;
 mod workspace;
 
 pub use attachment::StagedAttachmentUpload;
+pub use product::ResolvedToolFileResource;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,10 +27,11 @@ use agent_sdk::ContextWindowEvaluator;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CancelRunRequest, CancelRunResult,
-    ConfigurationStatus, CreateSessionRequest, CreateSessionResult, GetConfigStatusRequest,
-    GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest, GetRunResult,
-    GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult, ListSessionsRequest,
-    ListSessionsResult, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeLifecycle,
+    ConfigurationStatus, CreateSessionRequest, CreateSessionResult, DeleteConfirmationToken,
+    DeleteSessionImpact, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest,
+    GetModelResult, GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult,
+    ListModelsRequest, ListModelsResult, ListSessionsRequest, ListSessionsResult,
+    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
     SessionId, SessionSummary, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
@@ -46,6 +49,7 @@ use crate::{
         ConfigRegistry, ConfigSnapshot, project_model_by_key, project_models, project_status,
     },
     delegation::ChildTaskRegistry,
+    observation::ObservationCoordinator,
     permission::{PermissionCoordinator, PermissionFileScope, VolatilePermissionFileStore},
     session::{SessionController, allocate_session_id},
 };
@@ -72,6 +76,7 @@ pub struct AssistantRuntime {
     sessions: RwLock<BTreeMap<SessionId, Arc<SessionController>>>,
     workspaces: RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>,
     attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
+    delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: AsyncRwLock<()>,
     workspace_mutation_gate: AsyncMutex<()>,
@@ -84,9 +89,16 @@ pub struct AssistantRuntime {
     child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     child_tasks: Arc<ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
-    event_sender: broadcast::Sender<RuntimeEvent>,
+    event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
     tasks: RuntimeTasks,
+}
+
+#[derive(Clone)]
+struct PendingDeleteConfirmation {
+    session_id: SessionId,
+    impact: DeleteSessionImpact,
+    expires_at_ms: i64,
 }
 
 impl AssistantRuntime {
@@ -164,7 +176,7 @@ impl AssistantRuntime {
         permission_coordinator: Arc<PermissionCoordinator>,
         recovered: RecoveredRuntime,
     ) -> RuntimeResult<Self> {
-        let (event_sender, _) = broadcast::channel(config.event_capacity.get());
+        let event_sender = ObservationCoordinator::new(config.event_capacity.get());
         let recovered = recover_registries(recovered)?;
         Ok(Self {
             config,
@@ -172,6 +184,7 @@ impl AssistantRuntime {
             sessions: RwLock::new(recovered.sessions),
             workspaces: RwLock::new(recovered.workspaces),
             attachments: RwLock::new(recovered.attachments),
+            delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
             operation_gate: AsyncRwLock::new(()),
             workspace_mutation_gate: AsyncMutex::new(()),
@@ -210,6 +223,11 @@ impl AssistantRuntime {
 
     /// 订阅 Runtime 的有界实时事件流；落后的订阅者必须通过快照重新对齐。
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.event_sender.subscribe_legacy()
+    }
+
+    /// 订阅正式产品事件流；每条事件都带有当前 Runtime 实例内严格递增的观察序号。
+    pub fn subscribe_event_envelopes(&self) -> broadcast::Receiver<RuntimeEventEnvelope> {
         self.event_sender.subscribe()
     }
 
@@ -251,6 +269,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ReloadConfigResult> {
         self.ensure_running()?;
         let snapshot = self.config_registry.reload().await?;
+        self.publish(RuntimeEvent::ConfigChanged);
         Ok(ReloadConfigResult {
             status: self.configuration_status(&snapshot),
         })
@@ -265,7 +284,13 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
-        let title = request.title.unwrap_or_else(|| "New Session".to_owned());
+        let (title, title_origin) = match request.title {
+            Some(title) => (title, assistant_protocol::SessionTitleOrigin::User),
+            None => (
+                "New Session".to_owned(),
+                assistant_protocol::SessionTitleOrigin::Generated,
+            ),
+        };
         let config_snapshot = self.config_registry.snapshot()?;
         let model_key = resolve_session_model_key(&config_snapshot, request.model_key)?;
 
@@ -301,6 +326,7 @@ impl AssistantRuntime {
             .create_session(NewStoredSession {
                 session_id: session_id.clone(),
                 title,
+                title_origin,
                 model_key,
                 system_prompt: prepared.system_prompt,
                 environment: prepared.environment,
@@ -356,7 +382,7 @@ impl AssistantRuntime {
             .values()
             .cloned()
             .collect();
-        let summaries = sessions
+        let mut summaries = sessions
             .into_iter()
             .map(|session| session.summary())
             .collect::<RuntimeResult<Vec<SessionSummary>>>()?
@@ -370,7 +396,14 @@ impl AssistantRuntime {
                 }
                 assistant_protocol::SessionListFilter::All => true,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        summaries.sort_by(|left, right| {
+            right
+                .is_pinned
+                .cmp(&left.is_pinned)
+                .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
         Ok(ListSessionsResult {
             sessions: summaries,
         })
@@ -385,8 +418,8 @@ impl AssistantRuntime {
 
     /// 查询一个 Session 当前已经完整提交的规范 Conversation。
     ///
-    /// 该返回值属于 Runtime library 能力，不进入 `assistant-protocol` 公共 DTO；Host 的完整
-    /// Conversation 验证命令保持私有。
+    /// 该返回值属于 Runtime library 内部装配与单元测试能力，不进入 `assistant-protocol`
+    /// 公共 DTO，也不再通过正式 Host 暴露主会话整量查询。
     pub async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
@@ -467,6 +500,46 @@ impl AssistantRuntime {
 
         cancellation.cancel();
         Ok(CancelRunResult { run: snapshot })
+    }
+
+    /// 用户显式中断当前轮次；Run 走既有受控取消，剩余输入保持暂停。
+    pub async fn interrupt_run(
+        &self,
+        request: assistant_protocol::InterruptRunRequest,
+    ) -> RuntimeResult<assistant_protocol::InterruptRunResult> {
+        let session = self.session(&request.session_id)?;
+        let revision = {
+            let _mutation = session.mutation().await;
+            let mut state = session.lock_state()?;
+            if state
+                .active_run
+                .as_ref()
+                .is_none_or(|active| active.run_id != request.run_id)
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "only the active run can be interrupted",
+                });
+            }
+            state.resume_required = true;
+            state.queue_paused_by_user = true;
+            state.retry_override_input = None;
+            state.queue_revision = state.queue_revision.saturating_add(1);
+            state.queue_revision
+        };
+        let result = self
+            .cancel_run(CancelRunRequest {
+                session_id: request.session_id.clone(),
+                run_id: request.run_id,
+            })
+            .await?;
+        self.publish(RuntimeEvent::QueueChanged {
+            session_id: request.session_id,
+            revision,
+        });
+        Ok(assistant_protocol::InterruptRunResult {
+            run: result.run,
+            queue: self::product::queue_snapshot(&session)?,
+        })
     }
 
     fn ensure_running(&self) -> RuntimeResult<()> {

@@ -12,8 +12,9 @@ use agent_types::{
     UserMessage,
 };
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, AttachmentId, ChildTaskId, ChildTaskStatus, IdempotencyKey,
-    InputId, ModelKey, RunId, RunStatus, RuntimeErrorInfo, SessionId, ToolCallId, WorkspaceId,
+    AgentVariant, ApprovalMode, AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner,
+    IdempotencyKey, InputId, MessageFeedback, ModelKey, RunId, RunStatus, RuntimeErrorInfo,
+    SessionId, SessionTitleOrigin, ToolCallId, WorkspaceId,
 };
 
 use crate::SessionExecutionEnvironment;
@@ -190,12 +191,46 @@ pub struct WorkspaceRemoval {
 pub struct NewStoredSession {
     pub session_id: SessionId,
     pub title: String,
+    pub title_origin: SessionTitleOrigin,
     pub model_key: ModelKey,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
     pub created_at_ms: i64,
+}
+
+/// Fork 中一个源 Attachment 到新 Session 引用的稳定映射。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkedAttachmentReference {
+    pub source_attachment_id: AttachmentId,
+    pub attachment_id: AttachmentId,
+}
+
+/// Runtime 已校验 fork point 后交给 Store 的完整原子创建事实。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionFork {
+    pub source_session_id: SessionId,
+    pub source_generation: u64,
+    pub session: NewStoredSession,
+    pub conversation: ConversationSnapshot,
+    pub attachments: Vec<ForkedAttachmentReference>,
+}
+
+/// Store 完成路径重写和跨介质提交后的 Fork 结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredSessionFork {
+    pub session: StoredSession,
+    pub conversation: ConversationSnapshot,
+    pub attachments: Vec<StoredAttachment>,
+}
+
+/// 带预检影响摘要的永久删除业务原语。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDeletion {
+    pub session_id: SessionId,
+    pub operation_id: String,
+    pub expected_impact: assistant_protocol::DeleteSessionImpact,
 }
 
 /// 从存储恢复或创建完成的 Session 投影。
@@ -212,8 +247,11 @@ pub struct StoredSession {
     pub body_generation: u64,
     pub message_count: u64,
     pub created_at_ms: i64,
+    /// 最近一次 Run 可靠终结的时间；尚无 Run 时等于创建时间。
     pub updated_at_ms: i64,
     pub archived_at_ms: Option<i64>,
+    pub is_pinned: bool,
+    pub title_origin: SessionTitleOrigin,
     pub conversation_state: StoredConversationState,
 }
 
@@ -293,6 +331,8 @@ pub struct NewStoredInput {
     pub agent_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
     pub message: UserMessage,
+    /// 首条输入可提供的有界自动标题；Store 仅在标题来源仍为系统生成时采用。
+    pub generated_title: Option<String>,
     pub accepted_at_ms: i64,
 }
 
@@ -302,6 +342,13 @@ pub struct AcceptedInput {
     pub input: StoredInput,
     pub run: StoredRun,
     pub is_duplicate: bool,
+}
+
+/// 把一条仍在排队的 Input 提升为当前持久队列的下一项。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuePriorityChange {
+    pub session_id: SessionId,
+    pub input_id: InputId,
 }
 
 /// 从失败或中断 Run 创建下一次执行尝试的命令。
@@ -455,6 +502,47 @@ pub struct ArchiveChange {
     pub changed_at_ms: i64,
 }
 
+/// 原子修改 Session 标题并将来源标记为用户输入。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTitleChange {
+    pub session_id: SessionId,
+    pub title: String,
+    pub changed_at_ms: i64,
+}
+
+/// 幂等设置 Session 固定状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPinnedChange {
+    pub session_id: SessionId,
+    pub is_pinned: bool,
+    pub changed_at_ms: i64,
+}
+
+/// 为完全空闲且无历史事实的 Session 重新冻结目录与 System Prompt。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmptySessionWorkspaceChange {
+    pub session_id: SessionId,
+    pub system_prompt: SystemPromptSnapshot,
+    pub environment: SessionExecutionEnvironment,
+    pub changed_at_ms: i64,
+}
+
+/// 一条 Assistant Message 的本地反馈事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredMessageFeedback {
+    pub message_id: assistant_protocol::MessageId,
+    pub feedback: MessageFeedback,
+}
+
+/// 保存或清除一条 Assistant Message 的反馈。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageFeedbackChange {
+    pub session_id: SessionId,
+    pub message_id: assistant_protocol::MessageId,
+    pub feedback: Option<MessageFeedback>,
+    pub changed_at_ms: i64,
+}
+
 /// 原子切换 Session 后续 Run 使用的模型 key。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelChange {
@@ -515,6 +603,26 @@ pub struct ContextReplacement {
 pub struct RewriteResult {
     pub input: StoredInput,
     pub run: StoredRun,
+    pub body_generation: u64,
+}
+
+/// Runtime 向 Store 请求的一段规范 Conversation 窗口；`end` 使用可显示消息序号。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationWindowRequest {
+    pub owner: ConversationOwner,
+    pub generation: u64,
+    pub end: Option<usize>,
+    pub limit: usize,
+}
+
+/// Store 基于可重建索引返回的规范消息窗口；offset 不进入产品协议。
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredConversationWindow {
+    pub generation: u64,
+    pub start: usize,
+    pub end: usize,
+    pub total: usize,
+    pub conversation: ConversationSnapshot,
 }
 
 /// Assistant Runtime 使用的持久化能力端口。
@@ -539,6 +647,18 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 创建 Session 稳定事实及其空 Conversation。
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;
+
+    /// 基于已校验的正文前缀原子创建独立 Session，并重写 Attachment 稳定视图。
+    fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork>;
+
+    /// 读取永久删除的当前精确影响；实现不得缓存这个结果。
+    fn inspect_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_protocol::DeleteSessionImpact>;
+
+    /// 在再次核对影响后永久删除 Session 私有事实。
+    fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()>;
 
     /// 创建 accepted 子任务关系及其空的 generation 1 正文。
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask>;
@@ -591,6 +711,9 @@ pub trait RuntimeStore: Send + Sync {
         input_id: &InputId,
     ) -> StoreFuture<'_, ()>;
 
+    /// 可靠调整尚未开始的输入优先级；不得改写原始接收时间或 Conversation。
+    fn prioritize_queued_input(&self, change: QueuePriorityChange) -> StoreFuture<'_, ()>;
+
     /// 为最新的 Failed/Interrupted Run 创建递增 attempt。
     fn create_run_attempt(&self, attempt: NewStoredRunAttempt) -> StoreFuture<'_, StoredRun>;
 
@@ -612,8 +735,35 @@ pub trait RuntimeStore: Send + Sync {
     /// 按当前权威 generation 加载并校验完整规范 Conversation。
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot>;
 
+    /// 按可显示 User/Assistant 消息边界读取历史窗口；实现可使用可重建的私有索引。
+    fn load_conversation_window(
+        &self,
+        request: ConversationWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationWindow>;
+
     /// 原子切换 Session 归档状态；正文和运行历史保持不变。
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()>;
+
+    /// 修改 Session 标题并持久化用户来源。
+    fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()>;
+
+    /// 幂等设置 Session 固定状态。
+    fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()>;
+
+    /// 仅在 Session 仍完全为空时替换其冻结 Workspace 环境。
+    fn set_empty_session_workspace(
+        &self,
+        change: EmptySessionWorkspaceChange,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 保存或清除 Assistant Message 反馈。
+    fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()>;
+
+    /// 加载 Session 当前仍有效的 Assistant Message 反馈。
+    fn load_message_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<StoredMessageFeedback>>;
 
     /// 原子切换 Session 后续 Run 使用的模型 key。
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()>;

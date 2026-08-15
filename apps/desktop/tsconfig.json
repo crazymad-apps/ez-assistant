@@ -9,8 +9,9 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
+    "jsx": "react-jsx",
     "noEmit": true,
     "strict": true
   },
-  "include": ["src"]
+  "include": ["src", "tests/unit", "tests/support"]
 }

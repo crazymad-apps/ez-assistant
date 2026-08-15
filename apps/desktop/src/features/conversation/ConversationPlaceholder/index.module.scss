@@ -1,0 +1,39 @@
+.state_panel {
+  display: grid;
+  max-width: 420px;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--ez-text-secondary);
+  text-align: center;
+
+  strong {
+    color: var(--ez-text);
+    font-size: var(--ez-font-large);
+  }
+
+  small {
+    color: var(--ez-text-muted);
+    font-size: var(--ez-font-small);
+  }
+
+  button {
+    min-height: 32px;
+    margin-top: 5px;
+    padding: 0 13px;
+    border: 0;
+    border-radius: var(--ez-radius-small);
+    color: #fff;
+    background: var(--ez-primary);
+  }
+}
+
+.state_icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--ez-primary);
+  background: var(--ez-primary-soft);
+}

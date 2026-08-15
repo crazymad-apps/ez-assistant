@@ -5,13 +5,13 @@ mod auth;
 mod commands;
 mod error;
 mod events;
-#[cfg(feature = "web-demo")]
-mod web_demo;
+mod resources;
 
 use std::{path::PathBuf, sync::Arc};
 
 use assistant_protocol::{
-    PROTOCOL_VERSION, RuntimeHostCapabilities, RuntimeHostHealth, RuntimeHostHealthStatus,
+    PROTOCOL_VERSION, RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth,
+    RuntimeHostHealthStatus,
 };
 use assistant_runtime::AssistantRuntime;
 use axum::{
@@ -23,8 +23,14 @@ use axum::{
 use tokio_util::sync::CancellationToken;
 
 use self::{
-    attachments::upload_attachment, auth::authorize, commands::handle_command,
+    attachments::upload_attachment,
+    auth::authorize,
+    commands::handle_command,
     events::stream_events,
+    resources::{
+        export_session_markdown, preview_attachment, preview_tool_file,
+        resolve_tool_file_native_path,
+    },
 };
 
 pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -38,7 +44,6 @@ pub(crate) struct HttpState {
     base_url: Arc<str>,
     upload_staging_directory: Arc<PathBuf>,
     shutdown: CancellationToken,
-    web_demo: bool,
 }
 
 impl HttpState {
@@ -49,7 +54,6 @@ impl HttpState {
         base_url: String,
         runtime_home: PathBuf,
         shutdown: CancellationToken,
-        web_demo: bool,
     ) -> Self {
         Self {
             runtime,
@@ -58,7 +62,6 @@ impl HttpState {
             base_url: Arc::from(base_url),
             upload_staging_directory: Arc::new(runtime_home.join("data/staging/uploads")),
             shutdown,
-            web_demo,
         }
     }
 }
@@ -69,17 +72,26 @@ pub(crate) fn router(state: HttpState) -> Router {
     let api = Router::new()
         .route("/commands", command_route)
         .route("/sessions/{session_id}/attachments", attachment_route)
+        .route(
+            "/sessions/{session_id}/attachments/{attachment_id}/preview",
+            get(preview_attachment),
+        )
+        .route(
+            "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview",
+            get(preview_tool_file),
+        )
+        .route(
+            "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/native-path",
+            get(resolve_tool_file_native_path),
+        )
+        .route(
+            "/sessions/{session_id}/export.md",
+            get(export_session_markdown),
+        )
         .route("/events", get(stream_events))
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
         .layer(middleware::from_fn_with_state(state.clone(), authorize));
-
-    #[cfg(feature = "web-demo")]
-    let api = if state.web_demo {
-        api.merge(web_demo::router(state.clone()))
-    } else {
-        api
-    };
 
     api.with_state(state)
 }
@@ -90,9 +102,7 @@ async fn health() -> Json<RuntimeHostHealth> {
     })
 }
 
-async fn capabilities(
-    axum::extract::State(state): axum::extract::State<HttpState>,
-) -> Json<RuntimeHostCapabilities> {
+async fn capabilities() -> Json<RuntimeHostCapabilities> {
     Json(RuntimeHostCapabilities {
         protocol_version: PROTOCOL_VERSION,
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -100,6 +110,16 @@ async fn capabilities(
         max_attachment_bytes: Some(MAX_ATTACHMENT_BYTES),
         sse: true,
         streaming_upload: true,
-        private_web_demo: state.web_demo,
+        features: vec![
+            RuntimeHostFeature::EventEnvelopes,
+            RuntimeHostFeature::ApplicationSnapshot,
+            RuntimeHostFeature::SessionView,
+            RuntimeHostFeature::ChildTaskView,
+            RuntimeHostFeature::ConversationPaging,
+            RuntimeHostFeature::ToolDetail,
+            RuntimeHostFeature::QueueControl,
+            RuntimeHostFeature::ApprovalQueue,
+            RuntimeHostFeature::SessionManagement,
+        ],
     })
 }

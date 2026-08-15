@@ -1,0 +1,7 @@
+:root[data-platform="macos"] body {
+  -webkit-font-smoothing: antialiased;
+}
+
+:root[data-platform="macos"] [data-app-title-bar] {
+  padding-left: 78px;
+}

@@ -2,6 +2,9 @@
 
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
+use crate::{
+    RuntimeError, RuntimeResult, observation::ObservationCoordinator, session::SessionController,
+};
 use agent_core::{AgentEvent, AgentEventStream, CompletionFuture, ToolCompletionStatus};
 use agent_tools::ToolOutputChannel as AgentToolOutputChannel;
 use assistant_protocol::{
@@ -9,9 +12,6 @@ use assistant_protocol::{
     ToolActivityStatus, ToolCallId as ProtocolToolCallId, ToolOutputChannel,
 };
 use futures_util::{FutureExt, StreamExt};
-use tokio::sync::broadcast;
-
-use crate::{RuntimeError, RuntimeResult, session::SessionController};
 
 use super::{RunModelDiagnostics, RunRecord, is_active_run};
 
@@ -24,7 +24,7 @@ pub(crate) async fn observe_run_execution(
     run_id: RunId,
     mut events: AgentEventStream,
     completion: CompletionFuture,
-    event_sender: broadcast::Sender<RuntimeEvent>,
+    event_sender: ObservationCoordinator,
     model_diagnostics: Arc<RunModelDiagnostics>,
 ) -> ExecutionObservation {
     let completion = AssertUnwindSafe(completion).catch_unwind();
@@ -213,9 +213,14 @@ fn project_agent_event(
                 status,
             }))
         }
-        AgentEvent::StepStarted { .. } => {
+        AgentEvent::StepStarted { step } => {
             model_diagnostics.mark_step_started();
-            Ok(None)
+            with_active_record(session, run_id, RunRecord::start_step)?;
+            Ok(Some(RuntimeEvent::StepStarted {
+                session_id,
+                run_id: run_id.clone(),
+                step,
+            }))
         }
         AgentEvent::GuardrailTriggered {
             kind,

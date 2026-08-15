@@ -286,12 +286,12 @@ fn assert_run_status(result: &Value, run_id: &str, expected: &str) {
 }
 
 fn first_user_message_id(conversation: &Value) -> String {
-    conversation["messages"]
+    conversation["items"]
         .as_array()
-        .expect("messages")
+        .expect("Conversation items")
         .iter()
-        .find(|message| message["role"] == "user")
-        .and_then(|message| message["turn"]["id"].as_str())
+        .find(|message| message["type"] == "user")
+        .and_then(|message| message["message_id"].as_str())
         .expect("first User Message ID")
         .to_owned()
 }

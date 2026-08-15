@@ -56,11 +56,6 @@ pub(super) async fn authorize(
     response
 }
 
-#[cfg(feature = "web-demo")]
-pub(super) fn validate_demo_host(state: &HttpState, headers: &HeaderMap) -> Result<(), HttpError> {
-    validate_host(state, headers)
-}
-
 fn validate_host(state: &HttpState, headers: &HeaderMap) -> Result<(), HttpError> {
     let host = headers
         .get(HOST)

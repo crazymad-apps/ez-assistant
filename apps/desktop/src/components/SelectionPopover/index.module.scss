@@ -1,0 +1,100 @@
+.popover {
+  position: fixed;
+  z-index: var(--ez-z-popover);
+  width: min(360px, calc(100vw - 16px));
+  padding: 6px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: 11px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-popover);
+  opacity: 0;
+}
+
+.popover[data-width="content"] {
+  width: max-content;
+  max-width: calc(100vw - 16px);
+}
+
+.popover[data-position-ready="true"] { opacity: 1; }
+
+.title {
+  display: block;
+  padding: 6px 8px 8px;
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+}
+
+.option_scroll {
+  display: grid;
+  max-height: min(320px, calc(100vh - 100px));
+  overflow-y: auto;
+}
+
+.option {
+  display: grid;
+  width: auto;
+  min-height: 46px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  justify-self: stretch;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ez-text-secondary);
+  background: transparent;
+  text-align: left;
+
+  &:hover,
+  &:focus-visible {
+    outline: 0;
+    color: var(--ez-text);
+    background: var(--ez-surface-muted);
+  }
+}
+
+.option[data-has-icon="true"] {
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+}
+
+.option_icon {
+  display: grid;
+  grid-column: 1;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--ez-border);
+  border-radius: 7px;
+  color: var(--ez-text-muted);
+}
+
+.option_text {
+  display: grid;
+  grid-column: 1;
+  min-width: 0;
+  gap: 2px;
+
+  b { overflow: hidden; color: var(--ez-text); font-size: var(--ez-font-base); text-overflow: ellipsis; white-space: nowrap; }
+  small { overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.option[data-has-icon="true"] .option_text {
+  grid-column: 2;
+}
+
+.check_slot {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  grid-column: 2;
+  justify-self: end;
+  place-items: center;
+}
+
+.option[data-has-icon="true"] .check_slot {
+  grid-column: 3;
+}
+
+.check {
+  color: var(--ez-primary);
+}

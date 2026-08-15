@@ -1,0 +1,14 @@
+.error_shell {
+  display: grid;
+  width: min(460px, calc(100vw - 48px));
+  gap: 8px;
+  padding: 22px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-large);
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-popover);
+  text-align: center;
+
+  strong { color: var(--ez-text); font-size: var(--ez-font-large); }
+}

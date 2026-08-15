@@ -106,21 +106,23 @@ fn real_llm_completes_plan_then_approved_build_shell_in_the_formal_host() {
     );
 
     let conversation = client.conversation(&session_id);
-    let injected = conversation["messages"]
+    let messages = conversation["items"]
         .as_array()
-        .expect("conversation messages")
-        .iter()
-        .filter(|message| message["role"] == "user")
-        .flat_map(|message| {
-            message["turn"]["parts"]
-                .as_array()
-                .expect("User Message parts")
-        })
-        .filter(|part| part["type"] == "injected")
-        .filter_map(|part| part["data"]["text"].as_str())
-        .collect::<Vec<_>>();
-    assert!(injected.iter().any(|text| text.contains("mode=\"plan\"")));
-    assert!(injected.iter().any(|text| text.contains("mode=\"build\"")));
+        .expect("Conversation items");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["type"] == "user")
+            .count(),
+        2
+    );
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message["type"] == "assistant")
+            .count()
+            >= 2
+    );
 
     client.runtime("shutdown_runtime", json!({}));
     drop(client);

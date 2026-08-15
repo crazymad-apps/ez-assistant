@@ -2,11 +2,379 @@ use super::*;
 
 use crate::StagedAttachmentUpload;
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, ArchiveSessionRequest, IdempotencyKey, ListAttachmentsRequest,
-    ListRunsRequest, ReenterFromUserMessageRequest, RestoreSessionRequest, SessionLifecycle,
-    SessionListFilter, SetSessionApprovalModeRequest, SetSessionModelRequest,
+    AgentVariant, ApprovalMode, ArchiveSessionRequest, DeleteSessionRequest, ForkSessionRequest,
+    IdempotencyKey, ListAttachmentsRequest, ListConversationPageRequest, ListRunsRequest,
+    PrepareDeleteSessionRequest, ReenterFromUserMessageRequest, RenameSessionRequest,
+    RestoreSessionRequest, SessionLifecycle, SessionListFilter, SessionTitleOrigin,
+    SetSessionApprovalModeRequest, SetSessionModelRequest, SetSessionPinnedRequest,
     SetSessionVariantRequest,
 };
+
+#[tokio::test]
+async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
+    let assistant = assistant_text("assistant-fork-point", "fork here");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [ModelScript::Events(message_events(&assistant))],
+    ));
+    let runtime = runtime(model);
+    let source = runtime
+        .create_session(CreateSessionRequest {
+            title: Some("Source".to_owned()),
+            model_key: None,
+            workspace_id: None,
+        })
+        .await
+        .expect("source session")
+        .session;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: source.session_id.clone(),
+            message: "first turn".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: AgentVariant::Build,
+        })
+        .await
+        .expect("submit source input");
+    wait_for_terminal(&runtime, &source.session_id, &submitted.run.run_id).await;
+    let page = runtime
+        .list_conversation_page(ListConversationPageRequest {
+            owner: assistant_protocol::ConversationOwner::MainSession {
+                session_id: source.session_id.clone(),
+            },
+            cursor: None,
+            limit: 30,
+        })
+        .await
+        .expect("source page")
+        .snapshot
+        .value;
+
+    let forked = runtime
+        .fork_session(ForkSessionRequest {
+            session_id: source.session_id.clone(),
+            fork_point: assistant_protocol::MessageId::new("assistant-fork-point")
+                .expect("fork point"),
+            expected_generation: page.generation,
+        })
+        .await
+        .expect("fork session")
+        .session;
+
+    assert_ne!(forked.session_id, source.session_id);
+    assert_eq!(forked.title, "Source（分支）");
+    assert_eq!(forked.model_key, source.model_key);
+    assert_eq!(forked.message_count, 2);
+    let forked_conversation = runtime
+        .conversation_snapshot(&forked.session_id)
+        .await
+        .expect("forked conversation");
+    assert_eq!(forked_conversation.messages.len(), 2);
+    assert_eq!(
+        runtime
+            .conversation_snapshot(&source.session_id)
+            .await
+            .expect("source conversation")
+            .messages
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn delete_requires_a_bound_one_time_confirmation_and_removes_only_the_target_session() {
+    let runtime = runtime(empty_model());
+    let target = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("target")
+        .session;
+    let other = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("other")
+        .session;
+    let mismatched = runtime
+        .prepare_delete_session(PrepareDeleteSessionRequest {
+            session_id: target.session_id.clone(),
+        })
+        .await
+        .expect("prepare mismatched deletion");
+    assert!(matches!(
+        runtime
+            .delete_session(DeleteSessionRequest {
+                session_id: other.session_id.clone(),
+                confirmation_token: mismatched.confirmation_token.clone(),
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
+    assert!(matches!(
+        runtime
+            .delete_session(DeleteSessionRequest {
+                session_id: target.session_id.clone(),
+                confirmation_token: mismatched.confirmation_token,
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
+
+    let prepared = runtime
+        .prepare_delete_session(PrepareDeleteSessionRequest {
+            session_id: target.session_id.clone(),
+        })
+        .await
+        .expect("prepare deletion");
+    assert_eq!(prepared.impact.message_count, 0);
+    runtime
+        .delete_session(DeleteSessionRequest {
+            session_id: target.session_id.clone(),
+            confirmation_token: prepared.confirmation_token,
+        })
+        .await
+        .expect("delete target");
+
+    assert!(matches!(
+        runtime.get_session(assistant_protocol::GetSessionRequest {
+            session_id: target.session_id,
+        }),
+        Err(RuntimeError::SessionNotFound { .. })
+    ));
+    assert!(
+        runtime
+            .get_session(assistant_protocol::GetSessionRequest {
+                session_id: other.session_id,
+            })
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
+    let assistant = assistant_text("assistant-faulted-fork", "reliable prefix");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [ModelScript::Events(message_events(&assistant))],
+    ));
+    let runtime = runtime(model);
+    let source = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("source session")
+        .session;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: source.session_id.clone(),
+            message: "persist a reliable turn".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: AgentVariant::Build,
+        })
+        .await
+        .expect("submit input");
+    wait_for_terminal(&runtime, &source.session_id, &submitted.run.run_id).await;
+    runtime
+        .session(&source.session_id)
+        .expect("source controller")
+        .mark_faulted()
+        .expect("fault source");
+    let generation = runtime
+        .list_conversation_page(ListConversationPageRequest {
+            owner: assistant_protocol::ConversationOwner::MainSession {
+                session_id: source.session_id.clone(),
+            },
+            cursor: None,
+            limit: 30,
+        })
+        .await
+        .expect("reliable source conversation")
+        .snapshot
+        .value
+        .generation;
+
+    let forked = runtime
+        .fork_session(ForkSessionRequest {
+            session_id: source.session_id.clone(),
+            fork_point: assistant_protocol::MessageId::new("assistant-faulted-fork")
+                .expect("fork point"),
+            expected_generation: generation,
+        })
+        .await
+        .expect("fork faulted source");
+    assert_eq!(forked.session.message_count, 2);
+
+    let prepared = runtime
+        .prepare_delete_session(PrepareDeleteSessionRequest {
+            session_id: source.session_id.clone(),
+        })
+        .await
+        .expect("prepare faulted source deletion");
+    runtime
+        .delete_session(DeleteSessionRequest {
+            session_id: source.session_id.clone(),
+            confirmation_token: prepared.confirmation_token,
+        })
+        .await
+        .expect("delete faulted source");
+    assert!(matches!(
+        runtime.get_session(assistant_protocol::GetSessionRequest {
+            session_id: source.session_id,
+        }),
+        Err(RuntimeError::SessionNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title() {
+    let runtime = runtime(empty_model());
+    let generated = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("generated session")
+        .session;
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: generated.session_id.clone(),
+            message: "\n  首行作为会话标题  \n后续正文".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: AgentVariant::Build,
+        })
+        .await
+        .expect("first input");
+    let generated_summary = runtime
+        .get_session(assistant_protocol::GetSessionRequest {
+            session_id: generated.session_id,
+        })
+        .expect("generated summary")
+        .session;
+    assert_eq!(generated_summary.title, "首行作为会话标题");
+    assert_eq!(
+        generated_summary.title_origin,
+        SessionTitleOrigin::Generated
+    );
+
+    let renamed = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("renamed session")
+        .session;
+    runtime
+        .rename_session(RenameSessionRequest {
+            session_id: renamed.session_id.clone(),
+            title: "  用户标题  ".to_owned(),
+        })
+        .await
+        .expect("rename");
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: renamed.session_id.clone(),
+            message: "不应覆盖标题".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: AgentVariant::Build,
+        })
+        .await
+        .expect("first renamed input");
+    let renamed_summary = runtime
+        .get_session(assistant_protocol::GetSessionRequest {
+            session_id: renamed.session_id,
+        })
+        .expect("renamed summary")
+        .session;
+    assert_eq!(renamed_summary.title, "用户标题");
+    assert_eq!(renamed_summary.title_origin, SessionTitleOrigin::User);
+}
+
+#[tokio::test]
+async fn pinned_sessions_sort_first_and_pin_is_idempotent() {
+    let runtime = runtime(empty_model());
+    let first = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("first")
+        .session;
+    let second = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("second")
+        .session;
+    let activity_time = first.updated_at_ms;
+    for _ in 0..2 {
+        runtime
+            .set_session_pinned(SetSessionPinnedRequest {
+                session_id: first.session_id.clone(),
+                is_pinned: true,
+            })
+            .await
+            .expect("pin");
+    }
+    let listed = runtime
+        .list_sessions(ListSessionsRequest::default())
+        .expect("sessions")
+        .sessions;
+    assert_eq!(listed[0].session_id, first.session_id);
+    assert!(listed[0].is_pinned);
+    assert_eq!(listed[0].updated_at_ms, activity_time);
+    assert_eq!(listed[1].session_id, second.session_id);
+}
+
+#[tokio::test]
+async fn title_changes_do_not_advance_session_activity_time() {
+    let runtime = runtime(empty_model());
+    let created = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    let activity_time = created.updated_at_ms;
+
+    let renamed = runtime
+        .rename_session(RenameSessionRequest {
+            session_id: created.session_id,
+            title: "Only metadata changed".to_owned(),
+        })
+        .await
+        .expect("rename");
+
+    assert_eq!(renamed.session.updated_at_ms, activity_time);
+}
+
+#[tokio::test]
+async fn faulted_session_still_allows_non_execution_metadata_changes() {
+    let runtime = runtime(empty_model());
+    let created = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    runtime
+        .session(&created.session_id)
+        .expect("controller")
+        .mark_faulted()
+        .expect("fault session");
+
+    let renamed = runtime
+        .rename_session(RenameSessionRequest {
+            session_id: created.session_id.clone(),
+            title: "故障后仍可编辑".to_owned(),
+        })
+        .await
+        .expect("rename faulted session");
+    assert_eq!(renamed.session.title, "故障后仍可编辑");
+
+    let pinned = runtime
+        .set_session_pinned(SetSessionPinnedRequest {
+            session_id: created.session_id,
+            is_pinned: true,
+        })
+        .await
+        .expect("pin faulted session");
+    assert!(pinned.session.is_pinned);
+}
 
 #[tokio::test]
 async fn archived_session_is_filtered_read_only_and_can_be_restored() {

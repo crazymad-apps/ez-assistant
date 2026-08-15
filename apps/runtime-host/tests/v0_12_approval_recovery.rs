@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use support::{Client, FakeProvider, HostProcess, write_config};
 
 #[test]
-fn modes_permission_reload_and_injected_parts_survive_formal_host_restart() {
+fn modes_permission_reload_and_product_conversation_survive_formal_host_restart() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
     write_config(
@@ -53,9 +53,9 @@ fn modes_permission_reload_and_injected_parts_survive_formal_host_restart() {
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
     assert!(
-        first.conversation(&session_id)["messages"]
+        first.conversation(&session_id)["items"]
             .as_array()
-            .expect("messages")
+            .expect("Conversation items")
             .is_empty()
     );
     assert!(
@@ -145,18 +145,13 @@ fn modes_permission_reload_and_injected_parts_survive_formal_host_restart() {
         "completed"
     );
     let conversation = second.conversation(&session_id);
-    let parts = conversation["messages"][0]["turn"]["parts"]
+    let first_user = conversation["items"]
         .as_array()
-        .expect("User Message parts");
-    assert_eq!(parts[0]["type"], "text");
-    assert_eq!(parts[0]["data"]["text"], "DEFAULT_CASE");
-    assert_eq!(parts[1]["type"], "injected");
-    assert!(
-        parts[1]["data"]["text"]
-            .as_str()
-            .expect("injected text")
-            .contains("mode=\"build\"")
-    );
+        .expect("Conversation items")
+        .iter()
+        .find(|message| message["type"] == "user")
+        .expect("User Message projection");
+    assert_eq!(first_user["text"], "DEFAULT_CASE");
     assert_eq!(
         second.runtime("get_session", json!({ "session_id": session_id }))["session"]["current_variant"],
         "build"
@@ -168,7 +163,7 @@ fn modes_permission_reload_and_injected_parts_survive_formal_host_restart() {
 }
 
 #[test]
-fn workspace_allow_is_variant_scoped_in_the_formal_host() {
+fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
     write_config(
@@ -211,32 +206,29 @@ fn workspace_allow_is_variant_scoped_in_the_formal_host() {
         }),
     );
     let build_run = build["run"]["run_id"].as_str().expect("build run id");
-    let build_approval = wait_for_pending_approval(&mut client, &session_id);
-    assert!(
-        build_approval["available_decisions"]
-            .as_array()
-            .expect("decisions")
-            .contains(&json!("allow_workspace"))
-    );
-    client.runtime(
-        "decide_approval",
-        json!({
-            "session_id": session_id,
-            "approval_id": build_approval["approval_id"],
-            "decision": "allow_workspace"
-        }),
-    );
     assert_eq!(
         client.wait_for_status("Build tool", &session_id, build_run, &["completed"])["status"],
         "completed"
+    );
+    assert!(
+        client.runtime(
+            "list_pending_approvals",
+            json!({ "session_id": session_id })
+        )["approvals"]
+            .as_array()
+            .expect("Build approval list")
+            .is_empty()
     );
     let permission_path = std::path::Path::new(&agent_directory).join("permissions.json");
     let permission_document: Value =
         serde_json::from_slice(&fs::read(&permission_path).expect("read Workspace permissions"))
             .expect("parse Workspace permissions");
     assert_eq!(
-        permission_document["rules"][0]["variants"],
-        json!(["build"])
+        permission_document["rules"]
+            .as_array()
+            .expect("default rules")
+            .len(),
+        7
     );
 
     let plan = client.runtime(
@@ -249,26 +241,90 @@ fn workspace_allow_is_variant_scoped_in_the_formal_host() {
         }),
     );
     let plan_run = plan["run"]["run_id"].as_str().expect("plan run id");
-    let plan_approval = wait_for_pending_approval(&mut client, &session_id);
-    assert_eq!(plan_approval["variant"], "plan");
-    client.runtime(
-        "decide_approval",
-        json!({
-            "session_id": session_id,
-            "approval_id": plan_approval["approval_id"],
-            "decision": "deny"
-        }),
-    );
     assert_eq!(
-        client.wait_for_status("Plan denied tool", &session_id, plan_run, &["completed"])["status"],
+        client.wait_for_status("Plan tool", &session_id, plan_run, &["completed"])["status"],
         "completed"
+    );
+    assert!(
+        client.runtime(
+            "list_pending_approvals",
+            json!({ "session_id": session_id })
+        )["approvals"]
+            .as_array()
+            .expect("Plan approval list")
+            .is_empty()
     );
     let unchanged: Value = serde_json::from_slice(
         &fs::read(permission_path).expect("read unchanged Workspace permissions"),
     )
     .expect("parse unchanged Workspace permissions");
-    assert_eq!(unchanged["rules"].as_array().expect("rules").len(), 1);
-    assert_eq!(unchanged["rules"][0]["variants"], json!(["build"]));
+    assert_eq!(unchanged, permission_document);
+
+    let write_path = workspace_directory
+        .path()
+        .join("default-permission-write.txt");
+    let build_write = client.runtime(
+        "submit_input",
+        json!({
+            "session_id": session_id,
+            "message": "WRITE_CASE",
+            "variant": "build",
+            "idempotency_key": "workspace-build-write"
+        }),
+    );
+    let build_write_run = build_write["run"]["run_id"]
+        .as_str()
+        .expect("Build write run id");
+    assert_eq!(
+        client.wait_for_status(
+            "Build write tool",
+            &session_id,
+            build_write_run,
+            &["completed"]
+        )["status"],
+        "completed"
+    );
+    assert_eq!(
+        fs::read_to_string(&write_path).expect("Build writes inside Workspace"),
+        "written by default workspace permission"
+    );
+    fs::remove_file(&write_path).expect("reset write target for Plan boundary");
+
+    let plan_write = client.runtime(
+        "submit_input",
+        json!({
+            "session_id": session_id,
+            "message": "WRITE_CASE",
+            "variant": "plan",
+            "idempotency_key": "workspace-plan-write"
+        }),
+    );
+    let plan_write_run = plan_write["run"]["run_id"]
+        .as_str()
+        .expect("Plan write run id");
+    assert_eq!(
+        client.wait_for_status(
+            "Plan write tool",
+            &session_id,
+            plan_write_run,
+            &["completed"]
+        )["status"],
+        "completed"
+    );
+    assert!(
+        !write_path.exists(),
+        "Plan must not write into the Workspace"
+    );
+    assert!(
+        client.runtime(
+            "list_pending_approvals",
+            json!({ "session_id": session_id })
+        )["approvals"]
+            .as_array()
+            .expect("Plan write approval list")
+            .is_empty(),
+        "Plan's hard mutation boundary must deny instead of requesting approval"
+    );
 
     client.runtime("shutdown_runtime", json!({}));
     drop(client);

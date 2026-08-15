@@ -2,10 +2,12 @@
 
 use std::fs;
 
-use assistant_protocol::ChildTaskId;
+use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
 use assistant_runtime::{
-    ApprovalModeChange, ArchiveChange, ConversationRewrite, ModelChange, RewriteResult,
-    StoredInput, StoredInputState, StoredRun, VariantChange,
+    ApprovalModeChange, ArchiveChange, ConversationRewrite, EmptySessionWorkspaceChange,
+    MessageFeedbackChange, ModelChange, RewriteResult, SessionPinnedChange, SessionTitleChange,
+    StoredInput, StoredInputState, StoredMessageFeedback, StoredRun, StoredWorkspaceLifecycle,
+    VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -28,20 +30,14 @@ impl StorageEngine {
             .connection
             .execute(
                 "UPDATE sessions
-                 SET lifecycle = ?1, archived_at_ms = ?2, updated_at_ms = ?3
-                 WHERE session_id = ?4 AND lifecycle = ?5
+                 SET lifecycle = ?1, archived_at_ms = ?2
+                 WHERE session_id = ?3 AND lifecycle = ?4
                    AND (?1 = 'active' OR (
-                     NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?4 AND state = 'queued')
-                     AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?4 AND status IN ('accepted', 'running', 'cancelling'))
-                     AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?4)
+                     NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
+                     AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
+                     AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?3)
                    ))",
-                params![
-                    to,
-                    archived_at,
-                    change.changed_at_ms,
-                    change.session_id.as_str(),
-                    from,
-                ],
+                params![to, archived_at, change.session_id.as_str(), from],
             )
             .map_err(|source| {
                 database_write_error("session archive state could not be changed", source)
@@ -52,20 +48,208 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub(super) fn rename_session(&mut self, change: SessionTitleChange) -> StorageResult<()> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE sessions
+             SET title = ?1, title_origin = 'user'
+             WHERE session_id = ?2 AND lifecycle = 'active'",
+                params![change.title, change.session_id.as_str()],
+            )
+            .map_err(|source| database_write_error("session title could not be changed", source))?;
+        if changed != 1 {
+            return Err(conflict("session title cannot be changed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_session_pinned(&mut self, change: SessionPinnedChange) -> StorageResult<()> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE sessions SET is_pinned = ?1
+             WHERE session_id = ?2 AND lifecycle = 'active'",
+                params![i64::from(change.is_pinned), change.session_id.as_str()],
+            )
+            .map_err(|source| {
+                database_write_error("session pinned state could not be changed", source)
+            })?;
+        if changed != 1 {
+            return Err(conflict("session pinned state cannot be changed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_empty_session_workspace(
+        &mut self,
+        change: EmptySessionWorkspaceChange,
+    ) -> StorageResult<()> {
+        match change.environment.workspace_id.as_ref() {
+            Some(workspace_id) => {
+                let workspace = self.get_workspace(workspace_id)?;
+                if workspace.lifecycle != StoredWorkspaceLifecycle::Active
+                    || workspace.user_directory != change.environment.working_directory
+                    || change.environment.workspace_private_directory.as_deref()
+                        != Some(workspace.agent_directory.as_str())
+                {
+                    return Err(conflict("session workspace environment is unavailable"));
+                }
+                if !fs::metadata(&workspace.user_directory)
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false)
+                {
+                    return Err(assistant_runtime::StoreError::new(
+                        assistant_runtime::StoreErrorKind::ResourceUnavailable,
+                        "workspace directory is unavailable",
+                    ));
+                }
+            }
+            None => {
+                if change.environment.workspace_private_directory.is_some()
+                    || change.environment.working_directory
+                        != change.environment.session_private_directory
+                {
+                    return Err(assistant_runtime::StoreError::new(
+                        assistant_runtime::StoreErrorKind::InvalidInput,
+                        "unbound session environment is invalid",
+                    ));
+                }
+            }
+        }
+        let prompt_json = serde_json::to_string(&change.system_prompt)
+            .map_err(|source| internal_error("system prompt could not be encoded", source))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("session workspace change could not begin", source)
+            })?;
+        let changed = transaction
+            .execute(
+                "UPDATE sessions SET system_prompt_json = ?1
+             WHERE session_id = ?2 AND lifecycle = 'active' AND message_count = 0
+               AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?2)
+               AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?2)
+               AND NOT EXISTS (SELECT 1 FROM attachments WHERE session_id = ?2)
+               AND NOT EXISTS (SELECT 1 FROM child_tasks WHERE session_id = ?2)",
+                params![prompt_json, change.session_id.as_str()],
+            )
+            .map_err(|source| {
+                database_write_error("session workspace could not be changed", source)
+            })?;
+        if changed != 1 {
+            return Err(conflict("session workspace can only change while empty"));
+        }
+        let resources_changed = transaction
+            .execute(
+                "UPDATE session_resources SET workspace_id = ?1, working_directory = ?2
+             WHERE session_id = ?3",
+                params![
+                    change
+                        .environment
+                        .workspace_id
+                        .as_ref()
+                        .map(assistant_protocol::WorkspaceId::as_str),
+                    change.environment.working_directory,
+                    change.session_id.as_str(),
+                ],
+            )
+            .map_err(|source| {
+                database_write_error("session resources could not be changed", source)
+            })?;
+        if resources_changed != 1 {
+            return Err(conflict("session resources do not exist"));
+        }
+        transaction.commit().map_err(|source| {
+            database_write_error("session workspace change could not be committed", source)
+        })
+    }
+
+    pub(super) fn set_message_feedback(
+        &mut self,
+        change: MessageFeedbackChange,
+    ) -> StorageResult<()> {
+        let exists = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                [change.session_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|source| internal_error("feedback session could not be queried", source))?;
+        if exists != 1 {
+            return Err(conflict("feedback session does not exist"));
+        }
+        if let Some(feedback) = change.feedback {
+            self.connection
+                .execute(
+                    "INSERT INTO message_feedback (session_id, message_id, feedback, changed_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id, message_id) DO UPDATE SET
+                    feedback = excluded.feedback, changed_at_ms = excluded.changed_at_ms",
+                    params![
+                        change.session_id.as_str(),
+                        change.message_id.as_str(),
+                        feedback_value(feedback),
+                        change.changed_at_ms,
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("message feedback could not be saved", source)
+                })?;
+        } else {
+            self.connection
+                .execute(
+                    "DELETE FROM message_feedback WHERE session_id = ?1 AND message_id = ?2",
+                    params![change.session_id.as_str(), change.message_id.as_str()],
+                )
+                .map_err(|source| {
+                    database_write_error("message feedback could not be cleared", source)
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn load_message_feedback(
+        &self,
+        session_id: &assistant_protocol::SessionId,
+    ) -> StorageResult<Vec<StoredMessageFeedback>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT message_id, feedback FROM message_feedback
+             WHERE session_id = ?1 ORDER BY message_id",
+            )
+            .map_err(|source| internal_error("message feedback could not be queried", source))?;
+        let rows = statement
+            .query_map([session_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| internal_error("message feedback could not be read", source))?;
+        rows.map(|row| {
+            let (message_id, feedback) = row.map_err(|source| {
+                internal_error("message feedback row could not be read", source)
+            })?;
+            Ok(StoredMessageFeedback {
+                message_id: MessageId::new(message_id)
+                    .map_err(|_| invalid_data("stored feedback message id is invalid"))?,
+                feedback: parse_feedback(&feedback)?,
+            })
+        })
+        .collect()
+    }
+
     pub(super) fn set_session_model(&mut self, change: ModelChange) -> StorageResult<()> {
         let changed = self
             .connection
             .execute(
-                "UPDATE sessions SET model_key = ?1, updated_at_ms = ?2
-                 WHERE session_id = ?3 AND lifecycle = 'active'
-                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
-                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
-                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?3)",
-                params![
-                    change.model_key.as_str(),
-                    change.changed_at_ms,
-                    change.session_id.as_str(),
-                ],
+                "UPDATE sessions SET model_key = ?1
+                 WHERE session_id = ?2 AND lifecycle = 'active'
+                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?2 AND state = 'queued')
+                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?2 AND status IN ('accepted', 'running', 'cancelling'))
+                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?2)",
+                params![change.model_key.as_str(), change.session_id.as_str()],
             )
             .map_err(|source| {
                 database_write_error("session model could not be changed", source)
@@ -78,8 +262,8 @@ impl StorageEngine {
 
     pub(super) fn set_session_variant(&mut self, change: VariantChange) -> StorageResult<()> {
         let changed = self.connection.execute(
-            "UPDATE sessions SET current_variant = ?1, updated_at_ms = ?2 WHERE session_id = ?3 AND lifecycle = 'active'",
-            params![agent_variant_value(change.variant), change.changed_at_ms, change.session_id.as_str()],
+            "UPDATE sessions SET current_variant = ?1 WHERE session_id = ?2 AND lifecycle = 'active'",
+            params![agent_variant_value(change.variant), change.session_id.as_str()],
         ).map_err(|source| database_write_error("session variant could not be changed", source))?;
         if changed != 1 {
             return Err(conflict("session variant cannot be changed"));
@@ -92,8 +276,8 @@ impl StorageEngine {
         change: ApprovalModeChange,
     ) -> StorageResult<()> {
         let changed = self.connection.execute(
-            "UPDATE sessions SET approval_mode = ?1, updated_at_ms = ?2 WHERE session_id = ?3 AND lifecycle = 'active'",
-            params![approval_mode_value(change.approval_mode), change.changed_at_ms, change.session_id.as_str()],
+            "UPDATE sessions SET approval_mode = ?1 WHERE session_id = ?2 AND lifecycle = 'active'",
+            params![approval_mode_value(change.approval_mode), change.session_id.as_str()],
         ).map_err(|source| database_write_error("session approval mode could not be changed", source))?;
         if changed != 1 {
             return Err(conflict("session approval mode cannot be changed"));
@@ -134,11 +318,8 @@ impl StorageEngine {
             .map_err(|source| internal_error("rewrite target could not be queried", source))?
             .ok_or_else(|| conflict("target user message does not belong to an input"))?;
 
-        let plan = self.begin_replacement(
-            rewrite.session_id.clone(),
-            rewrite.conversation.clone(),
-            rewrite.changed_at_ms,
-        )?;
+        let plan =
+            self.begin_replacement(rewrite.session_id.clone(), rewrite.conversation.clone())?;
         match self.commit_rewrite(&plan, &rewrite, target_order, &new_message.id) {
             Ok(result) => Ok(result),
             Err(error) => {
@@ -165,17 +346,15 @@ impl StorageEngine {
         let updated = transaction
             .execute(
                 "UPDATE sessions
-                 SET body_generation = ?1, message_count = ?2, current_variant = ?3,
-                     updated_at_ms = ?4
-                 WHERE session_id = ?5 AND body_generation = ?6 AND lifecycle = 'active'
-                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?5 AND state = 'queued')
-                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?5 AND status IN ('accepted', 'running', 'cancelling'))
-                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?5)",
+                 SET body_generation = ?1, message_count = ?2, current_variant = ?3
+                 WHERE session_id = ?4 AND body_generation = ?5 AND lifecycle = 'active'
+                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?4 AND state = 'queued')
+                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?4 AND status IN ('accepted', 'running', 'cancelling'))
+                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?4)",
                 params![
                     to_i64(plan.new_generation, "body generation exceeds SQLite range")?,
                     to_i64(plan.message_count, "message count exceeds SQLite range")?,
                     agent_variant_value(rewrite.input.agent_variant),
-                    plan.updated_at_ms,
                     plan.session_id.as_str(),
                     to_i64(plan.previous_generation, "body generation exceeds SQLite range")?,
                 ],
@@ -293,6 +472,25 @@ impl StorageEngine {
             let _ = fs::remove_dir_all(child_task_directory(&session_directory, &child_task_id));
         }
         let _ = sync_directory(&child_tasks_directory);
-        Ok(RewriteResult { input, run })
+        Ok(RewriteResult {
+            input,
+            run,
+            body_generation: plan.new_generation,
+        })
+    }
+}
+
+fn feedback_value(feedback: MessageFeedback) -> &'static str {
+    match feedback {
+        MessageFeedback::Positive => "positive",
+        MessageFeedback::Negative => "negative",
+    }
+}
+
+fn parse_feedback(value: &str) -> StorageResult<MessageFeedback> {
+    match value {
+        "positive" => Ok(MessageFeedback::Positive),
+        "negative" => Ok(MessageFeedback::Negative),
+        _ => Err(invalid_data("stored message feedback is invalid")),
     }
 }

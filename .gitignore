@@ -4,6 +4,9 @@
 .vscode/
 node_modules/
 dist/
+apps/desktop/src-tauri/binaries/
+playwright-report/
+test-results/
 *.log
 .env
 docs/开发进度.md

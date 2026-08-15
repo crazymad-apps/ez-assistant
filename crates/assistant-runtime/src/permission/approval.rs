@@ -24,7 +24,7 @@ use assistant_protocol::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
     ChildTaskId, RunId, RuntimeEvent, SessionId, ToolApprovalSubject, WorkspaceId,
 };
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -37,6 +37,7 @@ use crate::{
     RuntimeError, RuntimeResult,
     delegation::{DELEGATE_TASK_TOOL_NAME, DelegationAuthorizationFacts},
     id,
+    observation::ObservationCoordinator,
 };
 
 struct PendingApproval {
@@ -60,12 +61,14 @@ struct ApprovalContext {
 /// Session 等待用户输入时不会阻塞其他 Session 查询或处理审批。
 pub(crate) struct ApprovalRegistry {
     entries: Mutex<BTreeMap<ApprovalId, PendingApproval>>,
+    revisions: Mutex<BTreeMap<SessionId, u64>>,
 }
 
 impl ApprovalRegistry {
     pub(crate) fn new() -> Self {
         Self {
             entries: Mutex::new(BTreeMap::new()),
+            revisions: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -123,6 +126,7 @@ impl ApprovalRegistry {
                     sender: Some(sender),
                 },
             );
+        self.bump_revision(&snapshot.session_id);
         Ok((snapshot, receiver))
     }
 
@@ -156,25 +160,43 @@ impl ApprovalRegistry {
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "approval registry",
                 })?;
-        let entry = entries
-            .get_mut(approval_id)
+        let requested = entries
+            .get(approval_id)
+            .filter(|entry| &entry.snapshot.session_id == session_id)
             .ok_or_else(|| RuntimeError::ApprovalNotFound {
                 approval_id: approval_id.clone(),
             })?;
-        if &entry.snapshot.session_id != session_id {
-            return Err(RuntimeError::ApprovalNotFound {
-                approval_id: approval_id.clone(),
-            });
-        }
-        // Pending -> Resolving 是审批的并发占用点。后到的重复决策必须失败，不能覆盖
-        // 正在执行的权限文件写入或把另一个 decision 发送给 Core。
-        if entry.snapshot.status != ApprovalStatus::Pending {
+        if requested.snapshot.status != ApprovalStatus::Pending {
             return Err(RuntimeError::ApprovalExpired {
                 approval_id: approval_id.clone(),
             });
         }
+        let head = entries
+            .values()
+            .filter(|entry| &entry.snapshot.session_id == session_id)
+            .min_by(|left, right| {
+                left.snapshot
+                    .created_at_ms
+                    .cmp(&right.snapshot.created_at_ms)
+                    .then_with(|| left.snapshot.approval_id.cmp(&right.snapshot.approval_id))
+            })
+            .map(|entry| entry.snapshot.approval_id.clone());
+        if head.as_ref() != Some(approval_id) {
+            return Err(RuntimeError::ApprovalNotHead {
+                approval_id: approval_id.clone(),
+            });
+        }
+        let entry = entries
+            .get_mut(approval_id)
+            .expect("approval existence checked above");
+        // Pending -> Resolving 是审批的并发占用点。后到的重复决策必须失败，不能覆盖
+        // 正在执行的权限文件写入或把另一个 decision 发送给 Core。
+        debug_assert_eq!(entry.snapshot.status, ApprovalStatus::Pending);
         entry.snapshot.status = ApprovalStatus::Resolving;
-        Ok(entry.snapshot.clone())
+        let snapshot = entry.snapshot.clone();
+        drop(entries);
+        self.bump_revision(session_id);
+        Ok(snapshot)
     }
 
     pub(crate) fn restore_pending(&self, approval_id: &ApprovalId) -> RuntimeResult<()> {
@@ -192,6 +214,9 @@ impl ApprovalRegistry {
         // 决策请求只取得了临时处理权；在持久化完成前失败或被取消时，审批仍然有效，
         // 因而必须回到 Pending 供客户端重试，而不是误报为已经解决。
         entry.snapshot.status = ApprovalStatus::Pending;
+        let session_id = entry.snapshot.session_id.clone();
+        drop(entries);
+        self.bump_revision(&session_id);
         Ok(())
     }
 
@@ -223,18 +248,23 @@ impl ApprovalRegistry {
             .map_err(|_| RuntimeError::ApprovalExpired {
                 approval_id: approval_id.clone(),
             })?;
+        self.bump_revision(&snapshot.session_id);
         Ok(snapshot)
     }
 
     fn cancel(&self, approval_id: &ApprovalId) -> RuntimeResult<Option<ApprovalSnapshot>> {
-        Ok(self
+        let removed = self
             .entries
             .lock()
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "approval registry",
             })?
             .remove(approval_id)
-            .map(|entry| entry.snapshot))
+            .map(|entry| entry.snapshot);
+        if let Some(approval) = &removed {
+            self.bump_revision(&approval.session_id);
+        }
+        Ok(removed)
     }
 
     /// 原子占用一个 Run 中仍处于 Pending 的审批，阻止并发用户决策越过取消流程。
@@ -259,6 +289,10 @@ impl ApprovalRegistry {
                 approvals.push(entry.snapshot.clone());
             }
         }
+        if !approvals.is_empty() {
+            drop(entries);
+            self.bump_revision(session_id);
+        }
         Ok(approvals)
     }
 
@@ -279,6 +313,10 @@ impl ApprovalRegistry {
             {
                 entry.snapshot.status = ApprovalStatus::Pending;
             }
+        }
+        drop(entries);
+        if let Some(approval) = approvals.first() {
+            self.bump_revision(&approval.session_id);
         }
         Ok(())
     }
@@ -305,7 +343,30 @@ impl ApprovalRegistry {
                 removed.push(entry.snapshot);
             }
         }
+        drop(entries);
+        if let Some(approval) = removed.first() {
+            self.bump_revision(&approval.session_id);
+        }
         Ok(removed)
+    }
+
+    pub(crate) fn revision(&self, session_id: &SessionId) -> RuntimeResult<u64> {
+        Ok(*self
+            .revisions
+            .lock()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "approval queue revisions",
+            })?
+            .get(session_id)
+            .unwrap_or(&0))
+    }
+
+    fn bump_revision(&self, session_id: &SessionId) {
+        let Ok(mut revisions) = self.revisions.lock() else {
+            return;
+        };
+        let revision = revisions.entry(session_id.clone()).or_default();
+        *revision = revision.saturating_add(1);
     }
 }
 
@@ -318,7 +379,7 @@ pub(crate) struct RuntimeApprovalResolver {
     pub(crate) approval_mode: ApprovalMode,
     pub(crate) workspace_id: Option<WorkspaceId>,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) events: broadcast::Sender<RuntimeEvent>,
+    pub(crate) events: ObservationCoordinator,
 }
 
 /// 保证等待 Future 被上层直接丢弃时也不会把 approval 遗留在 Registry 中。
@@ -328,7 +389,7 @@ pub(crate) struct RuntimeApprovalResolver {
 struct PendingApprovalGuard {
     registry: Arc<ApprovalRegistry>,
     approval_id: ApprovalId,
-    events: broadcast::Sender<RuntimeEvent>,
+    events: ObservationCoordinator,
 }
 
 impl Drop for PendingApprovalGuard {

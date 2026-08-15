@@ -149,6 +149,46 @@ impl ChildTaskRegistry {
             })
     }
 
+    pub(crate) fn list_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredChildTask>, crate::RuntimeError> {
+        self.tasks
+            .read()
+            .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                component: "child task registry",
+            })
+            .map(|tasks| {
+                let mut listed = tasks
+                    .values()
+                    .filter(|task| &task.session_id == session_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                listed.sort_by(|left, right| {
+                    left.created_at_ms
+                        .cmp(&right.created_at_ms)
+                        .then_with(|| left.child_task_id.cmp(&right.child_task_id))
+                });
+                listed
+            })
+    }
+
+    pub(crate) fn active_count_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u64, crate::RuntimeError> {
+        let count = self
+            .tasks
+            .read()
+            .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                component: "child task registry",
+            })?
+            .values()
+            .filter(|task| &task.session_id == session_id && !task.status.is_terminal())
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     pub(crate) fn activate(
         &self,
         task: &StoredChildTask,
@@ -186,6 +226,22 @@ impl ChildTaskRegistry {
                 component: "active child task registry",
             })?
             .remove(child_task_id);
+        Ok(())
+    }
+
+    pub(crate) fn remove_session(&self, session_id: &SessionId) -> Result<(), crate::RuntimeError> {
+        self.tasks
+            .write()
+            .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                component: "child task registry",
+            })?
+            .retain(|_, task| &task.session_id != session_id);
+        self.active
+            .lock()
+            .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                component: "active child task registry",
+            })?
+            .retain(|_, task| &task.session_id != session_id);
         Ok(())
     }
 

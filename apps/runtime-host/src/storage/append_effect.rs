@@ -289,5 +289,14 @@ pub(super) fn apply_run_settlement(
     if updated != 1 {
         return Err(conflict("run is not in a settleable state"));
     }
+    let session_updated = transaction
+        .execute(
+            "UPDATE sessions SET updated_at_ms = ?1 WHERE session_id = ?2",
+            params![finished_at_ms, session_id.as_str()],
+        )
+        .map_err(|source| internal_error("session activity time could not be updated", source))?;
+    if session_updated != 1 {
+        return Err(conflict("run session does not exist"));
+    }
     Ok(())
 }

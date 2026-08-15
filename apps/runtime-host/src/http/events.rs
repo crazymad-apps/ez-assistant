@@ -16,7 +16,7 @@ pub(super) async fn stream_events(
     State(state): State<HttpState>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     Sse::new(project_events(
-        state.runtime.subscribe_events(),
+        state.runtime.subscribe_event_envelopes(),
         state.shutdown,
     ))
     .keep_alive(
@@ -29,10 +29,13 @@ pub(super) async fn stream_events(
 /// 把可丢弃 Runtime 广播投影为 SSE。订阅者一旦落后，就不能继续假装事件连续：先发送
 /// Host 私有的 gap 控制事件，再关闭本次流，迫使客户端重连并从权威快照恢复。
 fn project_events(
-    mut receiver: broadcast::Receiver<assistant_protocol::RuntimeEvent>,
+    mut receiver: broadcast::Receiver<assistant_protocol::RuntimeEventEnvelope>,
     shutdown: CancellationToken,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let stream = async_stream::stream! {
+        // 立即写出一个无业务语义的帧，避免 WebView 等待 keep-alive 首字节后才认为
+        // SSE 已建立。客户端会忽略 comment，但仍能保证先订阅事件、再读取快照。
+        yield Ok(Event::default().comment("connected"));
         loop {
             let received = tokio::select! {
                 () = shutdown.cancelled() => break,
@@ -64,20 +67,31 @@ fn stream_gap_data(dropped_events: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assistant_protocol::RuntimeEvent;
+    use assistant_protocol::{RuntimeEvent, RuntimeEventEnvelope};
     use axum::{body::to_bytes, response::IntoResponse};
 
     use super::*;
 
     #[tokio::test]
+    async fn new_subscriber_gets_an_immediate_connection_frame() {
+        let (_sender, receiver) = broadcast::channel(1);
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let response = Sse::new(project_events(receiver, shutdown)).into_response();
+        let body = to_bytes(response.into_body(), 1_024)
+            .await
+            .expect("SSE body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 SSE");
+
+        assert_eq!(body, ": connected\n\n");
+    }
+
+    #[tokio::test]
     async fn lagged_subscriber_gets_a_gap_event_and_then_disconnects() {
         let (sender, receiver) = broadcast::channel(1);
-        sender
-            .send(RuntimeEvent::RuntimeShuttingDown)
-            .expect("first event");
-        sender
-            .send(RuntimeEvent::RuntimeShuttingDown)
-            .expect("second event");
+        sender.send(envelope(1)).expect("first event");
+        sender.send(envelope(2)).expect("second event");
 
         let response = Sse::new(project_events(receiver, CancellationToken::new())).into_response();
         let body = to_bytes(response.into_body(), 1_024)
@@ -92,5 +106,13 @@ mod tests {
     #[test]
     fn gap_payload_only_contains_the_dropped_event_count() {
         assert_eq!(stream_gap_data(3), r#"{"dropped_events":3}"#);
+    }
+
+    fn envelope(sequence: u64) -> RuntimeEventEnvelope {
+        RuntimeEventEnvelope {
+            sequence,
+            emitted_at_ms: 1,
+            event: RuntimeEvent::RuntimeShuttingDown,
+        }
     }
 }

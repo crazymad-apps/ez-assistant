@@ -679,6 +679,7 @@ mod delegation;
 mod failures;
 mod input;
 mod permission;
+mod product;
 mod runs;
 mod session_management;
 mod sessions;

@@ -6,21 +6,25 @@ use std::{
 };
 
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, ChildTaskStatus, InputId, RunId, RunStatus, SessionId, WorkspaceId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, InputId, MessageFeedback,
+    MessageId as ProtocolMessageId, RunId, RunStatus, SessionId, SessionTitleOrigin, WorkspaceId,
 };
 
 use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ModelChange, NewAttachmentUpload,
+    ContextReplacementTarget, ConversationRewrite, ConversationWindowRequest,
+    EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement, StoredConversationState,
-    StoredInput, StoredInputState, StoredRun, StoredRunSettlement, StoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationState, StoredConversationWindow, StoredInput, StoredInputState,
+    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
     StoredSessionLifecycle, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
     UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
@@ -49,6 +53,7 @@ struct State {
     runs: BTreeMap<RunId, StoredRun>,
     child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
     child_conversations: BTreeMap<ChildTaskId, ConversationSnapshot>,
+    message_feedback: BTreeMap<(SessionId, ProtocolMessageId), MessageFeedback>,
     pending_tool_exchanges: BTreeMap<String, VolatilePendingExchange>,
     pending_child_tool_exchanges: BTreeMap<String, VolatileChildPendingExchange>,
     next_queue_order: u64,
@@ -224,7 +229,11 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("input session is archived"));
             }
             session.current_variant = stored.agent_variant;
-            session.updated_at_ms = stored.accepted_at_ms;
+            if session.title_origin == SessionTitleOrigin::Generated
+                && let Some(title) = input.generated_title
+            {
+                session.title = title;
+            }
             state.inputs.insert(input.input_id, stored.clone());
             state.runs.insert(run.run_id.clone(), run.clone());
             Ok(AcceptedInput {
@@ -253,6 +262,36 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             state.inputs.remove(&input_id);
             state.runs.retain(|_, run| run.input_id != input_id);
+            Ok(())
+        })
+    }
+
+    fn prioritize_queued_input(&self, change: QueuePriorityChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let mut ordered = state
+                .inputs
+                .values()
+                .filter(|input| {
+                    input.session_id == change.session_id && input.state == StoredInputState::Queued
+                })
+                .map(|input| (input.queue_order, input.input_id.clone()))
+                .collect::<Vec<_>>();
+            ordered.sort_by_key(|(queue_order, _)| *queue_order);
+            let position = ordered
+                .iter()
+                .position(|(_, input_id)| input_id == &change.input_id)
+                .ok_or_else(|| conflict("input is not queued"))?;
+            let selected = ordered.remove(position);
+            ordered.insert(0, selected);
+            for (queue_order, (_, input_id)) in ordered.into_iter().enumerate() {
+                state
+                    .inputs
+                    .get_mut(&input_id)
+                    .expect("queued input id came from the same map")
+                    .queue_order = u64::try_from(queue_order)
+                    .map_err(|_| conflict("queue order exceeds storage range"))?;
+            }
             Ok(())
         })
     }
@@ -308,6 +347,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             let stored = StoredSession {
                 session_id: session.session_id.clone(),
                 title: session.title,
+                title_origin: session.title_origin,
                 model_key: session.model_key,
                 system_prompt: session.system_prompt,
                 environment: session.environment,
@@ -319,6 +359,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 created_at_ms: session.created_at_ms,
                 updated_at_ms: session.created_at_ms,
                 archived_at_ms: None,
+                is_pinned: false,
                 conversation_state: StoredConversationState::Available,
             };
             state
@@ -328,6 +369,210 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .sessions
                 .insert(stored.session_id.clone(), stored.clone());
             Ok(stored)
+        })
+    }
+
+    fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
+        Box::pin(async move {
+            fork.conversation
+                .validate_tool_exchange_pairs()
+                .map_err(|_| conflict("fork conversation splits a tool exchange"))?;
+            let mut state = self.lock()?;
+            let source = state
+                .sessions
+                .get(&fork.source_session_id)
+                .ok_or_else(|| conflict("fork source session does not exist"))?;
+            if source.body_generation != fork.source_generation {
+                return Err(conflict("fork source generation changed"));
+            }
+            if state.sessions.contains_key(&fork.session.session_id) {
+                return Err(conflict("fork session already exists"));
+            }
+            let mut new_attachment_ids = BTreeSet::new();
+            for reference in &fork.attachments {
+                if !new_attachment_ids.insert(reference.attachment_id.clone())
+                    || state.attachments.contains_key(&reference.attachment_id)
+                {
+                    return Err(conflict("fork attachment already exists"));
+                }
+            }
+
+            let mut path_rewrites = BTreeMap::new();
+            let mut attachments = Vec::with_capacity(fork.attachments.len());
+            for reference in &fork.attachments {
+                let source = state
+                    .attachments
+                    .get(&reference.source_attachment_id)
+                    .filter(|attachment| attachment.session_id == fork.source_session_id)
+                    .ok_or_else(|| conflict("fork attachment does not belong to source session"))?;
+                let readable_path = format!(
+                    "/volatile/sessions/{}/attachments/{}/file",
+                    fork.session.session_id, reference.attachment_id
+                );
+                path_rewrites.insert(source.agent_readable_path.clone(), readable_path.clone());
+                attachments.push(StoredAttachment {
+                    attachment_id: reference.attachment_id.clone(),
+                    session_id: fork.session.session_id.clone(),
+                    original_name: source.original_name.clone(),
+                    blob_hash: source.blob_hash.clone(),
+                    size_bytes: source.size_bytes,
+                    agent_readable_path: readable_path,
+                    state: source.state,
+                    created_at_ms: fork.session.created_at_ms,
+                });
+            }
+            let mut conversation = fork.conversation;
+            rewrite_file_reference_paths(&mut conversation, &path_rewrites)?;
+            let message_count = u64::try_from(conversation.messages.len())
+                .map_err(|_| conflict("fork conversation is too large"))?;
+            let stored = StoredSession {
+                session_id: fork.session.session_id.clone(),
+                title: fork.session.title,
+                title_origin: fork.session.title_origin,
+                model_key: fork.session.model_key,
+                system_prompt: fork.session.system_prompt,
+                environment: fork.session.environment,
+                lifecycle: StoredSessionLifecycle::Active,
+                current_variant: fork.session.current_variant,
+                approval_mode: fork.session.approval_mode,
+                body_generation: 1,
+                message_count,
+                created_at_ms: fork.session.created_at_ms,
+                updated_at_ms: fork.session.created_at_ms,
+                archived_at_ms: None,
+                is_pinned: false,
+                conversation_state: StoredConversationState::Available,
+            };
+            for attachment in &attachments {
+                state
+                    .attachments
+                    .insert(attachment.attachment_id.clone(), attachment.clone());
+            }
+            state
+                .conversations
+                .insert(stored.session_id.clone(), conversation.clone());
+            state
+                .sessions
+                .insert(stored.session_id.clone(), stored.clone());
+            Ok(StoredSessionFork {
+                session: stored,
+                conversation,
+                attachments,
+            })
+        })
+    }
+
+    fn inspect_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_protocol::DeleteSessionImpact> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            let session = state
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| conflict("delete session does not exist"))?;
+            Ok(assistant_protocol::DeleteSessionImpact {
+                message_count: session.message_count,
+                run_count: count_u64(
+                    state
+                        .runs
+                        .values()
+                        .filter(|run| run.session_id == session_id)
+                        .count(),
+                )?,
+                child_task_count: count_u64(
+                    state
+                        .child_tasks
+                        .values()
+                        .filter(|task| task.session_id == session_id)
+                        .count(),
+                )?,
+                attachment_count: count_u64(
+                    state
+                        .attachments
+                        .values()
+                        .filter(|attachment| attachment.session_id == session_id)
+                        .count(),
+                )?,
+            })
+        })
+    }
+
+    fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get(&deletion.session_id)
+                .ok_or_else(|| conflict("delete session does not exist"))?;
+            let current = assistant_protocol::DeleteSessionImpact {
+                message_count: session.message_count,
+                run_count: count_u64(
+                    state
+                        .runs
+                        .values()
+                        .filter(|run| run.session_id == deletion.session_id)
+                        .count(),
+                )?,
+                child_task_count: count_u64(
+                    state
+                        .child_tasks
+                        .values()
+                        .filter(|task| task.session_id == deletion.session_id)
+                        .count(),
+                )?,
+                attachment_count: count_u64(
+                    state
+                        .attachments
+                        .values()
+                        .filter(|attachment| attachment.session_id == deletion.session_id)
+                        .count(),
+                )?,
+            };
+            if current != deletion.expected_impact {
+                return Err(conflict("delete session impact changed"));
+            }
+            let run_ids = state
+                .runs
+                .values()
+                .filter(|run| run.session_id == deletion.session_id)
+                .map(|run| run.run_id.clone())
+                .collect::<BTreeSet<_>>();
+            let input_ids = state
+                .inputs
+                .values()
+                .filter(|input| input.session_id == deletion.session_id)
+                .map(|input| input.input_id.clone())
+                .collect::<BTreeSet<_>>();
+            let child_ids = state
+                .child_tasks
+                .values()
+                .filter(|task| task.session_id == deletion.session_id)
+                .map(|task| task.child_task_id.clone())
+                .collect::<BTreeSet<_>>();
+            state.sessions.remove(&deletion.session_id);
+            state.conversations.remove(&deletion.session_id);
+            state.inputs.retain(|id, _| !input_ids.contains(id));
+            state.runs.retain(|id, _| !run_ids.contains(id));
+            state.child_tasks.retain(|id, _| !child_ids.contains(id));
+            state
+                .child_conversations
+                .retain(|id, _| !child_ids.contains(id));
+            state
+                .attachments
+                .retain(|_, attachment| attachment.session_id != deletion.session_id);
+            state
+                .message_feedback
+                .retain(|(session_id, _), _| session_id != &deletion.session_id);
+            state
+                .pending_tool_exchanges
+                .retain(|_, exchange| exchange.session_id != deletion.session_id);
+            state
+                .pending_child_tool_exchanges
+                .retain(|_, exchange| exchange.session_id != deletion.session_id);
+            Ok(())
         })
     }
 
@@ -653,7 +898,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                         .checked_add(1)
                         .ok_or_else(|| conflict("conversation generation is exhausted"))?;
                     session.message_count = message_count;
-                    session.updated_at_ms = replacement.changed_at_ms;
                 }
                 ContextReplacementTarget::ChildTask {
                     session_id,
@@ -869,6 +1113,11 @@ impl RuntimeStore for VolatileRuntimeStore {
             run.cancel_requested = settlement.cancel_requested;
             run.error = settlement.error;
             run.finished_at_ms = Some(settlement.finished_at_ms);
+            let session = state
+                .sessions
+                .get_mut(&settlement.session_id)
+                .expect("run session exists");
+            session.updated_at_ms = settlement.finished_at_ms;
             Ok(())
         })
     }
@@ -881,6 +1130,50 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get(&session_id)
                 .cloned()
                 .ok_or_else(|| conflict("session does not exist in runtime storage"))
+        })
+    }
+
+    fn load_conversation_window(
+        &self,
+        request: ConversationWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationWindow> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let snapshot = match &request.owner {
+                ConversationOwner::MainSession { session_id } => {
+                    let session = state
+                        .sessions
+                        .get(session_id)
+                        .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+                    if session.body_generation != request.generation {
+                        return Err(conflict("conversation generation changed"));
+                    }
+                    state
+                        .conversations
+                        .get(session_id)
+                        .cloned()
+                        .ok_or_else(|| conflict("session conversation does not exist"))?
+                }
+                ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } => {
+                    let task = state
+                        .child_tasks
+                        .get(child_task_id)
+                        .filter(|task| task.session_id == *session_id)
+                        .ok_or_else(|| conflict("child task does not exist in session"))?;
+                    if task.body_generation != request.generation {
+                        return Err(conflict("conversation generation changed"));
+                    }
+                    state
+                        .child_conversations
+                        .get(child_task_id)
+                        .cloned()
+                        .ok_or_else(|| conflict("child conversation does not exist"))?
+                }
+            };
+            Ok(conversation_window(snapshot, &request))
         })
     }
 
@@ -905,8 +1198,107 @@ impl RuntimeStore for VolatileRuntimeStore {
                 }
                 _ => return Err(conflict("session lifecycle cannot be changed")),
             }
-            session.updated_at_ms = change.changed_at_ms;
             Ok(())
+        })
+    }
+
+    fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get_mut(&change.session_id)
+                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("session is archived"));
+            }
+            session.title = change.title;
+            session.title_origin = SessionTitleOrigin::User;
+            Ok(())
+        })
+    }
+
+    fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get_mut(&change.session_id)
+                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("session is archived"));
+            }
+            session.is_pinned = change.is_pinned;
+            Ok(())
+        })
+    }
+
+    fn set_empty_session_workspace(
+        &self,
+        change: EmptySessionWorkspaceChange,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let is_empty = !state
+                .inputs
+                .values()
+                .any(|item| item.session_id == change.session_id)
+                && !state
+                    .runs
+                    .values()
+                    .any(|item| item.session_id == change.session_id)
+                && !state
+                    .attachments
+                    .values()
+                    .any(|item| item.session_id == change.session_id);
+            if !is_empty {
+                return Err(conflict("session workspace can only change while empty"));
+            }
+            let session = state
+                .sessions
+                .get_mut(&change.session_id)
+                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active || session.message_count != 0 {
+                return Err(conflict("session workspace can only change while empty"));
+            }
+            session.system_prompt = change.system_prompt;
+            session.environment = change.environment;
+            Ok(())
+        })
+    }
+
+    fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if !state.sessions.contains_key(&change.session_id) {
+                return Err(conflict("feedback session does not exist"));
+            }
+            let key = (change.session_id, change.message_id);
+            if let Some(feedback) = change.feedback {
+                state.message_feedback.insert(key, feedback);
+            } else {
+                state.message_feedback.remove(&key);
+            }
+            Ok(())
+        })
+    }
+
+    fn load_message_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<StoredMessageFeedback>> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            Ok(state
+                .message_feedback
+                .iter()
+                .filter(|((owner, _), _)| owner == &session_id)
+                .map(|((_, message_id), feedback)| StoredMessageFeedback {
+                    message_id: message_id.clone(),
+                    feedback: *feedback,
+                })
+                .collect())
         })
     }
 
@@ -922,7 +1314,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.model_key = change.model_key;
-            session.updated_at_ms = change.changed_at_ms;
             Ok(())
         })
     }
@@ -938,7 +1329,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.current_variant = change.variant;
-            session.updated_at_ms = change.changed_at_ms;
             Ok(())
         })
     }
@@ -954,7 +1344,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.approval_mode = change.approval_mode;
-            session.updated_at_ms = change.changed_at_ms;
             Ok(())
         })
     }
@@ -1053,12 +1442,16 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get_mut(&rewrite.session_id)
                 .expect("checked session");
             session.body_generation += 1;
+            let body_generation = session.body_generation;
             session.message_count = count;
             session.current_variant = rewrite.input.agent_variant;
-            session.updated_at_ms = rewrite.changed_at_ms;
             state.inputs.insert(input.input_id.clone(), input.clone());
             state.runs.insert(run.run_id.clone(), run.clone());
-            Ok(RewriteResult { input, run })
+            Ok(RewriteResult {
+                input,
+                run,
+                body_generation,
+            })
         })
     }
 
@@ -1229,6 +1622,69 @@ fn ensure_idle(state: &State, session_id: &SessionId) -> Result<(), StoreError> 
         return Err(conflict("session is not idle"));
     }
     Ok(())
+}
+
+fn conversation_window(
+    snapshot: ConversationSnapshot,
+    request: &ConversationWindowRequest,
+) -> StoredConversationWindow {
+    let display_indices = snapshot
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            matches!(
+                message,
+                ConversationMessage::User(_) | ConversationMessage::Assistant(_)
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let total = display_indices.len();
+    let end = request.end.unwrap_or(total).min(total);
+    let start = end.saturating_sub(request.limit);
+    let raw_start = display_indices
+        .get(start)
+        .copied()
+        .unwrap_or(snapshot.messages.len());
+    let raw_end = display_indices
+        .get(end)
+        .copied()
+        .unwrap_or(snapshot.messages.len());
+    StoredConversationWindow {
+        generation: request.generation,
+        start,
+        end,
+        total,
+        conversation: ConversationSnapshot::new(snapshot.messages[raw_start..raw_end].to_vec()),
+    }
+}
+
+fn rewrite_file_reference_paths(
+    conversation: &mut ConversationSnapshot,
+    rewrites: &BTreeMap<String, String>,
+) -> Result<(), StoreError> {
+    for message in &mut conversation.messages {
+        let ConversationMessage::User(user) = message else {
+            continue;
+        };
+        for part in &mut user.parts {
+            let UserPart::FileReferences(references) = part else {
+                continue;
+            };
+            for file in &mut references.files {
+                file.readable_path =
+                    rewrites.get(&file.readable_path).cloned().ok_or_else(|| {
+                        conflict("fork conversation references an unmapped attachment")
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn count_u64(value: usize) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| conflict("session impact exceeds supported range"))
 }
 
 fn conflict(message: &'static str) -> StoreError {

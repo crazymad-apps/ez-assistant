@@ -60,6 +60,10 @@ Worker 池。
   隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
 - 默认 Host 注册正式文件与 Shell 工具，并统一交给 Runtime Authorizer 决策；不得因验证模式
   引入绕过权限规则或审批的 Allow All 产品路径。
+- 正式 Host 在 Workspace 首次注册或恢复发现权限文件缺失时，生成普通的 Workspace
+  `permissions.json`：Plan/Build 默认允许 Workspace 内结构化读取、列目录、查找和搜索，Build
+  默认允许结构化写入、编辑和删除。已存在文件不得覆盖或合并；Shell 和 Workspace 外访问不得
+  加入该默认文档。Runtime 必须加载实际文件，Authorizer 不写死默认放行分支。
 
 ## 不应放在本模块的内容
 
@@ -155,6 +159,10 @@ Worker 池。
   补建 unbound 资源行和目录，不改写既有 Prompt、Conversation、model 或 lifecycle。
 - M2 的存储 worker 串行提交 staging、内容 Blob、Session 稳定附件视图和 SQLite 元数据；
   Host 启动开放 HTTP 前修复缺失的已知视图，并把无法安全修复的附件标记为 `unavailable`。
+- Attachment Blob 文件名使用 `<内容身份摘要>.<原始安全扩展名>`；摘要身份仍由原始文件名与文件
+  字节共同决定。Session 可读路径可以继续使用软链接，但其真实目标必须保留扩展名，以便 macOS
+  LaunchServices 等系统类型识别机制正确打开文件。Host 启动时原地迁移旧的无扩展名 Blob，并只
+  重建指向该已知旧目标的稳定视图；不得为系统打开另建需要生命周期管理的展示副本。
 - M3 不增加 Message/Part 表；File References 直接随完整 User Message 进入既有
   `queued_message_json` 和 Conversation JSONL，Host Store 只沿用现有原子提交与 generation 切换语义。
 - v0.12.0 M3 由 Host 顶层固定装配 `agent-tools-local`；默认 `serve` 为每个 Run 注册
@@ -230,6 +238,21 @@ Worker 池。
 - child 卡片折叠时不累计正文和工具输出 DOM；展开后从权威 Conversation 加载稳定内容，实时增量按
   animation frame 批量写入，工具输出仅保留有界展示尾段。页面刷新和 SSE gap 后均重新查询，不能
   根据本地事件推断终态。
+
+## v0.14.1 正式产品投影与私有 Web Demo 退役
+
+- 本节是当前构建约束，并覆盖上文 v0.11.0 与 v0.13.0 中仅用于当时验收的私有 Web Demo 描述；
+  历史段落保留用于解释版本演进，不代表当前 Host 仍提供这些入口。
+- 主 Conversation 与 child Conversation 均通过 `assistant-protocol` 的有界产品投影读取；child
+  使用 `GetChildTaskView`、统一 Conversation 游标分页和 Tool Detail，不提供整份 Conversation
+  Host-private 命令，也不暴露 JSONL 路径。
+- `web-demo` Cargo feature、`--web-demo` CLI、`/demo` 路由、静态资源、Host 状态字段、capability
+  和专用验收测试已从当前产品删除。默认构建和 `--all-features` 构建都不得重新带入该能力；
+  `--web-demo` 必须被参数解析明确拒绝。
+- Host 只薄适配正式 child view/list/cancel、Conversation 分页、Tool Detail 和 SSE 事件；子审批
+  继续归入父 Session 的唯一 Runtime 审批队列，不建立 Host 或 Desktop 私有审批状态。
+- child Usage 只投影到对应任务和子视图；Host 不计算父子聚合值，右侧当前上下文继续以主 Session
+  为 owner。
 
 ## 验证
 

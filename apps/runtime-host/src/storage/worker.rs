@@ -10,13 +10,15 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
-    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
-    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
-    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PermissionFileStore,
-    PermissionStoreFuture, RecoveredRuntime, RewriteResult, RuntimeStore, StoreError,
-    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredRun, StoredRunSettlement, StoredSession, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkspaceRemoval,
+    ConversationWindowRequest, EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionFileLoad,
+    PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionStoreFuture,
+    QueuePriorityChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
+    SessionFork, SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredConversationWindow,
+    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
+    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -47,6 +49,18 @@ enum Command {
     CreateSession {
         session: NewStoredSession,
         reply: oneshot::Sender<Result<StoredSession, StoreError>>,
+    },
+    ForkSession {
+        fork: SessionFork,
+        reply: oneshot::Sender<Result<StoredSessionFork, StoreError>>,
+    },
+    InspectSessionDeletion {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<assistant_protocol::DeleteSessionImpact, StoreError>>,
+    },
+    DeleteSession {
+        deletion: SessionDeletion,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
     CreateChildTask {
         task: NewStoredChildTask,
@@ -95,6 +109,10 @@ enum Command {
         input_id: InputId,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    PrioritizeQueuedInput {
+        change: QueuePriorityChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     CreateRunAttempt {
         attempt: NewStoredRunAttempt,
         reply: oneshot::Sender<Result<StoredRun, StoreError>>,
@@ -123,9 +141,33 @@ enum Command {
         session_id: SessionId,
         reply: oneshot::Sender<Result<agent_types::ConversationSnapshot, StoreError>>,
     },
+    LoadConversationWindow {
+        request: ConversationWindowRequest,
+        reply: oneshot::Sender<Result<StoredConversationWindow, StoreError>>,
+    },
     SetSessionArchive {
         change: ArchiveChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    RenameSession {
+        change: SessionTitleChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetSessionPinned {
+        change: SessionPinnedChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetEmptySessionWorkspace {
+        change: EmptySessionWorkspaceChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetMessageFeedback {
+        change: MessageFeedbackChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    LoadMessageFeedback {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<Vec<StoredMessageFeedback>, StoreError>>,
     },
     SetSessionModel {
         change: ModelChange,
@@ -343,6 +385,36 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ForkSession { fork, reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn inspect_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_protocol::DeleteSessionImpact> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::InspectSessionDeletion { session_id, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::DeleteSession { deletion, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
@@ -477,6 +549,15 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn prioritize_queued_input(&self, change: QueuePriorityChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::PrioritizeQueuedInput { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn create_run_attempt(&self, attempt: NewStoredRunAttempt) -> StoreFuture<'_, StoredRun> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
@@ -544,10 +625,74 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn load_conversation_window(
+        &self,
+        request: ConversationWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationWindow> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadConversationWindow { request, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SetSessionArchive { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::RenameSession { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSessionPinned { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_empty_session_workspace(
+        &self,
+        change: EmptySessionWorkspaceChange,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetEmptySessionWorkspace { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetMessageFeedback { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn load_message_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<StoredMessageFeedback>> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadMessageFeedback { session_id, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -647,6 +792,15 @@ fn run_worker(
             Command::CreateSession { session, reply } => {
                 let _ = reply.send(engine.create_session(session));
             }
+            Command::ForkSession { fork, reply } => {
+                let _ = reply.send(engine.fork_session(fork));
+            }
+            Command::InspectSessionDeletion { session_id, reply } => {
+                let _ = reply.send(engine.inspect_session_deletion(&session_id));
+            }
+            Command::DeleteSession { deletion, reply } => {
+                let _ = reply.send(engine.delete_session(deletion));
+            }
             Command::CreateChildTask { task, reply } => {
                 let _ = reply.send(engine.create_child_task(task));
             }
@@ -693,6 +847,9 @@ fn run_worker(
             } => {
                 let _ = reply.send(engine.cancel_queued_input(&session_id, &input_id));
             }
+            Command::PrioritizeQueuedInput { change, reply } => {
+                let _ = reply.send(engine.prioritize_queued_input(change));
+            }
             Command::CreateRunAttempt { attempt, reply } => {
                 let _ = reply.send(engine.create_run_attempt(attempt));
             }
@@ -714,8 +871,26 @@ fn run_worker(
             Command::LoadConversation { session_id, reply } => {
                 let _ = reply.send(engine.load_conversation(&session_id));
             }
+            Command::LoadConversationWindow { request, reply } => {
+                let _ = reply.send(engine.load_conversation_window(request));
+            }
             Command::SetSessionArchive { change, reply } => {
                 let _ = reply.send(engine.set_session_archive(change));
+            }
+            Command::RenameSession { change, reply } => {
+                let _ = reply.send(engine.rename_session(change));
+            }
+            Command::SetSessionPinned { change, reply } => {
+                let _ = reply.send(engine.set_session_pinned(change));
+            }
+            Command::SetEmptySessionWorkspace { change, reply } => {
+                let _ = reply.send(engine.set_empty_session_workspace(change));
+            }
+            Command::SetMessageFeedback { change, reply } => {
+                let _ = reply.send(engine.set_message_feedback(change));
+            }
+            Command::LoadMessageFeedback { session_id, reply } => {
+                let _ = reply.send(engine.load_message_feedback(&session_id));
             }
             Command::SetSessionModel { change, reply } => {
                 let _ = reply.send(engine.set_session_model(change));

@@ -134,6 +134,14 @@ pub enum RuntimeError {
     ApprovalNotFound { approval_id: ApprovalId },
     #[error("approval `{approval_id}` is no longer pending")]
     ApprovalExpired { approval_id: ApprovalId },
+    #[error("approval `{approval_id}` is not at the head of its session queue")]
+    ApprovalNotHead { approval_id: ApprovalId },
+    #[error("queue revision does not match the current session queue")]
+    QueueConflict,
+    #[error("conversation cursor belongs to an older generation")]
+    SnapshotStale,
+    #[error("runtime state changed repeatedly while building a snapshot")]
+    SnapshotBusy,
     #[error("the requested permission scope is unavailable")]
     PermissionScopeUnavailable,
     #[error("permission file is invalid")]
@@ -259,6 +267,22 @@ impl RuntimeError {
             Self::ApprovalExpired { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ApprovalExpired,
                 "approval is no longer pending",
+            ),
+            Self::ApprovalNotHead { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ApprovalNotHead,
+                "approval is not at the head of the queue",
+            ),
+            Self::QueueConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::QueueConflict,
+                "queue changed before the operation was applied",
+            ),
+            Self::SnapshotStale => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SnapshotStale,
+                "conversation snapshot changed; reload the latest page",
+            ),
+            Self::SnapshotBusy => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SnapshotBusy,
+                "runtime state is changing; retry the snapshot",
             ),
             Self::PermissionScopeUnavailable => RuntimeErrorInfo::new(
                 RuntimeErrorCode::PermissionScopeUnavailable,

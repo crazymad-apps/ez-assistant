@@ -1,9 +1,11 @@
 //! 可安全跨进程传输的 Runtime 错误。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// 客户端可以稳定分支处理的 Runtime 错误码。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeErrorCode {
     /// 命令字段缺失、格式错误或业务输入无效。
@@ -70,7 +72,27 @@ pub enum RuntimeErrorCode {
     PermissionPersistenceFailed,
     ApprovalNotFound,
     ApprovalExpired,
+    /// 审批仍存在，但不是当前 Session 队列中允许决策的队首。
+    ApprovalNotHead,
+    /// 审批已经被其他客户端或并发操作完成。
+    ApprovalAlreadyResolved,
     PermissionScopeUnavailable,
+    /// 一般业务状态或 expected revision 已变化。
+    Conflict,
+    /// 模型配置 revision 已变化。
+    ConfigurationConflict,
+    /// 输入队列 revision 已变化。
+    QueueConflict,
+    /// Conversation generation 或快照依赖已经变化。
+    SnapshotStale,
+    /// 组合快照在有界重试内无法取得同一观察水位。
+    SnapshotBusy,
+    /// 当前资源状态不允许执行请求的操作。
+    OperationNotAllowed,
+    /// 资源存在，但不允许形成预览。
+    ResourceNotPreviewable,
+    /// 资源超过产品查询或预览上限。
+    ResourceTooLarge,
     /// 不应向客户端暴露内部细节的故障。
     Internal,
 }
@@ -79,7 +101,8 @@ pub enum RuntimeErrorCode {
 ///
 /// 该分类只表达可安全展示和聚合的故障事实，不携带 Provider 原始错误正文、
 /// prompt、credential 或请求内容。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFailureKind {
     Configuration,
@@ -97,7 +120,8 @@ pub enum ModelFailureKind {
 }
 
 /// Host 可以发送给客户端的脱敏错误信息。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RuntimeErrorInfo {
     /// 稳定、可供客户端判断的错误码。
     pub code: RuntimeErrorCode,
@@ -188,10 +212,32 @@ mod tests {
             ),
             (RuntimeErrorCode::ApprovalNotFound, "approval_not_found"),
             (RuntimeErrorCode::ApprovalExpired, "approval_expired"),
+            (RuntimeErrorCode::ApprovalNotHead, "approval_not_head"),
+            (
+                RuntimeErrorCode::ApprovalAlreadyResolved,
+                "approval_already_resolved",
+            ),
             (
                 RuntimeErrorCode::PermissionScopeUnavailable,
                 "permission_scope_unavailable",
             ),
+            (RuntimeErrorCode::Conflict, "conflict"),
+            (
+                RuntimeErrorCode::ConfigurationConflict,
+                "configuration_conflict",
+            ),
+            (RuntimeErrorCode::QueueConflict, "queue_conflict"),
+            (RuntimeErrorCode::SnapshotStale, "snapshot_stale"),
+            (RuntimeErrorCode::SnapshotBusy, "snapshot_busy"),
+            (
+                RuntimeErrorCode::OperationNotAllowed,
+                "operation_not_allowed",
+            ),
+            (
+                RuntimeErrorCode::ResourceNotPreviewable,
+                "resource_not_previewable",
+            ),
+            (RuntimeErrorCode::ResourceTooLarge, "resource_too_large"),
             (RuntimeErrorCode::Internal, "internal"),
         ];
 

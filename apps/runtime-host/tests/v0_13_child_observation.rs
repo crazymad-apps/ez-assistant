@@ -91,7 +91,10 @@ fn parallel_children_survive_archive_restore_and_formal_host_restart() {
     for task in before {
         let child_id = task["child_task_id"].as_str().expect("child id");
         assert_eq!(
-            second.child_conversation(&session_id, child_id)["messages"]
+            second.runtime(
+                "get_child_task_view",
+                json!({ "session_id": session_id, "child_task_id": child_id }),
+            )["snapshot"]["value"]["conversation"]["items"]
                 .as_array()
                 .expect("child conversation")
                 .len(),
@@ -178,25 +181,37 @@ fn killed_host_interrupts_child_and_repairs_the_parent_delegate_result_without_r
         .clone();
     assert_eq!(parent["status"], "interrupted");
     let conversation = second.conversation(&session_id);
-    let messages = conversation["messages"]
+    let messages = conversation["items"]
         .as_array()
-        .expect("parent messages");
+        .expect("parent Conversation items");
     assert!(messages.iter().any(|message| {
-        message["role"] == "tool"
-            && message["turn"]["result"]["call_id"]
-                .as_str()
-                .is_some_and(|call_id| call_id.starts_with("call-delegate-"))
-            && message["turn"]["result"]["status"] == "error"
+        message["type"] == "assistant"
+            && message["segments"]
+                .as_array()
+                .expect("Assistant segments")
+                .iter()
+                .filter(|segment| segment["type"] == "tool_group")
+                .flat_map(|segment| {
+                    segment["tools"]
+                        .as_array()
+                        .expect("tool group items")
+                        .iter()
+                })
+                .any(|tool| {
+                    tool["call_id"]
+                        .as_str()
+                        .is_some_and(|call_id| call_id.starts_with("call-delegate-"))
+                        && tool["status"] == "failed"
+                })
     }));
     second.runtime("shutdown_runtime", json!({}));
     drop(second);
     assert!(second_host.wait().status.success());
 }
 
-/// 只验证 M4 新增的正式 HTTP 薄适配；复杂恢复故障点由 storage 单测覆盖，
-/// Web Demo 展开与真实 Provider 回证留在 M5。
+/// 验证正式 Host 可直接提供子任务树和二级消息列表，不依赖私有 Conversation 快照。
 #[test]
-fn child_query_cancel_and_private_conversation_use_the_formal_host_contract() {
+fn child_query_cancel_and_product_view_use_the_formal_host_contract() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
     write_config(
@@ -271,14 +286,43 @@ fn child_query_cancel_and_private_conversation_use_the_formal_host_contract() {
     )["task"]
         .clone();
     assert_eq!(queried, tasks[0]);
-    let conversation = client.child_conversation(&session_id, &child_task_id);
+    let session_view = client.runtime(
+        "get_session_view",
+        json!({ "session_id": session_id }),
+    )["snapshot"]["value"]
+        .clone();
     assert_eq!(
-        conversation["messages"]
+        session_view["child_tasks"]
+            .as_array()
+            .expect("task tree")
+            .len(),
+        1
+    );
+    assert_eq!(
+        session_view["child_tasks"][0]["task"]["child_task_id"],
+        child_task_id
+    );
+
+    let child_view = client.runtime(
+        "get_child_task_view",
+        json!({
+            "session_id": session_id,
+            "child_task_id": child_task_id
+        }),
+    )["snapshot"]["value"]
+        .clone();
+    assert_eq!(child_view["task"]["task"]["status"], "completed");
+    assert_eq!(child_view["task"]["can_cancel"], false);
+    let conversation = &child_view["conversation"];
+    assert_eq!(
+        conversation["items"]
             .as_array()
             .expect("child messages")
             .len(),
         2
     );
+    assert_eq!(conversation["owner"]["type"], "child_task");
+    assert_eq!(conversation["items"][1]["can_fork"], false);
 
     // 终态取消是幂等查询，不改写已经可靠完成的状态。
     let cancelled = client.runtime(

@@ -30,6 +30,7 @@ use crate::{
         consume_execution_budget,
     },
     id,
+    observation::ObservationCoordinator,
     permission::{
         ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
         RuntimeToolAuthorizer,
@@ -52,7 +53,7 @@ pub(crate) struct ParentDelegationController {
     permission_coordinator: Arc<PermissionCoordinator>,
     approval_registry: Arc<ApprovalRegistry>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
-    events: tokio::sync::broadcast::Sender<assistant_protocol::RuntimeEvent>,
+    events: ObservationCoordinator,
     limits: crate::DelegationConfig,
     execution_permits: Arc<Semaphore>,
     created_tasks: Mutex<u32>,
@@ -71,7 +72,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) permission_coordinator: Arc<PermissionCoordinator>,
     pub(crate) approval_registry: Arc<ApprovalRegistry>,
     pub(crate) infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
-    pub(crate) events: tokio::sync::broadcast::Sender<assistant_protocol::RuntimeEvent>,
+    pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
 }
 

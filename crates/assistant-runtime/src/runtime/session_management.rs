@@ -1,11 +1,17 @@
 //! Session 生命周期、模型切换、Run 列表与破坏性历史重新输入。
 
-use agent_types::{ConversationMessage, ConversationSnapshot};
+use std::collections::{BTreeMap, BTreeSet};
+
+use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
 use assistant_protocol::{
-    ArchiveSessionRequest, ArchiveSessionResult, ListRunsRequest, ListRunsResult,
-    ReenterFromUserMessageRequest, ReenterFromUserMessageResult, RestoreSessionRequest,
-    RestoreSessionResult, RunSnapshot, SessionLifecycle, SetSessionApprovalModeRequest,
-    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
+    ArchiveSessionRequest, ArchiveSessionResult, DeleteConfirmationToken, DeleteSessionRequest,
+    DeleteSessionResult, ForkSessionRequest, ForkSessionResult, ListRunsRequest, ListRunsResult,
+    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
+    ReenterFromUserMessageResult, RenameSessionRequest, RenameSessionResult, RestoreSessionRequest,
+    RestoreSessionResult, RunSnapshot, SessionLifecycle, SessionTitleOrigin,
+    SetEmptySessionWorkspaceRequest, SetEmptySessionWorkspaceResult, SetMessageFeedbackRequest,
+    SetMessageFeedbackResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
+    SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
     SetSessionVariantRequest, SetSessionVariantResult,
 };
 
@@ -18,14 +24,365 @@ use super::{
     now_ms,
 };
 use crate::{
-    ApprovalModeChange, ArchiveChange, ConversationRewrite, ModelChange, NewStoredInput,
-    RuntimeError, RuntimeResult, StoredInputState, VariantChange,
+    ApprovalModeChange, ArchiveChange, ConversationRewrite, EmptySessionWorkspaceChange,
+    ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewStoredInput,
+    NewStoredSession, RuntimeError, RuntimeResult, SessionDeletion,
+    SessionEnvironmentFactoryRequest, SessionFork, SessionPinnedChange, SessionTitleChange,
+    StoredConversationState, StoredInputState, StoredSession, VariantChange,
+    WorkspaceEnvironmentSource,
     journal::InMemoryJournal,
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
 };
 
 impl AssistantRuntime {
+    pub(crate) const MAX_SESSION_TITLE_CHARS: usize = 80;
+    const DELETE_CONFIRMATION_TTL_MS: i64 = 60_000;
+
+    /// 从可靠 Assistant Message 及其完整工具结果闭包创建独立 Session。
+    pub async fn fork_session(
+        &self,
+        request: ForkSessionRequest,
+    ) -> RuntimeResult<ForkSessionResult> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let source = self.session(&request.session_id)?;
+        source
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = source.mutation().await;
+        let (source_generation, title, model_key, current_variant, approval_mode) = {
+            let state = source.lock_state()?;
+            (
+                state.body_generation,
+                state.title.clone(),
+                state.model_key.clone(),
+                state.current_variant,
+                state.approval_mode,
+            )
+        };
+        if source_generation != request.expected_generation {
+            return Err(RuntimeError::SnapshotStale);
+        }
+        let current = source.conversation_snapshot()?;
+        let target_index = current
+            .messages
+            .iter()
+            .position(|message| {
+                matches!(message, ConversationMessage::Assistant(assistant)
+                    if assistant.id.as_str() == request.fork_point.as_str())
+            })
+            .ok_or(RuntimeError::InvalidRequest {
+                reason: "fork point is not an assistant message in this session",
+            })?;
+        let mut end = target_index + 1;
+        while matches!(
+            current.messages.get(end),
+            Some(ConversationMessage::Tool(_))
+        ) {
+            end += 1;
+        }
+        let conversation = ConversationSnapshot::new(current.messages[..end].to_vec());
+        conversation
+            .validate_tool_exchange_pairs()
+            .map_err(|_| RuntimeError::InvalidRequest {
+                reason: "fork point would split a tool exchange",
+            })?;
+
+        let session_id = {
+            let sessions =
+                self.sessions
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "session registry",
+                    })?;
+            crate::session::allocate_session_id(&sessions)?
+        };
+        let workspace = source
+            .environment()
+            .workspace_id
+            .as_ref()
+            .map(|workspace_id| {
+                self.workspaces
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "workspace registry",
+                    })?
+                    .get(workspace_id)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::WorkspaceUnavailable {
+                        workspace_id: workspace_id.clone(),
+                    })
+            })
+            .transpose()?;
+        let prepared = self
+            .session_environment_factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &session_id,
+                workspace: workspace
+                    .as_ref()
+                    .map(|workspace| WorkspaceEnvironmentSource {
+                        workspace_id: &workspace.workspace_id,
+                        user_directory: &workspace.user_directory,
+                        agent_directory: &workspace.agent_directory,
+                    }),
+            })
+            .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
+
+        let attachments_by_path = self
+            .attachments
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "attachment registry",
+            })?
+            .values()
+            .filter(|attachment| attachment.session_id == request.session_id)
+            .map(|attachment| {
+                (
+                    attachment.agent_readable_path.clone(),
+                    attachment.attachment_id.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut used_attachment_ids = BTreeSet::new();
+        for message in &conversation.messages {
+            let ConversationMessage::User(user) = message else {
+                continue;
+            };
+            for part in &user.parts {
+                let UserPart::FileReferences(references) = part else {
+                    continue;
+                };
+                for file in &references.files {
+                    let attachment_id = attachments_by_path.get(&file.readable_path).ok_or(
+                        RuntimeError::InvalidRequest {
+                            reason: "fork history references an unavailable attachment",
+                        },
+                    )?;
+                    used_attachment_ids.insert(attachment_id.clone());
+                }
+            }
+        }
+        let mut attachments = Vec::with_capacity(used_attachment_ids.len());
+        let mut allocated_attachment_ids = BTreeSet::new();
+        for source_attachment_id in used_attachment_ids {
+            let attachment_id = self.allocate_attachment_id()?;
+            if !allocated_attachment_ids.insert(attachment_id.clone()) {
+                return Err(RuntimeError::InternalStateUnavailable {
+                    component: "fork attachment id collision",
+                });
+            }
+            attachments.push(ForkedAttachmentReference {
+                source_attachment_id,
+                attachment_id,
+            });
+        }
+        let created_at_ms = now_ms()?;
+        let stored = self
+            .store
+            .fork_session(SessionFork {
+                source_session_id: request.session_id,
+                source_generation,
+                session: NewStoredSession {
+                    session_id: session_id.clone(),
+                    title: fork_title(&title),
+                    title_origin: SessionTitleOrigin::Generated,
+                    model_key,
+                    system_prompt: prepared.system_prompt,
+                    environment: prepared.environment,
+                    current_variant,
+                    approval_mode,
+                    created_at_ms,
+                },
+                conversation,
+                attachments,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("fork session", source))?;
+        self.permission_coordinator
+            .register_empty_scope(crate::PermissionFileScope::Session(session_id.clone()))?;
+        let controller = std::sync::Arc::new(crate::session::SessionController::recovered(
+            stored.session,
+            Vec::new(),
+            Vec::new(),
+        ));
+        self.sessions
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .insert(session_id.clone(), controller.clone());
+        let mut attachment_registry =
+            self.attachments
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "attachment registry",
+                })?;
+        for attachment in stored.attachments {
+            attachment_registry.insert(attachment.attachment_id.clone(), attachment);
+        }
+        drop(attachment_registry);
+        let summary = controller.summary()?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionCreated {
+            session: summary.clone(),
+        });
+        self.publish(assistant_protocol::RuntimeEvent::ConversationCommitted {
+            owner: assistant_protocol::ConversationOwner::MainSession {
+                session_id: session_id.clone(),
+            },
+            generation: 1,
+        });
+        Ok(ForkSessionResult { session: summary })
+    }
+
+    /// 返回当前精确影响并签发仅可使用一次的短期确认 token。
+    pub async fn prepare_delete_session(
+        &self,
+        request: PrepareDeleteSessionRequest,
+    ) -> RuntimeResult<PrepareDeleteSessionResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_idle()?;
+        if self
+            .child_tasks
+            .active_count_for_session(&request.session_id)?
+            != 0
+        {
+            return Err(RuntimeError::SessionNotIdle {
+                session_id: request.session_id,
+            });
+        }
+        let impact = self
+            .store
+            .inspect_session_deletion(&request.session_id)
+            .await
+            .map_err(|source| RuntimeError::from_store("inspect session deletion", source))?;
+        let now = now_ms()?;
+        let expires_at_ms = now.checked_add(Self::DELETE_CONFIRMATION_TTL_MS).ok_or(
+            RuntimeError::InternalStateUnavailable {
+                component: "delete confirmation expiry",
+            },
+        )?;
+        let token = self.allocate_delete_confirmation_token(now)?;
+        self.delete_confirmations
+            .lock()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "delete confirmation registry",
+            })?
+            .insert(
+                token.clone(),
+                super::PendingDeleteConfirmation {
+                    session_id: request.session_id,
+                    impact: impact.clone(),
+                    expires_at_ms,
+                },
+            );
+        Ok(PrepareDeleteSessionResult {
+            session: session.summary()?,
+            impact,
+            confirmation_token: token,
+            expires_at_ms,
+        })
+    }
+
+    /// 消费确认 token，并在 Store 成功后才从内存 Registry 移除 Session。
+    pub async fn delete_session(
+        &self,
+        request: DeleteSessionRequest,
+    ) -> RuntimeResult<DeleteSessionResult> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_idle()?;
+        if self
+            .child_tasks
+            .active_count_for_session(&request.session_id)?
+            != 0
+        {
+            return Err(RuntimeError::SessionNotIdle {
+                session_id: request.session_id,
+            });
+        }
+        let now = now_ms()?;
+        let confirmation = self
+            .delete_confirmations
+            .lock()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "delete confirmation registry",
+            })?
+            .remove(&request.confirmation_token)
+            .filter(|confirmation| {
+                confirmation.session_id == request.session_id && confirmation.expires_at_ms >= now
+            })
+            .ok_or(RuntimeError::InvalidRequest {
+                reason: "delete confirmation is invalid or expired",
+            })?;
+        let operation_id =
+            crate::id::generate("delete").map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "delete operation id random source",
+            })?;
+        self.store
+            .delete_session(SessionDeletion {
+                session_id: request.session_id.clone(),
+                operation_id,
+                expected_impact: confirmation.impact,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("delete session", source))?;
+        self.sessions
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .remove(&request.session_id);
+        self.attachments
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "attachment registry",
+            })?
+            .retain(|_, attachment| attachment.session_id != request.session_id);
+        self.child_tasks.remove_session(&request.session_id)?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionDeleted {
+            session_id: request.session_id.clone(),
+        });
+        Ok(DeleteSessionResult {
+            session_id: request.session_id,
+        })
+    }
+
+    fn allocate_delete_confirmation_token(
+        &self,
+        now: i64,
+    ) -> RuntimeResult<DeleteConfirmationToken> {
+        let mut confirmations = self.delete_confirmations.lock().map_err(|_| {
+            RuntimeError::InternalStateUnavailable {
+                component: "delete confirmation registry",
+            }
+        })?;
+        confirmations.retain(|_, confirmation| confirmation.expires_at_ms >= now);
+        for _ in 0..crate::id::GENERATION_ATTEMPTS {
+            let value = crate::id::generate("delete_confirm").map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "delete confirmation random source",
+                }
+            })?;
+            let token = DeleteConfirmationToken::new(value).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "delete confirmation generator",
+                }
+            })?;
+            if !confirmations.contains_key(&token) {
+                return Ok(token);
+            }
+        }
+        Err(RuntimeError::InternalStateUnavailable {
+            component: "delete confirmation collision",
+        })
+    }
+
     /// 按输入接收顺序和 attempt 返回指定 Session 的全部 Run。
     pub async fn list_runs(&self, request: ListRunsRequest) -> RuntimeResult<ListRunsResult> {
         let session = self.session(&request.session_id)?;
@@ -49,15 +406,23 @@ impl AssistantRuntime {
         session.ensure_healthy()?;
         session.ensure_active()?;
         session.ensure_idle()?;
+        let changed_at_ms = now_ms()?;
         self.store
             .set_session_archive(ArchiveChange {
-                session_id: request.session_id,
+                session_id: request.session_id.clone(),
                 archived: true,
-                changed_at_ms: now_ms()?,
+                changed_at_ms,
             })
             .await
             .map_err(|source| RuntimeError::from_store("archive session", source))?;
-        session.lock_state()?.lifecycle = SessionLifecycle::Archived;
+        {
+            let mut state = session.lock_state()?;
+            state.lifecycle = SessionLifecycle::Archived;
+            state.archived_at_ms = Some(changed_at_ms);
+        }
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
         Ok(ArchiveSessionResult {
             session: session.summary()?,
         })
@@ -78,17 +443,241 @@ impl AssistantRuntime {
                 reason: "session is not archived",
             });
         }
+        let changed_at_ms = now_ms()?;
         self.store
             .set_session_archive(ArchiveChange {
-                session_id: request.session_id,
+                session_id: request.session_id.clone(),
                 archived: false,
-                changed_at_ms: now_ms()?,
+                changed_at_ms,
             })
             .await
             .map_err(|source| RuntimeError::from_store("restore session", source))?;
-        session.lock_state()?.lifecycle = SessionLifecycle::Active;
+        {
+            let mut state = session.lock_state()?;
+            state.lifecycle = SessionLifecycle::Active;
+            state.archived_at_ms = None;
+        }
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
         Ok(RestoreSessionResult {
             session: session.summary()?,
+        })
+    }
+
+    /// 修改活动 Session 标题；用户标题不会再被自动标题覆盖。
+    pub async fn rename_session(
+        &self,
+        request: RenameSessionRequest,
+    ) -> RuntimeResult<RenameSessionResult> {
+        let title = request.title.trim();
+        if title.is_empty() || title.chars().count() > Self::MAX_SESSION_TITLE_CHARS {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "session title must contain 1 to 80 characters",
+            });
+        }
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_active()?;
+        let changed_at_ms = now_ms()?;
+        self.store
+            .rename_session(SessionTitleChange {
+                session_id: request.session_id.clone(),
+                title: title.to_owned(),
+                changed_at_ms,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("rename session", source))?;
+        {
+            let mut state = session.lock_state()?;
+            state.title = title.to_owned();
+            state.title_origin = SessionTitleOrigin::User;
+        }
+        let summary = session.summary()?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
+        Ok(RenameSessionResult { session: summary })
+    }
+
+    /// 幂等设置活动 Session 的固定状态。
+    pub async fn set_session_pinned(
+        &self,
+        request: SetSessionPinnedRequest,
+    ) -> RuntimeResult<SetSessionPinnedResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_active()?;
+        if session.lock_state()?.is_pinned == request.is_pinned {
+            return Ok(SetSessionPinnedResult {
+                session: session.summary()?,
+            });
+        }
+        let changed_at_ms = now_ms()?;
+        self.store
+            .set_session_pinned(SessionPinnedChange {
+                session_id: request.session_id.clone(),
+                is_pinned: request.is_pinned,
+                changed_at_ms,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("set session pinned", source))?;
+        {
+            let mut state = session.lock_state()?;
+            state.is_pinned = request.is_pinned;
+        }
+        let summary = session.summary()?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
+        Ok(SetSessionPinnedResult { session: summary })
+    }
+
+    /// 仅为完全空的活动 Session 重新冻结 Workspace 与目录提示。
+    pub async fn set_empty_session_workspace(
+        &self,
+        request: SetEmptySessionWorkspaceRequest,
+    ) -> RuntimeResult<SetEmptySessionWorkspaceResult> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_healthy()?;
+        session.ensure_active()?;
+        {
+            let state = session.lock_state()?;
+            if state.message_count != 0
+                || !state.inputs.is_empty()
+                || !state.runs.is_empty()
+                || state.active_run.is_some()
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "session workspace can only change while empty",
+                });
+            }
+        }
+        if !self
+            .list_attachments(assistant_protocol::ListAttachmentsRequest {
+                session_id: request.session_id.clone(),
+            })?
+            .attachments
+            .is_empty()
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "session workspace can only change while empty",
+            });
+        }
+        let workspace = request
+            .workspace_id
+            .as_ref()
+            .map(|workspace_id| self.workspace_for_new_session(workspace_id))
+            .transpose()?;
+        let prepared = self
+            .session_environment_factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &request.session_id,
+                workspace: workspace
+                    .as_ref()
+                    .map(|workspace| WorkspaceEnvironmentSource {
+                        workspace_id: &workspace.workspace_id,
+                        user_directory: &workspace.user_directory,
+                        agent_directory: &workspace.agent_directory,
+                    }),
+            })
+            .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
+        let changed_at_ms = now_ms()?;
+        self.store
+            .set_empty_session_workspace(EmptySessionWorkspaceChange {
+                session_id: request.session_id.clone(),
+                system_prompt: prepared.system_prompt.clone(),
+                environment: prepared.environment.clone(),
+                changed_at_ms,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("change empty session workspace", source))?;
+        let replacement = {
+            let state = session.lock_state()?;
+            StoredSession {
+                session_id: request.session_id.clone(),
+                title: state.title.clone(),
+                model_key: state.model_key.clone(),
+                system_prompt: prepared.system_prompt,
+                environment: prepared.environment,
+                lifecycle: crate::StoredSessionLifecycle::Active,
+                current_variant: state.current_variant,
+                approval_mode: state.approval_mode,
+                body_generation: state.body_generation,
+                message_count: 0,
+                created_at_ms: session.created_at_ms(),
+                updated_at_ms: state.updated_at_ms,
+                archived_at_ms: None,
+                is_pinned: state.is_pinned,
+                title_origin: state.title_origin,
+                conversation_state: StoredConversationState::Available,
+            }
+        };
+        let replacement = std::sync::Arc::new(crate::session::SessionController::new(replacement));
+        self.sessions
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .insert(request.session_id.clone(), replacement.clone());
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
+        Ok(SetEmptySessionWorkspaceResult {
+            session: replacement.summary()?,
+        })
+    }
+
+    /// 保存一条可靠 Assistant Message 的本地反馈。
+    pub async fn set_message_feedback(
+        &self,
+        request: SetMessageFeedbackRequest,
+    ) -> RuntimeResult<SetMessageFeedbackResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
+        session.ensure_healthy()?;
+        session.ensure_active()?;
+        let exists = session
+            .conversation_snapshot()?
+            .messages
+            .iter()
+            .any(|message| {
+                matches!(message, ConversationMessage::Assistant(assistant)
+                if assistant.id.as_str() == request.message_id.as_str())
+            });
+        if !exists {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "assistant message does not exist in session",
+            });
+        }
+        self.store
+            .set_message_feedback(MessageFeedbackChange {
+                session_id: request.session_id.clone(),
+                message_id: request.message_id.clone(),
+                feedback: request.feedback,
+                changed_at_ms: now_ms()?,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("set message feedback", source))?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
+        Ok(SetMessageFeedbackResult {
+            message_id: request.message_id,
+            feedback: request.feedback,
         })
     }
 
@@ -106,15 +695,22 @@ impl AssistantRuntime {
         session.ensure_idle()?;
         let snapshot = self.config_registry.snapshot()?;
         let model_key = resolve_session_model_key(&snapshot, Some(request.model_key))?;
+        let changed_at_ms = now_ms()?;
         self.store
             .set_session_model(ModelChange {
-                session_id: request.session_id,
+                session_id: request.session_id.clone(),
                 model_key: model_key.clone(),
-                changed_at_ms: now_ms()?,
+                changed_at_ms,
             })
             .await
             .map_err(|source| RuntimeError::from_store("change session model", source))?;
-        session.lock_state()?.model_key = model_key;
+        {
+            let mut state = session.lock_state()?;
+            state.model_key = model_key;
+        }
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
         Ok(SetSessionModelResult {
             session: session.summary()?,
         })
@@ -131,15 +727,19 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
+        let changed_at_ms = now_ms()?;
         self.store
             .set_session_variant(VariantChange {
                 session_id: request.session_id,
                 variant: request.variant,
-                changed_at_ms: now_ms()?,
+                changed_at_ms,
             })
             .await
             .map_err(|source| RuntimeError::from_store("change session variant", source))?;
-        session.lock_state()?.current_variant = request.variant;
+        {
+            let mut state = session.lock_state()?;
+            state.current_variant = request.variant;
+        }
         let summary = session.summary()?;
         self.publish(assistant_protocol::RuntimeEvent::SessionVariantChanged {
             session: summary.clone(),
@@ -158,15 +758,19 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
+        let changed_at_ms = now_ms()?;
         self.store
             .set_session_approval_mode(ApprovalModeChange {
                 session_id: request.session_id,
                 approval_mode: request.approval_mode,
-                changed_at_ms: now_ms()?,
+                changed_at_ms,
             })
             .await
             .map_err(|source| RuntimeError::from_store("change session approval mode", source))?;
-        session.lock_state()?.approval_mode = request.approval_mode;
+        {
+            let mut state = session.lock_state()?;
+            state.approval_mode = request.approval_mode;
+        }
         let summary = session.summary()?;
         self.publish(
             assistant_protocol::RuntimeEvent::SessionApprovalModeChanged {
@@ -309,6 +913,7 @@ impl AssistantRuntime {
                     agent_variant: request.variant,
                     approval_mode,
                     message: new_message.clone(),
+                    generated_title: None,
                     accepted_at_ms: changed_at_ms,
                 },
                 changed_at_ms,
@@ -316,15 +921,7 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("rewrite conversation history", source))?;
 
-        let run = RunRecord::accepted(
-            rewritten.run.run_id.clone(),
-            session.id().clone(),
-            rewritten.input.input_id.clone(),
-            rewritten.run.attempt,
-            rewritten.run.agent_variant,
-            rewritten.run.approval_mode,
-            vec![new_message.id],
-        );
+        let run = RunRecord::accepted(&rewritten.run, vec![new_message.id]);
         let run_snapshot: RunSnapshot = run.snapshot();
         {
             let mut state = session.lock_state()?;
@@ -336,9 +933,12 @@ impl AssistantRuntime {
                 .retain(|_, input| !removed_inputs.contains(&input.stored.input_id));
             state.runnable_inputs.clear();
             state.resume_required = false;
+            state.queue_paused_by_user = false;
+            state.queue_revision = state.queue_revision.saturating_add(1);
             state.retry_override_input = None;
             state.message_count = replacement_message_count;
             state.persisted_message_count = replacement.messages.len();
+            state.body_generation = rewritten.body_generation;
             state.journal = Some(replacement_journal);
             state.current_variant = rewritten.input.agent_variant;
             state.runs.insert(rewritten.run.run_id.clone(), run);
@@ -369,4 +969,13 @@ impl AssistantRuntime {
             run: run_snapshot,
         })
     }
+}
+
+fn fork_title(source: &str) -> String {
+    const SUFFIX: &str = "（分支）";
+    let available =
+        AssistantRuntime::MAX_SESSION_TITLE_CHARS.saturating_sub(SUFFIX.chars().count());
+    let mut title = source.chars().take(available).collect::<String>();
+    title.push_str(SUFFIX);
+    title
 }

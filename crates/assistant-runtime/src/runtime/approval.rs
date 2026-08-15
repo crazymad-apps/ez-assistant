@@ -6,7 +6,8 @@
 
 use assistant_protocol::{
     ApprovalDecision, ApprovalId, DecideApprovalRequest, DecideApprovalResult,
-    ListPendingApprovalsRequest, ListPendingApprovalsResult, RuntimeEvent,
+    ListPendingApprovalsRequest, ListPendingApprovalsResult, RejectApprovalAndStopRunRequest,
+    RejectApprovalAndStopRunResult, RuntimeEvent,
 };
 
 use super::AssistantRuntime;
@@ -40,6 +41,42 @@ impl Drop for ResolutionGuard<'_> {
 }
 
 impl AssistantRuntime {
+    /// 拒绝队首审批并立即请求停止其所属父 Run。
+    pub async fn reject_approval_and_stop_run(
+        &self,
+        request: RejectApprovalAndStopRunRequest,
+    ) -> RuntimeResult<RejectApprovalAndStopRunResult> {
+        if self.approval_registry.revision(&request.session_id)? != request.expected_queue_revision
+        {
+            return Err(RuntimeError::QueueConflict);
+        }
+        let approval = self
+            .approval_registry
+            .list(&request.session_id)?
+            .into_iter()
+            .find(|approval| approval.approval_id == request.approval_id)
+            .ok_or_else(|| RuntimeError::ApprovalNotFound {
+                approval_id: request.approval_id.clone(),
+            })?;
+        self.decide_approval(DecideApprovalRequest {
+            session_id: request.session_id.clone(),
+            approval_id: request.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await?;
+        let run = self
+            .cancel_run(assistant_protocol::CancelRunRequest {
+                session_id: request.session_id.clone(),
+                run_id: approval.run_id,
+            })
+            .await?
+            .run;
+        Ok(RejectApprovalAndStopRunResult {
+            run,
+            approvals: self.approval_queue(&request.session_id)?,
+        })
+    }
+
     /// 在传播 Run cancellation 前原子占用并移除仍在等待的内存审批。
     pub(super) async fn cancel_run_approvals(
         &self,

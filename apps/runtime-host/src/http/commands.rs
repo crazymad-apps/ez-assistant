@@ -1,7 +1,6 @@
 //! 有界 JSON Command ingress 与 Runtime 薄 dispatch。
 
-use agent_types::ConversationSnapshot;
-use assistant_protocol::{RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, SessionId};
+use assistant_protocol::{RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo};
 use assistant_runtime::{AssistantRuntime, RuntimeError};
 use axum::{
     Json,
@@ -25,14 +24,6 @@ pub(crate) struct CommandRequest {
 #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
 pub(crate) enum HostCommand {
     Runtime(RuntimeCommand),
-    /// 私有验收查询；完整 Conversation 尚未进入公共应用协议。
-    ConversationSnapshot {
-        session_id: SessionId,
-    },
-    ChildTaskConversationSnapshot {
-        session_id: SessionId,
-        child_task_id: assistant_protocol::ChildTaskId,
-    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -45,8 +36,6 @@ pub(crate) struct CommandResponse {
 #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
 pub(crate) enum HostCommandResult {
     Runtime(Box<RuntimeCommandResult>),
-    ConversationSnapshot { conversation: ConversationSnapshot },
-    ChildTaskConversationSnapshot { conversation: ConversationSnapshot },
 }
 
 #[derive(Serialize)]
@@ -111,27 +100,6 @@ async fn dispatch(
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
     match command {
         HostCommand::Runtime(command) => dispatch_runtime(runtime, command).await,
-        HostCommand::ConversationSnapshot { session_id } => runtime
-            .conversation_snapshot(&session_id)
-            .await
-            .map(|conversation| {
-                (
-                    HostCommandResult::ConversationSnapshot { conversation },
-                    false,
-                )
-            }),
-        HostCommand::ChildTaskConversationSnapshot {
-            session_id,
-            child_task_id,
-        } => runtime
-            .child_task_conversation_snapshot(&session_id, &child_task_id)
-            .await
-            .map(|conversation| {
-                (
-                    HostCommandResult::ChildTaskConversationSnapshot { conversation },
-                    false,
-                )
-            }),
     }
 }
 
@@ -140,6 +108,60 @@ async fn dispatch_runtime(
     command: RuntimeCommand,
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
     let (result, shutdown) = match command {
+        RuntimeCommand::GetApplicationSnapshot(request) => (
+            RuntimeCommandResult::GetApplicationSnapshot(
+                runtime.get_application_snapshot(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetSessionView(request) => (
+            RuntimeCommandResult::GetSessionView(Box::new(
+                runtime.get_session_view(request).await?,
+            )),
+            false,
+        ),
+        RuntimeCommand::GetChildTaskView(request) => (
+            RuntimeCommandResult::GetChildTaskView(Box::new(
+                runtime.get_child_task_view(request).await?,
+            )),
+            false,
+        ),
+        RuntimeCommand::ListConversationPage(request) => (
+            RuntimeCommandResult::ListConversationPage(
+                runtime.list_conversation_page(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetConversationPageAroundRun(request) => (
+            RuntimeCommandResult::GetConversationPageAroundRun(
+                runtime.get_conversation_page_around_run(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetToolDetail(request) => (
+            RuntimeCommandResult::GetToolDetail(runtime.get_tool_detail(request).await?),
+            false,
+        ),
+        RuntimeCommand::PrioritizeQueuedInput(request) => (
+            RuntimeCommandResult::PrioritizeQueuedInput(
+                runtime.prioritize_queued_input(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::InterruptRun(request) => (
+            RuntimeCommandResult::InterruptRun(runtime.interrupt_run(request).await?),
+            false,
+        ),
+        RuntimeCommand::ResumeQueuedInput(request) => (
+            RuntimeCommandResult::ResumeQueuedInput(runtime.resume_queued_input(request).await?),
+            false,
+        ),
+        RuntimeCommand::RejectApprovalAndStopRun(request) => (
+            RuntimeCommandResult::RejectApprovalAndStopRun(
+                runtime.reject_approval_and_stop_run(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetConfigStatus(request) => (
             RuntimeCommandResult::GetConfigStatus(runtime.get_config_status(request)?),
             false,
@@ -202,6 +224,20 @@ async fn dispatch_runtime(
             RuntimeCommandResult::CreateSession(runtime.create_session(request).await?),
             false,
         ),
+        RuntimeCommand::ForkSession(request) => (
+            RuntimeCommandResult::ForkSession(runtime.fork_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::PrepareDeleteSession(request) => (
+            RuntimeCommandResult::PrepareDeleteSession(
+                runtime.prepare_delete_session(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::DeleteSession(request) => (
+            RuntimeCommandResult::DeleteSession(runtime.delete_session(request).await?),
+            false,
+        ),
         RuntimeCommand::ListSessions(request) => (
             RuntimeCommandResult::ListSessions(runtime.list_sessions(request)?),
             false,
@@ -252,6 +288,24 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::RestoreSession(request) => (
             RuntimeCommandResult::RestoreSession(runtime.restore_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::RenameSession(request) => (
+            RuntimeCommandResult::RenameSession(runtime.rename_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSessionPinned(request) => (
+            RuntimeCommandResult::SetSessionPinned(runtime.set_session_pinned(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetEmptySessionWorkspace(request) => (
+            RuntimeCommandResult::SetEmptySessionWorkspace(
+                runtime.set_empty_session_workspace(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::SetMessageFeedback(request) => (
+            RuntimeCommandResult::SetMessageFeedback(runtime.set_message_feedback(request).await?),
             false,
         ),
         RuntimeCommand::SetSessionModel(request) => (

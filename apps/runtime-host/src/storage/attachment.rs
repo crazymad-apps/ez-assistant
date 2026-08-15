@@ -70,7 +70,8 @@ impl StorageEngine {
             .blobs_directory
             .parent()
             .expect("blobs directory is inside data directory");
-        let expected_blob_relative = attachment_io::blob_relative_path(&upload.blob_hash);
+        let expected_blob_relative =
+            attachment_io::blob_relative_path(&upload.blob_hash, &upload.original_name);
         if let Some((stored_size, stored_relative)) = self
             .connection
             .query_row(
@@ -102,7 +103,8 @@ impl StorageEngine {
             &upload.attachment_id,
             &upload.original_name,
         );
-        let created_view = attachment_io::ensure_stable_view(&view, &upload.blob_hash)?;
+        let created_view =
+            attachment_io::ensure_stable_view(&view, &upload.blob_hash, &upload.original_name)?;
         let agent_readable_path = view
             .to_str()
             .ok_or_else(|| {
@@ -282,12 +284,17 @@ impl StorageEngine {
             .transpose()
     }
 
-    fn validate_or_repair_attachment(&self, attachment: &StoredAttachment) -> StorageResult<()> {
+    fn validate_or_repair_attachment(
+        &mut self,
+        attachment: &StoredAttachment,
+    ) -> StorageResult<()> {
         super::filesystem::validate_attachment_component(&attachment.attachment_id)?;
         super::filesystem::validate_session_component(&attachment.session_id)?;
         attachment_io::validate_original_name(&attachment.original_name)?;
         attachment_io::validate_blob_hash(&attachment.blob_hash)?;
-        let expected_relative = attachment_io::blob_relative_path(&attachment.blob_hash);
+        let expected_relative =
+            attachment_io::blob_relative_path(&attachment.blob_hash, &attachment.original_name);
+        let legacy_relative = attachment_io::legacy_blob_relative_path(&attachment.blob_hash);
         let row_relative = self
             .connection
             .query_row(
@@ -298,7 +305,10 @@ impl StorageEngine {
             .map_err(|source| {
                 internal_error("attachment blob metadata could not be queried", source)
             })?;
-        if Path::new(&row_relative) != expected_relative {
+        let row_relative = Path::new(&row_relative);
+        if row_relative == legacy_relative && legacy_relative != expected_relative {
+            self.migrate_legacy_blob(attachment, &legacy_relative, &expected_relative)?;
+        } else if row_relative != expected_relative {
             return Err(invalid_data("attachment blob path is invalid"));
         }
         let data_directory = self.blobs_directory.parent().expect("data directory");
@@ -325,7 +335,84 @@ impl StorageEngine {
         if Path::new(&attachment.agent_readable_path) != expected_view {
             return Err(invalid_data("attachment readable path is invalid"));
         }
-        attachment_io::ensure_stable_view(&expected_view, &attachment.blob_hash)?;
+        attachment_io::ensure_stable_view(
+            &expected_view,
+            &attachment.blob_hash,
+            &attachment.original_name,
+        )?;
+        Ok(())
+    }
+
+    fn migrate_legacy_blob(
+        &mut self,
+        attachment: &StoredAttachment,
+        legacy_relative: &Path,
+        expected_relative: &Path,
+    ) -> StorageResult<()> {
+        let data_directory = self.blobs_directory.parent().expect("data directory");
+        let legacy_blob = data_directory.join(legacy_relative);
+        let expected_blob = data_directory.join(expected_relative);
+        let legacy_metadata = fs::symlink_metadata(&legacy_blob);
+        let expected_metadata = fs::symlink_metadata(&expected_blob);
+
+        match (legacy_metadata, expected_metadata) {
+            (Ok(legacy), Err(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                if !legacy.file_type().is_file() || legacy.len() != attachment.size_bytes {
+                    return Err(invalid_data("legacy attachment blob is invalid"));
+                }
+                fs::rename(&legacy_blob, &expected_blob).map_err(|source| {
+                    internal_error("legacy attachment blob could not be migrated", source)
+                })?;
+                super::sync_directory(
+                    expected_blob
+                        .parent()
+                        .expect("attachment blob has a parent"),
+                )?;
+            }
+            (Err(source), Ok(expected)) if source.kind() == std::io::ErrorKind::NotFound => {
+                if !expected.file_type().is_file() || expected.len() != attachment.size_bytes {
+                    return Err(invalid_data("migrated attachment blob is invalid"));
+                }
+            }
+            (Ok(_), Ok(_)) => {
+                return Err(invalid_data(
+                    "legacy and migrated attachment blobs both exist",
+                ));
+            }
+            (Err(source), Err(_)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(invalid_data("attachment blob is unavailable"));
+            }
+            (Err(source), _) | (_, Err(source)) => {
+                return Err(internal_error(
+                    "attachment blob migration state could not be inspected",
+                    source,
+                ));
+            }
+        }
+
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE attachment_blobs
+                 SET relative_path = ?2
+                 WHERE blob_hash = ?1 AND relative_path = ?3",
+                params![
+                    attachment.blob_hash,
+                    path_text(expected_relative)?,
+                    path_text(legacy_relative)?,
+                ],
+            )
+            .map_err(|source| {
+                database_write_error(
+                    "attachment blob path migration could not be committed",
+                    source,
+                )
+            })?;
+        if changed != 1 {
+            return Err(invalid_data(
+                "attachment blob path migration lost authority",
+            ));
+        }
         Ok(())
     }
 }

@@ -307,6 +307,17 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
         event,
         RuntimeEvent::RunStarted { run_id, .. } if run_id == &started.run.run_id
     )));
+    assert_eq!(
+        observed
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::StepStarted { run_id, step, .. } if run_id == &started.run.run_id =>
+                    Some(*step),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     assert!(observed.iter().any(|event| matches!(
         event,
         RuntimeEvent::ToolProposed { tool_name, .. } if tool_name == "echo_tool"

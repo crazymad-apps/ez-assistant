@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">EZ Assistant for macOS</title>
+  <desc id="desc">The Quiet rocket mark on an optically balanced macOS app icon plate.</desc>
+
+  <defs>
+    <linearGradient id="plate" x1="64" y1="24" x2="448" y2="488" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#181818" />
+      <stop offset="0.55" stop-color="#0C0C0C" />
+      <stop offset="1" stop-color="#050505" />
+    </linearGradient>
+
+    <radialGradient
+      id="planet"
+      cx="0"
+      cy="0"
+      r="1"
+      gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(198 184) rotate(47) scale(270)"
+    >
+      <stop stop-color="#FFFFFF" />
+      <stop offset="0.38" stop-color="#F8F8F5" />
+      <stop offset="0.7" stop-color="#E2E4E6" />
+      <stop offset="0.9" stop-color="#C8CCD1" />
+      <stop offset="1" stop-color="#EEF0F1" />
+    </radialGradient>
+
+    <linearGradient id="flame" x1="256" y1="328" x2="256" y2="377" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFC24A" />
+      <stop offset="0.48" stop-color="#FF8A1F" />
+      <stop offset="1" stop-color="#FF5A0A" />
+    </linearGradient>
+
+    <mask id="quiet-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="white" />
+      <g transform="translate(256 256) scale(1.1) translate(-256 -256)">
+        <path
+          d="M256 150C222 188 207 233 218 279L188 313Q177 328 199 332L230 328L248 362Q256 377 264 362L282 328L313 332Q335 328 324 313L294 279C305 233 290 188 256 150Z"
+          fill="black"
+        />
+        <circle cx="256" cy="226" r="19" fill="white" />
+        <circle cx="343" cy="188" r="9.5" fill="black" />
+      </g>
+    </mask>
+  </defs>
+
+  <!-- Static ICNS: reserve transparent space because Dock preserves supplied alpha bounds. -->
+  <rect x="48" y="48" width="416" height="416" rx="92" fill="url(#plate)" />
+  <circle cx="256" cy="256" r="154" fill="url(#planet)" mask="url(#quiet-cutout)" />
+  <path
+    d="M230 328L248 362Q256 377 264 362L282 328Z"
+    fill="url(#flame)"
+    transform="translate(256 256) scale(1.1) translate(-256 -256)"
+  />
+</svg>

@@ -1,11 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">EZ Assistant</title>
+  <desc id="desc">A quiet rocket-shaped void inside a planet on a restrained black app-icon plate.</desc>
+
   <defs>
-    <linearGradient id="background" x1="72" y1="64" x2="440" y2="448" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#38BDF8" />
-      <stop offset="1" stop-color="#2563EB" />
+    <linearGradient id="plate" x1="112" y1="76" x2="408" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#181818" />
+      <stop offset="0.55" stop-color="#0C0C0C" />
+      <stop offset="1" stop-color="#050505" />
     </linearGradient>
+
+    <mask id="quiet-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="white" />
+      <path
+        d="M256 150C222 188 207 233 218 279L188 313Q177 328 199 332L230 328L248 362Q256 377 264 362L282 328L313 332Q335 328 324 313L294 279C305 233 290 188 256 150Z"
+        fill="black"
+      />
+      <circle cx="256" cy="226" r="19" fill="white" />
+      <circle cx="343" cy="188" r="9.5" fill="black" />
+    </mask>
   </defs>
-  <rect width="512" height="512" rx="120" fill="#0B1020" />
-  <path d="M256 92 408 180v152L256 420 104 332V180L256 92Z" fill="url(#background)" />
-  <path d="M194 180h132v40h-84v46h74v39h-74v47h87v40H194V180Z" fill="#F8FAFC" />
+
+  <!-- 81.25% optical plate with a 9.375% transparent Dock safe area. -->
+  <rect x="48" y="48" width="416" height="416" rx="92" fill="url(#plate)" />
+
+  <circle cx="256" cy="256" r="140" fill="#F5F5F1" mask="url(#quiet-cutout)" />
 </svg>

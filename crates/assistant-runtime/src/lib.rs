@@ -12,6 +12,7 @@ mod error;
 mod factory;
 mod id;
 mod journal;
+mod observation;
 mod permission;
 mod run;
 mod runtime;
@@ -44,17 +45,19 @@ pub use permission::{
     PermissionProcessMode, PermissionRule, PermissionSourceDiagnostic, PermissionStoreFuture,
     ShellPermissionMatcher,
 };
-pub use runtime::AssistantRuntime;
-pub use runtime::StagedAttachmentUpload;
+pub use runtime::{AssistantRuntime, ResolvedToolFileResource, StagedAttachmentUpload};
 pub use storage::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ModelChange, NewAttachmentUpload,
-    NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement, StoredConversationState,
-    StoredInput, StoredInputState, StoredRun, StoredRunSettlement, StoredSession,
+    ContextReplacementTarget, ConversationRewrite, ConversationWindowRequest,
+    EmptySessionWorkspaceChange, ForkedAttachmentReference, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationState, StoredConversationWindow, StoredInput, StoredInputState,
+    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
     StoredSessionLifecycle, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
     UserMessageCommit, VariantChange, WorkspaceRemoval,
 };

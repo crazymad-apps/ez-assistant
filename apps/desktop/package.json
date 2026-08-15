@@ -5,17 +5,44 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run check:protocol && tsc && vite build",
+    "generate:icon:macos": "node scripts/generate-macos-icon.mjs",
+    "check:icon:macos": "node scripts/generate-macos-icon.mjs --check",
+    "generate:protocol": "cargo run -p assistant-protocol --example export_typescript",
+    "check:protocol": "cargo run -p assistant-protocol --example export_typescript -- --check",
+    "lint": "oxlint --ignore-pattern src/generated/** src tests vite.config.ts vitest.config.ts playwright.config.ts",
+    "test": "npm run check:protocol && vitest run",
+    "test:e2e": "cargo build -p assistant-runtime-host && playwright test",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "prepare:sidecar": "cargo build -p assistant-runtime-host --release && node scripts/prepare-sidecar.mjs",
+    "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1"
+    "@streamdown/code": "1.1.1",
+    "@streamdown/math": "1.0.2",
+    "@streamdown/mermaid": "1.0.2",
+    "@tauri-apps/api": "2.11.1",
+    "mobx": "7.0.0",
+    "mobx-react-lite": "5.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "streamdown": "2.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "2.11.4",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.4",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "jsdom": "29.1.1",
+    "oxlint": "1.78.0",
+    "sass": "1.102.0",
     "typescript": "7.0.2",
-    "vite": "8.1.4"
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
   },
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+  "packageManager": "npm@10.9.2"
 }

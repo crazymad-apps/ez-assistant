@@ -13,8 +13,9 @@ use std::{
 
 use assistant_protocol::PermissionDiagnosticCode;
 use assistant_runtime::{
-    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PermissionSourceDiagnostic,
-    StoreError, StoreErrorKind,
+    FilePermissionMatcher, PathMatch, PermissionDocument, PermissionEffect, PermissionFileLoad,
+    PermissionFileOperation, PermissionFileRevision, PermissionFileScope, PermissionMatcher,
+    PermissionRule, PermissionSourceDiagnostic, StoreError, StoreErrorKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -23,8 +24,28 @@ use crate::config_source::prepare_private_directory;
 
 const PERMISSION_FILE: &str = "permissions.json";
 const MAX_PERMISSION_FILE_BYTES: u64 = 1024 * 1024;
+const DEFAULT_WORKSPACE_RULE_PREFIX: &str = "default-workspace-";
 
 impl StorageEngine {
+    pub(super) fn ensure_workspace_permission_file(
+        &self,
+        workspace: &assistant_runtime::StoredWorkspace,
+    ) -> StorageResult<bool> {
+        let path = Path::new(&workspace.agent_directory).join(PERMISSION_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(false),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(internal_error(
+                    "workspace permission metadata could not be read",
+                    source,
+                ));
+            }
+        }
+        let content = default_workspace_permission_document(&workspace.user_directory)?;
+        write_default_permission_file(&path, &content)
+    }
+
     pub(super) fn load_permission_file(
         &self,
         scope: &PermissionFileScope,
@@ -110,6 +131,114 @@ impl StorageEngine {
             }
         }
     }
+}
+
+fn default_workspace_permission_document(workspace_path: &str) -> StorageResult<Vec<u8>> {
+    let operations = [
+        PermissionFileOperation::Read,
+        PermissionFileOperation::List,
+        PermissionFileOperation::Find,
+        PermissionFileOperation::Search,
+        PermissionFileOperation::Write,
+        PermissionFileOperation::Edit,
+        PermissionFileOperation::Delete,
+    ];
+    let rules = operations
+        .into_iter()
+        .map(|operation| PermissionRule {
+            id: format!(
+                "{DEFAULT_WORKSPACE_RULE_PREFIX}{}",
+                operation_name(operation)
+            ),
+            effect: PermissionEffect::Allow,
+            variants: match operation {
+                PermissionFileOperation::Write
+                | PermissionFileOperation::Edit
+                | PermissionFileOperation::Delete => {
+                    vec![assistant_protocol::AgentVariant::Build]
+                }
+                PermissionFileOperation::Read
+                | PermissionFileOperation::List
+                | PermissionFileOperation::Find
+                | PermissionFileOperation::Search => vec![
+                    assistant_protocol::AgentVariant::Plan,
+                    assistant_protocol::AgentVariant::Build,
+                ],
+            },
+            matcher: PermissionMatcher::File(FilePermissionMatcher {
+                operation,
+                path: workspace_path.to_owned(),
+                path_match: PathMatch::Recursive,
+            }),
+        })
+        .collect();
+    PermissionDocument {
+        schema_version: 1,
+        rules,
+    }
+    .render()
+    .map_err(|source| {
+        StoreError::with_source(
+            StoreErrorKind::Internal,
+            "default workspace permissions could not be encoded",
+            source,
+        )
+    })
+}
+
+fn operation_name(operation: PermissionFileOperation) -> &'static str {
+    match operation {
+        PermissionFileOperation::Read => "read",
+        PermissionFileOperation::List => "list",
+        PermissionFileOperation::Find => "find",
+        PermissionFileOperation::Search => "search",
+        PermissionFileOperation::Write => "write",
+        PermissionFileOperation::Edit => "edit",
+        PermissionFileOperation::Delete => "delete",
+    }
+}
+
+fn write_default_permission_file(path: &Path, content: &[u8]) -> StorageResult<bool> {
+    let mut file = match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(PRIVATE_FILE_MODE)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(source) => {
+            return Err(internal_error(
+                "default workspace permission file could not be created",
+                source,
+            ));
+        }
+    };
+    let result = (|| -> StorageResult<()> {
+        file.write_all(content).map_err(|source| {
+            internal_error(
+                "default workspace permission file could not be written",
+                source,
+            )
+        })?;
+        file.sync_all().map_err(|source| {
+            internal_error(
+                "default workspace permission file could not be synchronized",
+                source,
+            )
+        })?;
+        let parent = path.parent().ok_or_else(|| {
+            StoreError::new(
+                StoreErrorKind::InvalidData,
+                "workspace permission parent is invalid",
+            )
+        })?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result.map(|()| true)
 }
 
 fn load_path(path: &Path) -> StorageResult<PermissionFileLoad> {

@@ -89,19 +89,30 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::WorkspaceRemoved
         | RuntimeErrorCode::WorkspaceUnavailable
         | RuntimeErrorCode::AttachmentUnavailable
-        | RuntimeErrorCode::PermissionFileConflict => StatusCode::CONFLICT,
-        RuntimeErrorCode::ApprovalExpired | RuntimeErrorCode::PermissionScopeUnavailable => {
-            StatusCode::CONFLICT
+        | RuntimeErrorCode::PermissionFileConflict
+        | RuntimeErrorCode::ApprovalExpired
+        | RuntimeErrorCode::ApprovalNotHead
+        | RuntimeErrorCode::ApprovalAlreadyResolved
+        | RuntimeErrorCode::PermissionScopeUnavailable
+        | RuntimeErrorCode::Conflict
+        | RuntimeErrorCode::ConfigurationConflict
+        | RuntimeErrorCode::QueueConflict
+        | RuntimeErrorCode::SnapshotStale
+        | RuntimeErrorCode::OperationNotAllowed => StatusCode::CONFLICT,
+        RuntimeErrorCode::AttachmentTooLarge | RuntimeErrorCode::ResourceTooLarge => {
+            StatusCode::PAYLOAD_TOO_LARGE
         }
-        RuntimeErrorCode::AttachmentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         RuntimeErrorCode::AttachmentUploadInvalid => StatusCode::BAD_REQUEST,
         RuntimeErrorCode::StorageUnavailable
         | RuntimeErrorCode::RuntimeShuttingDown
         | RuntimeErrorCode::ConfigurationUnavailable
         | RuntimeErrorCode::ModelUnavailable
         | RuntimeErrorCode::PermissionReloadFailed
-        | RuntimeErrorCode::PermissionPersistenceFailed => StatusCode::SERVICE_UNAVAILABLE,
-        RuntimeErrorCode::PermissionFileInvalid => StatusCode::UNPROCESSABLE_ENTITY,
+        | RuntimeErrorCode::PermissionPersistenceFailed
+        | RuntimeErrorCode::SnapshotBusy => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeErrorCode::PermissionFileInvalid | RuntimeErrorCode::ResourceNotPreviewable => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         RuntimeErrorCode::AgentBuildFailed
         | RuntimeErrorCode::ModelBuildFailed
         | RuntimeErrorCode::ContextCompactionFailed

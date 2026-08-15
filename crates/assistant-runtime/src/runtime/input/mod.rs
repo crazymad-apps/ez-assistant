@@ -7,9 +7,8 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use agent_core::{AgentExecution, ExecutionContext, ExecutionInput};
 use agent_sdk::ContextWindowEvaluator;
 use agent_types::ConversationMessage;
-use assistant_protocol::{RunStatus, RuntimeErrorInfo};
+use assistant_protocol::{ConversationOwner, RunStatus, RuntimeErrorInfo, RuntimeEvent};
 use futures_util::FutureExt;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -23,6 +22,7 @@ use crate::{
         MAX_AUTOMATIC_COMPACTIONS, compact_parent_context, compaction_reason_label,
         consume_execution_budget,
     },
+    observation::ObservationCoordinator,
     run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, observe_run_execution},
     session::SessionController,
 };
@@ -38,7 +38,7 @@ struct QueueDriverContext {
     child_tasks: Arc<crate::delegation::ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
-    events: broadcast::Sender<assistant_protocol::RuntimeEvent>,
+    events: ObservationCoordinator,
     root_cancellation: CancellationToken,
 }
 
@@ -116,7 +116,7 @@ async fn recover_panicked_queue_inner(
     if let Ok(snapshot) =
         crate::run::settle_run(&session, &run_id, None, context.store.as_ref(), None).await
     {
-        let _ = context.events.send(crate::run::finished_event(snapshot));
+        publish_settlement_events(&context.events, &session, snapshot);
     }
     // Runtime supervisor 已异常退出，而 Core completion 的 observer 有意独立存在。
     // 在没有重新取得旧 Core 退出事实前，不能直接启动下一条输入；由下次启动从
@@ -233,12 +233,13 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     fault_driver(&session);
                     return;
                 }
-                let (mut input, cancellation) = {
+                let (mut input, cancellation, queue_revision, generation) = {
                     let mut state = match session.lock_state() {
                         Ok(state) => state,
                         Err(_) => return,
                     };
                     state.runnable_inputs.pop_front();
+                    state.queue_revision = state.queue_revision.saturating_add(1);
                     if state.retry_override_input.as_ref() == Some(&next.0) {
                         state.retry_override_input = None;
                     }
@@ -279,8 +280,23 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         .as_ref()
                         .expect("loaded conversation")
                         .snapshot();
-                    (ExecutionInput { conversation }, cancellation)
+                    (
+                        ExecutionInput { conversation },
+                        cancellation,
+                        state.queue_revision,
+                        state.body_generation,
+                    )
                 };
+                let _ = context.events.send(RuntimeEvent::ConversationCommitted {
+                    owner: ConversationOwner::MainSession {
+                        session_id: session.id().clone(),
+                    },
+                    generation,
+                });
+                let _ = context.events.send(RuntimeEvent::QueueChanged {
+                    session_id: session.id().clone(),
+                    revision: queue_revision,
+                });
                 // 领取提交完成后立即释放变更门禁；supervisor 的终态结算还要再次取得同一门禁。
                 drop(mutation);
                 let recorder = Arc::new(RuntimeRecorder::new(
@@ -397,7 +413,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 };
                 match settled {
                     Ok(snapshot) => {
-                        let _ = context.events.send(crate::run::finished_event(snapshot));
+                        publish_settlement_events(&context.events, &session, snapshot);
                     }
                     Err(_) => fault_driver(&session),
                 }
@@ -418,6 +434,24 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         )
         .await;
         return;
+    }
+}
+
+fn publish_settlement_events(
+    events: &ObservationCoordinator,
+    session: &SessionController,
+    snapshot: assistant_protocol::RunSnapshot,
+) {
+    let _ = events.send(crate::run::finished_event(snapshot));
+    if let Ok(state) = session.lock_state() {
+        let generation = state.body_generation;
+        drop(state);
+        let _ = events.send(RuntimeEvent::ConversationCommitted {
+            owner: ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+            generation,
+        });
     }
 }
 
@@ -457,13 +491,15 @@ async fn fail_before_start(
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
         if state.runnable_inputs.front() == failed_input_id.as_ref() {
             state.runnable_inputs.pop_front();
+            state.queue_revision = state.queue_revision.saturating_add(1);
         }
         if state.retry_override_input == failed_input_id {
             state.retry_override_input = None;
         }
         if let Some(run) = state.runs.get_mut(run_id) {
-            run.fail_before_start(error.clone());
+            run.fail_before_start(error.clone(), finished_at);
         }
+        state.updated_at_ms = finished_at;
         state.is_queue_driver_running = false;
     }
     let _ = context

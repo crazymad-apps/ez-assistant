@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "EZ Assistant",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 720,
+        "minHeight": 520,
+        "center": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 23
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "icon": ["icons/macos/icon.icns"]
+  }
+}

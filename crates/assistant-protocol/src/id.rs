@@ -4,6 +4,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
+use ts_rs::TS;
 
 const MAX_MODEL_KEY_BYTES: usize = 64;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
@@ -33,8 +34,8 @@ fn validate(value: String, kind: &'static str) -> Result<String, IdentifierError
 macro_rules! define_identifier {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-        #[serde(transparent)]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
         pub struct $name(String);
 
         impl $name {
@@ -126,6 +127,11 @@ define_identifier!(
     "approval_id"
 );
 define_identifier!(
+    /// Runtime 为一次永久删除预检签发的短期、单次确认标识。
+    DeleteConfirmationToken,
+    "delete_confirmation_token"
+);
+define_identifier!(
     /// Runtime 中一次已接受用户输入的不透明标识。
     InputId,
     "input_id"
@@ -145,10 +151,15 @@ define_identifier!(
     ToolCallId,
     "tool_call_id"
 );
+define_identifier!(
+    /// Conversation 消息中一个可再次解析的文件资源引用。
+    ResourceRefId,
+    "resource_ref_id"
+);
 
 /// 客户端提交输入时使用的不透明请求身份；只在同一 Session 内比较。
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct IdempotencyKey(String);
 
 impl IdempotencyKey {
@@ -202,8 +213,8 @@ pub enum ModelKeyError {
 }
 
 /// 用户为模型配置指定的稳定业务 key；它不是 Runtime 生成的内部 ID。
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ModelKey(String);
 
 impl ModelKey {
@@ -329,6 +340,7 @@ mod tests {
         assert!(MessageId::new("\n").is_err());
         assert!(PartId::new("\t").is_err());
         assert!(ToolCallId::new("  ").is_err());
+        assert!(DeleteConfirmationToken::new("  ").is_err());
         assert!(serde_json::from_str::<RunId>("\"\"").is_err());
     }
 
@@ -377,6 +389,13 @@ mod tests {
             serde_json::to_value(ToolCallId::new("call-1").expect("tool call id"))
                 .expect("serialize tool call id"),
             "call-1"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                DeleteConfirmationToken::new("delete-token-1").expect("confirmation token")
+            )
+            .expect("serialize confirmation token"),
+            "delete-token-1"
         );
     }
 

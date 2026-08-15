@@ -24,8 +24,17 @@ struct Cli {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub(crate) enum CliAction {
+    /// Start an independent Runtime Host process and return after it is spawned.
+    Launch(LaunchArguments),
     /// Start the Runtime Host.
     Serve(ServeArguments),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
+pub(crate) struct LaunchArguments {
+    /// Absolute Runtime Home override; defaults to ~/.ez-assistant.
+    #[arg(long, value_name = "PATH")]
+    runtime_home: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
@@ -36,10 +45,6 @@ pub(crate) struct ServeArguments {
     /// Positive Runtime event buffer capacity; defaults to 256.
     #[arg(long, value_name = "COUNT")]
     event_capacity: Option<NonZeroUsize>,
-    /// Serve the private browser validation page from this Host instance.
-    #[cfg(feature = "web-demo")]
-    #[arg(long)]
-    web_demo: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,7 +52,11 @@ pub(crate) struct ServeConfig {
     pub(crate) runtime_home: PathBuf,
     pub(crate) config_path: PathBuf,
     pub(crate) event_capacity: NonZeroUsize,
-    pub(crate) web_demo: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LaunchConfig {
+    pub(crate) runtime_home: PathBuf,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -78,10 +87,14 @@ impl ServeConfig {
             event_capacity: arguments.event_capacity.unwrap_or_else(|| {
                 NonZeroUsize::new(DEFAULT_EVENT_CAPACITY).expect("static capacity is non-zero")
             }),
-            #[cfg(feature = "web-demo")]
-            web_demo: arguments.web_demo,
-            #[cfg(not(feature = "web-demo"))]
-            web_demo: false,
+        })
+    }
+}
+
+impl LaunchConfig {
+    pub(crate) fn resolve(arguments: LaunchArguments) -> Result<Self, ConfigError> {
+        Ok(Self {
+            runtime_home: resolve_runtime_home(arguments.runtime_home)?,
         })
     }
 }
@@ -111,8 +124,17 @@ mod tests {
     use super::*;
 
     fn expect_serve(action: CliAction) -> ServeArguments {
-        let CliAction::Serve(arguments) = action;
-        arguments
+        match action {
+            CliAction::Serve(arguments) => arguments,
+            CliAction::Launch(_) => panic!("expected serve action"),
+        }
+    }
+
+    fn expect_launch(action: CliAction) -> LaunchArguments {
+        match action {
+            CliAction::Launch(arguments) => arguments,
+            CliAction::Serve(_) => panic!("expected launch action"),
+        }
     }
 
     #[test]
@@ -171,7 +193,23 @@ mod tests {
         let config = ServeConfig::resolve(arguments).expect("config");
         assert_eq!(config.runtime_home, home);
         assert_eq!(config.config_path, home.join(CONFIG_FILE));
-        assert!(!config.web_demo);
+    }
+
+    #[test]
+    fn launch_uses_the_same_runtime_home_contract_as_serve() {
+        let home = std::env::temp_dir().join("runtime-host-launch-test");
+        let arguments = expect_launch(
+            parse_cli([
+                OsString::from("launch"),
+                OsString::from("--runtime-home"),
+                home.clone().into_os_string(),
+            ])
+            .expect("parse"),
+        );
+        assert_eq!(
+            LaunchConfig::resolve(arguments),
+            Ok(LaunchConfig { runtime_home: home })
+        );
     }
 
     #[test]
@@ -187,25 +225,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "web-demo")]
     #[test]
-    fn web_demo_still_requires_an_explicit_startup_switch() {
-        let home = std::env::temp_dir().join("runtime-host-config-test");
-        let arguments = expect_serve(
-            parse_cli([
-                OsString::from("serve"),
-                OsString::from("--runtime-home"),
-                home.into_os_string(),
-                OsString::from("--web-demo"),
-            ])
-            .expect("parse"),
-        );
-        assert!(ServeConfig::resolve(arguments).expect("config").web_demo);
-    }
-
-    #[cfg(not(feature = "web-demo"))]
-    #[test]
-    fn builds_without_web_demo_do_not_accept_the_startup_switch() {
+    fn private_web_demo_startup_switch_is_not_part_of_the_product_host() {
         assert_eq!(
             parse_cli([OsString::from("serve"), OsString::from("--web-demo"),])
                 .expect_err("feature-disabled switch")

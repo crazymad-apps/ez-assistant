@@ -46,7 +46,8 @@ impl AssistantRuntime {
                 }
             })?;
         self.permission_coordinator
-            .register_empty_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))?;
+            .register_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))
+            .await?;
         let projection = summary(&stored);
         self.workspaces
             .write()
@@ -54,6 +55,9 @@ impl AssistantRuntime {
                 component: "workspace registry",
             })?
             .insert(stored.workspace_id.clone(), stored);
+        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+            workspace_id: projection.workspace_id.clone(),
+        });
         Ok(RegisterWorkspaceResult {
             workspace: projection,
         })
@@ -109,6 +113,9 @@ impl AssistantRuntime {
                 component: "workspace registry",
             })?
             .insert(stored.workspace_id.clone(), stored);
+        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+            workspace_id: projection.workspace_id.clone(),
+        });
         Ok(RemoveWorkspaceResult {
             workspace: projection,
         })

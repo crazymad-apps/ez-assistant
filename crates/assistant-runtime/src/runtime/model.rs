@@ -20,6 +20,7 @@ use crate::{
     delegation::{
         ChildTaskRegistry, DelegateTaskTool, ParentDelegationController, ParentDelegationResources,
     },
+    observation::ObservationCoordinator,
     permission::{
         ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
         RuntimeToolAuthorizer,
@@ -108,7 +109,7 @@ pub(super) struct RunAuthorizationInput {
     pub(super) approval_mode: ApprovalMode,
     pub(super) run_id: assistant_protocol::RunId,
     pub(super) cancellation: tokio_util::sync::CancellationToken,
-    pub(super) events: tokio::sync::broadcast::Sender<assistant_protocol::RuntimeEvent>,
+    pub(super) events: ObservationCoordinator,
 }
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。

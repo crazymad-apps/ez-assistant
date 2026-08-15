@@ -2,9 +2,9 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use crate::observation::ObservationCoordinator;
 use agent_model::{ModelAttemptEvent, ModelAttemptObserver, ModelError, ModelTransportErrorKind};
 use assistant_protocol::{ModelFailureKind, RunId, RuntimeEvent, SessionId};
-use tokio::sync::broadcast;
 
 /// 最终结算使用的安全模型失败事实；不保存 Provider 展示文本。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,7 +28,7 @@ struct ModelAttemptState {
 pub(crate) struct RunModelDiagnostics {
     session_id: SessionId,
     run_id: RunId,
-    events: broadcast::Sender<RuntimeEvent>,
+    events: ObservationCoordinator,
     state: Mutex<ModelAttemptState>,
 }
 
@@ -36,7 +36,7 @@ impl RunModelDiagnostics {
     pub(crate) fn new(
         session_id: SessionId,
         run_id: RunId,
-        events: broadcast::Sender<RuntimeEvent>,
+        events: ObservationCoordinator,
     ) -> Self {
         Self {
             session_id,

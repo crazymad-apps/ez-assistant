@@ -7,18 +7,18 @@ use std::{
 };
 
 use agent_model::SystemPromptSnapshot;
-use assistant_protocol::{ModelKey, SessionId};
+use assistant_protocol::{ConversationOwner, ModelKey, SessionId, SessionTitleOrigin};
 use assistant_runtime::{
-    NewStoredSession, RecoveredRuntime, StoredConversationState, StoredSession,
-    StoredSessionLifecycle,
+    ConversationWindowRequest, NewStoredSession, RecoveredRuntime, StoredConversationState,
+    StoredConversationWindow, StoredSession, StoredSessionLifecycle,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
-    BLOBS_DIRECTORY, BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, SESSIONS_DIRECTORY,
-    STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path, conflict, conversation,
-    create_new_private_file, database_write_error, internal_error, invalid_data,
-    invalid_data_with_source,
+    BLOBS_DIRECTORY, BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, DELETION_STAGING_DIRECTORY,
+    SESSIONS_DIRECTORY, STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path,
+    conflict, conversation, create_new_private_file, database_write_error, internal_error,
+    invalid_data, invalid_data_with_source,
     mode::{agent_variant_value, approval_mode_value, parse_agent_variant, parse_approval_mode},
     non_negative_u64, positive_u64, schema,
     session_resources::remove_created_session_directories,
@@ -33,9 +33,11 @@ pub(super) struct StorageEngine {
     pub(super) workspaces_directory: PathBuf,
     pub(super) blobs_directory: PathBuf,
     pub(super) upload_staging_directory: PathBuf,
+    pub(super) deletion_staging_directory: PathBuf,
     pub(super) connection: Connection,
-    unavailable_sessions: HashSet<String>,
+    pub(super) unavailable_sessions: HashSet<String>,
     pub(super) unavailable_child_tasks: HashSet<String>,
+    pub(super) conversation_indexes: conversation::ConversationIndexCache,
 }
 
 impl StorageEngine {
@@ -45,6 +47,7 @@ impl StorageEngine {
         let workspaces_directory = data_directory.join(WORKSPACES_DIRECTORY);
         let blobs_directory = data_directory.join(BLOBS_DIRECTORY);
         let upload_staging_directory = data_directory.join(STAGING_DIRECTORY);
+        let deletion_staging_directory = data_directory.join(DELETION_STAGING_DIRECTORY);
         prepare_private_directory(&data_directory).map_err(|source| {
             internal_error("runtime data directory could not be prepared", source)
         })?;
@@ -60,6 +63,12 @@ impl StorageEngine {
         prepare_private_directory(&upload_staging_directory).map_err(|source| {
             internal_error(
                 "runtime upload staging directory could not be prepared",
+                source,
+            )
+        })?;
+        prepare_private_directory(&deletion_staging_directory).map_err(|source| {
+            internal_error(
+                "runtime deletion staging directory could not be prepared",
                 source,
             )
         })?;
@@ -94,10 +103,13 @@ impl StorageEngine {
             workspaces_directory,
             blobs_directory,
             upload_staging_directory,
+            deletion_staging_directory,
             connection,
             unavailable_sessions: HashSet::new(),
             unavailable_child_tasks: HashSet::new(),
+            conversation_indexes: conversation::ConversationIndexCache::default(),
         };
+        engine.recover_session_deletions()?;
         engine.repair_session_resources()?;
         engine.recover_attachments()?;
         Ok(engine)
@@ -145,8 +157,8 @@ impl StorageEngine {
                     "INSERT INTO sessions (
                         session_id, title, model_key, system_prompt_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
-                        updated_at_ms, archived_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, 0, ?7, ?7, NULL)",
+                        updated_at_ms, archived_at_ms, is_pinned, title_origin
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, 0, ?7, ?7, NULL, 0, ?8)",
                     params![
                         session.session_id.as_str(),
                         session.title,
@@ -155,6 +167,10 @@ impl StorageEngine {
                         agent_variant_value(session.current_variant),
                         approval_mode_value(session.approval_mode),
                         session.created_at_ms,
+                        match session.title_origin {
+                            SessionTitleOrigin::Generated => "generated",
+                            SessionTitleOrigin::User => "user",
+                        },
                     ],
                 )
                 .map_err(|source| {
@@ -187,6 +203,8 @@ impl StorageEngine {
             created_at_ms: session.created_at_ms,
             updated_at_ms: session.created_at_ms,
             archived_at_ms: None,
+            is_pinned: false,
+            title_origin: session.title_origin,
             conversation_state: StoredConversationState::Available,
         })
     }
@@ -203,13 +221,52 @@ impl StorageEngine {
         conversation::read(&body_path(&self.session_directory(session_id)?, generation))
     }
 
+    pub(super) fn load_conversation_window(
+        &mut self,
+        request: ConversationWindowRequest,
+    ) -> StorageResult<StoredConversationWindow> {
+        let path = match &request.owner {
+            ConversationOwner::MainSession { session_id } => {
+                super::filesystem::validate_session_component(session_id)?;
+                if self.unavailable_sessions.contains(session_id.as_str()) {
+                    return Err(invalid_data("session conversation is unavailable"));
+                }
+                if self.session_generation(session_id)? != request.generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                body_path(&self.session_directory(session_id)?, request.generation)
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                super::filesystem::validate_session_component(session_id)?;
+                super::filesystem::validate_child_task_component(child_task_id)?;
+                if self
+                    .unavailable_child_tasks
+                    .contains(child_task_id.as_str())
+                {
+                    return Err(invalid_data("child conversation is unavailable"));
+                }
+                if self.child_generation(session_id, child_task_id)? != request.generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                self.child_body(session_id, child_task_id, request.generation)?
+            }
+        };
+        self.conversation_indexes
+            .read_window(&path, request.generation, request.end, request.limit)
+    }
+
     fn load_sessions(&self) -> StorageResult<Vec<StoredSession>> {
         let mut statement = self
             .connection
             .prepare(
                 "SELECT session_id, title, model_key, system_prompt_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
-                        updated_at_ms, archived_at_ms
+                        COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
+                                  WHERE runs.session_id = sessions.session_id), created_at_ms),
+                        archived_at_ms, is_pinned, title_origin
                  FROM sessions
                  ORDER BY created_at_ms, session_id",
             )
@@ -229,6 +286,8 @@ impl StorageEngine {
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, String>(13)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -248,6 +307,8 @@ impl StorageEngine {
                 created_at_ms,
                 updated_at_ms,
                 archived_at_ms,
+                is_pinned,
+                title_origin,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -286,6 +347,16 @@ impl StorageEngine {
                 created_at_ms,
                 updated_at_ms,
                 archived_at_ms,
+                is_pinned: match is_pinned {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(invalid_data("stored session pinned state is invalid")),
+                },
+                title_origin: match title_origin.as_str() {
+                    "generated" => SessionTitleOrigin::Generated,
+                    "user" => SessionTitleOrigin::User,
+                    _ => return Err(invalid_data("stored session title origin is invalid")),
+                },
                 conversation_state: if self.unavailable_sessions.contains(&session_id) {
                     StoredConversationState::Unavailable
                 } else {

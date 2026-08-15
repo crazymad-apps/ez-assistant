@@ -9,6 +9,8 @@ mod config_source;
 mod endpoint;
 #[cfg(unix)]
 mod http;
+#[cfg(unix)]
+mod platform;
 mod resources;
 #[cfg(unix)]
 mod server;
@@ -29,7 +31,7 @@ use thiserror::Error;
 use crate::config::{CliAction, parse_cli};
 #[cfg(unix)]
 use crate::{
-    config::ServeConfig,
+    config::{LaunchConfig, ServeConfig},
     config_source::{LocalConfigSource, prepare_runtime_home},
     endpoint::RuntimeInstanceGuard,
     resources::HostResources,
@@ -54,6 +56,20 @@ async fn main() {
 
 async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
     match action {
+        CliAction::Launch(arguments) => {
+            #[cfg(unix)]
+            {
+                let config = LaunchConfig::resolve(arguments)?;
+                prepare_runtime_home(&config.runtime_home)?;
+                platform::launch_detached(&config.runtime_home)?;
+                Ok(())
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = arguments;
+                Err(Box::new(UnsupportedPlatform))
+            }
+        }
         CliAction::Serve(arguments) => {
             #[cfg(unix)]
             {
@@ -99,10 +115,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     endpoint.base_url(),
                     endpoint.discovery_path().display()
                 );
-                if config.web_demo {
-                    println!("Private Web Demo: {}/demo/", endpoint.base_url());
-                }
-                RuntimeServer::new(endpoint, runtime, config.runtime_home, config.web_demo)
+                RuntimeServer::new(endpoint, runtime, config.runtime_home)
                     .serve()
                     .await?;
                 Ok(())

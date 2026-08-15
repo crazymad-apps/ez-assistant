@@ -16,4 +16,19 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 assistant-protocol = { path = "../../../crates/assistant-protocol" }
+dirs.workspace = true
+libc.workspace = true
+base64.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
+serde.workspace = true
+serde_json.workspace = true
 tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2.5.4"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

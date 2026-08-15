@@ -223,6 +223,9 @@ Runtime Host 进程
 - 每个 Run 冻结 Input 变体与当时的 Ask/Auto，但每次 Tool Call 都读取 Global、可选 Workspace、
   Session 三层 Permission Registry 最新快照。显式 Deny 优先于 Ask，Ask 优先于 Allow；未知
   typed facts 和无效权限快照一律 fail-closed。
+- Workspace 的产品默认信任通过 Host 生成的普通 Workspace 权限文档表达，不进入 Authorizer
+  硬编码：Plan/Build 可读取，Build 可变更 Workspace。Runtime 注册 Workspace scope 时加载 Store
+  中的实际文档；既有用户文档、无效文档和缺失文档的诊断语义不得被默认值静默覆盖。
 - Plan 对结构化文件 mutation 施加不可由规则或审批覆盖的能力上限：只允许进入 Session 和可选
   Workspace Agent 私有目录的普通权限决策，并对现有路径祖先做物理解析以拒绝 symlink 逃逸。
   Shell 仍是当前用户权限下的通用工具，不能被表述为 OS 沙箱。

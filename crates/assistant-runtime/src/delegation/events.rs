@@ -51,8 +51,8 @@ pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
                 ToolCompletionStatus::Failed => ToolActivityStatus::Failed,
             },
         }),
+        AgentEvent::StepStarted { step } => Some(ChildTaskEvent::StepStarted { step }),
         AgentEvent::ExecutionStarted
-        | AgentEvent::StepStarted { .. }
         | AgentEvent::GuardrailTriggered { .. }
         | AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }

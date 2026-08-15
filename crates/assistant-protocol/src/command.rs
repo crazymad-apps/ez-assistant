@@ -1,70 +1,88 @@
 //! Runtime 客户端意图及其成功结果。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, AttachmentId,
-    AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus, IdempotencyKey,
-    InputId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionFileSummary, RunId,
+    AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus,
+    DeleteConfirmationToken, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
+    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundRunRequest,
+    GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
+    GetToolDetailRequest, GetToolDetailResult, IdempotencyKey, InputId, InterruptRunRequest,
+    InterruptRunResult, ListConversationPageRequest, ListConversationPageResult, MessageFeedback,
+    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionFileSummary,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, RejectApprovalAndStopRunRequest,
+    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
     RunSnapshot, RuntimeLifecycle, SessionId, SessionListFilter, SessionSummary, WorkspaceId,
     WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetConfigStatusRequest {}
 
 /// 当前配置总体状态查询结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetConfigStatusResult {
     /// 当前配置总体状态。
     pub status: ConfigurationStatus,
 }
 
 /// 按确定性顺序查询全部脱敏模型投影。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListModelsRequest {}
 
 /// 全部模型的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListModelsResult {
     /// 按配置 key 确定性排序的模型投影。
     pub models: Vec<ModelConfiguration>,
 }
 
 /// 查询一个合法 model key 的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetModelRequest {
     /// 要查询的用户 model key。
     pub model_key: ModelKey,
 }
 
 /// 单个模型的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetModelResult {
     /// 指定模型的脱敏投影。
     pub model: ModelConfiguration,
 }
 
 /// 显式重新读取唯一配置源。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReloadConfigRequest {}
 
 /// reload 后立即可见的配置总体状态。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReloadConfigResult {
     /// 本次 reload 原子交换出的配置总体状态。
     pub status: ConfigurationStatus,
 }
 
 /// 以 Session 为入口显式重载 Global、可选 Workspace 和 Session 权限文件。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReloadPermissionsRequest {
     pub session_id: SessionId,
 }
 
 /// 权限 cohort 的重载结果；只有 `applied` 为 true 时才替换内存快照。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReloadPermissionsResult {
     pub session_id: SessionId,
     pub applied: bool,
@@ -72,19 +90,22 @@ pub struct ReloadPermissionsResult {
     pub diagnostics: Vec<PermissionDiagnostic>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListPendingApprovalsRequest {
     /// 仅查询这个 Session 当前仍可决策的审批。
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListPendingApprovalsResult {
     /// 按创建时间稳定排序的内存审批快照。
     pub approvals: Vec<ApprovalSnapshot>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct DecideApprovalRequest {
     /// 审批所属 Session；防止跨 Session 猜测标识。
     pub session_id: SessionId,
@@ -94,7 +115,8 @@ pub struct DecideApprovalRequest {
     pub decision: ApprovalDecision,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct DecideApprovalResult {
     /// 已消费的审批标识。
     pub approval_id: ApprovalId,
@@ -103,7 +125,8 @@ pub struct DecideApprovalResult {
 }
 
 /// 显式验证一个已配置模型的基本连接与协议响应。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ValidateModelConnectionRequest {
     /// 要验证的用户 model key。
     pub model_key: ModelKey,
@@ -113,7 +136,8 @@ pub struct ValidateModelConnectionRequest {
 ///
 /// 这些值是应用层契约，不直接序列化 Provider SDK、HTTP 客户端或
 /// `ModelError` 的内部类型。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionValidationFailureKind {
     /// 模型服务或固定验证请求无法从当前配置构造。
@@ -137,7 +161,8 @@ pub enum ConnectionValidationFailureKind {
 }
 
 /// 一次连接验证的脱敏失败。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ConnectionValidationFailure {
     /// 客户端可稳定分支的失败分类。
     pub kind: ConnectionValidationFailureKind,
@@ -146,7 +171,8 @@ pub struct ConnectionValidationFailure {
 }
 
 /// 连接验证的业务结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "status", content = "failure", rename_all = "snake_case")]
 pub enum ConnectionValidationOutcome {
     /// 模型流产生了唯一且合法的 `TurnFinished` 终态。
@@ -156,7 +182,8 @@ pub enum ConnectionValidationOutcome {
 }
 
 /// 指定模型的连接验证结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ValidateModelConnectionResult {
     /// 本次使用的用户 model key。
     pub model_key: ModelKey,
@@ -165,79 +192,93 @@ pub struct ValidateModelConnectionResult {
 }
 
 /// 登记或恢复一个本机 Workspace。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RegisterWorkspaceRequest {
     /// 用户选择的本机绝对 UTF-8 目录路径。
     pub path: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RegisterWorkspaceResult {
     pub workspace: WorkspaceSummary,
 }
 
 /// 查询一个 Workspace；已移除 Workspace 仍可查询。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetWorkspaceRequest {
     pub workspace_id: WorkspaceId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetWorkspaceResult {
     pub workspace: WorkspaceSummary,
 }
 
 /// 按确定性顺序列出当前活动 Workspace。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListWorkspacesRequest {}
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListWorkspacesResult {
     pub workspaces: Vec<WorkspaceSummary>,
 }
 
 /// 从新 Session 的正常可选列表中假删一个 Workspace。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RemoveWorkspaceRequest {
     pub workspace_id: WorkspaceId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RemoveWorkspaceResult {
     pub workspace: WorkspaceSummary,
 }
 
 /// 查询 Session 中的一个 Attachment。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetAttachmentRequest {
     pub session_id: SessionId,
     pub attachment_id: AttachmentId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetAttachmentResult {
     pub attachment: AttachmentSummary,
 }
 
 /// 按创建顺序列出 Session 的全部 Attachment。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListAttachmentsRequest {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListAttachmentsResult {
     pub attachments: Vec<AttachmentSummary>,
 }
 
 /// HTTP 流式上传完成后的稳定业务结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct UploadAttachmentResult {
     pub attachment: AttachmentSummary,
 }
 
 /// 创建一个空 Session。
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CreateSessionRequest {
     /// 可选展示标题；`None` 表示由 Runtime 选择默认标题。
     pub title: Option<String>,
@@ -249,42 +290,104 @@ pub struct CreateSessionRequest {
 }
 
 /// 创建 Session 的成功结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CreateSessionResult {
     /// 新创建的 Session 摘要。
     pub session: SessionSummary,
 }
 
+/// 从一条已可靠提交的 Assistant Message 创建独立 Session。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ForkSessionRequest {
+    pub session_id: SessionId,
+    pub fork_point: MessageId,
+    /// 客户端取得 fork point 时观察到的正文 generation。
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ForkSessionResult {
+    pub session: SessionSummary,
+}
+
+/// 永久删除将移除的 Runtime 私有事实摘要；不包含 Workspace 用户文件。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeleteSessionImpact {
+    pub message_count: u64,
+    pub run_count: u64,
+    pub child_task_count: u64,
+    pub attachment_count: u64,
+}
+
+/// 请求 Runtime 重新核对永久删除影响并签发短期确认 token。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct PrepareDeleteSessionRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct PrepareDeleteSessionResult {
+    pub session: SessionSummary,
+    pub impact: DeleteSessionImpact,
+    pub confirmation_token: DeleteConfirmationToken,
+    pub expires_at_ms: i64,
+}
+
+/// 使用预检签发的单次 token 永久删除 Session 私有事实。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeleteSessionRequest {
+    pub session_id: SessionId,
+    pub confirmation_token: DeleteConfirmationToken,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeleteSessionResult {
+    pub session_id: SessionId,
+}
+
 /// 按生命周期列出 Session；缺省只返回活动 Session。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSessionsRequest {
     #[serde(default)]
     pub filter: SessionListFilter,
 }
 
 /// 列出 Session 的成功结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSessionsResult {
     /// 按 Runtime 确定性顺序返回的 Session 摘要。
     pub sessions: Vec<SessionSummary>,
 }
 
 /// 查询指定 Session。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetSessionRequest {
     /// 要查询的 Session。
     pub session_id: SessionId,
 }
 
 /// 查询 Session 的成功结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetSessionResult {
     /// 当前 Session 摘要。
     pub session: SessionSummary,
 }
 
 /// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SubmitInputRequest {
     /// 目标 Session。
     pub session_id: SessionId,
@@ -301,49 +404,57 @@ pub struct SubmitInputRequest {
 }
 
 /// 输入已持久化接受的结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SubmitInputResult {
     pub input_id: InputId,
     pub run: RunSnapshot,
 }
 
 /// 取消尚未进入 Conversation 的排队输入。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelQueuedInputRequest {
     pub session_id: SessionId,
     pub input_id: InputId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelQueuedInputResult {
     pub input_id: InputId,
 }
 
 /// 显式恢复重启后暂停的 Session 队列。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ResumeSessionRequest {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ResumeSessionResult {
     pub session: SessionSummary,
 }
 
 /// 为可重试的失败或中断 Run 创建新 attempt。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RetryRunRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RetryRunResult {
     pub run: RunSnapshot,
 }
 
 /// 查询指定 Session 中的 Run。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetRunRequest {
     /// Run 所属 Session。
     pub session_id: SessionId,
@@ -352,116 +463,194 @@ pub struct GetRunRequest {
 }
 
 /// 查询 Run 的成功结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetRunResult {
     /// 当前 Run 快照。
     pub run: RunSnapshot,
 }
 
 /// 查询指定 Session 的全部 Run。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListRunsRequest {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListRunsResult {
     pub runs: Vec<RunSnapshot>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListChildTasksRequest {
     pub session_id: SessionId,
     pub parent_run_id: RunId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListChildTasksResult {
     pub tasks: Vec<ChildTaskSnapshot>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetChildTaskRequest {
     pub session_id: SessionId,
     pub child_task_id: ChildTaskId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct GetChildTaskResult {
     pub task: ChildTaskSnapshot,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelChildTaskRequest {
     pub session_id: SessionId,
     pub child_task_id: ChildTaskId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelChildTaskResult {
     pub task: ChildTaskSnapshot,
 }
 
 /// 把完全空闲的活动 Session 转为只读归档状态。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ArchiveSessionRequest {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ArchiveSessionResult {
     pub session: SessionSummary,
 }
 
 /// 恢复一个归档 Session；不会自动启动任何 Run。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RestoreSessionRequest {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct RestoreSessionResult {
     pub session: SessionSummary,
 }
 
+/// 修改 Session 的用户可见标题。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RenameSessionRequest {
+    pub session_id: SessionId,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RenameSessionResult {
+    pub session: SessionSummary,
+}
+
+/// 显式设置 Session 的固定状态；重复提交相同目标值保持幂等。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionPinnedRequest {
+    pub session_id: SessionId,
+    pub is_pinned: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionPinnedResult {
+    pub session: SessionSummary,
+}
+
+/// 为完全空的 Session 重新冻结可选 Workspace。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetEmptySessionWorkspaceRequest {
+    pub session_id: SessionId,
+    pub workspace_id: Option<WorkspaceId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetEmptySessionWorkspaceResult {
+    pub session: SessionSummary,
+}
+
+/// 保存或清除一条 Assistant Message 的本地反馈。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetMessageFeedbackRequest {
+    pub session_id: SessionId,
+    pub message_id: crate::MessageId,
+    pub feedback: Option<MessageFeedback>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetMessageFeedbackResult {
+    pub message_id: crate::MessageId,
+    pub feedback: Option<MessageFeedback>,
+}
+
 /// 切换 Session 后续 Run 使用的模型 key。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionModelRequest {
     pub session_id: SessionId,
     pub model_key: ModelKey,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionModelResult {
     pub session: SessionSummary,
 }
 
 /// 只更新 Session 当前展示和下次提交默认使用的 Agent 变体。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionVariantRequest {
     pub session_id: SessionId,
     pub variant: AgentVariant,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionVariantResult {
     pub session: SessionSummary,
 }
 
 /// 更新 Session 后续 Run 捕获的审批模式。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionApprovalModeRequest {
     pub session_id: SessionId,
     pub approval_mode: ApprovalMode,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionApprovalModeResult {
     pub session: SessionSummary,
 }
 
 /// 从历史 User Message 位置提交一条全新输入并销毁原目标及尾段。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReenterFromUserMessageRequest {
     pub session_id: SessionId,
     pub message_id: crate::MessageId,
@@ -475,14 +664,16 @@ pub struct ReenterFromUserMessageRequest {
     pub idempotency_key: Option<IdempotencyKey>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ReenterFromUserMessageResult {
     pub input_id: InputId,
     pub run: RunSnapshot,
 }
 
 /// 请求取消指定 Session 中的活动 Run。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelRunRequest {
     /// Run 所属 Session。
     pub session_id: SessionId,
@@ -491,27 +682,51 @@ pub struct CancelRunRequest {
 }
 
 /// 取消请求被 Runtime 接受后的结果。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct CancelRunResult {
     /// 已反映取消请求的当前 Run 快照。
     pub run: RunSnapshot,
 }
 
 /// 请求受控关闭 Runtime。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ShutdownRuntimeRequest {}
 
 /// 受控关闭请求被接受后的结果。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ShutdownRuntimeResult {
     /// 接受请求后的 Runtime 生命周期。
     pub lifecycle: RuntimeLifecycle,
 }
 
 /// Runtime 支持的最小客户端意图。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    /// 查询 Desktop 首屏所需的权威组合投影。
+    GetApplicationSnapshot(GetApplicationSnapshotRequest),
+    /// 查询一个主 Session 页面所需的权威组合投影。
+    GetSessionView(GetSessionViewRequest),
+    /// 查询一个子 Agent 二级消息列表所需的权威组合投影。
+    GetChildTaskView(GetChildTaskViewRequest),
+    /// 分页查询主或子 Conversation 的可靠历史。
+    ListConversationPage(ListConversationPageRequest),
+    /// 查询包含目标 Run 的主 Conversation 页。
+    GetConversationPageAroundRun(GetConversationPageAroundRunRequest),
+    /// 按需查询一条工具调用的安全详情。
+    GetToolDetail(GetToolDetailRequest),
+    /// 把一条排队输入提升为下一条执行项。
+    PrioritizeQueuedInput(PrioritizeQueuedInputRequest),
+    /// 中断当前 Run 并暂停剩余队列。
+    InterruptRun(InterruptRunRequest),
+    /// 从暂停队列中指定恢复一条输入。
+    ResumeQueuedInput(ResumeQueuedInputRequest),
+    /// 拒绝队首审批并停止其所属 Run。
+    RejectApprovalAndStopRun(RejectApprovalAndStopRunRequest),
     /// 查询配置总体状态。
     GetConfigStatus(GetConfigStatusRequest),
     /// 列出全部模型脱敏投影。
@@ -540,6 +755,12 @@ pub enum RuntimeCommand {
     ListAttachments(ListAttachmentsRequest),
     /// 创建 Session。
     CreateSession(CreateSessionRequest),
+    /// 从可靠 Assistant Message 创建独立 Session。
+    ForkSession(ForkSessionRequest),
+    /// 预检永久删除影响并签发短期 token。
+    PrepareDeleteSession(PrepareDeleteSessionRequest),
+    /// 使用单次 token 永久删除 Session。
+    DeleteSession(DeleteSessionRequest),
     /// 列出 Session。
     ListSessions(ListSessionsRequest),
     /// 查询 Session。
@@ -563,6 +784,14 @@ pub enum RuntimeCommand {
     ArchiveSession(ArchiveSessionRequest),
     /// 恢复归档 Session。
     RestoreSession(RestoreSessionRequest),
+    /// 修改 Session 标题。
+    RenameSession(RenameSessionRequest),
+    /// 设置 Session 固定状态。
+    SetSessionPinned(SetSessionPinnedRequest),
+    /// 为空 Session 重新选择 Workspace。
+    SetEmptySessionWorkspace(SetEmptySessionWorkspaceRequest),
+    /// 保存 Assistant Message 反馈。
+    SetMessageFeedback(SetMessageFeedbackRequest),
     /// 切换 Session 模型。
     SetSessionModel(SetSessionModelRequest),
     /// 切换 Session 当前 Agent 变体。
@@ -578,9 +807,20 @@ pub enum RuntimeCommand {
 }
 
 /// Runtime 命令的成功结果；失败统一由 Host 发送 [`crate::RuntimeErrorInfo`]。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommandResult {
+    GetApplicationSnapshot(GetApplicationSnapshotResult),
+    GetSessionView(Box<GetSessionViewResult>),
+    GetChildTaskView(Box<GetChildTaskViewResult>),
+    ListConversationPage(ListConversationPageResult),
+    GetConversationPageAroundRun(GetConversationPageAroundRunResult),
+    GetToolDetail(GetToolDetailResult),
+    PrioritizeQueuedInput(PrioritizeQueuedInputResult),
+    InterruptRun(InterruptRunResult),
+    ResumeQueuedInput(ResumeQueuedInputResult),
+    RejectApprovalAndStopRun(RejectApprovalAndStopRunResult),
     /// 配置总体状态已返回。
     GetConfigStatus(GetConfigStatusResult),
     /// 模型列表已返回。
@@ -609,6 +849,12 @@ pub enum RuntimeCommandResult {
     ListAttachments(ListAttachmentsResult),
     /// Session 已创建。
     CreateSession(CreateSessionResult),
+    /// Fork Session 已创建。
+    ForkSession(ForkSessionResult),
+    /// 永久删除预检已完成。
+    PrepareDeleteSession(PrepareDeleteSessionResult),
+    /// Session 已永久删除。
+    DeleteSession(DeleteSessionResult),
     /// Session 列表已返回。
     ListSessions(ListSessionsResult),
     /// Session 查询已返回。
@@ -632,6 +878,14 @@ pub enum RuntimeCommandResult {
     ArchiveSession(ArchiveSessionResult),
     /// Session 已恢复。
     RestoreSession(RestoreSessionResult),
+    /// Session 标题已修改。
+    RenameSession(RenameSessionResult),
+    /// Session 固定状态已设置。
+    SetSessionPinned(SetSessionPinnedResult),
+    /// 空 Session 的 Workspace 已重新冻结。
+    SetEmptySessionWorkspace(SetEmptySessionWorkspaceResult),
+    /// Assistant Message 反馈已保存。
+    SetMessageFeedback(SetMessageFeedbackResult),
     /// Session 模型已切换。
     SetSessionModel(SetSessionModelResult),
     /// Session 当前 Agent 变体已切换。
@@ -665,6 +919,14 @@ mod tests {
             message_count: 0,
             queued_input_count: 0,
             resume_required: false,
+            created_at_ms: None,
+            updated_at_ms: None,
+            archived_at_ms: None,
+            is_pinned: false,
+            title_origin: Default::default(),
+            pending_approval_count: 0,
+            active_child_count: 0,
+            active_run_status: None,
         }
     }
 
@@ -674,6 +936,8 @@ mod tests {
             session_id: SessionId::new("session-1").expect("session id"),
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
+            created_at_ms: Some(1),
+            finished_at_ms: None,
             status: crate::RunStatus::Accepted,
             variant: AgentVariant::Build,
             approval_mode: ApprovalMode::Ask,
@@ -934,6 +1198,28 @@ mod tests {
                 "create_session",
             ),
             (
+                RuntimeCommand::ForkSession(ForkSessionRequest {
+                    session_id: session_id.clone(),
+                    fork_point: MessageId::new("message-1").expect("message id"),
+                    expected_generation: 3,
+                }),
+                "fork_session",
+            ),
+            (
+                RuntimeCommand::PrepareDeleteSession(PrepareDeleteSessionRequest {
+                    session_id: session_id.clone(),
+                }),
+                "prepare_delete_session",
+            ),
+            (
+                RuntimeCommand::DeleteSession(DeleteSessionRequest {
+                    session_id: session_id.clone(),
+                    confirmation_token: DeleteConfirmationToken::new("delete-confirm-1")
+                        .expect("delete confirmation"),
+                }),
+                "delete_session",
+            ),
+            (
                 RuntimeCommand::ListSessions(ListSessionsRequest::default()),
                 "list_sessions",
             ),
@@ -1183,6 +1469,33 @@ mod tests {
                     session: session_summary(),
                 }),
                 "create_session",
+            ),
+            (
+                RuntimeCommandResult::ForkSession(ForkSessionResult {
+                    session: session_summary(),
+                }),
+                "fork_session",
+            ),
+            (
+                RuntimeCommandResult::PrepareDeleteSession(PrepareDeleteSessionResult {
+                    session: session_summary(),
+                    impact: DeleteSessionImpact {
+                        message_count: 4,
+                        run_count: 2,
+                        child_task_count: 1,
+                        attachment_count: 3,
+                    },
+                    confirmation_token: DeleteConfirmationToken::new("delete-confirm-1")
+                        .expect("delete confirmation"),
+                    expires_at_ms: 10_000,
+                }),
+                "prepare_delete_session",
+            ),
+            (
+                RuntimeCommandResult::DeleteSession(DeleteSessionResult {
+                    session_id: session_id.clone(),
+                }),
+                "delete_session",
             ),
             (
                 RuntimeCommandResult::ListSessions(ListSessionsResult {

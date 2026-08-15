@@ -8,11 +8,14 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use crate::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
-    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
-    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
-    RecoveredRuntime, RewriteResult, RuntimeStore, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredRun, StoredRunSettlement,
-    StoredSession, StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    ConversationWindowRequest, EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredConversationWindow,
+    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
+    StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -84,6 +87,21 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.create_session(session)
     }
 
+    fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
+        self.inner.fork_session(fork)
+    }
+
+    fn inspect_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_protocol::DeleteSessionImpact> {
+        self.inner.inspect_session_deletion(session_id)
+    }
+
+    fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()> {
+        self.inner.delete_session(deletion)
+    }
+
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
         self.inner.create_child_task(task)
     }
@@ -148,6 +166,10 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.cancel_queued_input(session_id, input_id)
     }
 
+    fn prioritize_queued_input(&self, change: QueuePriorityChange) -> StoreFuture<'_, ()> {
+        self.inner.prioritize_queued_input(change)
+    }
+
     fn create_run_attempt(&self, attempt: NewStoredRunAttempt) -> StoreFuture<'_, StoredRun> {
         self.inner.create_run_attempt(attempt)
     }
@@ -185,8 +207,41 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.load_conversation(session_id)
     }
 
+    fn load_conversation_window(
+        &self,
+        request: ConversationWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationWindow> {
+        self.inner.load_conversation_window(request)
+    }
+
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()> {
         self.inner.set_session_archive(change)
+    }
+
+    fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()> {
+        self.inner.rename_session(change)
+    }
+
+    fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()> {
+        self.inner.set_session_pinned(change)
+    }
+
+    fn set_empty_session_workspace(
+        &self,
+        change: EmptySessionWorkspaceChange,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.set_empty_session_workspace(change)
+    }
+
+    fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()> {
+        self.inner.set_message_feedback(change)
+    }
+
+    fn load_message_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<StoredMessageFeedback>> {
+        self.inner.load_message_feedback(session_id)
     }
 
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()> {

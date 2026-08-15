@@ -17,7 +17,6 @@ pub(crate) struct RuntimeServer {
     endpoint: OwnedEndpoint,
     runtime: Arc<AssistantRuntime>,
     runtime_home: PathBuf,
-    web_demo: bool,
 }
 
 impl RuntimeServer {
@@ -25,13 +24,11 @@ impl RuntimeServer {
         endpoint: OwnedEndpoint,
         runtime: Arc<AssistantRuntime>,
         runtime_home: PathBuf,
-        web_demo: bool,
     ) -> Self {
         Self {
             endpoint,
             runtime,
             runtime_home,
-            web_demo,
         }
     }
 
@@ -67,7 +64,6 @@ impl RuntimeServer {
             self.endpoint.base_url(),
             self.runtime_home,
             shutdown.clone(),
-            self.web_demo,
         );
         let serve_result = axum::serve(listener, router(state))
             .with_graceful_shutdown(shutdown.clone().cancelled_owned())

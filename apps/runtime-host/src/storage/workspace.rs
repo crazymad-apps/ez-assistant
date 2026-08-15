@@ -57,6 +57,7 @@ impl StorageEngine {
 
         if let Some(mut existing) = self.workspace_by_user_directory(canonical)? {
             self.prepare_workspace_agent_directory(&existing)?;
+            let _ = self.ensure_workspace_permission_file(&existing)?;
             if existing.lifecycle == StoredWorkspaceLifecycle::Removed {
                 self.connection
                     .execute(
@@ -88,19 +89,39 @@ impl StorageEngine {
         let agent_directory_text = agent_directory
             .to_str()
             .ok_or_else(|| invalid_data("workspace agent directory is not valid UTF-8"))?;
+        let workspace = StoredWorkspace {
+            workspace_id: registration.workspace_id,
+            user_directory: canonical.to_owned(),
+            agent_directory: agent_directory_text.to_owned(),
+            lifecycle: StoredWorkspaceLifecycle::Active,
+            created_at_ms: registration.changed_at_ms,
+            updated_at_ms: registration.changed_at_ms,
+            removed_at_ms: None,
+        };
+        let permission_created = match self.ensure_workspace_permission_file(&workspace) {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = fs::remove_dir(&agent_directory);
+                let _ = fs::remove_dir(&workspace_directory);
+                return Err(error);
+            }
+        };
         let inserted = self.connection.execute(
             "INSERT INTO workspaces (
                 workspace_id, user_directory, agent_directory, lifecycle,
                 created_at_ms, updated_at_ms, removed_at_ms
              ) VALUES (?1, ?2, ?3, 'active', ?4, ?4, NULL)",
             params![
-                registration.workspace_id.as_str(),
+                workspace.workspace_id.as_str(),
                 canonical,
                 agent_directory_text,
                 registration.changed_at_ms,
             ],
         );
         if let Err(source) = inserted {
+            if permission_created {
+                let _ = fs::remove_file(agent_directory.join("permissions.json"));
+            }
             let _ = fs::remove_dir(&agent_directory);
             let _ = fs::remove_dir(&workspace_directory);
             return Err(database_write_error(
@@ -109,15 +130,7 @@ impl StorageEngine {
             ));
         }
         sync_directory(&self.workspaces_directory)?;
-        Ok(StoredWorkspace {
-            workspace_id: registration.workspace_id,
-            user_directory: canonical.to_owned(),
-            agent_directory: agent_directory_text.to_owned(),
-            lifecycle: StoredWorkspaceLifecycle::Active,
-            created_at_ms: registration.changed_at_ms,
-            updated_at_ms: registration.changed_at_ms,
-            removed_at_ms: None,
-        })
+        Ok(workspace)
     }
 
     pub(super) fn get_workspace(
@@ -137,6 +150,7 @@ impl StorageEngine {
         let workspaces = self.load_workspaces(true)?;
         for workspace in &workspaces {
             self.prepare_workspace_agent_directory(workspace)?;
+            let _ = self.ensure_workspace_permission_file(workspace)?;
         }
         Ok(workspaces)
     }

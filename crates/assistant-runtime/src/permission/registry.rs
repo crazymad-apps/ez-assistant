@@ -167,6 +167,15 @@ impl PermissionCoordinator {
             .insert_if_absent(CompiledPermissionLoad::empty(scope))
     }
 
+    pub(crate) async fn register_scope(&self, scope: PermissionFileScope) -> RuntimeResult<()> {
+        let _gate = self.mutation_gate.lock().await;
+        let load = match self.store.load_permission_file(&scope).await {
+            Ok(load) => CompiledPermissionLoad::compile(scope, load),
+            Err(_) => CompiledPermissionLoad::unavailable(scope),
+        };
+        self.registry.replace_scope(load)
+    }
+
     /// 读取一次调用所需的完整 cohort。Registry 替换只持有短暂写锁，
     /// 因此活动 Run 的下一次工具调用会自然看到 reload 后的新快照。
     pub(crate) fn snapshot(
@@ -322,6 +331,17 @@ impl PermissionRegistry {
         snapshots
             .entry(load.scope.clone())
             .or_insert_with(|| Arc::new(load));
+        Ok(())
+    }
+
+    fn replace_scope(&self, load: CompiledPermissionLoad) -> RuntimeResult<()> {
+        let mut snapshots =
+            self.snapshots
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "permission registry",
+                })?;
+        snapshots.insert(load.scope.clone(), Arc::new(load));
         Ok(())
     }
 

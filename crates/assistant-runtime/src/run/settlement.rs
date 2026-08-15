@@ -180,8 +180,9 @@ async fn settle_run_inner(
         .get_mut(run_id)
         .expect("run existence checked before persistence");
     record.extend_message_ids(message_ids);
-    record.settle(settlement);
+    record.settle(settlement, finished_at_ms);
     let snapshot = record.snapshot();
+    state.updated_at_ms = finished_at_ms;
     state.active_run = None;
     Ok(snapshot)
 }

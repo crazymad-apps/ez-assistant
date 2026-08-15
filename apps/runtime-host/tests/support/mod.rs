@@ -90,20 +90,22 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         delegate_task_tool_response(tool_exchange_number(&body))
     } else if case == "TOOL_CASE" && !current_turn_has_tool_result {
         directory_list_tool_response(tool_exchange_number(&body))
+    } else if case == "WRITE_CASE" && !current_turn_has_tool_result {
+        file_write_tool_response(tool_exchange_number(&body))
     } else if case == "FILE_REFERENCE_CASE" && !current_turn_has_tool_result {
         file_read_tool_response(
             attached_file_path(&body).expect("File References request contains a readable path"),
             tool_exchange_number(&body),
         )
     } else {
-        let response_id = if matches!(case, "FILE_REFERENCE_CASE" | "TOOL_CASE") {
+        let response_id = if matches!(case, "FILE_REFERENCE_CASE" | "TOOL_CASE" | "WRITE_CASE") {
             format!("text-{case}-{}", tool_exchange_number(&body))
         } else {
             format!("text-{case}")
         };
         let text = if case == "REPLACEMENT_CASE" {
             "replacement answer"
-        } else if case == "TOOL_CASE" {
+        } else if matches!(case, "TOOL_CASE" | "WRITE_CASE") {
             "tool answer"
         } else if case == "FILE_REFERENCE_CASE" && body_text.contains("attachment-tool-token-91") {
             "file tool verified"
@@ -290,12 +292,48 @@ fn directory_list_tool_response(exchange_number: usize) -> String {
     format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
+fn file_write_tool_response(exchange_number: usize) -> String {
+    let proposal = json!({
+        "id": format!("write-tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": format!("call-write-file-{exchange_number}"),
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": "{\"path\":\"default-permission-write.txt\",\"content\":\"written by default workspace permission\"}"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": format!("write-tool-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
 fn latest_case(body: &str) -> &'static str {
     [
         "FIRST_CASE",
         "BLOCK_FOR_RESTART",
         "QUEUED_AFTER_RESTART",
         "TOOL_CASE",
+        "WRITE_CASE",
         "CANCEL_CASE",
         "REPLACEMENT_CASE",
         "FILE_REFERENCE_CASE",
@@ -399,15 +437,6 @@ pub struct HostProcess {
 
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, false)
-    }
-
-    #[cfg(feature = "web-demo")]
-    pub fn start_web_demo(runtime_home: &Path) -> Self {
-        Self::start_with_options(runtime_home, true)
-    }
-
-    fn start_with_options(runtime_home: &Path, web_demo: bool) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
         command
             .arg("serve")
@@ -415,12 +444,6 @@ impl HostProcess {
             .arg(runtime_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(feature = "web-demo")]
-        if web_demo {
-            command.arg("--web-demo");
-        }
-        #[cfg(not(feature = "web-demo"))]
-        let _ = web_demo;
         let mut child = command.spawn().expect("spawn Runtime Host");
         let (base_url, access_token) = wait_until_ready(runtime_home, &mut child);
         Self {
@@ -488,37 +511,80 @@ impl Client {
     }
 
     pub fn runtime(&mut self, command_type: &str, payload: Value) -> Value {
-        let result = self.request(json!({
+        let command = json!({
             "scope": "runtime",
             "payload": {
                 "type": command_type,
                 "payload": payload
             }
-        }));
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let result = loop {
+            match self.try_request(command.clone()) {
+                Ok(result) => break result,
+                Err((_status, body))
+                    if body["error"]["code"] == "snapshot_busy" && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err((status, body)) => {
+                    panic!("Runtime command `{command_type}` failed ({status}): {body}");
+                }
+            }
+        };
         assert_eq!(result["scope"], "runtime");
         assert_eq!(result["payload"]["type"], command_type);
         result["payload"]["payload"].clone()
     }
 
     pub fn conversation(&mut self, session_id: &str) -> Value {
-        let result = self.request(json!({
-            "scope": "conversation_snapshot",
-            "payload": { "session_id": session_id }
-        }));
-        assert_eq!(result["scope"], "conversation_snapshot");
-        result["payload"]["conversation"].clone()
-    }
+        let mut cursor: Option<String> = None;
+        let mut items = Vec::new();
+        let mut metadata = None;
 
-    pub fn child_conversation(&mut self, session_id: &str, child_task_id: &str) -> Value {
-        let result = self.request(json!({
-            "scope": "child_task_conversation_snapshot",
-            "payload": {
-                "session_id": session_id,
-                "child_task_id": child_task_id
+        loop {
+            let result = self.runtime(
+                "list_conversation_page",
+                json!({
+                    "owner": { "type": "main_session", "session_id": session_id },
+                    "cursor": cursor,
+                    "limit": 100
+                }),
+            );
+            let page = &result["snapshot"]["value"];
+            assert!(
+                page["items"].is_array(),
+                "list_conversation_page returned a non-product projection: {result}"
+            );
+            if metadata.is_none() {
+                metadata = Some((page["owner"].clone(), page["generation"].clone()));
             }
-        }));
-        assert_eq!(result["scope"], "child_task_conversation_snapshot");
-        result["payload"]["conversation"].clone()
+            let mut older = page["items"]
+                .as_array()
+                .expect("Conversation page items")
+                .clone();
+            older.append(&mut items);
+            items = older;
+
+            if !page["has_more"].as_bool().unwrap_or(false) {
+                break;
+            }
+            cursor = Some(
+                page["previous_cursor"]
+                    .as_str()
+                    .expect("previous cursor when Conversation has more pages")
+                    .to_owned(),
+            );
+        }
+        let (owner, generation) = metadata.expect("at least one Conversation page");
+
+        json!({
+            "owner": owner,
+            "generation": generation,
+            "items": items,
+            "previous_cursor": null,
+            "has_more": false
+        })
     }
 
     pub fn wait_for_status(
@@ -552,6 +618,13 @@ impl Client {
     }
 
     fn request(&mut self, command: Value) -> Value {
+        match self.try_request(command) {
+            Ok(result) => result,
+            Err((status, body)) => panic!("Runtime command failed ({status}): {body}"),
+        }
+    }
+
+    fn try_request(&mut self, command: Value) -> Result<Value, (reqwest::StatusCode, Value)> {
         let request_id = format!("request-{}", self.next_request);
         self.next_request += 1;
         let response = self
@@ -566,12 +639,11 @@ impl Client {
             .expect("send Runtime command");
         let status = response.status();
         let body: Value = response.json().expect("decode Runtime command response");
-        assert!(
-            status.is_success(),
-            "Runtime command failed ({status}): {body}"
-        );
+        if !status.is_success() {
+            return Err((status, body));
+        }
         assert_eq!(body["request_id"], request_id);
-        body["result"].clone()
+        Ok(body["result"].clone())
     }
 }
 

@@ -14,19 +14,22 @@ use agent_types::{
     ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, ChildTaskStatus, IdempotencyKey, InputId, ModelKey,
-    PermissionDiagnosticCode, RunId, RunStatus, SessionId, WorkspaceId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, IdempotencyKey, InputId,
+    MessageFeedback, ModelKey, PermissionDiagnosticCode, RunId, RunStatus, SessionId,
+    SessionTitleOrigin, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ModelChange, NewAttachmentUpload,
+    ContextReplacementTarget, ConversationRewrite, ConversationWindowRequest,
+    ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, PermissionDocument, PermissionFileRevision,
-    PermissionFileScope, PermissionFileStore, RuntimeStore, SessionExecutionEnvironment,
-    StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState,
-    StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkspaceRemoval,
+    PendingChildToolExchange, PendingToolExchange, PermissionDocument, PermissionEffect,
+    PermissionFileRevision, PermissionFileScope, PermissionFileStore, QueuePriorityChange,
+    RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork, SessionPinnedChange,
+    SessionTitleChange, StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement,
+    StoredConversationState, StoredRunSettlement, StoredSessionLifecycle, StoredWorkspaceLifecycle,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -60,6 +63,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     NewStoredSession {
         session_id: session_id(value),
         title: format!("Session {value}"),
+        title_origin: assistant_protocol::SessionTitleOrigin::Generated,
         model_key: ModelKey::new("fixture-model").expect("model key"),
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
         environment: SessionExecutionEnvironment {
@@ -151,6 +155,130 @@ fn tool_exchange() -> Vec<ConversationMessage> {
     ]
 }
 
+#[test]
+fn session_navigation_metadata_and_feedback_survive_reopen() {
+    let root = TempDir::new().expect("temp root");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-navigation-persistence");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-navigation-persistence").expect("input id"),
+            run_id: run_id("run-navigation-persistence"),
+            session_id: session.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: raw_user_message("user-navigation-persistence", "first input"),
+            generated_title: Some("Generated first input".to_owned()),
+            accepted_at_ms: 1_500,
+        })
+        .expect("accept first input");
+    let generated_title: String = engine
+        .connection
+        .query_row(
+            "SELECT title FROM sessions WHERE session_id = ?1",
+            [session.as_str()],
+            |row| row.get(0),
+        )
+        .expect("generated title");
+    assert_eq!(generated_title, "Generated first input");
+    engine
+        .rename_session(SessionTitleChange {
+            session_id: session.clone(),
+            title: "User title".to_owned(),
+            changed_at_ms: 2_000,
+        })
+        .expect("rename");
+    engine
+        .set_session_pinned(SessionPinnedChange {
+            session_id: session.clone(),
+            is_pinned: true,
+            changed_at_ms: 2_001,
+        })
+        .expect("pin");
+    let message_id = assistant_protocol::MessageId::new("assistant-feedback").expect("message id");
+    engine
+        .set_message_feedback(MessageFeedbackChange {
+            session_id: session.clone(),
+            message_id: message_id.clone(),
+            feedback: Some(MessageFeedback::Negative),
+            changed_at_ms: 2_002,
+        })
+        .expect("feedback");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    let stored = recovered
+        .sessions
+        .iter()
+        .find(|stored| stored.session_id == session)
+        .expect("stored session");
+    assert_eq!(stored.title, "User title");
+    assert_eq!(stored.title_origin, SessionTitleOrigin::User);
+    assert!(stored.is_pinned);
+    assert_eq!(stored.updated_at_ms, 1_000);
+    assert_eq!(
+        reopened
+            .load_message_feedback(&session)
+            .expect("load feedback")[0]
+            .feedback,
+        MessageFeedback::Negative
+    );
+    reopened
+        .set_message_feedback(MessageFeedbackChange {
+            session_id: session.clone(),
+            message_id,
+            feedback: None,
+            changed_at_ms: 2_003,
+        })
+        .expect("clear feedback");
+    assert!(
+        reopened
+            .load_message_feedback(&session)
+            .expect("cleared feedback")
+            .is_empty()
+    );
+}
+
+#[test]
+fn session_activity_time_advances_only_when_a_run_settles() {
+    let root = TempDir::new().expect("temp root");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-activity-time");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    commit_completed_turn(&mut engine, &session, "activity-time", 2_000);
+    engine
+        .rename_session(SessionTitleChange {
+            session_id: session.clone(),
+            title: "Renamed after run".to_owned(),
+            changed_at_ms: 3_000,
+        })
+        .expect("rename");
+    engine
+        .set_session_pinned(SessionPinnedChange {
+            session_id: session.clone(),
+            is_pinned: true,
+            changed_at_ms: 3_001,
+        })
+        .expect("pin");
+
+    let recovered = engine.load_runtime().expect("load runtime");
+    let stored = recovered
+        .sessions
+        .iter()
+        .find(|stored| stored.session_id == session)
+        .expect("stored session");
+    assert_eq!(stored.updated_at_ms, 2_002);
+}
+
 fn pending_tool_exchange(session: &str, run: &str, receipt: &str) -> PendingToolExchange {
     let ConversationMessage::Assistant(assistant) = tool_exchange().remove(0) else {
         unreachable!("fixture starts with assistant")
@@ -218,6 +346,278 @@ fn raw_user_message(value: &str, text: &str) -> UserMessage {
         unreachable!("fixture is a user message")
     };
     message
+}
+
+fn commit_completed_turn(
+    engine: &mut StorageEngine,
+    session: &SessionId,
+    suffix: &str,
+    accepted_at_ms: i64,
+) {
+    let input_id = InputId::new(format!("input-{suffix}")).expect("input id");
+    let run_id = run_id(&format!("run-{suffix}"));
+    let message = raw_user_message(&format!("user-{suffix}"), suffix);
+    engine
+        .accept_input(NewStoredInput {
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+            session_id: session.clone(),
+            idempotency_key: None,
+            message: message.clone(),
+            generated_title: None,
+            accepted_at_ms,
+        })
+        .expect("accept fixture input");
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: format!("commit-{suffix}"),
+            input_id,
+            run_id: run_id.clone(),
+            session_id: session.clone(),
+            message: Some(message),
+            created_at_ms: accepted_at_ms + 1,
+        })
+        .expect("commit fixture user message");
+    engine
+        .settle_run(StoredRunSettlement {
+            operation_id: format!("settle-{suffix}"),
+            run_id,
+            session_id: session.clone(),
+            status: RunStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message(&format!("assistant-{suffix}"), suffix)],
+            finished_at_ms: accepted_at_ms + 2,
+        })
+        .expect("settle fixture run");
+}
+
+#[test]
+fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source_id = session_id("s-transfer-source");
+    let forked_id = session_id("s-transfer-fork");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(source_id.as_str(), &sessions_directory))
+        .expect("create source");
+    commit_completed_turn(&mut engine, &source_id, "transfer", 2_000);
+    let source_generation = engine
+        .connection
+        .query_row(
+            "SELECT body_generation FROM sessions WHERE session_id = ?1",
+            [source_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("source generation") as u64;
+    let source_conversation = engine
+        .load_conversation(&source_id)
+        .expect("source conversation");
+
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: source_id.clone(),
+            source_generation,
+            session: new_session(forked_id.as_str(), &sessions_directory),
+            conversation: source_conversation.clone(),
+            attachments: Vec::new(),
+        })
+        .expect("fork session");
+    assert_eq!(forked.session.session_id, forked_id);
+    assert_eq!(forked.session.body_generation, 1);
+    assert_eq!(forked.conversation, source_conversation);
+    assert_eq!(
+        engine
+            .load_conversation(&forked.session.session_id)
+            .expect("forked conversation"),
+        source_conversation
+    );
+
+    let impact = engine
+        .inspect_session_deletion(&source_id)
+        .expect("delete impact");
+    assert_eq!(impact.message_count, 2);
+    assert_eq!(impact.run_count, 1);
+    engine
+        .delete_session(SessionDeletion {
+            session_id: source_id.clone(),
+            operation_id: "delete-transfer-source".to_owned(),
+            expected_impact: impact,
+        })
+        .expect("delete source");
+    assert!(!engine.sessions_directory.join(source_id.as_str()).exists());
+    assert!(engine.sessions_directory.join(forked_id.as_str()).exists());
+    assert!(engine.inspect_session_deletion(&source_id).is_err());
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.sessions.len(), 1);
+    assert_eq!(recovered.sessions[0].session_id, forked_id);
+}
+
+#[test]
+fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source_id = session_id("s-transfer-attachment-source");
+    let forked_id = session_id("s-transfer-attachment-fork");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(source_id.as_str(), &sessions_directory))
+        .expect("create source");
+
+    let bytes = b"fork attachment payload";
+    let original_name = "fork-source.txt";
+    let blob_hash = crate::attachment_hash::digest_bytes(original_name, bytes);
+    let staging = engine.upload_staging_directory.join("fork-source.part");
+    fs::write(&staging, bytes).expect("write staging");
+    let source_attachment = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-transfer-source").expect("attachment id"),
+            session_id: source_id.clone(),
+            original_name: original_name.to_owned(),
+            staging_path: staging.to_string_lossy().into_owned(),
+            blob_hash: blob_hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_000,
+        })
+        .expect("upload source attachment");
+    let source_readable_path = source_attachment.agent_readable_path.clone();
+    let conversation = ConversationSnapshot::new(vec![
+        ConversationMessage::User(UserMessage {
+            id: MessageId::new("message-transfer-file").expect("message id"),
+            parts: vec![UserPart::FileReferences(FileReferencesPart {
+                id: PartId::new("part-transfer-file").expect("part id"),
+                files: vec![FileReference {
+                    original_name: original_name.to_owned(),
+                    readable_path: source_readable_path.clone(),
+                }],
+            })],
+        }),
+        assistant_message("assistant-transfer-file", "attachment received"),
+    ]);
+    let forked_attachment_id = AttachmentId::new("a-transfer-fork").expect("fork attachment id");
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: source_id.clone(),
+            source_generation: 1,
+            session: new_session(forked_id.as_str(), &sessions_directory),
+            conversation,
+            attachments: vec![ForkedAttachmentReference {
+                source_attachment_id: source_attachment.attachment_id.clone(),
+                attachment_id: forked_attachment_id.clone(),
+            }],
+        })
+        .expect("fork attachment session");
+
+    assert_eq!(forked.attachments.len(), 1);
+    let forked_attachment = &forked.attachments[0];
+    assert_eq!(forked_attachment.attachment_id, forked_attachment_id);
+    assert_eq!(forked_attachment.session_id, forked_id);
+    assert_eq!(forked_attachment.blob_hash, blob_hash);
+    assert_ne!(forked_attachment.agent_readable_path, source_readable_path);
+    assert_eq!(
+        fs::read(&forked_attachment.agent_readable_path).expect("read fork attachment"),
+        bytes
+    );
+    let ConversationMessage::User(forked_user) = &forked.conversation.messages[0] else {
+        panic!("fork first message must be user")
+    };
+    let UserPart::FileReferences(forked_files) = &forked_user.parts[0] else {
+        panic!("fork user message must keep file references")
+    };
+    assert_eq!(
+        forked_files.files[0].readable_path,
+        forked_attachment.agent_readable_path
+    );
+
+    let impact = engine
+        .inspect_session_deletion(&source_id)
+        .expect("source delete impact");
+    assert_eq!(impact.attachment_count, 1);
+    engine
+        .delete_session(SessionDeletion {
+            session_id: source_id,
+            operation_id: "delete-transfer-attachment-source".to_owned(),
+            expected_impact: impact,
+        })
+        .expect("delete source");
+    assert_eq!(
+        fs::read(&forked_attachment.agent_readable_path)
+            .expect("fork attachment survives source deletion"),
+        bytes
+    );
+    assert_eq!(
+        engine
+            .load_attachments()
+            .expect("load remaining attachments")
+            .into_iter()
+            .map(|attachment| attachment.attachment_id)
+            .collect::<Vec<_>>(),
+        vec![forked_attachment_id]
+    );
+}
+
+#[test]
+fn deletion_staging_recovers_precommit_and_cleans_postcommit_interruptions() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let restored_id = session_id("s-delete-restore");
+    let removed_id = session_id("s-delete-remove");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(restored_id.as_str(), &sessions_directory))
+        .expect("create restored fixture");
+    engine
+        .create_session(new_session(removed_id.as_str(), &sessions_directory))
+        .expect("create removed fixture");
+    let restored_staging = engine
+        .deletion_staging_directory
+        .join(format!("{}.interrupted", restored_id));
+    fs::rename(
+        engine.sessions_directory.join(restored_id.as_str()),
+        &restored_staging,
+    )
+    .expect("stage uncommitted delete");
+    let removed_staging = engine
+        .deletion_staging_directory
+        .join(format!("{}.committed", removed_id));
+    fs::rename(
+        engine.sessions_directory.join(removed_id.as_str()),
+        &removed_staging,
+    )
+    .expect("stage committed delete");
+    engine
+        .connection
+        .execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            [removed_id.as_str()],
+        )
+        .expect("commit fixture delete");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    assert!(
+        reopened
+            .sessions_directory
+            .join(restored_id.as_str())
+            .exists()
+    );
+    assert!(!restored_staging.exists());
+    assert!(!removed_staging.exists());
+    assert!(
+        !reopened
+            .sessions_directory
+            .join(removed_id.as_str())
+            .exists()
+    );
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.sessions.len(), 1);
+    assert_eq!(recovered.sessions[0].session_id, restored_id);
 }
 
 fn seed_session_and_run(engine: &mut StorageEngine, session: &str, run: &str) {
@@ -721,6 +1121,34 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
             .to_string_lossy()
     );
     assert!(Path::new(&first.agent_directory).is_dir());
+    let default_permissions = PermissionDocument::parse(
+        &fs::read(Path::new(&first.agent_directory).join("permissions.json"))
+            .expect("default workspace permissions"),
+    )
+    .expect("valid default workspace permissions");
+    assert_eq!(default_permissions.rules.len(), 7);
+    assert!(
+        default_permissions
+            .rules
+            .iter()
+            .all(|rule| rule.effect == PermissionEffect::Allow)
+    );
+    assert_eq!(
+        default_permissions
+            .rules
+            .iter()
+            .filter(|rule| rule.variants == [assistant_protocol::AgentVariant::Build])
+            .count(),
+        3
+    );
+    assert!(default_permissions.rules.iter().all(|rule| {
+        matches!(
+            &rule.matcher,
+            assistant_runtime::PermissionMatcher::File(matcher)
+                if matcher.path == first.user_directory
+                    && matcher.path_match == assistant_runtime::PathMatch::Recursive
+        )
+    }));
 
     let duplicate = engine
         .register_workspace(NewWorkspaceRegistration {
@@ -759,6 +1187,74 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
         .expect("restore workspace");
     assert_eq!(restored.workspace_id, first.workspace_id);
     assert_eq!(restored.lifecycle, StoredWorkspaceLifecycle::Active);
+}
+
+#[test]
+fn workspace_registration_preserves_an_existing_permission_file() {
+    let root = TempDir::new().expect("runtime home");
+    let user_directory = TempDir::new().expect("user workspace");
+    let mut engine = open_engine(&root);
+    let workspace = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-custom-permissions"),
+            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register workspace");
+    let permission_path = Path::new(&workspace.agent_directory).join("permissions.json");
+    let custom = br#"{"schema_version":1,"rules":[]}
+"#;
+    fs::write(&permission_path, custom).expect("custom permissions");
+
+    let restored = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-unused-custom"),
+            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 200,
+        })
+        .expect("register existing workspace");
+
+    assert_eq!(restored.workspace_id, workspace.workspace_id);
+    assert_eq!(
+        fs::read(permission_path).expect("custom file remains"),
+        custom
+    );
+}
+
+#[test]
+fn runtime_recovery_backfills_only_missing_workspace_permission_files() {
+    let root = TempDir::new().expect("runtime home");
+    let first_directory = TempDir::new().expect("first workspace");
+    let second_directory = TempDir::new().expect("second workspace");
+    let mut engine = open_engine(&root);
+    let first = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-backfill-default"),
+            requested_directory: first_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register first workspace");
+    let second = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-backfill-custom"),
+            requested_directory: second_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register second workspace");
+    let first_path = Path::new(&first.agent_directory).join("permissions.json");
+    let second_path = Path::new(&second.agent_directory).join("permissions.json");
+    fs::remove_file(&first_path).expect("simulate legacy missing permissions");
+    let custom = br#"{"schema_version":1,"rules":[]}
+"#;
+    fs::write(&second_path, custom).expect("custom permissions");
+
+    let recovered = engine.load_runtime().expect("recover runtime");
+
+    assert_eq!(recovered.workspaces.len(), 2);
+    assert!(
+        PermissionDocument::parse(&fs::read(first_path).expect("backfilled permissions")).is_ok()
+    );
+    assert_eq!(fs::read(second_path).expect("custom file remains"), custom);
 }
 
 #[test]
@@ -905,6 +1401,112 @@ async fn worker_round_trips_session_and_shuts_down_explicitly() {
     );
 }
 
+#[test]
+fn queued_input_priority_is_non_negative_and_survives_reopen() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-priority");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    for (suffix, at) in [("one", 1_001), ("two", 1_002), ("three", 1_003)] {
+        engine
+            .accept_input(NewStoredInput {
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
+                input_id: InputId::new(format!("input-{suffix}")).expect("input id"),
+                run_id: run_id(&format!("run-{suffix}")),
+                session_id: session.clone(),
+                idempotency_key: None,
+                message: raw_user_message(&format!("user-{suffix}"), suffix),
+                generated_title: None,
+                accepted_at_ms: at,
+            })
+            .expect("accept queued input");
+    }
+    for selected in ["input-three", "input-two"] {
+        engine
+            .prioritize_queued_input(QueuePriorityChange {
+                session_id: session.clone(),
+                input_id: InputId::new(selected).expect("input id"),
+            })
+            .expect("prioritize queued input");
+    }
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    let order = recovered
+        .inputs
+        .iter()
+        .map(|input| (input.input_id.as_str(), input.queue_order))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        vec![("input-two", 0), ("input-three", 1), ("input-one", 2)]
+    );
+}
+
+#[test]
+fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-window");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    for (suffix, at) in [("one", 1_100), ("two", 1_200), ("three", 1_300)] {
+        commit_completed_turn(&mut engine, &session, suffix, at);
+    }
+
+    let owner = ConversationOwner::MainSession {
+        session_id: session.clone(),
+    };
+    let latest = engine
+        .load_conversation_window(ConversationWindowRequest {
+            owner: owner.clone(),
+            generation: 1,
+            end: None,
+            limit: 2,
+        })
+        .expect("latest window");
+    assert_eq!((latest.start, latest.end, latest.total), (4, 6, 6));
+    assert_eq!(latest.conversation.messages.len(), 2);
+    assert_eq!(
+        conversation::message_id(&latest.conversation.messages[0]).as_str(),
+        "user-three"
+    );
+
+    let older = engine
+        .load_conversation_window(ConversationWindowRequest {
+            owner: owner.clone(),
+            generation: 1,
+            end: Some(latest.start),
+            limit: 2,
+        })
+        .expect("older window");
+    assert_eq!((older.start, older.end, older.total), (2, 4, 6));
+    assert_eq!(
+        conversation::message_id(&older.conversation.messages[0]).as_str(),
+        "user-two"
+    );
+
+    commit_completed_turn(&mut engine, &session, "four", 1_400);
+    let appended = engine
+        .load_conversation_window(ConversationWindowRequest {
+            owner,
+            generation: 1,
+            end: None,
+            limit: 2,
+        })
+        .expect("window after append");
+    assert_eq!((appended.start, appended.end, appended.total), (6, 8, 8));
+    assert_eq!(
+        conversation::message_id(&appended.conversation.messages[0]).as_str(),
+        "user-four"
+    );
+}
+
 #[tokio::test]
 async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_edits() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -940,13 +1542,20 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
         PermissionFileScope::Session(session.session_id.clone()),
     ];
     for scope in &scopes {
-        let missing = store
+        let current = store
             .load_permission_file(scope)
             .await
-            .expect("load missing permission");
-        assert_eq!(missing.revision, PermissionFileRevision::Missing);
+            .expect("load current permission");
+        if matches!(scope, PermissionFileScope::Workspace(_)) {
+            assert!(matches!(
+                current.revision,
+                PermissionFileRevision::Content(_)
+            ));
+        } else {
+            assert_eq!(current.revision, PermissionFileRevision::Missing);
+        }
         let revision = store
-            .replace_permission_file(scope, &missing.revision, content.clone())
+            .replace_permission_file(scope, &current.revision, content.clone())
             .await
             .expect("replace permission file");
         assert!(matches!(revision, PermissionFileRevision::Content(_)));
@@ -1064,6 +1673,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
             session_id: session.clone(),
             idempotency_key: None,
             message: message.clone(),
+            generated_title: None,
             accepted_at_ms: 2_000,
         })
         .expect("accept input");
@@ -1833,7 +2443,7 @@ fn generation_switch_keeps_old_authority_until_sqlite_commit() {
         .expect("append original");
     let replacement = ConversationSnapshot::new(vec![user_message("message-new", "replacement")]);
     let plan = engine
-        .begin_replacement(session_id("s-rewrite"), replacement.clone(), 3_000)
+        .begin_replacement(session_id("s-rewrite"), replacement.clone())
         .expect("write replacement generation");
     drop(engine);
 
@@ -1870,7 +2480,7 @@ fn committed_generation_replaces_message_count_and_removes_old_body() {
         .expect("append original");
     let replacement = ConversationSnapshot::new(vec![user_message("message-only", "replacement")]);
     let plan = engine
-        .begin_replacement(session_id("s-commit"), replacement.clone(), 4_000)
+        .begin_replacement(session_id("s-commit"), replacement.clone())
         .expect("begin replacement");
     let old_path = body_path(
         &engine
@@ -2013,12 +2623,11 @@ fn switch_generation_without_cleanup(connection: &mut Connection, plan: &Replace
     connection
         .execute(
             "UPDATE sessions
-             SET body_generation = ?1, message_count = ?2, updated_at_ms = ?3
-             WHERE session_id = ?4 AND body_generation = ?5",
+             SET body_generation = ?1, message_count = ?2
+             WHERE session_id = ?3 AND body_generation = ?4",
             params![
                 i64::try_from(plan.new_generation).expect("new generation"),
                 i64::try_from(plan.message_count).expect("message count"),
-                plan.updated_at_ms,
                 plan.session_id.as_str(),
                 i64::try_from(plan.previous_generation).expect("old generation"),
             ],
@@ -2050,6 +2659,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 session_id: session.clone(),
                 idempotency_key: None,
                 message: user_message.clone(),
+                generated_title: None,
                 accepted_at_ms: at,
             })
             .expect("accept input");
@@ -2115,6 +2725,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 session_id: session.clone(),
                 idempotency_key: Some(IdempotencyKey::new("rewrite-1").expect("key")),
                 message: replacement_user,
+                generated_title: None,
                 accepted_at_ms: 2_000,
             },
             changed_at_ms: 2_000,
@@ -2196,6 +2807,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
             session_id: session.clone(),
             idempotency_key: None,
             message: queued_message,
+            generated_title: None,
             accepted_at_ms: 2_004,
         })
         .expect("queued input");
@@ -2275,6 +2887,13 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             .expect("stable view")
             .file_type()
             .is_symlink()
+    );
+    assert_eq!(
+        fs::canonicalize(&first.agent_readable_path)
+            .expect("canonical attachment blob")
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("txt")
     );
 
     let duplicate_staging = engine.upload_staging_directory.join("duplicate.part");
@@ -2359,7 +2978,10 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
     let blob = root
         .path()
         .join("data")
-        .join(super::attachment_io::blob_relative_path(&hash));
+        .join(super::attachment_io::blob_relative_path(
+            &hash,
+            original_name,
+        ));
     fs::remove_file(blob).expect("remove blob for unavailable recovery");
     drop(reopened);
     let mut reopened = open_engine(&root);
@@ -2386,5 +3008,76 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             .expect("differently named attachment")
             .state,
         StoredAttachmentState::Ready
+    );
+}
+
+#[test]
+fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
+    let root = TempDir::new().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-legacy-attachment");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    let bytes = b"legacy image bytes";
+    let original_name = "legacy-image.png";
+    let hash = crate::attachment_hash::digest_bytes(original_name, bytes);
+    let staging = engine.upload_staging_directory.join("legacy.part");
+    fs::write(&staging, bytes).expect("write staging");
+    let attachment = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-legacy").expect("attachment id"),
+            session_id: session,
+            original_name: original_name.to_owned(),
+            staging_path: staging.to_string_lossy().into_owned(),
+            blob_hash: hash.clone(),
+            size_bytes: bytes.len() as u64,
+            created_at_ms: 2_000,
+        })
+        .expect("upload attachment");
+
+    let data_directory = root.path().join("data");
+    let current_relative = super::attachment_io::blob_relative_path(&hash, original_name);
+    let legacy_relative = super::attachment_io::legacy_blob_relative_path(&hash);
+    fs::rename(
+        data_directory.join(&current_relative),
+        data_directory.join(&legacy_relative),
+    )
+    .expect("restore legacy blob path");
+    engine
+        .connection
+        .execute(
+            "UPDATE attachment_blobs SET relative_path = ?2 WHERE blob_hash = ?1",
+            params![hash, legacy_relative.to_string_lossy().as_ref(),],
+        )
+        .expect("restore legacy metadata");
+    fs::remove_file(&attachment.agent_readable_path).expect("remove current stable view");
+    symlink(
+        Path::new("../../../../").join(&legacy_relative),
+        &attachment.agent_readable_path,
+    )
+    .expect("restore legacy stable view");
+    drop(engine);
+
+    let reopened = open_engine(&root);
+    assert!(!data_directory.join(&legacy_relative).exists());
+    assert_eq!(
+        fs::read(data_directory.join(&current_relative)).expect("read migrated blob"),
+        bytes
+    );
+    assert_eq!(
+        fs::read_link(&attachment.agent_readable_path).expect("read migrated stable view"),
+        super::attachment_io::relative_blob_link(&hash, original_name)
+    );
+    assert_eq!(
+        reopened
+            .connection
+            .query_row(
+                "SELECT relative_path FROM attachment_blobs WHERE blob_hash = ?1",
+                [hash.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("migrated blob metadata"),
+        current_relative.to_string_lossy()
     );
 }

@@ -170,6 +170,7 @@ mod tests {
             .create_session(NewStoredSession {
                 session_id: session_id.clone(),
                 title: "recorder fixture".to_owned(),
+                title_origin: assistant_protocol::SessionTitleOrigin::Generated,
                 model_key: ModelKey::new("fixture").expect("model key"),
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
                 environment: SessionExecutionEnvironment {
@@ -194,6 +195,7 @@ mod tests {
                 agent_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),
+                generated_title: None,
                 accepted_at_ms: 2,
             })
             .await

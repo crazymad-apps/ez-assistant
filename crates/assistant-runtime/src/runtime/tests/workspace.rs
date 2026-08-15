@@ -1,6 +1,7 @@
 use assistant_protocol::{
     CreateSessionRequest, GetWorkspaceRequest, ListWorkspacesRequest, RegisterWorkspaceRequest,
-    RemoveWorkspaceRequest, RuntimeErrorCode, SubmitInputRequest, WorkspaceLifecycle,
+    RemoveWorkspaceRequest, RuntimeErrorCode, SetEmptySessionWorkspaceRequest, SubmitInputRequest,
+    WorkspaceLifecycle,
 };
 
 use super::*;
@@ -113,6 +114,63 @@ async fn unbound_session_remains_supported_and_unknown_workspace_is_structured()
         .await
         .expect_err("unknown workspace");
     assert!(matches!(error, RuntimeError::WorkspaceNotFound { .. }));
+}
+
+#[tokio::test]
+async fn only_a_completely_empty_session_can_rebind_its_workspace() {
+    let runtime = runtime_with_tools(empty_model(), ToolSetSnapshot::default());
+    let first = runtime
+        .register_workspace(RegisterWorkspaceRequest {
+            path: "/workspace/first".to_owned(),
+        })
+        .await
+        .expect("first workspace")
+        .workspace;
+    let second = runtime
+        .register_workspace(RegisterWorkspaceRequest {
+            path: "/workspace/second".to_owned(),
+        })
+        .await
+        .expect("second workspace")
+        .workspace;
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            title: None,
+            model_key: None,
+            workspace_id: Some(first.workspace_id),
+        })
+        .await
+        .expect("session")
+        .session;
+    let rebound = runtime
+        .set_empty_session_workspace(SetEmptySessionWorkspaceRequest {
+            session_id: session.session_id.clone(),
+            workspace_id: Some(second.workspace_id.clone()),
+        })
+        .await
+        .expect("rebind empty session")
+        .session;
+    assert_eq!(rebound.workspace_id, Some(second.workspace_id));
+
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "now nonempty".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: assistant_protocol::AgentVariant::Build,
+        })
+        .await
+        .expect("input");
+    assert!(matches!(
+        runtime
+            .set_empty_session_workspace(SetEmptySessionWorkspaceRequest {
+                session_id: session.session_id,
+                workspace_id: None,
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
 }
 
 #[tokio::test]

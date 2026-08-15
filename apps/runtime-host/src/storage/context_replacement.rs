@@ -32,11 +32,7 @@ impl StorageEngine {
                 if active != 1 {
                     return Err(conflict("run context is not replaceable"));
                 }
-                let plan = self.begin_replacement(
-                    session_id,
-                    replacement.conversation,
-                    replacement.changed_at_ms,
-                )?;
+                let plan = self.begin_replacement(session_id, replacement.conversation)?;
                 if let Err(error) = self.commit_replacement(&plan) {
                     if let Ok(directory) = self.session_directory(&plan.session_id) {
                         let _ = fs::remove_file(body_path(&directory, plan.new_generation));

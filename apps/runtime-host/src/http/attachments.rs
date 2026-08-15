@@ -114,7 +114,12 @@ pub(super) async fn upload_attachment(
         })
         .await;
     match result {
-        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Ok(mut result) => {
+            // Agent-readable storage paths stay inside Runtime/Host. The Desktop only needs the
+            // stable Attachment identity and display metadata after a successful upload.
+            result.attachment.agent_readable_path.clear();
+            (StatusCode::OK, Json(result)).into_response()
+        }
         Err(error) => {
             cleanup(&staging_path).await;
             runtime_error(error)

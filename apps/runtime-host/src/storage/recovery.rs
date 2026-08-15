@@ -28,7 +28,6 @@ pub(super) struct ReplacementPlan {
     pub previous_generation: u64,
     pub new_generation: u64,
     pub message_count: u64,
-    pub updated_at_ms: i64,
 }
 
 pub(super) struct StagedAppend {
@@ -240,14 +239,13 @@ impl StorageEngine {
         let updated = match &staged.target {
             ConversationStorageTarget::Session { session_id, .. } => transaction.execute(
                 "UPDATE sessions
-                 SET message_count = message_count + ?1, updated_at_ms = ?2
-                 WHERE session_id = ?3 AND body_generation = ?4",
+                 SET message_count = message_count + ?1
+                 WHERE session_id = ?2 AND body_generation = ?3",
                 params![
                     to_i64(
                         staged.message_count_delta,
                         "message count exceeds SQLite range"
                     )?,
-                    staged.created_at_ms,
                     session_id.as_str(),
                     to_i64(
                         staged.body_generation,
@@ -339,7 +337,6 @@ impl StorageEngine {
         &mut self,
         session_id: SessionId,
         snapshot: ConversationSnapshot,
-        updated_at_ms: i64,
     ) -> StorageResult<ReplacementPlan> {
         // Round-trip through the same reader used after restart. This checks duplicate IDs, Tool
         // pairing and the exact bytes before a new generation can become authoritative.
@@ -370,7 +367,6 @@ impl StorageEngine {
                     source,
                 )
             })?,
-            updated_at_ms,
         })
     }
 
@@ -388,12 +384,11 @@ impl StorageEngine {
         let updated = transaction
             .execute(
                 "UPDATE sessions
-                 SET body_generation = ?1, message_count = ?2, updated_at_ms = ?3
-                 WHERE session_id = ?4 AND body_generation = ?5",
+                 SET body_generation = ?1, message_count = ?2
+                 WHERE session_id = ?3 AND body_generation = ?4",
                 params![
                     to_i64(plan.new_generation, "body generation exceeds SQLite range")?,
                     to_i64(plan.message_count, "message count exceeds SQLite range")?,
-                    plan.updated_at_ms,
                     plan.session_id.as_str(),
                     to_i64(
                         plan.previous_generation,

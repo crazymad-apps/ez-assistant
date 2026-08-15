@@ -30,6 +30,7 @@ pub(crate) struct RunRecord {
     session_id: SessionId,
     input_id: InputId,
     attempt: u32,
+    created_at_ms: Option<i64>,
     status: RunStatus,
     variant: AgentVariant,
     approval_mode: ApprovalMode,
@@ -39,32 +40,27 @@ pub(crate) struct RunRecord {
     tools: Vec<ToolActivitySnapshot>,
     error: Option<RuntimeErrorInfo>,
     message_ids: Vec<MessageId>,
+    finished_at_ms: Option<i64>,
 }
 
 impl RunRecord {
-    pub(crate) fn accepted(
-        run_id: RunId,
-        session_id: SessionId,
-        input_id: InputId,
-        attempt: u32,
-        variant: AgentVariant,
-        approval_mode: ApprovalMode,
-        message_ids: Vec<MessageId>,
-    ) -> Self {
+    pub(crate) fn accepted(run: &StoredRun, message_ids: Vec<MessageId>) -> Self {
         Self {
-            run_id,
-            session_id,
-            input_id,
-            attempt,
+            run_id: run.run_id.clone(),
+            session_id: run.session_id.clone(),
+            input_id: run.input_id.clone(),
+            attempt: run.attempt,
+            created_at_ms: Some(run.created_at_ms),
             status: RunStatus::Accepted,
-            variant,
-            approval_mode,
+            variant: run.agent_variant,
+            approval_mode: run.approval_mode,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,
             message_ids,
+            finished_at_ms: None,
         }
     }
 
@@ -74,6 +70,7 @@ impl RunRecord {
             session_id: run.session_id,
             input_id: run.input_id,
             attempt: run.attempt,
+            created_at_ms: Some(run.created_at_ms),
             status: run.status,
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
@@ -83,6 +80,7 @@ impl RunRecord {
             tools: Vec::new(),
             error: run.error,
             message_ids: run.message_ids,
+            finished_at_ms: run.finished_at_ms,
         }
     }
 
@@ -121,6 +119,8 @@ impl RunRecord {
             session_id: self.session_id.clone(),
             input_id: self.input_id.clone(),
             attempt: self.attempt,
+            created_at_ms: self.created_at_ms,
+            finished_at_ms: self.finished_at_ms,
             status: self.status,
             variant: self.variant,
             approval_mode: self.approval_mode,
@@ -150,8 +150,17 @@ impl RunRecord {
         true
     }
 
+    /// 开始新的模型 Step 时只保留该 Step 的流式可见正文；可靠历史由 Conversation 承载。
+    pub(crate) fn start_step(&mut self) {
+        self.reasoning.clear();
+        self.text.clear();
+    }
+
     pub(crate) fn input_id(&self) -> &InputId {
         &self.input_id
+    }
+    pub(crate) fn message_ids(&self) -> &[MessageId] {
+        &self.message_ids
     }
     pub(crate) fn attempt(&self) -> u32 {
         self.attempt
@@ -159,12 +168,16 @@ impl RunRecord {
     pub(crate) fn status(&self) -> RunStatus {
         self.status
     }
-    pub(crate) fn fail_before_start(&mut self, error: RuntimeErrorInfo) {
+    pub(crate) fn finished_at_ms(&self) -> Option<i64> {
+        self.finished_at_ms
+    }
+    pub(crate) fn fail_before_start(&mut self, error: RuntimeErrorInfo, finished_at_ms: i64) {
         self.status = RunStatus::Failed;
         self.error = Some(error);
+        self.finished_at_ms = Some(finished_at_ms);
     }
 
-    fn settle(&mut self, settlement: RunSettlement) {
+    fn settle(&mut self, settlement: RunSettlement, finished_at_ms: i64) {
         self.status = settlement.status;
         if let Some(reasoning) = settlement.reasoning {
             self.reasoning = reasoning;
@@ -173,6 +186,7 @@ impl RunRecord {
             self.text = text;
         }
         self.error = settlement.error;
+        self.finished_at_ms = Some(finished_at_ms);
     }
 }
 

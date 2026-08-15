@@ -12,10 +12,11 @@
 
 ## 技术栈
 
-- WebView：Vanilla TypeScript、Vite、`@tauri-apps/api`。
+- WebView：React、MobX、Sass、TypeScript、Vite、`@tauri-apps/api`。
 - 原生层：Tauri 2、Rust。
 - macOS 渲染：系统 `WKWebView`。
-- 当前不引入前端框架和全局状态库；需要引入时先记录架构决策。
+- 当前前端架构决策见 [`v0.14.0 技术方案`](../versions/v0.14.0/技术方案.md)；更换视图框架、
+  状态方案或样式体系时必须先更新技术决策。
 
 ## 职责
 
@@ -39,12 +40,23 @@
 - 纯浏览器直连本地 Runtime 保留为未来显式开放的可选模式，默认关闭；它可通过
   独立的 Origin 白名单和授权边界直连，不强制引入 companion bridge。
 - WebView 不直接访问文件系统、模型 API、数据库或 Shell；必须通过受控 Tauri command。
-- 关闭主窗口或退出桌面客户端不得默认终止 Runtime；只有明确的“退出 Assistant”或 Runtime
-  管理动作才触发受控关闭流程。
+- 关闭主窗口或退出桌面客户端不得默认终止 Runtime；只有明确执行“停止 Runtime”，或在当次退出
+  确认中选择“同时停止 Runtime”，才触发受控关闭流程。“退出 Assistant”不作为独立动作。
 - 桌面专属数据（窗口大小、悬浮球位置、快捷键）不进入 Agent 会话模型。
 - Runtime 配置（模型、工具、调度）不应散落到前端 localStorage。
 - capability 按实际需要最小开放；修改窗口标签时同步检查 capability 绑定。
 - 自定义 command 需要明确请求/响应类型、错误映射和权限语义。
+- 附件或工具文件不支持应用内预览时按正常能力回退展示友好说明，不直接暴露 Runtime 原始错误；
+  “使用系统应用打开”和“在目录中打开”都只向窄 Tauri command 提交稳定资源身份，由原生层
+  回查 Runtime 后执行，WebView 不得提交任意本地路径。
+- 子任务树和子 Agent 消息复用主 Conversation 的 Message、Reasoning、Tool Detail 与分页组件；
+  进入子任务只替换中栏消息 owner，不创建子 Session、子 Composer 或第二个右侧上下文 owner。
+- 子 Agent 审批继续消费父 Session 的唯一 pending approval 投影，并使用同一底部审批工作区；
+  主视图和子视图不得同时复制一份阻塞列表。子任务自身 Usage 放在任务树和子视图，UI 不聚合父子
+  Usage。
+- 正式 Desktop 不依赖已退役的私有 Web Demo、整份 Conversation 命令或 Demo capability。
+- WebView 生产源码与测试代码物理分离：`src/` 不放测试文件；单元/组件测试、测试支持代码和
+  Playwright 场景分别集中在 `tests/unit/`、`tests/support/` 和 `tests/e2e/`。
 
 ## 不应放在本模块的内容
 

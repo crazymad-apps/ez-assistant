@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'"
     }
   },
   "bundle": {

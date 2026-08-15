@@ -19,7 +19,18 @@ CREATE TABLE IF NOT EXISTS sessions (
     message_count       INTEGER NOT NULL CHECK (message_count >= 0),
     created_at_ms       INTEGER NOT NULL,
     updated_at_ms       INTEGER NOT NULL,
-    archived_at_ms      INTEGER
+    archived_at_ms      INTEGER,
+    is_pinned           INTEGER NOT NULL DEFAULT 0 CHECK (is_pinned IN (0, 1)),
+    title_origin        TEXT NOT NULL DEFAULT 'generated'
+                            CHECK (title_origin IN ('generated', 'user'))
+);
+
+CREATE TABLE IF NOT EXISTS message_feedback (
+    session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    message_id          TEXT NOT NULL,
+    feedback            TEXT NOT NULL CHECK (feedback IN ('positive', 'negative')),
+    changed_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (session_id, message_id)
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -67,6 +78,7 @@ CREATE INDEX IF NOT EXISTS attachments_session_order
 
 CREATE TABLE IF NOT EXISTS inputs (
     queue_order         INTEGER PRIMARY KEY AUTOINCREMENT,
+    priority_order      INTEGER,
     input_id            TEXT NOT NULL UNIQUE,
     session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     idempotency_key     TEXT,
@@ -188,12 +200,13 @@ CREATE TABLE IF NOT EXISTS body_appends (
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
-    "SELECT session_id, title, model_key, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms FROM sessions LIMIT 0",
+    "SELECT session_id, title, model_key, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
     "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT queue_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant FROM inputs LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id FROM run_message_refs LIMIT 0",
     "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, final_message_id, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM child_tasks LIMIT 0",
@@ -222,9 +235,27 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     )?;
     ensure_column(
         &transaction,
+        "inputs",
+        "priority_order",
+        "ALTER TABLE inputs ADD COLUMN priority_order INTEGER",
+    )?;
+    ensure_column(
+        &transaction,
         "sessions",
         "approval_mode",
         "ALTER TABLE sessions ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'ask' CHECK (approval_mode IN ('ask', 'auto'))",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "is_pinned",
+        "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0 CHECK (is_pinned IN (0, 1))",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "title_origin",
+        "ALTER TABLE sessions ADD COLUMN title_origin TEXT NOT NULL DEFAULT 'generated' CHECK (title_origin IN ('generated', 'user'))",
     )?;
     ensure_column(
         &transaction,
@@ -336,19 +367,33 @@ mod tests {
             )
             .expect("legacy-compatible run insert");
 
-        let values: (String, String, String, String) = connection
+        let values: (String, String, String, String, Option<i64>) = connection
             .query_row(
                 "SELECT sessions.current_variant, sessions.approval_mode,
-                        inputs.agent_variant, runs.approval_mode
+                        inputs.agent_variant, runs.approval_mode, inputs.priority_order
                  FROM sessions JOIN inputs ON inputs.session_id = sessions.session_id
                  JOIN runs ON runs.input_id = inputs.input_id",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .expect("migrated defaults");
         assert_eq!(
             values,
-            ("build".into(), "ask".into(), "build".into(), "ask".into())
+            (
+                "build".into(),
+                "ask".into(),
+                "build".into(),
+                "ask".into(),
+                None,
+            )
         );
     }
 }

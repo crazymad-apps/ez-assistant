@@ -10,7 +10,7 @@ use super::AssistantRuntime;
 use crate::{RuntimeError, RuntimeResult, StoredChildTask};
 
 impl AssistantRuntime {
-    pub async fn child_task_conversation_snapshot(
+    pub(super) async fn child_task_conversation_snapshot(
         &self,
         session_id: &assistant_protocol::SessionId,
         child_task_id: &assistant_protocol::ChildTaskId,
@@ -110,7 +110,10 @@ impl AssistantRuntime {
         })
     }
 
-    async fn child_snapshot(&self, task: StoredChildTask) -> RuntimeResult<ChildTaskSnapshot> {
+    pub(super) async fn child_snapshot(
+        &self,
+        task: StoredChildTask,
+    ) -> RuntimeResult<ChildTaskSnapshot> {
         let final_text = if task.final_message_id.is_some() {
             let conversation = self
                 .store

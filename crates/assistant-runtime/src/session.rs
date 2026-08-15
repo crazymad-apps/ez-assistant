@@ -9,7 +9,7 @@ use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, RunId, RunSnapshot, SessionId,
-    SessionLifecycle, SessionSummary,
+    SessionLifecycle, SessionSummary, SessionTitleOrigin,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
@@ -22,7 +22,7 @@ use crate::{
 
 pub(crate) struct SessionController {
     id: SessionId,
-    title: String,
+    created_at_ms: i64,
     system_prompt: SystemPromptSnapshot,
     environment: SessionExecutionEnvironment,
     mutation_gate: AsyncMutex<()>,
@@ -30,6 +30,9 @@ pub(crate) struct SessionController {
 }
 
 pub(crate) struct SessionState {
+    pub(crate) title: String,
+    pub(crate) is_pinned: bool,
+    pub(crate) title_origin: SessionTitleOrigin,
     pub(crate) model_key: ModelKey,
     pub(crate) current_variant: AgentVariant,
     pub(crate) approval_mode: ApprovalMode,
@@ -37,16 +40,21 @@ pub(crate) struct SessionState {
     pub(crate) journal: Option<InMemoryJournal>,
     pub(crate) persisted_message_count: usize,
     pub(crate) message_count: u64,
+    pub(crate) body_generation: u64,
     pub(crate) is_conversation_available: bool,
     pub(crate) runs: BTreeMap<RunId, RunRecord>,
     pub(crate) inputs: BTreeMap<InputId, InputRecord>,
     pub(crate) runnable_inputs: VecDeque<InputId>,
+    pub(crate) queue_revision: u64,
+    pub(crate) queue_paused_by_user: bool,
     pub(crate) resume_required: bool,
     /// 重启后只允许显式重试的这一条输入越过暂停门禁；其余恢复队列仍等待 ResumeSession。
     pub(crate) retry_override_input: Option<InputId>,
     pub(crate) is_queue_driver_running: bool,
     pub(crate) active_run: Option<ActiveRun>,
     pub(crate) is_faulted: bool,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) archived_at_ms: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -80,11 +88,14 @@ impl SessionController {
     pub(crate) fn new(stored: StoredSession) -> Self {
         Self {
             id: stored.session_id,
-            title: stored.title,
+            created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                title: stored.title,
+                is_pinned: stored.is_pinned,
+                title_origin: stored.title_origin,
                 model_key: stored.model_key,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
@@ -92,15 +103,20 @@ impl SessionController {
                 journal: Some(InMemoryJournal::new()),
                 persisted_message_count: 0,
                 message_count: stored.message_count,
+                body_generation: stored.body_generation,
                 is_conversation_available: true,
                 runs: BTreeMap::new(),
                 inputs: BTreeMap::new(),
                 runnable_inputs: VecDeque::new(),
+                queue_revision: 0,
+                queue_paused_by_user: false,
                 resume_required: false,
                 retry_override_input: None,
                 is_queue_driver_running: false,
                 active_run: None,
                 is_faulted: false,
+                updated_at_ms: stored.updated_at_ms,
+                archived_at_ms: stored.archived_at_ms,
             }),
         }
     }
@@ -144,11 +160,14 @@ impl SessionController {
         let resume_required = !runnable.is_empty();
         Self {
             id: stored.session_id,
-            title: stored.title,
+            created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                title: stored.title,
+                is_pinned: stored.is_pinned,
+                title_origin: stored.title_origin,
                 model_key: stored.model_key,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
@@ -156,15 +175,20 @@ impl SessionController {
                 journal: None,
                 persisted_message_count: 0,
                 message_count: stored.message_count,
+                body_generation: stored.body_generation,
                 is_conversation_available,
                 runs: run_records,
                 inputs: input_records,
                 runnable_inputs: runnable.into_iter().map(|(_, id)| id).collect(),
+                queue_revision: 0,
+                queue_paused_by_user: false,
                 resume_required,
                 retry_override_input: None,
                 is_queue_driver_running: false,
                 active_run: None,
                 is_faulted: false,
+                updated_at_ms: stored.updated_at_ms,
+                archived_at_ms: stored.archived_at_ms,
             }),
         }
     }
@@ -173,7 +197,7 @@ impl SessionController {
         let state = self.lock_state()?;
         Ok(SessionSummary {
             session_id: self.id.clone(),
-            title: self.title.clone(),
+            title: state.title.clone(),
             model_key: state.model_key.clone(),
             lifecycle: state.lifecycle,
             current_variant: state.current_variant,
@@ -190,6 +214,18 @@ impl SessionController {
                 .filter(|input| input.stored.state == StoredInputState::Queued)
                 .count() as u64,
             resume_required: state.resume_required,
+            created_at_ms: Some(self.created_at_ms),
+            updated_at_ms: Some(state.updated_at_ms),
+            archived_at_ms: state.archived_at_ms,
+            is_pinned: state.is_pinned,
+            title_origin: state.title_origin,
+            pending_approval_count: 0,
+            active_child_count: 0,
+            active_run_status: state
+                .active_run
+                .as_ref()
+                .and_then(|active| state.runs.get(&active.run_id))
+                .map(|run| run.snapshot().status),
         })
     }
 
@@ -290,6 +326,10 @@ impl SessionController {
 
     pub(crate) fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    pub(crate) fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
     }
 
     pub(crate) fn model_key(&self) -> RuntimeResult<ModelKey> {

@@ -12,10 +12,6 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
-[features]
-default = []
-web-demo = []
-
 [dependencies]
 agent-context = { path = "../../crates/agent-context" }
 agent-core = { path = "../../crates/agent-core" }

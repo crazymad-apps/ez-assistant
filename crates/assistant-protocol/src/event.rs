@@ -1,22 +1,38 @@
 //! Runtime 已发生事实的实时观察事件。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::{
     ApprovalDecision, ApprovalId, ApprovalSnapshot, ChildTaskId, ChildTaskSnapshot,
-    ChildTaskStatus, GuardrailKind, GuardrailMode, ModelFailureKind, PartId, PermissionFileSummary,
-    RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary, TokenUsageSnapshot,
-    ToolActivityStatus, ToolCallId, ToolOutputChannel,
+    ChildTaskStatus, ConversationOwner, GuardrailKind, GuardrailMode, ModelFailureKind, PartId,
+    PermissionFileSummary, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
+    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel, WorkspaceId,
 };
 
+/// Runtime 单实例内严格递增的实时事件封装。
+///
+/// `sequence` 只用于把事件与 [`crate::ObservedSnapshot`] 的水位对齐，不跨 Runtime 重启持久化。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RuntimeEventEnvelope {
+    pub sequence: u64,
+    pub emitted_at_ms: i64,
+    pub event: RuntimeEvent,
+}
+
 /// 子任务事件的 payload；父子所有权固定放在外层 RuntimeEvent envelope。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChildTaskEvent {
     Created {
         task: Box<ChildTaskSnapshot>,
     },
     Started,
+    StepStarted {
+        step: u32,
+    },
     TextDelta {
         part_id: PartId,
         delta: String,
@@ -54,15 +70,42 @@ pub enum ChildTaskEvent {
 /// Runtime 向在线客户端发布的产品层观察事件。
 ///
 /// 事件允许因背压或断线丢失，客户端必须用 Session/Run 快照重新对齐。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     /// Runtime 已开始受控关闭。
     RuntimeShuttingDown,
+    /// 应用配置投影已经变化；客户端应重新获取 ApplicationSnapshot。
+    ConfigChanged,
+    /// Workspace Registry 已经变化；客户端应重新获取 ApplicationSnapshot。
+    WorkspaceChanged {
+        workspace_id: WorkspaceId,
+    },
+    /// Session 的稳定产品投影已经变化；事件本身不替代组合快照。
+    SessionChanged {
+        session_id: SessionId,
+    },
+    /// Session 输入队列已经变化；revision 用于拒绝基于旧顺序的 mutation。
+    QueueChanged {
+        session_id: SessionId,
+        revision: u64,
+    },
+    /// 规范 Conversation 已经可靠提交；客户端应按 owner/generation 失效历史页。
+    ConversationCommitted {
+        owner: ConversationOwner,
+        generation: u64,
+    },
+    /// 权限 Registry 已经完成原子替换。
+    PermissionChanged,
     /// 一个 Session 已完整创建。
     SessionCreated {
         /// 新 Session 的稳定摘要。
         session: SessionSummary,
+    },
+    /// 一个 Session 已从 Runtime 权威状态和私有存储中移除。
+    SessionDeleted {
+        session_id: SessionId,
     },
     /// Session 当前 Agent 变体发生变化。
     SessionVariantChanged {
@@ -121,6 +164,12 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 正在取消的 Run。
         run_id: RunId,
+    },
+    /// 当前 Run 开始一个新的模型 Turn；仅表达增量分组边界，不要求 UI 显示 step 文本。
+    StepStarted {
+        session_id: SessionId,
+        run_id: RunId,
+        step: u32,
     },
     /// 一次真实模型请求 attempt 即将开始。
     ModelAttemptStarted {
@@ -258,6 +307,23 @@ mod tests {
     use super::*;
     use crate::ModelKey;
 
+    #[test]
+    fn event_envelope_has_a_stable_watermark_shape() {
+        let envelope = RuntimeEventEnvelope {
+            sequence: 42,
+            emitted_at_ms: 1_700_000_000_000,
+            event: RuntimeEvent::RuntimeShuttingDown,
+        };
+        let value = serde_json::to_value(&envelope).expect("serialize envelope");
+        assert_eq!(value["sequence"], 42);
+        assert_eq!(value["emitted_at_ms"], 1_700_000_000_000_i64);
+        assert_eq!(value["event"]["type"], "runtime_shutting_down");
+        assert_eq!(
+            serde_json::from_value::<RuntimeEventEnvelope>(value).expect("deserialize envelope"),
+            envelope
+        );
+    }
+
     fn session_id() -> SessionId {
         SessionId::new("session-1").expect("session id")
     }
@@ -279,6 +345,14 @@ mod tests {
             message_count: 0,
             queued_input_count: 0,
             resume_required: false,
+            created_at_ms: None,
+            updated_at_ms: None,
+            archived_at_ms: None,
+            is_pinned: false,
+            title_origin: Default::default(),
+            pending_approval_count: 0,
+            active_child_count: 0,
+            active_run_status: None,
         }
     }
 
@@ -354,6 +428,12 @@ mod tests {
                     session: session_fixture(),
                 },
                 "session_created",
+            ),
+            (
+                RuntimeEvent::SessionDeleted {
+                    session_id: session_id(),
+                },
+                "session_deleted",
             ),
             (
                 RuntimeEvent::SessionVariantChanged {
@@ -437,6 +517,14 @@ mod tests {
                     run_id: run_id(),
                 },
                 "run_cancelling",
+            ),
+            (
+                RuntimeEvent::StepStarted {
+                    session_id: session_id(),
+                    run_id: run_id(),
+                    step: 1,
+                },
+                "step_started",
             ),
             (
                 RuntimeEvent::ModelAttemptStarted {

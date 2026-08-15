@@ -55,7 +55,36 @@ pub(super) fn safe_display_name(name: &str) -> String {
     }
 }
 
-pub(super) fn blob_relative_path(blob_hash: &str) -> PathBuf {
+const MAX_BLOB_EXTENSION_BYTES: usize = 180;
+
+fn original_extension(original_name: &str) -> Option<&str> {
+    let extension = Path::new(original_name).extension()?.to_str()?;
+    if extension.is_empty()
+        || extension.len() > MAX_BLOB_EXTENSION_BYTES
+        || extension.chars().any(char::is_control)
+    {
+        None
+    } else {
+        Some(extension)
+    }
+}
+
+fn blob_file_name(blob_hash: &str, original_name: &str) -> String {
+    original_extension(original_name).map_or_else(
+        || blob_hash.to_owned(),
+        |extension| format!("{blob_hash}.{extension}"),
+    )
+}
+
+pub(super) fn blob_relative_path(blob_hash: &str, original_name: &str) -> PathBuf {
+    PathBuf::from("blobs")
+        .join("sha256")
+        .join(&blob_hash[..2])
+        .join(blob_file_name(blob_hash, original_name))
+}
+
+/// v0.14.1 之前的 Blob 没有保留原始扩展名，只用于启动迁移识别。
+pub(super) fn legacy_blob_relative_path(blob_hash: &str) -> PathBuf {
     PathBuf::from("blobs")
         .join("sha256")
         .join(&blob_hash[..2])
@@ -108,7 +137,7 @@ pub(super) fn ensure_blob(
     blob_hash: &str,
     expected_size: u64,
 ) -> StorageResult<(PathBuf, bool)> {
-    let relative = blob_relative_path(blob_hash);
+    let relative = blob_relative_path(blob_hash, original_name);
     let blob = data_directory.join(&relative);
     let parent = blob.parent().expect("blob path has a parent");
     prepare_private_directory(parent).map_err(|source| {
@@ -175,7 +204,15 @@ pub(super) fn stable_view_path(
         .join(safe_display_name(original_name))
 }
 
-pub(super) fn relative_blob_link(blob_hash: &str) -> PathBuf {
+pub(super) fn relative_blob_link(blob_hash: &str, original_name: &str) -> PathBuf {
+    PathBuf::from("../../../../")
+        .join("blobs")
+        .join("sha256")
+        .join(&blob_hash[..2])
+        .join(blob_file_name(blob_hash, original_name))
+}
+
+fn legacy_relative_blob_link(blob_hash: &str) -> PathBuf {
     PathBuf::from("../../../../")
         .join("blobs")
         .join("sha256")
@@ -184,16 +221,30 @@ pub(super) fn relative_blob_link(blob_hash: &str) -> PathBuf {
 }
 
 /// 创建缺失视图；遇到任何已有未知对象都 fail-closed，不覆盖用户可观察内容。
-pub(super) fn ensure_stable_view(view: &Path, blob_hash: &str) -> StorageResult<bool> {
-    let expected = relative_blob_link(blob_hash);
+pub(super) fn ensure_stable_view(
+    view: &Path,
+    blob_hash: &str,
+    original_name: &str,
+) -> StorageResult<bool> {
+    let expected = relative_blob_link(blob_hash, original_name);
     match fs::symlink_metadata(view) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             let target = fs::read_link(view)
                 .map_err(|source| internal_error("attachment view could not be read", source))?;
-            if target != expected {
+            if target == expected {
+                return Ok(false);
+            }
+            if target != legacy_relative_blob_link(blob_hash) {
                 return Err(invalid_data("attachment view points to an unexpected blob"));
             }
-            Ok(false)
+            fs::remove_file(view).map_err(|source| {
+                internal_error("legacy attachment view could not be removed", source)
+            })?;
+            symlink(&expected, view).map_err(|source| {
+                internal_error("attachment view could not be migrated", source)
+            })?;
+            super::sync_directory(view.parent().expect("attachment view has a parent"))?;
+            Ok(true)
         }
         Ok(_) => Err(invalid_data("attachment view is not a symbolic link")),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
