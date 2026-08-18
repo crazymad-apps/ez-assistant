@@ -435,8 +435,7 @@ mod tests {
                 "pin_memory",
                 serde_json::json!({
                     "category": "preference",
-                    "content": "Use dark mode",
-                    "attributes": {"scope": "demo"}
+                    "content": "Use dark mode"
                 }),
             ),
             tool_turn(
@@ -459,6 +458,7 @@ mod tests {
                 "call_4",
                 "recall_memory",
                 serde_json::json!({
+                    "action": "search",
                     "query": "memory",
                     "limit": 4,
                     "sources": ["demo_records", "failing_demo"]

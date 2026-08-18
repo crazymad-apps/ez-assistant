@@ -26,7 +26,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.14.2"
+version = "0.15.0"
 
 [workspace.dependencies]
 async-stream = "0.3.6"
@@ -39,6 +39,7 @@ libc = "0.2.177"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 getrandom = "0.4.3"
+hmac = "0.12.1"
 path-absolutize = "4.0.1"
 process-wrap = { version = "9.1.0", default-features = false, features = [
     "tokio1",

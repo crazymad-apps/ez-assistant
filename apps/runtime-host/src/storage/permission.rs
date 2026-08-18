@@ -13,9 +13,10 @@ use std::{
 
 use assistant_protocol::PermissionDiagnosticCode;
 use assistant_runtime::{
-    FilePermissionMatcher, PathMatch, PermissionDocument, PermissionEffect, PermissionFileLoad,
-    PermissionFileOperation, PermissionFileRevision, PermissionFileScope, PermissionMatcher,
-    PermissionRule, PermissionSourceDiagnostic, StoreError, StoreErrorKind,
+    FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
+    PermissionEffect, PermissionFileLoad, PermissionFileOperation, PermissionFileRevision,
+    PermissionFileScope, PermissionMatcher, PermissionRule, PermissionSourceDiagnostic, StoreError,
+    StoreErrorKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -27,6 +28,7 @@ const MAX_PERMISSION_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_WORKSPACE_RULE_PREFIX: &str = "default-workspace-";
 const DEFAULT_SESSION_PRIVATE_RULE_PREFIX: &str = "default-session-private-";
 const DEFAULT_SESSION_ATTACHMENT_RULE_PREFIX: &str = "default-session-attachment-";
+const DEFAULT_SESSION_MEMORY_RULE_PREFIX: &str = "default-session-memory-";
 
 impl StorageEngine {
     pub(super) fn ensure_workspace_permission_file(
@@ -172,7 +174,31 @@ fn default_session_permission_document(
         &environment.session_attachment_directory,
         false,
     ));
+    rules.extend(default_memory_permission_rules());
     render_default_permission_document(rules, "default session permissions could not be encoded")
+}
+
+fn default_memory_permission_rules() -> Vec<PermissionRule> {
+    [
+        ("list_pinned_memories", PermissionEffect::Allow),
+        ("recall_memory", PermissionEffect::Allow),
+        ("pin_memory", PermissionEffect::Ask),
+        ("update_pinned_memory", PermissionEffect::Ask),
+        ("unpin_memory", PermissionEffect::Ask),
+    ]
+    .into_iter()
+    .map(|(tool_name, effect)| PermissionRule {
+        id: format!("{DEFAULT_SESSION_MEMORY_RULE_PREFIX}{tool_name}"),
+        effect,
+        variants: vec![
+            assistant_protocol::AgentVariant::Plan,
+            assistant_protocol::AgentVariant::Build,
+        ],
+        matcher: PermissionMatcher::General(GeneralPermissionMatcher {
+            tool_name: tool_name.to_owned(),
+        }),
+    })
+    .collect()
 }
 
 fn default_file_permission_rules(

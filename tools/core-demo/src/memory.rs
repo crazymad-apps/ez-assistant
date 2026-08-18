@@ -681,6 +681,7 @@ mod tests {
             .recall(
                 MemoryRecallRequest {
                     query: "memory".to_owned(),
+                    scope: agent_memory::RecallScope::Session,
                     limit: non_zero(4),
                     sources: Some(vec![
                         RecallSourceId::new(DEMO_SOURCE_ID).expect("demo source"),

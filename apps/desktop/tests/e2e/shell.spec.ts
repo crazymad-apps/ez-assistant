@@ -92,7 +92,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
 
   await navigation.getByRole("button", { name: "搜索会话" }).click();
-  const search_input = navigation.getByRole("searchbox", { name: "搜索会话" });
+  const search_input = navigation.getByRole("searchbox", { name: "搜索历史会话" });
   await search_input.fill("M2 临时");
   await expect(navigation.getByRole("button", { name: /M2 临时会话/ })).toBeVisible();
   await navigation.getByRole("button", { name: "关闭搜索" }).click();
@@ -124,6 +124,12 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await page.getByRole("menu", { name: "选择新会话目录" }).getByRole("menuitem").first().click();
   await expect(session_header.getByRole("button", { name: "New Session" })).toBeVisible();
   await expectComposerAtBottom(page);
+  const source_composer = page.getByRole("textbox", { name: "输入消息" });
+  await source_composer.fill("SOURCE_CASE");
+  await source_composer.press("Enter");
+  await expect(source_composer).toHaveValue("");
+  await expect(page.getByTitle("SOURCE_CASE")).toBeVisible();
+  await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
   await seeded_session.click();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
   await expectComposerAtBottom(page);
@@ -140,6 +146,21 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("FIRST_CASE", { exact: true })).toBeVisible();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "切换会话模型" })).toBeEnabled();
+
+  await navigation.getByRole("button", { name: "搜索会话" }).click();
+  const history_search = navigation.getByRole("searchbox", { name: "搜索历史会话" });
+  await history_search.fill("SOURCE_CASE");
+  await navigation.getByRole("button", { name: "选择历史检索范围" }).click();
+  await page.getByRole("option", { name: /全局/ }).click();
+  // FTS snippet 会按归一化后的大小写返回，来源窗口中的权威正文仍保留原始文本。
+  await navigation.getByRole("button", { name: /消息.*source_case/i }).click();
+  const recall_dialog = page.getByRole("dialog");
+  await expect(recall_dialog.getByText("SOURCE_CASE", { exact: true })).toBeVisible();
+  await recall_dialog.getByRole("button", { name: "在原会话中查看" }).click();
+  await expect(session_header.getByRole("button", { name: "SOURCE_CASE" })).toBeVisible();
+  await session_header.getByRole("button", { name: "返回上一处会话位置" }).click();
+  await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
+  await navigation.getByRole("button", { name: "关闭搜索" }).click();
 
   await composer.fill("TOOL_CASE");
   await composer.press("Enter");

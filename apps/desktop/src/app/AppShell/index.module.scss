@@ -167,7 +167,7 @@
   display: grid;
   min-width: 0;
   min-height: 56px;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   padding: 0 18px 0 26px;
@@ -352,6 +352,7 @@
 }
 
 .session_switcher,
+.session_navigation > button,
 .session_actions button {
   display: grid;
   width: 30px;
@@ -366,6 +367,14 @@
     color: var(--ez-text-secondary);
     background: var(--ez-surface-muted);
   }
+}
+
+.session_navigation {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+
+  > button:disabled { opacity: 0.35; }
 }
 
 .session_actions {

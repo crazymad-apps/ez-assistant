@@ -147,11 +147,12 @@ impl CoordinatedMemoryRecall {
 
     fn selected_source_indices(
         &self,
-        request: &MemoryRecallRequest,
+        query: &str,
+        sources: Option<&[RecallSourceId]>,
     ) -> Result<Vec<usize>, MemoryRecallError> {
-        validate_query(&request.query, self.config.max_query_bytes)?;
+        validate_query(query, self.config.max_query_bytes)?;
 
-        let Some(source_ids) = &request.sources else {
+        let Some(source_ids) = sources else {
             return Ok(self.default_source_indices.clone());
         };
         if source_ids.is_empty() {
@@ -196,7 +197,13 @@ impl CoordinatedMemoryRecall {
         if cancellation.is_cancelled() {
             return Err(MemoryRecallError::Cancelled);
         }
-        let selected = self.selected_source_indices(&request)?;
+        let MemoryRecallRequest {
+            query,
+            limit,
+            sources,
+            ..
+        } = request;
+        let selected = self.selected_source_indices(&query, sources.as_deref())?;
         if cancellation.is_cancelled() {
             return Err(MemoryRecallError::Cancelled);
         }
@@ -204,8 +211,8 @@ impl CoordinatedMemoryRecall {
         let futures = selected.iter().map(|index| {
             let source = &self.sources[*index];
             let source_request = RecallSourceRequest {
-                query: request.query.clone(),
-                limit: request.limit,
+                query: query.clone(),
+                limit,
             };
             run_source(
                 source.as_ref(),
@@ -246,14 +253,15 @@ impl CoordinatedMemoryRecall {
         }
 
         let mut items = merge_round_robin(successes);
-        if items.len() > request.limit.get() {
+        if items.len() > limit.get() {
             truncated = true;
-            items.truncate(request.limit.get());
+            items.truncate(limit.get());
         }
         Ok(MemoryRecallResponse {
             items,
             failures,
             truncated,
+            window: None,
         })
     }
 }
@@ -556,8 +564,17 @@ mod tests {
     }
 
     fn request(limit: usize, sources: Option<Vec<&str>>) -> MemoryRecallRequest {
+        request_with_query("preferred editor", limit, sources)
+    }
+
+    fn request_with_query(
+        query: &str,
+        limit: usize,
+        sources: Option<Vec<&str>>,
+    ) -> MemoryRecallRequest {
         MemoryRecallRequest {
-            query: "preferred editor".to_owned(),
+            query: query.to_owned(),
+            scope: super::super::RecallScope::Session,
             limit: NonZeroUsize::new(limit).expect("non-zero"),
             sources: sources.map(|values| values.into_iter().map(id).collect()),
         }
@@ -682,15 +699,13 @@ mod tests {
         }
 
         for query in [" ", "bad\0query"] {
-            let mut invalid = request(1, None);
-            invalid.query = query.to_owned();
+            let invalid = request_with_query(query, 1, None);
             assert!(matches!(
                 recall.recall(invalid, CancellationToken::new()).await,
                 Err(MemoryRecallError::InvalidInput { .. })
             ));
         }
-        let mut invalid = request(1, None);
-        invalid.query = "x".repeat(129);
+        let invalid = request_with_query(&"x".repeat(129), 1, None);
         assert!(matches!(
             recall.recall(invalid, CancellationToken::new()).await,
             Err(MemoryRecallError::InvalidInput { .. })
@@ -950,8 +965,7 @@ mod tests {
 
         let already_cancelled = CancellationToken::new();
         already_cancelled.cancel();
-        let mut otherwise_invalid = request(2, None);
-        otherwise_invalid.query = " ".to_owned();
+        let otherwise_invalid = request_with_query(" ", 2, None);
         assert_eq!(
             recall.recall(otherwise_invalid, already_cancelled).await,
             Err(MemoryRecallError::Cancelled)

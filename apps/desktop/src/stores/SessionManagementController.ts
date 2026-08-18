@@ -15,7 +15,6 @@ import { chooseWorkspaceDirectory } from "../native-bridge/workspaceDirectory";
 import type { ConnectionStore } from "./ConnectionStore";
 import type { NavigationStore } from "./NavigationStore";
 import type { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
-import type { RuntimeProjectionStore } from "./RuntimeProjectionStore";
 
 type SessionManagementState = {
   composer_pending: boolean;
@@ -27,7 +26,6 @@ type SessionManagementState = {
 type SessionManagementDependencies = Readonly<{
   connection: ConnectionStore;
   navigation: NavigationStore;
-  projection: RuntimeProjectionStore;
   runtime: RuntimeLifecycleCoordinator;
   save_preferences: () => void;
   select_session: (session_id: SessionId) => Promise<void>;
@@ -138,7 +136,7 @@ export class SessionManagementController {
         },
       });
       if (navigation.selected_session_id === prepared.session.session_id) {
-        navigation.selectSession(null);
+        navigation.selectSession(null, false);
       }
       await runtime.loadApplication();
       await runtime.selectInitialSession();
@@ -179,54 +177,6 @@ export class SessionManagementController {
       });
       await runtime.loadApplication();
       await this.dependencies.select_session(session_result.payload.session.session_id);
-    } catch (error: unknown) {
-      runInAction(() => {
-        state.interaction_error = displayError(error);
-      });
-    } finally {
-      runInAction(() => {
-        state.pending_workspace_action = false;
-      });
-    }
-  }
-
-  async changeSessionWorkspace(session_id: SessionId): Promise<void> {
-    const { navigation, projection, runtime, state } = this.dependencies;
-    const client = runtime.client;
-    if (!client || state.pending_workspace_action || state.pending_session_action) {
-      return;
-    }
-    state.pending_workspace_action = true;
-    state.interaction_error = null;
-    try {
-      const path = await chooseWorkspaceDirectory();
-      if (!path) {
-        return;
-      }
-      const workspace_result = await client.command({ type: "register_workspace", payload: { path } });
-      const workspace_id = workspace_result.payload.workspace.workspace_id;
-      const session = projection.application?.active_sessions.find((item) => item.session_id === session_id);
-      const view = projection.session_views.get(session_id);
-      const is_empty = session?.message_count === 0
-        && session.queued_input_count === 0
-        && session.pending_approval_count === 0
-        && !session.active_run_id
-        && (view?.runs.length ?? 0) === 0
-        && (view?.attachments.length ?? 0) === 0;
-      if (is_empty) {
-        await client.command({ type: "set_empty_session_workspace", payload: { session_id, workspace_id } });
-        await runtime.loadApplication();
-        await runtime.loadSession(session_id);
-      } else {
-        const created = await client.command({
-          type: "create_session",
-          payload: { title: null, model_key: session?.model_key ?? null, workspace_id },
-        });
-        await runtime.loadApplication();
-        await this.dependencies.select_session(created.payload.session.session_id);
-      }
-      navigation.ensureWorkspaceExpanded(workspace_id);
-      this.dependencies.save_preferences();
     } catch (error: unknown) {
       runInAction(() => {
         state.interaction_error = displayError(error);

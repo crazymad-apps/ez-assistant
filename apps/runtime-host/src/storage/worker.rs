@@ -9,16 +9,21 @@ use std::{
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
-    ConversationWindowRequest, EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange,
-    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
+    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
+    NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionFileLoad,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionStoreFuture,
+    PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
     QueuePriorityChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
     SessionFork, SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredConversationWindow,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
-    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
+    StoredSessionFork, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -33,6 +38,23 @@ enum Command {
     },
     LoadRuntime {
         reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,
+    },
+    LoadMemoryContext {
+        reply: oneshot::Sender<Result<MemoryContextSnapshot, StoreError>>,
+    },
+    GetPersona {
+        reply: oneshot::Sender<Result<PersonaSnapshot, StoreError>>,
+    },
+    SetPersona {
+        mutation: PersonaMutation,
+        reply: oneshot::Sender<Result<PersonaSnapshot, StoreError>>,
+    },
+    ListPinnedMemories {
+        reply: oneshot::Sender<Result<Vec<StoredPinnedMemory>, StoreError>>,
+    },
+    MutatePinnedMemory {
+        mutation: PinnedMemoryMutation,
+        reply: oneshot::Sender<Result<PinnedMemoryMutationResult, StoreError>>,
     },
     RegisterWorkspace {
         registration: NewWorkspaceRegistration,
@@ -145,6 +167,18 @@ enum Command {
         request: ConversationWindowRequest,
         reply: oneshot::Sender<Result<StoredConversationWindow, StoreError>>,
     },
+    LoadConversationRawWindow {
+        request: ConversationRawWindowRequest,
+        reply: oneshot::Sender<Result<StoredConversationRawWindow, StoreError>>,
+    },
+    LocateConversationMessage {
+        request: ConversationMessageLocationRequest,
+        reply: oneshot::Sender<Result<Option<StoredConversationMessageLocation>, StoreError>>,
+    },
+    SearchConversations {
+        request: ConversationSearchRequest,
+        reply: oneshot::Sender<Result<ConversationSearchPage, StoreError>>,
+    },
     SetSessionArchive {
         change: ArchiveChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
@@ -155,10 +189,6 @@ enum Command {
     },
     SetSessionPinned {
         change: SessionPinnedChange,
-        reply: oneshot::Sender<Result<(), StoreError>>,
-    },
-    SetEmptySessionWorkspace {
-        change: EmptySessionWorkspaceChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     SetMessageFeedback {
@@ -339,6 +369,51 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::LoadRuntime { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadMemoryContext { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::GetPersona { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetPersona { mutation, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ListPinnedMemories { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn mutate_pinned_memory(
+        &self,
+        mutation: PinnedMemoryMutation,
+    ) -> StoreFuture<'_, PinnedMemoryMutationResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::MutatePinnedMemory { mutation, reply })
+                .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -637,6 +712,42 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn load_conversation_raw_window(
+        &self,
+        request: ConversationRawWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationRawWindow> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadConversationRawWindow { request, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn locate_conversation_message(
+        &self,
+        request: ConversationMessageLocationRequest,
+    ) -> StoreFuture<'_, Option<StoredConversationMessageLocation>> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LocateConversationMessage { request, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn search_conversations(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, ConversationSearchPage> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SearchConversations { request, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
@@ -659,18 +770,6 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SetSessionPinned { change, reply })
-                .await?;
-            result.await.map_err(|_| worker_unavailable())?
-        })
-    }
-
-    fn set_empty_session_workspace(
-        &self,
-        change: EmptySessionWorkspaceChange,
-    ) -> StoreFuture<'_, ()> {
-        Box::pin(async move {
-            let (reply, result) = oneshot::channel();
-            self.enqueue(Command::SetEmptySessionWorkspace { change, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -777,6 +876,21 @@ fn run_worker(
             Command::LoadRuntime { reply } => {
                 let _ = reply.send(engine.load_runtime());
             }
+            Command::LoadMemoryContext { reply } => {
+                let _ = reply.send(engine.load_memory_context());
+            }
+            Command::GetPersona { reply } => {
+                let _ = reply.send(engine.get_persona());
+            }
+            Command::SetPersona { mutation, reply } => {
+                let _ = reply.send(engine.set_persona(mutation));
+            }
+            Command::ListPinnedMemories { reply } => {
+                let _ = reply.send(engine.list_pinned_memories());
+            }
+            Command::MutatePinnedMemory { mutation, reply } => {
+                let _ = reply.send(engine.mutate_pinned_memory(mutation));
+            }
             Command::RegisterWorkspace {
                 registration,
                 reply,
@@ -874,6 +988,15 @@ fn run_worker(
             Command::LoadConversationWindow { request, reply } => {
                 let _ = reply.send(engine.load_conversation_window(request));
             }
+            Command::LoadConversationRawWindow { request, reply } => {
+                let _ = reply.send(engine.load_conversation_raw_window(request));
+            }
+            Command::LocateConversationMessage { request, reply } => {
+                let _ = reply.send(engine.locate_conversation_message(request));
+            }
+            Command::SearchConversations { request, reply } => {
+                let _ = reply.send(engine.search_conversations(request));
+            }
             Command::SetSessionArchive { change, reply } => {
                 let _ = reply.send(engine.set_session_archive(change));
             }
@@ -882,9 +1005,6 @@ fn run_worker(
             }
             Command::SetSessionPinned { change, reply } => {
                 let _ = reply.send(engine.set_session_pinned(change));
-            }
-            Command::SetEmptySessionWorkspace { change, reply } => {
-                let _ = reply.send(engine.set_empty_session_workspace(change));
             }
             Command::SetMessageFeedback { change, reply } => {
                 let _ = reply.send(engine.set_message_feedback(change));

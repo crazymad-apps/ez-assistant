@@ -383,6 +383,7 @@ mod tests {
         .expect("build coordinator");
         let request = |sources| MemoryRecallRequest {
             query: "memory".to_owned(),
+            scope: agent_memory::RecallScope::Session,
             limit: non_zero(4),
             sources,
         };

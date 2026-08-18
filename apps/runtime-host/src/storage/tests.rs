@@ -1,11 +1,15 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
+    hint::black_box,
     io::Write,
     os::unix::fs::{PermissionsExt, symlink},
     path::Path,
+    time::Instant,
 };
 
 use agent_core::ExchangeReceipt;
+use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry, PinnedMemoryId};
 use agent_model::SystemPromptSnapshot;
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
@@ -21,16 +25,17 @@ use assistant_protocol::{
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ConversationWindowRequest,
-    ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
-    NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, PermissionDocument, PermissionEffect,
-    PermissionFileOperation, PermissionFileRevision, PermissionFileScope, PermissionFileStore,
-    QueuePriorityChange, RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoreErrorKind, StoredAttachmentState,
-    StoredChildTaskSettlement, StoredConversationState, StoredRunSettlement, StoredSession,
-    StoredSessionLifecycle, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkspaceRemoval,
+    ContextReplacementTarget, ConversationRewrite, ConversationSearchRequest,
+    ConversationSearchScope, ConversationWindowRequest, ForkedAttachmentReference,
+    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
+    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
+    PermissionDocument, PermissionEffect, PermissionFileOperation, PermissionFileRevision,
+    PermissionFileScope, PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy,
+    PinnedMemoryMutation, QueuePriorityChange, RuntimeStore, SessionDeletion,
+    SessionExecutionEnvironment, SessionFork, SessionPinnedChange, SessionTitleChange,
+    StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState,
+    StoredRunSettlement, StoredSession, StoredSessionLifecycle, StoredWorkspaceLifecycle,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -91,11 +96,17 @@ fn assert_default_session_permissions(session: &StoredSession) {
         .expect("default session permissions"),
     )
     .expect("valid default session permissions");
-    assert_eq!(document.rules.len(), 11);
+    assert_eq!(document.rules.len(), 16);
     assert!(
         document
             .rules
             .iter()
+            .filter(|rule| {
+                !matches!(
+                    &rule.matcher,
+                    assistant_runtime::PermissionMatcher::General(_)
+                )
+            })
             .all(|rule| rule.effect == PermissionEffect::Allow)
     );
     assert_eq!(
@@ -106,6 +117,32 @@ fn assert_default_session_permissions(session: &StoredSession) {
             .count(),
         3
     );
+    assert!(document.rules.iter().any(|rule| {
+        rule.effect == PermissionEffect::Allow
+            && matches!(
+                &rule.matcher,
+                assistant_runtime::PermissionMatcher::General(matcher)
+                    if matcher.tool_name == "list_pinned_memories"
+            )
+    }));
+    assert!(document.rules.iter().any(|rule| {
+        rule.effect == PermissionEffect::Allow
+            && matches!(
+                &rule.matcher,
+                assistant_runtime::PermissionMatcher::General(matcher)
+                    if matcher.tool_name == "recall_memory"
+            )
+    }));
+    for tool_name in ["pin_memory", "update_pinned_memory", "unpin_memory"] {
+        assert!(document.rules.iter().any(|rule| {
+            rule.effect == PermissionEffect::Ask
+                && matches!(
+                    &rule.matcher,
+                    assistant_runtime::PermissionMatcher::General(matcher)
+                        if matcher.tool_name == tool_name
+                )
+        }));
+    }
     assert_eq!(
         document
             .rules
@@ -402,6 +439,143 @@ fn start_tool(engine: &mut StorageEngine, session: &str, run: &str, receipt: &st
 
 fn open_engine(root: &TempDir) -> StorageEngine {
     StorageEngine::open(root.path()).expect("open storage engine")
+}
+
+#[test]
+fn persona_and_pinned_memory_use_cas_and_survive_reopen() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    assert_eq!(
+        engine
+            .load_memory_context()
+            .expect("initial memory")
+            .persona
+            .revision,
+        0
+    );
+
+    let persona = engine
+        .set_persona(PersonaMutation {
+            expected_revision: 0,
+            enabled: true,
+            content: "Prefer concise answers.".to_owned(),
+            updated_at_ms: 10,
+        })
+        .expect("set persona");
+    assert_eq!(persona.revision, 1);
+    assert_eq!(
+        engine
+            .set_persona(PersonaMutation {
+                expected_revision: 0,
+                enabled: false,
+                content: String::new(),
+                updated_at_ms: 11,
+            })
+            .expect_err("stale persona mutation")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        "scope".to_owned(),
+        MemoryPropertyValue::String("desktop".to_owned()),
+    );
+    let original = PinnedMemoryEntry {
+        id: PinnedMemoryId::new("memory-one").expect("memory id"),
+        category: PinnedMemoryCategory::new("preference").expect("category"),
+        content: "Use Chinese by default.".to_owned(),
+        attributes,
+    };
+    let created = engine
+        .mutate_pinned_memory(PinnedMemoryMutation::Create {
+            entry: original.clone(),
+            created_by: PinnedMemoryCreatedBy::AgentTool {
+                session_id: session_id("s-memory-author"),
+            },
+            expected_collection_revision: 0,
+            changed_at_ms: 20,
+        })
+        .expect("create pinned memory");
+    assert_eq!(created.collection_revision, 1);
+    assert_eq!(created.memory.as_ref().expect("created memory").revision, 1);
+    assert_eq!(
+        engine
+            .mutate_pinned_memory(PinnedMemoryMutation::Create {
+                entry: PinnedMemoryEntry {
+                    id: PinnedMemoryId::new("memory-two").expect("memory id"),
+                    ..original.clone()
+                },
+                created_by: PinnedMemoryCreatedBy::User,
+                expected_collection_revision: 0,
+                changed_at_ms: 21,
+            })
+            .expect_err("stale collection revision")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+
+    let replacement = PinnedMemoryEntry {
+        content: "Use concise Chinese by default.".to_owned(),
+        ..original
+    };
+    let replaced = engine
+        .mutate_pinned_memory(PinnedMemoryMutation::Replace {
+            entry: replacement.clone(),
+            expected_revision: 1,
+            changed_at_ms: 30,
+        })
+        .expect("replace pinned memory");
+    assert_eq!(replaced.collection_revision, 2);
+    assert_eq!(
+        replaced.memory.as_ref().expect("replaced memory").revision,
+        2
+    );
+    assert_eq!(
+        engine
+            .mutate_pinned_memory(PinnedMemoryMutation::Replace {
+                entry: replacement.clone(),
+                expected_revision: 1,
+                changed_at_ms: 31,
+            })
+            .expect_err("stale memory revision")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let snapshot = reopened.load_memory_context().expect("reopened memory");
+    assert!(snapshot.persona.enabled);
+    assert_eq!(snapshot.persona.content, "Prefer concise answers.");
+    assert_eq!(snapshot.persona.revision, 1);
+    assert_eq!(snapshot.pinned_collection_revision, 2);
+    assert_eq!(snapshot.pinned_memories.len(), 1);
+    assert_eq!(snapshot.pinned_memories[0].entry, replacement);
+    assert_eq!(
+        snapshot.pinned_memories[0].created_by,
+        PinnedMemoryCreatedBy::AgentTool {
+            session_id: session_id("s-memory-author")
+        }
+    );
+
+    let deleted = reopened
+        .mutate_pinned_memory(PinnedMemoryMutation::Delete {
+            id: PinnedMemoryId::new("memory-one").expect("memory id"),
+            expected_revision: 2,
+            changed_at_ms: 40,
+        })
+        .expect("delete pinned memory");
+    assert_eq!(deleted.collection_revision, 3);
+    assert!(deleted.memory.is_none());
+    drop(reopened);
+    assert!(
+        open_engine(&root)
+            .load_memory_context()
+            .expect("memory after delete")
+            .pinned_memories
+            .is_empty()
+    );
 }
 
 fn raw_user_message(value: &str, text: &str) -> UserMessage {
@@ -775,6 +949,16 @@ fn assert_recovered_append(root: &TempDir, session: &str) {
         })
         .expect("count refs");
     assert_eq!(reference_count, 2);
+    let recall = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "world".to_owned(),
+            scope: ConversationSearchScope::Session {
+                session_id: session_id(session),
+            },
+            limit: 20,
+        })
+        .expect("search recovered append");
+    assert_eq!(recall.hits.len(), 1);
 }
 
 #[test]
@@ -858,6 +1042,196 @@ fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
         .expect("count rows after compatible schema initialization");
     assert_eq!((after.0, after.1), before);
     assert_eq!(after.2, 0);
+}
+
+#[test]
+fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source_id = session_id("s-v0142-source");
+    let forked_id = session_id("s-v0142-fork");
+    let child_session_id = session_id("s-v0142-child");
+    let child_id = child_task_id("ct-v0142-child");
+    let sessions_directory = engine.sessions_directory.clone();
+
+    let source = engine
+        .create_session(new_session(source_id.as_str(), &sessions_directory))
+        .expect("create source session");
+    commit_completed_turn(&mut engine, &source_id, "v0142-search-marker", 2_000);
+    engine
+        .rename_session(SessionTitleChange {
+            session_id: source_id.clone(),
+            title: "v0.14.2 archived session".to_owned(),
+            changed_at_ms: 2_100,
+        })
+        .expect("rename source session");
+    engine
+        .set_session_pinned(SessionPinnedChange {
+            session_id: source_id.clone(),
+            is_pinned: true,
+            changed_at_ms: 2_101,
+        })
+        .expect("pin source session");
+
+    let attachment_bytes = b"v0.14.2 attachment payload";
+    let attachment_name = "legacy-note.txt";
+    let attachment_hash = crate::attachment_hash::digest_bytes(attachment_name, attachment_bytes);
+    let staging = engine
+        .upload_staging_directory
+        .join("v0142-attachment.part");
+    fs::write(&staging, attachment_bytes).expect("write attachment staging file");
+    let attachment = engine
+        .upload_attachment(NewAttachmentUpload {
+            attachment_id: AttachmentId::new("a-v0142").expect("attachment id"),
+            session_id: source_id.clone(),
+            original_name: attachment_name.to_owned(),
+            staging_path: staging.to_string_lossy().into_owned(),
+            blob_hash: attachment_hash,
+            size_bytes: attachment_bytes.len() as u64,
+            created_at_ms: 2_102,
+        })
+        .expect("upload legacy attachment");
+
+    let source_generation = engine
+        .connection
+        .query_row(
+            "SELECT body_generation FROM sessions WHERE session_id = ?1",
+            [source_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("source generation") as u64;
+    let source_conversation = engine
+        .load_conversation(&source_id)
+        .expect("source conversation");
+    engine
+        .fork_session(SessionFork {
+            source_session_id: source_id.clone(),
+            source_generation,
+            session: new_session(forked_id.as_str(), &sessions_directory),
+            conversation: source_conversation.clone(),
+            attachments: Vec::new(),
+        })
+        .expect("fork legacy session");
+    engine
+        .set_session_archive(ArchiveChange {
+            session_id: source_id.clone(),
+            archived: true,
+            changed_at_ms: 2_103,
+        })
+        .expect("archive source session");
+
+    seed_session_and_run(&mut engine, child_session_id.as_str(), "r-v0142-child");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: child_session_id.clone(),
+            parent_run_id: run_id("r-v0142-child"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-v0142")
+                .expect("tool call id"),
+            title: "v0.14.2 child task".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["legacy child prompt".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_104,
+        })
+        .expect("create legacy child task");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-v0142-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: child_session_id.clone(),
+            message: raw_user_message("v0142-child-user", "legacy child marker"),
+            started_at_ms: 2_105,
+        })
+        .expect("start legacy child task");
+
+    let permission_path =
+        Path::new(&source.environment.session_private_directory).join("permissions.json");
+    let permission_bytes = fs::read(&permission_path).expect("read legacy permission document");
+
+    // v0.14.2 与当前版本共用原有业务表；这里只移除 v0.15 新增对象，构造精确的旧版形态。
+    engine
+        .connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS conversation_recall_documents_ai;
+             DROP TRIGGER IF EXISTS conversation_recall_documents_ad;
+             DROP TRIGGER IF EXISTS conversation_recall_documents_au;
+             DROP TABLE IF EXISTS conversation_recall_fts;
+             DROP TABLE IF EXISTS conversation_recall_documents;
+             DROP TABLE IF EXISTS conversation_recall_heads;
+             DROP TABLE IF EXISTS pinned_memories;
+             DROP TABLE IF EXISTS memory_state;
+             DROP TABLE IF EXISTS persona;",
+        )
+        .expect("downgrade fixture to v0.14.2 shape");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover migrated runtime");
+    let source = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id == source_id)
+        .expect("migrated source session");
+    assert_eq!(source.title, "v0.14.2 archived session");
+    assert_eq!(source.lifecycle, StoredSessionLifecycle::Archived);
+    assert!(source.is_pinned);
+    assert_eq!(
+        reopened.load_conversation(&source_id).unwrap(),
+        source_conversation
+    );
+    assert_eq!(
+        reopened.load_conversation(&forked_id).unwrap(),
+        source_conversation
+    );
+    assert!(
+        recovered
+            .child_tasks
+            .iter()
+            .any(|task| task.child_task_id == child_id)
+    );
+    assert_eq!(
+        reopened
+            .load_child_conversation(&child_session_id, &child_id)
+            .expect("migrated child conversation")
+            .messages
+            .len(),
+        1
+    );
+    let migrated_attachment = recovered
+        .attachments
+        .iter()
+        .find(|stored| stored.attachment_id == attachment.attachment_id)
+        .expect("migrated attachment");
+    assert_eq!(
+        fs::read(&migrated_attachment.agent_readable_path).expect("read migrated attachment"),
+        attachment_bytes
+    );
+    assert_eq!(
+        fs::read(&permission_path).expect("read migrated permission document"),
+        permission_bytes
+    );
+
+    let memory = reopened
+        .load_memory_context()
+        .expect("load migrated memory defaults");
+    assert_eq!(memory.persona.revision, 0);
+    assert!(!memory.persona.enabled);
+    assert_eq!(memory.pinned_collection_revision, 0);
+    assert!(memory.pinned_memories.is_empty());
+    let search = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "v0142-search-marker".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("rebuild recall index from migrated conversation");
+    assert_eq!(search.hits.len(), 4);
+    assert!(!search.partial);
+    assert!(search.hits.iter().all(|hit| matches!(
+        &hit.owner,
+        ConversationOwner::MainSession { session_id }
+            if session_id == &source_id || session_id == &forked_id
+    )));
 }
 
 #[test]
@@ -3196,4 +3570,894 @@ fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
             .expect("migrated blob metadata"),
         current_relative.to_string_lossy()
     );
+}
+
+#[test]
+fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-visible", "r-recall-visible");
+    assert!(engine.recall_index_available);
+
+    let call_id = ToolCallId::new("call-recall-visible").expect("tool call id");
+    let messages = vec![
+        ConversationMessage::User(UserMessage {
+            id: MessageId::new("recall-user").expect("message id"),
+            parts: vec![
+                UserPart::Text(TextPart {
+                    id: PartId::new("recall-user-text").expect("part id"),
+                    text: "  可见   用户正文 AlphaPath /src/runtime_host.rs ErrorCode::Retry  "
+                        .to_owned(),
+                }),
+                UserPart::FileReferences(FileReferencesPart {
+                    id: PartId::new("recall-user-files").expect("part id"),
+                    files: vec![FileReference {
+                        original_name: "架构图-final.png".to_owned(),
+                        readable_path: "/fixture/architecture.png".to_owned(),
+                    }],
+                }),
+            ],
+        }),
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new("recall-assistant").expect("message id"),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider id"),
+                "fixture-model",
+            ),
+            parts: vec![
+                AssistantPart::Reasoning(ReasoningPart {
+                    id: PartId::new("recall-reasoning").expect("part id"),
+                    text: "hidden-reasoning-token".to_owned(),
+                }),
+                AssistantPart::Text(TextPart {
+                    id: PartId::new("recall-assistant-text").expect("part id"),
+                    text: "最终可见 AnswerToken".to_owned(),
+                }),
+                AssistantPart::ToolCall(ToolCall {
+                    id: call_id.clone(),
+                    name: ToolName::new("echo_text").expect("tool name"),
+                    arguments: serde_json::json!({"secret": "tool-argument-token"}),
+                }),
+            ],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        }),
+        ConversationMessage::Tool(ToolMessage {
+            id: MessageId::new("recall-tool-result").expect("message id"),
+            result: ToolResult {
+                call_id,
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::Text("tool-result-token".to_owned()),
+            },
+        }),
+    ];
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-visible".to_owned(),
+            session_id: session_id("s-recall-visible"),
+            run_id: run_id("r-recall-visible"),
+            messages,
+            created_at_ms: 2_000,
+        })
+        .expect("append searchable messages");
+
+    for query in [
+        "用户正文",
+        "alphapath",
+        "runtime_host.rs",
+        "ErrorCode::Retry",
+        "架构图",
+        "最终可见",
+        "answertoken",
+    ] {
+        let page = engine
+            .search_conversations(ConversationSearchRequest {
+                query: query.to_owned(),
+                scope: ConversationSearchScope::Session {
+                    session_id: session_id("s-recall-visible"),
+                },
+                limit: 20,
+            })
+            .expect("search visible content");
+        assert!(!page.hits.is_empty(), "expected a hit for {query}");
+    }
+    for query in [
+        "hidden-reasoning-token",
+        "tool-argument-token",
+        "tool-result-token",
+        "architecture.png",
+        "' OR 1=1 --",
+    ] {
+        let page = engine
+            .search_conversations(ConversationSearchRequest {
+                query: query.to_owned(),
+                scope: ConversationSearchScope::Session {
+                    session_id: session_id("s-recall-visible"),
+                },
+                limit: 20,
+            })
+            .expect("search filtered content");
+        assert!(page.hits.is_empty(), "unexpected hit for {query}");
+    }
+    let error = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "中文".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect_err("two-character query must be rejected");
+    assert_eq!(error.kind(), StoreErrorKind::InvalidInput);
+    let error = engine
+        .search_conversations(ConversationSearchRequest {
+            query: " \n\t ".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect_err("empty normalized query must be rejected");
+    assert_eq!(error.kind(), StoreErrorKind::InvalidInput);
+}
+
+#[test]
+fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_conversations() {
+    let root = TempDir::new().expect("runtime home");
+    let workspace_directory = TempDir::new().expect("workspace");
+    let mut engine = open_engine(&root);
+    let workspace = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-recall-scope"),
+            requested_directory: workspace_directory.path().to_string_lossy().into_owned(),
+            changed_at_ms: 100,
+        })
+        .expect("register workspace");
+
+    for (session_value, in_workspace) in [("s-recall-one", true), ("s-recall-two", false)] {
+        let mut session = new_session(session_value, &engine.sessions_directory);
+        if in_workspace {
+            session.environment.workspace_id = Some(workspace.workspace_id.clone());
+            session.environment.working_directory = workspace.user_directory.clone();
+            session.environment.workspace_private_directory =
+                Some(workspace.agent_directory.clone());
+        }
+        engine
+            .create_session(session)
+            .expect("create scoped session");
+        commit_completed_turn(
+            &mut engine,
+            &session_id(session_value),
+            &format!("scope-marker-{session_value}"),
+            2_000,
+        );
+    }
+    engine
+        .set_session_archive(ArchiveChange {
+            session_id: session_id("s-recall-one"),
+            archived: true,
+            changed_at_ms: 2_100,
+        })
+        .expect("archive workspace recall fixture");
+
+    seed_session_and_run(&mut engine, "s-recall-child", "r-recall-child");
+    let child_id = child_task_id("ct-recall-child");
+    engine
+        .create_child_task(NewStoredChildTask {
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-recall-child"),
+            parent_run_id: run_id("r-recall-child"),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("delegate-recall-child")
+                .expect("tool call id"),
+            title: "recall child".to_owned(),
+            system_prompt: SystemPromptSnapshot::new(vec!["child".to_owned()]),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            created_at_ms: 2_100,
+        })
+        .expect("create child");
+    engine
+        .start_child_task(ChildTaskStart {
+            operation_id: "start-recall-child".to_owned(),
+            child_task_id: child_id.clone(),
+            session_id: session_id("s-recall-child"),
+            message: raw_user_message("recall-child-user", "child-scope-marker"),
+            started_at_ms: 2_200,
+        })
+        .expect("start child");
+
+    let session_page = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "child-scope-marker".to_owned(),
+            scope: ConversationSearchScope::Session {
+                session_id: session_id("s-recall-child"),
+            },
+            limit: 20,
+        })
+        .expect("search child in session scope");
+    assert_eq!(session_page.hits.len(), 1);
+    assert!(matches!(
+        &session_page.hits[0].owner,
+        ConversationOwner::ChildTask { child_task_id, .. } if child_task_id == &child_id
+    ));
+
+    let workspace_page = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "scope-marker".to_owned(),
+            scope: ConversationSearchScope::Workspace {
+                workspace_id: workspace.workspace_id,
+            },
+            limit: 20,
+        })
+        .expect("search workspace scope");
+    assert_eq!(workspace_page.hits.len(), 2);
+    assert!(workspace_page.hits.iter().all(|hit| matches!(
+        &hit.owner,
+        ConversationOwner::MainSession { session_id } if session_id.as_str() == "s-recall-one"
+    )));
+
+    let global_page = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "scope-marker".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("search global scope");
+    assert_eq!(global_page.hits.len(), 5);
+}
+
+#[test]
+fn recall_index_filters_old_generations_and_cascades_session_deletion() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-generation", "r-recall-generation");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-generation".to_owned(),
+            session_id: session_id("s-recall-generation"),
+            run_id: run_id("r-recall-generation"),
+            messages: vec![user_message("recall-old", "legacy-generation-token")],
+            created_at_ms: 2_000,
+        })
+        .expect("append old generation");
+    let replacement =
+        ConversationSnapshot::new(vec![user_message("recall-new", "current-generation-token")]);
+    let plan = engine
+        .begin_replacement(session_id("s-recall-generation"), replacement)
+        .expect("begin replacement");
+    engine
+        .commit_replacement(&plan)
+        .expect("commit replacement");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs
+             SET status = 'completed', finished_at_ms = 2001
+             WHERE run_id = 'r-recall-generation'",
+            [],
+        )
+        .expect("settle generation fixture run");
+
+    let old = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "legacy-generation-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("search old generation");
+    assert!(old.hits.is_empty());
+    let current = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "current-generation-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("search current generation");
+    assert_eq!(current.hits.len(), 1);
+    assert_eq!(current.hits[0].generation, plan.new_generation);
+
+    let impact = engine
+        .inspect_session_deletion(&session_id("s-recall-generation"))
+        .expect("inspect deletion");
+    engine
+        .delete_session(SessionDeletion {
+            session_id: session_id("s-recall-generation"),
+            operation_id: "delete-recall-generation".to_owned(),
+            expected_impact: impact,
+        })
+        .expect("delete indexed session");
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_recall_documents",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count recall documents"),
+        0
+    );
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_recall_heads",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .expect("count recall heads"),
+        0
+    );
+}
+
+#[test]
+fn recall_index_rebuilds_dirty_owners_in_bounded_batches_after_reopen() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-rebuild", "r-recall-rebuild");
+    let messages = (0..300)
+        .map(|index| {
+            user_message(
+                &format!("recall-rebuild-{index}"),
+                &format!("batch-rebuild-token-{index}"),
+            )
+        })
+        .collect();
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-rebuild".to_owned(),
+            session_id: session_id("s-recall-rebuild"),
+            run_id: run_id("r-recall-rebuild"),
+            messages,
+            created_at_ms: 2_000,
+        })
+        .expect("append rebuild fixture");
+    engine
+        .connection
+        .execute("DELETE FROM conversation_recall_documents", [])
+        .expect("delete derived documents");
+    engine
+        .connection
+        .execute(
+            "UPDATE conversation_recall_heads
+             SET indexed_message_count = 0, state = 'dirty'",
+            [],
+        )
+        .expect("mark derived index dirty");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let untouched: (i64, String) = reopened
+        .connection
+        .query_row(
+            "SELECT indexed_message_count, state FROM conversation_recall_heads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read dirty head after startup");
+    assert_eq!(untouched, (0, "dirty".to_owned()));
+
+    let first = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "batch-rebuild-token-0".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("run first rebuild batch");
+    assert!(first.partial);
+    assert!(first.hits.is_empty());
+    let rebuilding: (i64, String) = reopened
+        .connection
+        .query_row(
+            "SELECT indexed_message_count, state FROM conversation_recall_heads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read rebuilding head");
+    assert_eq!(rebuilding, (256, "rebuilding".to_owned()));
+
+    let second = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "batch-rebuild-token-0".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("finish rebuild");
+    assert!(!second.partial);
+    assert_eq!(second.hits.len(), 1);
+    let ready: (i64, String) = reopened
+        .connection
+        .query_row(
+            "SELECT indexed_message_count, state FROM conversation_recall_heads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read ready head");
+    assert_eq!(ready, (300, "ready".to_owned()));
+}
+
+#[test]
+fn recall_index_recovers_interrupted_rebuild_without_scanning_at_startup() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-interrupted", "r-recall-interrupted");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-interrupted".to_owned(),
+            session_id: session_id("s-recall-interrupted"),
+            run_id: run_id("r-recall-interrupted"),
+            messages: vec![user_message(
+                "recall-interrupted",
+                "interrupted-rebuild-token",
+            )],
+            created_at_ms: 2_000,
+        })
+        .expect("append interrupted rebuild fixture");
+    engine
+        .connection
+        .execute(
+            "UPDATE conversation_recall_heads
+             SET indexed_message_count = 1, state = 'rebuilding'",
+            [],
+        )
+        .expect("stage interrupted rebuild");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let head: (i64, String) = reopened
+        .connection
+        .query_row(
+            "SELECT indexed_message_count, state FROM conversation_recall_heads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read recovered recall head");
+    assert_eq!(head, (1, "dirty".to_owned()));
+    let page = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "interrupted-rebuild-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("rebuild interrupted owner lazily");
+    assert!(!page.partial);
+    assert_eq!(page.hits.len(), 1);
+}
+
+#[test]
+fn recall_index_returns_ready_results_when_another_owner_cannot_be_rebuilt() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    for (session, suffix) in [
+        ("s-recall-healthy", "partial-recall-token-healthy"),
+        ("s-recall-broken", "partial-recall-token-broken"),
+    ] {
+        let session_id = session_id(session);
+        engine
+            .create_session(new_session(session, &engine.sessions_directory))
+            .expect("create partial recall fixture");
+        commit_completed_turn(&mut engine, &session_id, suffix, 2_000);
+    }
+    let broken_owner = ConversationOwner::MainSession {
+        session_id: session_id("s-recall-broken"),
+    };
+    let broken_body = body_path(
+        &engine
+            .session_directory(&session_id("s-recall-broken"))
+            .expect("broken session directory"),
+        1,
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(broken_body)
+        .expect("open broken conversation")
+        .write_all(b"not-json\n")
+        .expect("corrupt derived rebuild source");
+    engine.mark_recall_owner_dirty_now(&broken_owner, 1);
+
+    let page = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "partial-recall-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("return partial recall page");
+    assert!(page.partial);
+    assert_eq!(page.failed_owners, vec![broken_owner.clone()]);
+    assert_eq!(page.hits.len(), 2);
+    assert!(page.hits.iter().all(|hit| matches!(
+        &hit.owner,
+        ConversationOwner::MainSession { session_id }
+            if session_id.as_str() == "s-recall-healthy"
+    )));
+
+    let error = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "partial-recall-token".to_owned(),
+            scope: ConversationSearchScope::Session {
+                session_id: session_id("s-recall-broken"),
+            },
+            limit: 20,
+        })
+        .expect_err("all unavailable owners must fail explicitly");
+    assert_eq!(error.kind(), StoreErrorKind::Unavailable);
+}
+
+#[test]
+fn missing_fts_is_recreated_as_dirty_without_eager_history_rebuild() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-missing-fts", "r-recall-missing-fts");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-missing-fts".to_owned(),
+            session_id: session_id("s-recall-missing-fts"),
+            run_id: run_id("r-recall-missing-fts"),
+            messages: vec![user_message("recall-missing-fts", "missing-fts-token")],
+            created_at_ms: 2_000,
+        })
+        .expect("append missing FTS fixture");
+    engine
+        .connection
+        .execute("DROP TABLE conversation_recall_fts", [])
+        .expect("drop derived FTS table");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    assert!(reopened.recall_index_available);
+    let derived_count: i64 = reopened
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_recall_documents",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count derived documents after startup");
+    assert_eq!(derived_count, 0);
+    let state: String = reopened
+        .connection
+        .query_row("SELECT state FROM conversation_recall_heads", [], |row| {
+            row.get(0)
+        })
+        .expect("read missing FTS head");
+    assert_eq!(state, "dirty");
+
+    let page = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "missing-fts-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 20,
+        })
+        .expect("lazily rebuild missing FTS");
+    assert!(!page.partial);
+    assert_eq!(page.hits.len(), 1);
+}
+
+#[test]
+fn recall_index_failure_never_blocks_authoritative_conversation_commit() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(
+        &mut engine,
+        "s-recall-index-failure",
+        "r-recall-index-failure",
+    );
+    engine
+        .connection
+        .execute("DROP TABLE conversation_recall_fts", [])
+        .expect("break derived FTS index");
+
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-index-failure".to_owned(),
+            session_id: session_id("s-recall-index-failure"),
+            run_id: run_id("r-recall-index-failure"),
+            messages: vec![user_message(
+                "recall-index-failure",
+                "authority-survives-index-failure",
+            )],
+            created_at_ms: 2_000,
+        })
+        .expect("commit conversation despite derived index failure");
+    let conversation = engine
+        .load_conversation(&session_id("s-recall-index-failure"))
+        .expect("load authoritative conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    let head: (i64, String) = engine
+        .connection
+        .query_row(
+            "SELECT indexed_message_count, state FROM conversation_recall_heads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read degraded recall head");
+    assert_eq!(head, (0, "dirty".to_owned()));
+}
+
+#[test]
+fn recall_index_enforces_result_limit_and_deterministic_order() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-recall-limit", "r-recall-limit");
+    let messages = (0..120)
+        .map(|index| {
+            user_message(
+                &format!("recall-limit-{index:03}"),
+                &format!("shared-limit-token item-{index:03}"),
+            )
+        })
+        .collect();
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-recall-limit".to_owned(),
+            session_id: session_id("s-recall-limit"),
+            run_id: run_id("r-recall-limit"),
+            messages,
+            created_at_ms: 2_000,
+        })
+        .expect("append recall limit fixture");
+    let request = ConversationSearchRequest {
+        query: "shared-limit-token".to_owned(),
+        scope: ConversationSearchScope::Global,
+        limit: 500,
+    };
+
+    let first = engine
+        .search_conversations(request.clone())
+        .expect("first bounded recall query");
+    let second = engine
+        .search_conversations(request)
+        .expect("second bounded recall query");
+    assert_eq!(first.hits.len(), 100);
+    assert_eq!(first.hits, second.hits);
+}
+
+#[test]
+fn runtime_startup_does_not_scan_committed_conversation_bodies() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-startup-no-body-scan");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create startup fixture");
+    commit_completed_turn(&mut engine, &session, "startup-no-body-scan", 2_000);
+
+    let body = body_path(
+        &engine
+            .session_directory(&session)
+            .expect("session directory"),
+        1,
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(body)
+        .expect("open conversation body")
+        .write_all(b"not-json\n")
+        .expect("append invalid body line");
+    engine
+        .connection
+        .execute("DELETE FROM conversation_recall_documents", [])
+        .expect("clear derived recall documents");
+    engine
+        .connection
+        .execute(
+            "UPDATE conversation_recall_heads
+             SET indexed_message_count = 0, state = 'dirty'",
+            [],
+        )
+        .expect("mark recall owner dirty");
+    drop(engine);
+
+    // 已提交正文不属于启动投影；只有用户真正检索该 owner 时才会读取并诊断损坏。
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("load metadata projection");
+    assert_eq!(recovered.sessions.len(), 1);
+    assert_eq!(recovered.sessions[0].session_id, session);
+    assert_eq!(
+        reopened
+            .search_conversations(ConversationSearchRequest {
+                query: "startup-no-body-scan".to_owned(),
+                scope: ConversationSearchScope::Session {
+                    session_id: session_id("s-startup-no-body-scan"),
+                },
+                limit: 20,
+            })
+            .expect_err("corrupt body must be diagnosed on demand")
+            .kind(),
+        StoreErrorKind::Unavailable
+    );
+}
+
+#[test]
+#[ignore = "manual v0.15 storage performance baseline"]
+fn v015_storage_performance_baseline_reports_reproducible_cases() {
+    const SESSION_COUNT: usize = 24;
+    const TURNS_PER_SESSION: usize = 12;
+    const BATCH_SEARCH_COUNT: usize = 100;
+
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    for session_index in 0..SESSION_COUNT {
+        let session = session_id(&format!("s-performance-{session_index:02}"));
+        engine
+            .create_session(new_session(session.as_str(), &engine.sessions_directory))
+            .expect("create performance session");
+        for turn_index in 0..TURNS_PER_SESSION {
+            let suffix =
+                format!("performance-{session_index:02}-{turn_index:02}-shared-baseline-token");
+            commit_completed_turn(
+                &mut engine,
+                &session,
+                &suffix,
+                2_000 + (session_index * TURNS_PER_SESSION + turn_index) as i64 * 10,
+            );
+        }
+    }
+    engine
+        .connection
+        .execute("DELETE FROM conversation_recall_documents", [])
+        .expect("clear derived recall documents");
+    engine
+        .connection
+        .execute(
+            "UPDATE conversation_recall_heads
+             SET indexed_message_count = 0, state = 'dirty'",
+            [],
+        )
+        .expect("mark recall owners dirty");
+    drop(engine);
+
+    let startup_started = Instant::now();
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("load baseline runtime");
+    let startup_elapsed = startup_started.elapsed();
+    assert_eq!(recovered.sessions.len(), SESSION_COUNT);
+
+    let first_search_started = Instant::now();
+    let first_page = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "shared-baseline-token".to_owned(),
+            scope: ConversationSearchScope::Session {
+                session_id: session_id("s-performance-00"),
+            },
+            limit: 20,
+        })
+        .expect("first lazy recall search");
+    let first_search_elapsed = first_search_started.elapsed();
+    assert!(!first_page.partial);
+    assert_eq!(first_page.hits.len(), 20);
+
+    let incremental_started = Instant::now();
+    commit_completed_turn(
+        &mut reopened,
+        &session_id("s-performance-00"),
+        "incremental-baseline-token",
+        50_000,
+    );
+    let incremental_elapsed = incremental_started.elapsed();
+    let incremental_page = reopened
+        .search_conversations(ConversationSearchRequest {
+            query: "incremental-baseline-token".to_owned(),
+            scope: ConversationSearchScope::Session {
+                session_id: session_id("s-performance-00"),
+            },
+            limit: 20,
+        })
+        .expect("search incrementally indexed turn");
+    assert_eq!(incremental_page.hits.len(), 2);
+
+    // 先完成其余 owner 的懒重建，批量检索只衡量稳定索引查询，不混入重建成本。
+    for _ in 0..64 {
+        let page = reopened
+            .search_conversations(ConversationSearchRequest {
+                query: "shared-baseline-token".to_owned(),
+                scope: ConversationSearchScope::Global,
+                limit: 20,
+            })
+            .expect("warm global recall index");
+        if !page.partial {
+            break;
+        }
+    }
+    let ready_count: i64 = reopened
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_recall_heads WHERE state = 'ready'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count ready recall owners");
+    assert_eq!(ready_count as usize, SESSION_COUNT);
+
+    let batch_started = Instant::now();
+    for _ in 0..BATCH_SEARCH_COUNT {
+        let page = reopened
+            .search_conversations(ConversationSearchRequest {
+                query: "shared-baseline-token".to_owned(),
+                scope: ConversationSearchScope::Global,
+                limit: 20,
+            })
+            .expect("run stable batch search");
+        black_box(page);
+    }
+    let batch_elapsed = batch_started.elapsed();
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "baseline": "v0.15-storage",
+            "sessions": SESSION_COUNT,
+            "turns_per_session": TURNS_PER_SESSION,
+            "messages": SESSION_COUNT * TURNS_PER_SESSION * 2,
+            "batch_search_count": BATCH_SEARCH_COUNT,
+            "runtime_startup_us": startup_elapsed.as_micros(),
+            "first_session_search_us": first_search_elapsed.as_micros(),
+            "incremental_turn_commit_us": incremental_elapsed.as_micros(),
+            "batch_search_total_us": batch_elapsed.as_micros(),
+            "batch_search_average_us": batch_elapsed.as_micros() / BATCH_SEARCH_COUNT as u128,
+        })
+    );
+}
+
+#[test]
+fn recall_index_never_exposes_old_generation_while_rebuild_budget_is_exhausted() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    for index in 0..9 {
+        let session = format!("s-recall-stale-{index}");
+        let run = format!("r-recall-stale-{index}");
+        seed_session_and_run(&mut engine, &session, &run);
+        engine
+            .append_messages(AppendRequest {
+                operation_id: format!("append-recall-stale-{index}"),
+                session_id: session_id(&session),
+                run_id: run_id(&run),
+                messages: vec![user_message(
+                    &format!("recall-stale-{index}"),
+                    "stale-generation-budget-token",
+                )],
+                created_at_ms: 2_000 + index,
+            })
+            .expect("append stale generation fixture");
+    }
+    engine
+        .connection
+        .execute(
+            "UPDATE sessions SET body_generation = 2, message_count = 0",
+            [],
+        )
+        .expect("switch authoritative generations without derived maintenance");
+
+    let page = engine
+        .search_conversations(ConversationSearchRequest {
+            query: "stale-generation-budget-token".to_owned(),
+            scope: ConversationSearchScope::Global,
+            limit: 100,
+        })
+        .expect("search while rebuild owner budget is exhausted");
+    assert!(page.partial);
+    assert!(page.hits.is_empty());
+}
+
+#[tokio::test]
+async fn recall_queries_share_the_bounded_store_worker() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-recall-worker");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create worker recall fixture");
+    commit_completed_turn(&mut engine, &session, "worker-recall-token", 2_000);
+    drop(engine);
+
+    let store = LocalRuntimeStore::open(root.path(), 2)
+        .await
+        .expect("open recall store worker");
+    let request = ConversationSearchRequest {
+        query: "worker-recall-token".to_owned(),
+        scope: ConversationSearchScope::Global,
+        limit: 20,
+    };
+    let (first, second) = tokio::join!(
+        store.search_conversations(request.clone()),
+        store.search_conversations(request),
+    );
+    assert_eq!(first.expect("first worker search").hits.len(), 2);
+    assert_eq!(second.expect("second worker search").hits.len(), 2);
+    store.shutdown().await.expect("shutdown recall worker");
 }

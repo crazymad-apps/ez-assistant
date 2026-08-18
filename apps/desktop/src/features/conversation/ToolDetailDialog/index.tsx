@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type {
+  RecallNavigationTarget,
+  RecallToolDetailSnapshot,
   ToolDetailSnapshot,
   ToolFileReference,
   ToolInputSnapshot,
@@ -21,6 +23,7 @@ type ToolDetailDialogProps = Readonly<{
   initial_file_ref_id?: string | null;
   is_loading: boolean;
   on_close: () => void;
+  on_recall_navigate?: (target: RecallNavigationTarget) => void;
 }>;
 
 export type ToolDetailView = Pick<
@@ -28,7 +31,10 @@ export type ToolDetailView = Pick<
   | "tool_name"
   | "status"
   | "input"
+  | "request_json"
   | "result_summary"
+  | "result_json"
+  | "recall"
   | "stdout"
   | "stderr"
   | "error"
@@ -38,7 +44,14 @@ export type ToolDetailView = Pick<
 > & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id">>
   & Readonly<{ source?: "reliable" | "live" }>;
 
-export function ToolDetailDialog({ detail, error, initial_file_ref_id, is_loading, on_close }: ToolDetailDialogProps) {
+export function ToolDetailDialog({
+  detail,
+  error,
+  initial_file_ref_id,
+  is_loading,
+  on_close,
+  on_recall_navigate,
+}: ToolDetailDialogProps) {
   const [selected_file, setSelectedFile] = useState<ToolFileReference | null>(null);
   const [file_preview, setFilePreview] = useState<AttachmentPreview | null>(null);
   const [file_error, setFileError] = useState<string | null>(null);
@@ -138,15 +151,22 @@ export function ToolDetailDialog({ detail, error, initial_file_ref_id, is_loadin
           {error && <p className={styles.error}>{error}</p>}
           {detail && (
             <>
-              <DetailSection title="请求内容">
-                <ToolInput input={detail.input} is_live={detail.source === "live"} />
+              <DetailSection title="请求参数">
+                {detail.request_json
+                  ? <JsonBlock text={detail.request_json} />
+                  : <ToolInput input={detail.input} is_live={detail.source === "live"} />}
               </DetailSection>
               <DetailSection title="执行结果">
-                {detail.result_summary && <p>{detail.result_summary}</p>}
+                {detail.recall
+                  ? <RecallResult on_navigate={on_recall_navigate} recall={detail.recall} />
+                  : detail.result_json
+                    ? <JsonBlock text={detail.result_json} />
+                    : detail.result_summary && <p>{detail.result_summary}</p>}
                 {detail.stdout && <OutputBlock label="stdout" text={detail.stdout} />}
                 {detail.stderr && <OutputBlock label="stderr" text={detail.stderr} />}
                 {detail.error && <p className={styles.error}>{detail.error.message}</p>}
-                {!detail.result_summary && !detail.stdout && !detail.stderr && !detail.error && (
+                {!detail.recall && !detail.result_json && !detail.result_summary
+                  && !detail.stdout && !detail.stderr && !detail.error && (
                   <p className={styles.muted}>当前记录没有可展示的结果内容。</p>
                 )}
               </DetailSection>
@@ -245,6 +265,67 @@ function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_l
 
 function OutputBlock({ label, text }: Readonly<{ label: string; text: string }>) {
   return <div className={styles.output}><span>{label}</span><pre>{text}</pre></div>;
+}
+
+/** 请求参数与结果保留 JSON 结构，不再将对象压成难读的单行正文。 */
+function JsonBlock({ text }: Readonly<{ text: string }>) {
+  return <pre className={styles.json_block}>{text}</pre>;
+}
+
+function RecallResult({
+  on_navigate,
+  recall,
+}: Readonly<{
+  on_navigate?: (target: RecallNavigationTarget) => void;
+  recall: RecallToolDetailSnapshot;
+}>) {
+  return (
+    <div className={styles.recall_result}>
+      {recall.items.length > 0 ? (
+        <ol className={styles.recall_list}>
+          {recall.items.map((item, index) => (
+            <li key={`${item.navigation?.message_id ?? "unavailable"}-${index}`}>
+              <div className={styles.recall_meta}>
+                <span>{roleLabel(item.role)}</span>
+                {item.created_at_ms !== null && <time>{formatRecallTime(item.created_at_ms)}</time>}
+              </div>
+              <p>{item.content}</p>
+              {item.navigation && on_navigate && (
+                <button onClick={() => on_navigate(item.navigation!)} type="button">
+                  打开来源会话
+                  <Icon name="chevron-right" size={14} />
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      ) : <p className={styles.muted}>本次检索没有返回可展示的消息。</p>}
+      {recall.failures.length > 0 && (
+        <ul className={styles.recall_failures}>
+          {recall.failures.map((failure) => (
+            <li key={`${failure.source_id}-${failure.kind}`}>{failure.message}</li>
+          ))}
+        </ul>
+      )}
+      {recall.truncated && <p className={styles.muted}>结果已达到本次检索上限。</p>}
+    </div>
+  );
+}
+
+function roleLabel(role: string | null): string {
+  return { assistant: "助手消息", user: "用户消息", tool: "工具消息" }[role ?? ""] ?? "会话消息";
+}
+
+function formatRecallTime(timestamp_ms: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp_ms));
 }
 
 function statusLabel(status: ToolDetailSnapshot["status"]): string {

@@ -17,6 +17,7 @@ use crate::{
         ChatToolChoice, ChatToolChoiceMode, ChatToolKind, ChatToolMessage, ChatUserContent,
         ChatUserMessage,
     },
+    tool_schema::encode_tool_schema,
 };
 
 /// 请求根的保留字段名。Provider 私有选项经 flatten 平铺到请求根，使用这些键
@@ -76,7 +77,13 @@ pub fn encode_request(
     let tools = if request.tools.is_empty() {
         None
     } else {
-        Some(request.tools.iter().map(encode_tool_definition).collect())
+        Some(
+            request
+                .tools
+                .iter()
+                .map(|definition| encode_tool_definition(definition, profile))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
     };
     // 没有工具时 `Auto`/`None` 省略即可（省略与 Provider 默认行为一致）；
     // `Required`/`Named` 与空工具列表矛盾，属于上游装配错误，显式报 Config
@@ -378,15 +385,25 @@ fn encode_tool_message(message: &ToolMessage) -> ChatToolMessage {
 }
 
 /// 把规范工具定义编码为原生 function 工具。
-fn encode_tool_definition(definition: &ToolDefinition) -> ChatTool {
-    ChatTool {
+fn encode_tool_definition(
+    definition: &ToolDefinition,
+    profile: &Profile,
+) -> Result<ChatTool, ModelError> {
+    let parameters = encode_tool_schema(&definition.input_schema, profile.tool_schema_dialect)
+        .map_err(|error| {
+            ModelError::Config(format!(
+                "tool `{}` has an incompatible input schema: {error}",
+                definition.name.as_str()
+            ))
+        })?;
+    Ok(ChatTool {
         kind: ChatToolKind::Function,
         function: ChatFunctionDefinition {
             name: definition.name.as_str().to_owned(),
             description: definition.description.clone(),
-            parameters: definition.input_schema.clone(),
+            parameters,
         },
-    }
+    })
 }
 
 /// 把规范工具选择策略编码为原生 `tool_choice`。

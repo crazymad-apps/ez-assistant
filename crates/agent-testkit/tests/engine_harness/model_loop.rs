@@ -552,8 +552,7 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
             "pin_memory",
             json!({
                 "category": "preference",
-                "content": "Use dark mode",
-                "attributes": {"scope": "desktop"}
+                "content": "Use dark mode"
             }),
         )],
     );
@@ -562,7 +561,7 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
         vec![call(
             "call_memory_2",
             "recall_memory",
-            json!({"query": "preferred editor", "limit": 2, "sources": ["notes"]}),
+            json!({"action": "search", "query": "preferred editor", "limit": 2, "sources": ["notes"]}),
         )],
     );
     let turn3 = text_message(
@@ -590,6 +589,7 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
         }],
         failures: vec![],
         truncated: false,
+        window: None,
     };
     let recall = Arc::new(ScriptedMemoryRecall::new(Ok(recall_response.clone())));
     let tools = memory_tools_snapshot(store.clone(), recall.clone());
@@ -618,16 +618,14 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
         vec![PinnedMemoryObservation::Pin(PinnedMemoryDraft {
             category: PinnedMemoryCategory::new("preference").expect("valid category"),
             content: "Use dark mode".to_owned(),
-            attributes: BTreeMap::from([(
-                "scope".to_owned(),
-                MemoryPropertyValue::String("desktop".to_owned()),
-            )]),
+            attributes: BTreeMap::new(),
         })]
     );
     assert_eq!(
         recall.requests(),
         vec![MemoryRecallRequest {
             query: "preferred editor".to_owned(),
+            scope: agent_memory::RecallScope::Session,
             limit: NonZeroUsize::new(2).expect("non-zero"),
             sources: Some(vec![RecallSourceId::new("notes").expect("valid source id")]),
         }]
@@ -685,14 +683,13 @@ async fn denied_memory_tools_do_not_touch_store_or_recall_capabilities() {
                 "pin_memory",
                 json!({
                     "category": "preference",
-                    "content": "Use dark mode",
-                    "attributes": {}
+                    "content": "Use dark mode"
                 }),
             ),
             call(
                 "call_memory_deny_2",
                 "recall_memory",
-                json!({"query": "private note", "limit": 1}),
+                json!({"action": "search", "query": "private note", "limit": 1}),
             ),
         ],
     );
@@ -710,6 +707,7 @@ async fn denied_memory_tools_do_not_touch_store_or_recall_capabilities() {
         items: vec![],
         failures: vec![],
         truncated: false,
+        window: None,
     })));
     let tools = memory_tools_snapshot(store.clone(), recall.clone());
     let recorder = Arc::new(InMemoryRecorder::new(log.clone()));

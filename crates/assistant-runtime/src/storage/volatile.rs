@@ -16,17 +16,23 @@ use assistant_protocol::{
 use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ConversationWindowRequest,
-    EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
-    NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    ContextReplacementTarget, ConversationMessageLocationRequest, ConversationRawWindowRequest,
+    ConversationRewrite, ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
+    ConversationSearchScope, ConversationWindowRequest, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
     RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
     SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
     StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationState, StoredConversationWindow, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
-    StoredSessionLifecycle, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkspaceRemoval,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
+    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredWorkspace,
+    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkspaceRemoval,
+};
+use crate::{
+    MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, StoredPinnedMemory,
 };
 
 struct VolatilePendingExchange {
@@ -45,6 +51,9 @@ struct VolatileChildPendingExchange {
 
 #[derive(Default)]
 struct State {
+    persona: PersonaSnapshot,
+    pinned_collection_revision: u64,
+    pinned_memories: BTreeMap<String, StoredPinnedMemory>,
     workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     attachments: BTreeMap<AttachmentId, StoredAttachment>,
     sessions: BTreeMap<SessionId, StoredSession>,
@@ -76,6 +85,124 @@ impl RuntimeStore for VolatileRuntimeStore {
                 inputs: state.inputs.values().cloned().collect(),
                 runs: state.runs.values().cloned().collect(),
                 child_tasks: state.child_tasks.values().cloned().collect(),
+            })
+        })
+    }
+
+    fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            Ok(MemoryContextSnapshot {
+                persona: state.persona.clone(),
+                pinned_collection_revision: state.pinned_collection_revision,
+                pinned_memories: state.pinned_memories.values().cloned().collect(),
+            })
+        })
+    }
+
+    fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot> {
+        Box::pin(async move { Ok(self.lock()?.persona.clone()) })
+    }
+
+    fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if state.persona.revision != mutation.expected_revision {
+                return Err(conflict("persona revision changed"));
+            }
+            let next_revision = mutation
+                .expected_revision
+                .checked_add(1)
+                .ok_or_else(|| conflict("persona revision exhausted"))?;
+            state.persona = PersonaSnapshot {
+                enabled: mutation.enabled,
+                content: mutation.content,
+                revision: next_revision,
+                updated_at_ms: mutation.updated_at_ms,
+            };
+            Ok(state.persona.clone())
+        })
+    }
+
+    fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {
+        Box::pin(async move { Ok(self.lock()?.pinned_memories.values().cloned().collect()) })
+    }
+
+    fn mutate_pinned_memory(
+        &self,
+        mutation: PinnedMemoryMutation,
+    ) -> StoreFuture<'_, PinnedMemoryMutationResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let memory = match mutation {
+                PinnedMemoryMutation::Create {
+                    entry,
+                    created_by,
+                    expected_collection_revision,
+                    changed_at_ms,
+                } => {
+                    if state.pinned_collection_revision != expected_collection_revision {
+                        return Err(conflict("pinned memory collection revision changed"));
+                    }
+                    if state.pinned_memories.contains_key(entry.id.as_str()) {
+                        return Err(conflict("pinned memory already exists"));
+                    }
+                    let stored = StoredPinnedMemory {
+                        entry,
+                        created_by,
+                        created_at_ms: changed_at_ms,
+                        updated_at_ms: changed_at_ms,
+                        revision: 1,
+                    };
+                    state
+                        .pinned_memories
+                        .insert(stored.entry.id.as_str().to_owned(), stored.clone());
+                    Some(stored)
+                }
+                PinnedMemoryMutation::Replace {
+                    entry,
+                    expected_revision,
+                    changed_at_ms,
+                } => {
+                    let existing = state
+                        .pinned_memories
+                        .get_mut(entry.id.as_str())
+                        .ok_or_else(|| conflict("pinned memory does not exist"))?;
+                    if existing.revision != expected_revision {
+                        return Err(conflict("pinned memory revision changed"));
+                    }
+                    let next_revision = existing
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("pinned memory revision exhausted"))?;
+                    existing.entry = entry;
+                    existing.updated_at_ms = changed_at_ms;
+                    existing.revision = next_revision;
+                    Some(existing.clone())
+                }
+                PinnedMemoryMutation::Delete {
+                    id,
+                    expected_revision,
+                    changed_at_ms: _,
+                } => {
+                    let existing = state
+                        .pinned_memories
+                        .get(id.as_str())
+                        .ok_or_else(|| conflict("pinned memory does not exist"))?;
+                    if existing.revision != expected_revision {
+                        return Err(conflict("pinned memory revision changed"));
+                    }
+                    state.pinned_memories.remove(id.as_str());
+                    None
+                }
+            };
+            state.pinned_collection_revision = state
+                .pinned_collection_revision
+                .checked_add(1)
+                .ok_or_else(|| conflict("pinned memory collection revision exhausted"))?;
+            Ok(PinnedMemoryMutationResult {
+                memory,
+                collection_revision: state.pinned_collection_revision,
             })
         })
     }
@@ -1177,6 +1304,193 @@ impl RuntimeStore for VolatileRuntimeStore {
         })
     }
 
+    fn load_conversation_raw_window(
+        &self,
+        request: ConversationRawWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationRawWindow> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let snapshot = match &request.owner {
+                ConversationOwner::MainSession { session_id } => {
+                    let session = state
+                        .sessions
+                        .get(session_id)
+                        .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+                    if session.body_generation != request.generation {
+                        return Err(conflict("conversation generation changed"));
+                    }
+                    state
+                        .conversations
+                        .get(session_id)
+                        .cloned()
+                        .ok_or_else(|| conflict("session conversation does not exist"))?
+                }
+                ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } => {
+                    let task = state
+                        .child_tasks
+                        .get(child_task_id)
+                        .filter(|task| task.session_id == *session_id)
+                        .ok_or_else(|| conflict("child task does not exist in session"))?;
+                    if task.body_generation != request.generation {
+                        return Err(conflict("conversation generation changed"));
+                    }
+                    state
+                        .child_conversations
+                        .get(child_task_id)
+                        .cloned()
+                        .ok_or_else(|| conflict("child conversation does not exist"))?
+                }
+            };
+            let total = snapshot.messages.len();
+            let start = request.start.min(total);
+            let end = start.saturating_add(request.limit).min(total);
+            Ok(StoredConversationRawWindow {
+                generation: request.generation,
+                start,
+                end,
+                total,
+                conversation: ConversationSnapshot::new(snapshot.messages[start..end].to_vec()),
+            })
+        })
+    }
+
+    fn locate_conversation_message(
+        &self,
+        request: ConversationMessageLocationRequest,
+    ) -> StoreFuture<'_, Option<StoredConversationMessageLocation>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let (generation, snapshot) = match &request.owner {
+                ConversationOwner::MainSession { session_id } => {
+                    let session = state
+                        .sessions
+                        .get(session_id)
+                        .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+                    let snapshot = state
+                        .conversations
+                        .get(session_id)
+                        .ok_or_else(|| conflict("session conversation does not exist"))?;
+                    (session.body_generation, snapshot)
+                }
+                ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } => {
+                    let task = state
+                        .child_tasks
+                        .get(child_task_id)
+                        .filter(|task| task.session_id == *session_id)
+                        .ok_or_else(|| conflict("child task does not exist in session"))?;
+                    let snapshot = state
+                        .child_conversations
+                        .get(child_task_id)
+                        .ok_or_else(|| conflict("child conversation does not exist"))?;
+                    (task.body_generation, snapshot)
+                }
+            };
+            snapshot
+                .messages
+                .iter()
+                .position(|message| message_id(message) == &request.message_id)
+                .map(|ordinal| {
+                    let display_ordinal = matches!(
+                        snapshot.messages[ordinal],
+                        ConversationMessage::User(_) | ConversationMessage::Assistant(_)
+                    )
+                    .then(|| {
+                        snapshot.messages[..ordinal]
+                            .iter()
+                            .filter(|message| {
+                                matches!(
+                                    message,
+                                    ConversationMessage::User(_)
+                                        | ConversationMessage::Assistant(_)
+                                )
+                            })
+                            .count()
+                    });
+                    Ok(StoredConversationMessageLocation {
+                        generation,
+                        message_ordinal: u64::try_from(ordinal)
+                            .map_err(|_| conflict("conversation ordinal exceeds storage range"))?,
+                        display_ordinal: display_ordinal.map(u64::try_from).transpose().map_err(
+                            |_| conflict("conversation display ordinal exceeds storage range"),
+                        )?,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    fn search_conversations(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, ConversationSearchPage> {
+        Box::pin(async move {
+            let query = normalize_recall_text(&request.query);
+            if query.chars().count() < 3 {
+                return Err(StoreError::new(
+                    StoreErrorKind::InvalidInput,
+                    "conversation recall query is too short",
+                ));
+            }
+            let state = self.lock()?;
+            let mut hits = Vec::new();
+            for (session_id, snapshot) in &state.conversations {
+                let Some(session) = state.sessions.get(session_id) else {
+                    continue;
+                };
+                if !volatile_scope_matches(&request.scope, session) {
+                    continue;
+                }
+                collect_volatile_hits(
+                    &mut hits,
+                    ConversationOwner::MainSession {
+                        session_id: session_id.clone(),
+                    },
+                    session.body_generation,
+                    session.updated_at_ms,
+                    snapshot,
+                    &query,
+                );
+                for task in state
+                    .child_tasks
+                    .values()
+                    .filter(|task| task.session_id == *session_id)
+                {
+                    if let Some(child) = state.child_conversations.get(&task.child_task_id) {
+                        collect_volatile_hits(
+                            &mut hits,
+                            ConversationOwner::ChildTask {
+                                session_id: session_id.clone(),
+                                child_task_id: task.child_task_id.clone(),
+                            },
+                            task.body_generation,
+                            task.finished_at_ms.unwrap_or(task.created_at_ms),
+                            child,
+                            &query,
+                        );
+                    }
+                }
+            }
+            hits.sort_by(|left, right| {
+                right
+                    .created_at_ms
+                    .cmp(&left.created_at_ms)
+                    .then_with(|| left.message_ordinal.cmp(&right.message_ordinal))
+            });
+            hits.truncate(request.limit.clamp(1, 100));
+            Ok(ConversationSearchPage {
+                hits,
+                partial: false,
+                failed_owners: Vec::new(),
+            })
+        })
+    }
+
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.lock()?;
@@ -1229,40 +1543,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.is_pinned = change.is_pinned;
-            Ok(())
-        })
-    }
-
-    fn set_empty_session_workspace(
-        &self,
-        change: EmptySessionWorkspaceChange,
-    ) -> StoreFuture<'_, ()> {
-        Box::pin(async move {
-            let mut state = self.lock()?;
-            let is_empty = !state
-                .inputs
-                .values()
-                .any(|item| item.session_id == change.session_id)
-                && !state
-                    .runs
-                    .values()
-                    .any(|item| item.session_id == change.session_id)
-                && !state
-                    .attachments
-                    .values()
-                    .any(|item| item.session_id == change.session_id);
-            if !is_empty {
-                return Err(conflict("session workspace can only change while empty"));
-            }
-            let session = state
-                .sessions
-                .get_mut(&change.session_id)
-                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
-            if session.lifecycle != StoredSessionLifecycle::Active || session.message_count != 0 {
-                return Err(conflict("session workspace can only change while empty"));
-            }
-            session.system_prompt = change.system_prompt;
-            session.environment = change.environment;
             Ok(())
         })
     }
@@ -1658,6 +1938,84 @@ fn conversation_window(
         total,
         conversation: ConversationSnapshot::new(snapshot.messages[raw_start..raw_end].to_vec()),
     }
+}
+
+fn volatile_scope_matches(scope: &ConversationSearchScope, session: &StoredSession) -> bool {
+    match scope {
+        ConversationSearchScope::Session { session_id } => session.session_id == *session_id,
+        ConversationSearchScope::Workspace { workspace_id } => {
+            session.environment.workspace_id.as_ref() == Some(workspace_id)
+        }
+        ConversationSearchScope::Global => true,
+    }
+}
+
+fn collect_volatile_hits(
+    hits: &mut Vec<ConversationSearchHit>,
+    owner: ConversationOwner,
+    generation: u64,
+    created_at_ms: i64,
+    snapshot: &ConversationSnapshot,
+    query: &str,
+) {
+    for (ordinal, message) in snapshot.messages.iter().enumerate() {
+        let (message_id, text) = match message {
+            ConversationMessage::User(message) => {
+                let mut parts = Vec::new();
+                for part in &message.parts {
+                    match part {
+                        UserPart::Text(part) => parts.push(part.text.clone()),
+                        UserPart::FileReferences(references) => parts.extend(
+                            references
+                                .files
+                                .iter()
+                                .map(|file| file.original_name.clone()),
+                        ),
+                        UserPart::Injected(_) => {}
+                    }
+                }
+                let text = parts.join("\n");
+                (&message.id, text)
+            }
+            ConversationMessage::Assistant(message) => {
+                let text = message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        AssistantPart::Text(part) => Some(part.text.as_str()),
+                        AssistantPart::Reasoning(_)
+                        | AssistantPart::ToolCall(_)
+                        | AssistantPart::ProviderState(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (&message.id, text)
+            }
+            ConversationMessage::System(_)
+            | ConversationMessage::ContextSummary(_)
+            | ConversationMessage::Tool(_) => continue,
+        };
+        let normalized = normalize_recall_text(&text);
+        if !normalized.contains(query) {
+            continue;
+        }
+        hits.push(ConversationSearchHit {
+            owner: owner.clone(),
+            generation,
+            message_id: message_id.clone(),
+            message_ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
+            created_at_ms,
+            text,
+        });
+    }
+}
+
+fn normalize_recall_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn rewrite_file_reference_paths(

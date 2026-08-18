@@ -3,6 +3,7 @@
 use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use agent_core::ToolPolicy;
+use agent_memory::{MemoryRecall, PinnedMemoryStore, RecallReferenceReader};
 use agent_model::ModelService;
 use agent_tools::ToolSetSnapshot;
 use agent_types::ProviderId;
@@ -128,6 +129,15 @@ pub struct RunToolBundle {
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
 }
 
+/// Host 编译单次 Run 工具所需的 Runtime 绑定能力。
+pub struct RunToolFactoryRequest<'a> {
+    pub session_id: &'a assistant_protocol::SessionId,
+    pub environment: &'a SessionExecutionEnvironment,
+    pub pinned_memory: Arc<dyn PinnedMemoryStore>,
+    pub conversation_recall: Arc<dyn MemoryRecall>,
+    pub conversation_recall_reader: Arc<dyn RecallReferenceReader>,
+}
+
 impl RunToolBundle {
     pub fn new(tools: ToolSetSnapshot, infrastructure_policies: Vec<Arc<dyn ToolPolicy>>) -> Self {
         Self {
@@ -184,6 +194,6 @@ impl RunToolFactoryError {
 pub trait RunToolFactory: Send + Sync {
     fn compile(
         &self,
-        environment: &SessionExecutionEnvironment,
+        request: RunToolFactoryRequest<'_>,
     ) -> Result<RunToolBundle, RunToolFactoryError>;
 }

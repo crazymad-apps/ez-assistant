@@ -355,13 +355,31 @@ fn default_session_permissions_apply_immediately_in_the_formal_host() {
             .expect("read Session permissions"),
     )
     .expect("parse Session permissions");
+    let rules = permission_document["rules"]
+        .as_array()
+        .expect("default rules");
+    assert_eq!(rules.len(), 16);
     assert_eq!(
-        permission_document["rules"]
-            .as_array()
-            .expect("default rules")
-            .len(),
+        rules
+            .iter()
+            .filter(|rule| rule["matcher"]["type"] == "file")
+            .count(),
         11
     );
+    for (tool_name, effect) in [
+        ("list_pinned_memories", "allow"),
+        ("pin_memory", "ask"),
+        ("update_pinned_memory", "ask"),
+        ("unpin_memory", "ask"),
+        ("recall_memory", "allow"),
+    ] {
+        let rule = rules
+            .iter()
+            .find(|rule| rule["matcher"]["tool_name"] == tool_name)
+            .unwrap_or_else(|| panic!("missing default memory rule for {tool_name}"));
+        assert_eq!(rule["effect"], effect);
+        assert_eq!(rule["variants"], json!(["plan", "build"]));
+    }
 
     for (variant, idempotency_key) in [
         ("build", "session-default-build-read"),

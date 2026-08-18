@@ -38,6 +38,7 @@ struct QueueDriverContext {
     child_tasks: Arc<crate::delegation::ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
+    recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     events: ObservationCoordinator,
     root_cancellation: CancellationToken,
 }
@@ -80,6 +81,7 @@ impl AssistantRuntime {
             child_tasks: self.child_tasks.clone(),
             context_window: self.context_window.clone(),
             store: self.store.clone(),
+            recall_reference_codec: self.recall_reference_codec.clone(),
             events: self.event_sender.clone(),
             root_cancellation: self.root_cancellation.clone(),
         }
@@ -183,6 +185,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     child_task_workspace_factory: context.child_task_workspace_factory.clone(),
                     child_tasks: context.child_tasks.clone(),
                     store: context.store.clone(),
+                    recall_reference_codec: context.recall_reference_codec.clone(),
                 },
                 RunAuthorizationInput {
                     permission_coordinator: context.permission_coordinator.clone(),

@@ -49,10 +49,12 @@ pub use standard::{
     },
     pinned_memory::{
         ListPinnedMemoriesInput, ListPinnedMemoriesTool, PinMemoryInput, PinMemoryTool,
-        ResolvedUpdatePinnedMemoryInput, UnpinMemoryInput, UnpinMemoryTool,
+        PinnedMemoryToolEntry, ResolvedUpdatePinnedMemoryInput, UnpinMemoryInput, UnpinMemoryTool,
         UpdatePinnedMemoryInput, UpdatePinnedMemoryTool,
     },
-    recall_memory::{RecallMemoryInput, RecallMemoryTool, RecallMemoryToolConfig},
+    recall_memory::{
+        RecallMemoryInput, RecallMemoryTool, RecallMemoryToolConfig, ResolvedRecallMemoryInput,
+    },
     shell::{ResolvedShellInput, ShellExecTool, ShellExecToolConfig, ShellInput},
 };
 pub use tool::{

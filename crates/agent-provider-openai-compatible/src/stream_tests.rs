@@ -92,6 +92,7 @@ fn reasoning_profile() -> Profile {
         supports_stop: true,
         max_output_tokens_field: Some("max_tokens".to_owned()),
         supports_tool_choice: true,
+        tool_schema_dialect: crate::ToolSchemaDialect::JsonSchema2020_12,
         tool_calls_require_reasoning: false,
         cached_input_tokens_field: None,
     }

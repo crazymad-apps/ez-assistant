@@ -16,6 +16,7 @@ workspace = true
 agent-context = { path = "../../crates/agent-context" }
 agent-core = { path = "../../crates/agent-core" }
 agent-model = { path = "../../crates/agent-model" }
+agent-memory = { path = "../../crates/agent-memory" }
 agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
 agent-sdk = { path = "../../crates/agent-sdk" }
 agent-tools = { path = "../../crates/agent-tools" }

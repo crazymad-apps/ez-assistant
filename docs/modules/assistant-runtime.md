@@ -21,7 +21,8 @@
 - 为每个 Runtime Run 创建绑定 `RunId`/`SessionId` 的 Recorder、Authorizer 和 Event Adapter。
 - 在新建 Session 时读取 Pinned Memory Store、渲染并持久化冻结 System Prompt Snapshot；
   恢复、继续、压缩续接和分支复用原快照。
-- 按应用配置装配 PinnedMemoryStore、MemoryRecall 与 RecallSource，并通过普通工具注册给 Core。
+- 按应用配置装配 `PinnedMemoryStore`、检索用 `MemoryRecall`、可选续读用
+  `RecallReferenceReader` 与具体 Recall Source，并通过普通工具注册给 Core。
 - 定时任务、配置加载、后台任务与恢复。
 - 装配真实文件/Shell Adapter，并负责授权、确认、环境策略与中断恢复。
 - Repository/持久化边界和应用级错误。

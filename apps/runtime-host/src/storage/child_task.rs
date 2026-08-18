@@ -107,6 +107,12 @@ impl StorageEngine {
             ));
         }
 
+        let recall_owner = assistant_protocol::ConversationOwner::ChildTask {
+            session_id: task.session_id.clone(),
+            child_task_id: task.child_task_id.clone(),
+        };
+        let _ = self.initialize_recall_owner(&recall_owner, 1, task.created_at_ms);
+
         Ok(StoredChildTask {
             child_task_id: task.child_task_id,
             session_id: task.session_id,

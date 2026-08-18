@@ -106,16 +106,6 @@ fn write_entry(
     memory.push_attribute(("category", entry.category.as_str()));
     writer.write_event(Event::Start(memory))?;
 
-    writer.write_event(Event::Start(BytesStart::new("properties")))?;
-    for (name, value) in &entry.attributes {
-        let mut property = BytesStart::new("property");
-        property.push_attribute(("name", name.as_str()));
-        property.push_attribute(("type", value.kind()));
-        writer.write_event(Event::Start(property))?;
-        writer.write_event(Event::Text(BytesText::new(&value.text())))?;
-        writer.write_event(Event::End(BytesEnd::new("property")))?;
-    }
-    writer.write_event(Event::End(BytesEnd::new("properties")))?;
     write_text_element(writer, "content", &entry.content)?;
     writer.write_event(Event::End(BytesEnd::new("memory")))?;
     Ok(())
@@ -177,8 +167,10 @@ mod tests {
         assert_eq!(forward, reverse);
         assert_eq!(
             forward.content(),
-            "<pinned_memories>\n  <description>Use &lt;pinned&gt; &amp; trusted &quot;facts&quot;.</description>\n  <entries>\n    <memory id=\"memory_1\" category=\"alpha\">\n      <properties>\n      </properties>\n      <content>第一条</content>\n    </memory>\n    <memory id=\"memory_2\" category=\"zeta\">\n      <properties>\n        <property name=\"quote&quot;&lt;&amp;\" type=\"string\">value &apos; &quot; &lt; &amp; &gt;</property>\n        <property name=\"rank\" type=\"number\">2</property>\n      </properties>\n      <content>第二条 &lt;内容&gt;</content>\n    </memory>\n  </entries>\n</pinned_memories>"
+            "<pinned_memories>\n  <description>Use &lt;pinned&gt; &amp; trusted &quot;facts&quot;.</description>\n  <entries>\n    <memory id=\"memory_1\" category=\"alpha\">\n      <content>第一条</content>\n    </memory>\n    <memory id=\"memory_2\" category=\"zeta\">\n      <content>第二条 &lt;内容&gt;</content>\n    </memory>\n  </entries>\n</pinned_memories>"
         );
+        assert!(!forward.content().contains("properties"));
+        assert!(!forward.content().contains("value &apos;"));
     }
 
     #[test]

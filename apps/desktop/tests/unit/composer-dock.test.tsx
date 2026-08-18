@@ -204,7 +204,7 @@ function applicationSnapshot(): ApplicationSnapshot {
     }],
     active_sessions: [sessionSummary()],
     archived_sessions: [],
-    capabilities: { conversation_paging: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true },
+    capabilities: { conversation_paging: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
   };
 }
 

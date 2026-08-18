@@ -6,7 +6,7 @@
 
 use std::{
     ffi::OsString,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -15,16 +15,17 @@ use std::{
 use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
     AbsolutePath, FileAuthorizationFacts, FileOperation, FsDeleteTool, FsEditTool, FsFindTool,
-    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ReadFileToolConfig, ResolvedToolBatch,
+    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ListPinnedMemoriesTool, PinMemoryTool,
+    ReadFileToolConfig, RecallMemoryTool, RecallMemoryToolConfig, ResolvedToolBatch,
     ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver, ShellExecTool,
-    ShellExecToolConfig, Tool, ToolRegistry,
+    ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
 use agent_tools_local::{
     EnvironmentPolicy, LocalFileSystem, LocalFileSystemConfig, LocalShell, LocalShellConfig,
 };
 use assistant_runtime::{
     RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
-    SessionExecutionEnvironment,
+    RunToolFactoryRequest, SessionExecutionEnvironment, pinned_memory_limits,
 };
 use thiserror::Error;
 
@@ -61,11 +62,11 @@ impl HostRunToolFactory {
 impl RunToolFactory for HostRunToolFactory {
     fn compile(
         &self,
-        environment: &SessionExecutionEnvironment,
+        request: RunToolFactoryRequest<'_>,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
-        let resolver = checked_resolver(environment)?;
+        let resolver = checked_resolver(request.environment)?;
         self.resources
-            .compile(environment, resolver, self.sessions_root.clone())
+            .compile(request, resolver, self.sessions_root.clone())
     }
 }
 
@@ -103,7 +104,7 @@ impl LocalToolResources {
 
     fn compile(
         &self,
-        environment: &SessionExecutionEnvironment,
+        request: RunToolFactoryRequest<'_>,
         resolver: SessionPathResolver,
         sessions_root: AbsolutePath,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
@@ -149,9 +150,36 @@ impl LocalToolResources {
             &mut registry,
             ShellExecTool::new(self.shell.clone(), resolver, self.shell_config),
         )?;
+        let limits = pinned_memory_limits();
+        register(
+            &mut registry,
+            ListPinnedMemoriesTool::new(request.pinned_memory.clone()),
+        )?;
+        register(
+            &mut registry,
+            PinMemoryTool::new(request.pinned_memory.clone(), limits.clone()),
+        )?;
+        register(
+            &mut registry,
+            UpdatePinnedMemoryTool::new(request.pinned_memory.clone(), limits.clone()),
+        )?;
+        register(
+            &mut registry,
+            UnpinMemoryTool::new(request.pinned_memory, limits),
+        )?;
+        register(
+            &mut registry,
+            RecallMemoryTool::new(
+                request.conversation_recall,
+                RecallMemoryToolConfig::new(
+                    NonZeroUsize::new(20).expect("static recall limit is non-zero"),
+                ),
+            )
+            .with_reference_reader(request.conversation_recall_reader),
+        )?;
         // 校验当前 Session 冻结附件目录的类型边界。Authorizer 持有
         // Runtime Home 下的 sessions root，因此同样保护其他 Session 附件。
-        AbsolutePath::new(&environment.session_attachment_directory).map_err(|source| {
+        AbsolutePath::new(&request.environment.session_attachment_directory).map_err(|source| {
             RunToolFactoryError::with_source(RunToolFactoryErrorKind::InvalidConfiguration, source)
         })?;
         Ok(RunToolBundle::new(
@@ -322,20 +350,49 @@ impl ToolResourceError {
 #[cfg(test)]
 mod tests {
     use agent_core::{AllowAllAuthorizer, ComposedToolAuthorizer, ToolAuthorizer};
-    use agent_model::{ModelCapabilities, SystemPromptSnapshot};
+    use agent_memory::MemoryRecallResponse;
+    use agent_model::{
+        GenerationConfig, ModelCapabilities, ModelRequest, ProviderOptions, SystemPromptSnapshot,
+    };
+    use agent_provider_openai_compatible::{Profile, encode_request};
     use agent_sdk::{AgentBuilder, ContextWindowEvaluator, ExecutionInput, ExecutionOutcome};
-    use agent_testkit::{ModelScript, ScriptedModelService, message_events};
+    use agent_testkit::{
+        FakePinnedMemoryStore, ModelScript, ScriptedMemoryRecall, ScriptedModelService,
+        message_events,
+    };
     use agent_tools::{Dispatcher, ResolvedBatchItemRef, ToolContext};
     use agent_types::{
         AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
         FileReferencesPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
-        ToolCall, ToolCallId, ToolName, ToolResultContent, UserMessage, UserPart,
+        ToolCall, ToolCallId, ToolChoice, ToolName, ToolResultContent, UserMessage, UserPart,
     };
     use serde_json::json;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    fn compile_bundle(
+        factory: &HostRunToolFactory,
+        environment: &SessionExecutionEnvironment,
+    ) -> RunToolBundle {
+        let session_id = assistant_protocol::SessionId::new("session-test").expect("session id");
+        let conversation_recall = Arc::new(ScriptedMemoryRecall::new(Ok(MemoryRecallResponse {
+            items: Vec::new(),
+            failures: Vec::new(),
+            truncated: false,
+            window: None,
+        })));
+        factory
+            .compile(RunToolFactoryRequest {
+                session_id: &session_id,
+                environment,
+                pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
+                conversation_recall: conversation_recall.clone(),
+                conversation_recall_reader: conversation_recall,
+            })
+            .expect("tool bundle")
+    }
 
     fn environment(root: &TempDir, workdir: &str) -> SessionExecutionEnvironment {
         let session = root.path().join("data/sessions/session-test");
@@ -369,10 +426,7 @@ mod tests {
             std::path::Path::new(&environment.session_attachment_directory).join("reference.txt");
         std::fs::write(&attachment, "stable-token-42\n").expect("attachment");
         let factory = HostRunToolFactory::new(root.path()).expect("factory");
-        let (tools, policies) = factory
-            .compile(&environment)
-            .expect("tool bundle")
-            .into_parts();
+        let (tools, policies) = compile_bundle(&factory, &environment).into_parts();
         let authorizer = test_authorizer(policies);
         assert_eq!(
             tools
@@ -389,6 +443,11 @@ mod tests {
                 "edit_file",
                 "delete_file",
                 "shell",
+                "list_pinned_memories",
+                "pin_memory",
+                "update_pinned_memory",
+                "unpin_memory",
+                "recall_memory",
             ]
         );
 
@@ -532,6 +591,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn every_host_tool_schema_encodes_for_the_deepseek_function_subset() {
+        let root = TempDir::new().expect("tempdir");
+        std::fs::create_dir(root.path().join("work")).expect("workdir");
+        let environment = environment(&root, "work");
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
+        let (tools, _) = compile_bundle(&factory, &environment).into_parts();
+        let request = ModelRequest {
+            system: SystemPromptSnapshot::default(),
+            conversation: ConversationSnapshot::new(Vec::new()),
+            tools: tools.definitions().to_vec(),
+            tool_choice: ToolChoice::Auto,
+            generation: GenerationConfig::default(),
+            reasoning: None,
+            provider_options: ProviderOptions::new(),
+        };
+
+        // 用真实 Host Bundle 审计，而不是只验证 recall_memory 的手写样例。以后标准
+        // 工具新增方言敏感 Schema 时，这里会在请求编码阶段给出具体工具名。
+        let encoded = encode_request(&request, &Profile::deepseek(), "deepseek-chat")
+            .expect("every registered host tool must encode for DeepSeek");
+        assert_eq!(
+            encoded.tools.as_ref().map(Vec::len),
+            Some(tools.definitions().len())
+        );
+        let encoded = serde_json::to_value(encoded).expect("encoded request");
+        assert_provider_tool_subset(&encoded["tools"]);
+    }
+
+    fn assert_provider_tool_subset(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_provider_tool_subset(value);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                for forbidden in [
+                    "$schema",
+                    "$defs",
+                    "definitions",
+                    "$ref",
+                    "oneOf",
+                    "const",
+                    "default",
+                ] {
+                    assert!(
+                        !object.contains_key(forbidden),
+                        "Provider tool schema still contains `{forbidden}` in {value}"
+                    );
+                }
+                for value in object.values() {
+                    assert_provider_tool_subset(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[tokio::test]
     async fn scripted_model_reads_the_referenced_real_file_before_completing() {
         let root = TempDir::new().expect("tempdir");
@@ -541,10 +659,7 @@ mod tests {
             std::path::Path::new(&environment.session_attachment_directory).join("reference.txt");
         std::fs::write(&attachment, "provider-visible-token-73\n").expect("attachment");
         let factory = HostRunToolFactory::new(root.path()).expect("factory");
-        let (tools, policies) = factory
-            .compile(&environment)
-            .expect("tool bundle")
-            .into_parts();
+        let (tools, policies) = compile_bundle(&factory, &environment).into_parts();
         let authorizer = test_authorizer(policies);
 
         let model = Arc::new(ScriptedModelService::new(
@@ -638,14 +753,10 @@ mod tests {
         std::fs::create_dir(root.path().join("first")).expect("first work");
         std::fs::create_dir(root.path().join("second")).expect("second work");
         let factory = HostRunToolFactory::new(root.path()).expect("factory");
-        let (first_tools, _) = factory
-            .compile(&environment(&root, "first"))
-            .expect("first bundle")
-            .into_parts();
-        let (second_tools, _) = factory
-            .compile(&environment(&root, "second"))
-            .expect("second bundle")
-            .into_parts();
+        let first_environment = environment(&root, "first");
+        let second_environment = environment(&root, "second");
+        let (first_tools, _) = compile_bundle(&factory, &first_environment).into_parts();
+        let (second_tools, _) = compile_bundle(&factory, &second_environment).into_parts();
         let first_batch = Dispatcher::resolve_batch(
             &first_tools,
             &[call("read_file", json!({"path": "relative.txt"}))],
@@ -680,14 +791,8 @@ mod tests {
         std::fs::create_dir(root.path().join("work")).expect("workdir");
         let factory = HostRunToolFactory::new(root.path()).expect("factory");
         let environment = environment(&root, "work");
-        let (first, _) = factory
-            .compile(&environment)
-            .expect("first bundle")
-            .into_parts();
-        let (second, _) = factory
-            .compile(&environment)
-            .expect("second bundle")
-            .into_parts();
+        let (first, _) = compile_bundle(&factory, &environment).into_parts();
+        let (second, _) = compile_bundle(&factory, &environment).into_parts();
         assert_eq!(
             serde_json::to_vec(first.definitions()).expect("first definitions"),
             serde_json::to_vec(second.definitions()).expect("second definitions")

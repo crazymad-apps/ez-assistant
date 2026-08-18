@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     MemoryRecallError, MemoryRecallRequest, MemoryRecallResponse, RecallFailureKind,
-    RecallSourceId, RecallSourceRequest, RecallSourceResponse,
+    RecallReferenceReadRequest, RecallSourceId, RecallSourceRequest, RecallSourceResponse,
 };
 
 /// 单个 RecallSource 操作返回的 boxed future。
@@ -14,6 +14,10 @@ pub type RecallSourceFuture<'a, T> =
 
 /// 统一 Memory Recall 操作返回的 boxed future。
 pub type MemoryRecallFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, MemoryRecallError>> + Send + 'a>>;
+
+/// 稳定引用续读返回的 boxed future。
+pub type RecallReferenceReadFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, MemoryRecallError>> + Send + 'a>>;
 
 /// 单个 RecallSource 的稳定错误分类。
@@ -91,6 +95,18 @@ pub trait MemoryRecall: Send + Sync {
         request: MemoryRecallRequest,
         cancellation: CancellationToken,
     ) -> MemoryRecallFuture<'_, MemoryRecallResponse>;
+}
+
+/// 具有稳定顺序和引用语义的数据源可选实现的有限续读能力。
+///
+/// 该能力与 [`MemoryRecall`] 分离，避免普通检索 Source 被迫承诺无法成立的顺序和定位语义。
+pub trait RecallReferenceReader: Send + Sync {
+    /// 围绕已校验的稳定引用读取有限正文。
+    fn read_reference(
+        &self,
+        request: RecallReferenceReadRequest,
+        cancellation: CancellationToken,
+    ) -> RecallReferenceReadFuture<'_, MemoryRecallResponse>;
 }
 
 #[cfg(test)]

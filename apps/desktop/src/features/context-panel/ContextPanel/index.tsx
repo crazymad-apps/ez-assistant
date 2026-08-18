@@ -1,9 +1,10 @@
 import { observer } from "mobx-react-lite";
-import { useState } from "react";
-import type { AttachmentSummary } from "../../../generated/assistant-protocol";
+import { useEffect, useState } from "react";
+import type { AttachmentSummary, SystemContextSnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { AttachmentPreviewDialog } from "../AttachmentPreviewDialog";
+import { SystemContextDialog } from "../SystemContextDialog";
 import { ContextRing, ContextSection } from "./ContextSection";
 import {
   childStatusLabel,
@@ -31,14 +32,12 @@ export const ContextPanel = observer(function ContextPanel() {
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const attachments = session_view?.attachments ?? [];
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
+  const [system_context, setSystemContext] = useState<SystemContextSnapshot | null>(null);
+  const [system_context_error, setSystemContextError] = useState<string | null>(null);
+  const [system_context_loading, setSystemContextLoading] = useState(false);
   const [locating_run_id, setLocatingRunId] = useState<string | null>(null);
   const [section_state, setSectionState] = useState<Record<string, Partial<Record<ContextSectionKey, boolean>>>>({});
   const model = application?.models.find((item) => item.model_key === session?.model_key);
-  const blocks_workspace_change = Boolean(
-    session?.active_run_id
-    || (session?.queued_input_count ?? 0) > 0
-    || (session?.pending_approval_count ?? 0) > 0,
-  );
   const section_owner = session_id ?? "unselected";
   const sectionIsOpen = (section: ContextSectionKey) => section_state[section_owner]?.[section] ?? true;
   const toggleSection = (section: ContextSectionKey) => {
@@ -51,6 +50,12 @@ export const ContextPanel = observer(function ContextPanel() {
     }));
   };
 
+  useEffect(() => {
+    setSystemContext(null);
+    setSystemContextError(null);
+    setSystemContextLoading(false);
+  }, [session_id]);
+
   const locateRun = async (run_id: string) => {
     if (!session_id || locating_run_id) {
       return;
@@ -59,6 +64,19 @@ export const ContextPanel = observer(function ContextPanel() {
     store.navigation.closeChildTask();
     await store.locateConversationRun(session_id, run_id);
     setLocatingRunId(null);
+  };
+
+  const openSystemContext = async () => {
+    if (!session_id || system_context_loading) return;
+    setSystemContextLoading(true);
+    setSystemContextError(null);
+    try {
+      setSystemContext(await store.getSystemContext(session_id));
+    } catch (error: unknown) {
+      setSystemContextError(error instanceof Error ? error.message : "无法读取当前会话的 System Context。");
+    } finally {
+      setSystemContextLoading(false);
+    }
   };
 
   return (
@@ -106,6 +124,13 @@ export const ContextPanel = observer(function ContextPanel() {
               <div><dt>会话 Token</dt><dd>{formatNullableTokens(session_view.usage.accumulated.total_tokens)}</dd></div>
             </dl>
           )}
+          {session && (
+            <button className={styles.system_context_row} onClick={() => void openSystemContext()} type="button">
+              <strong>System Context</strong>
+              <em>{system_context_loading ? "读取中…" : "查看原文"}</em>
+            </button>
+          )}
+          {system_context_error && <p className={styles.context_error}>{system_context_error}</p>}
         </ContextSection>
         <ContextSection is_open={sectionIsOpen("workspace")} on_toggle={() => toggleSection("workspace")} title="Workspace">
           {workspace && session ? (
@@ -130,14 +155,6 @@ export const ContextPanel = observer(function ContextPanel() {
                 >
                   <Icon name="copy" size={14} />
                   复制路径
-                </button>
-                <button
-                  disabled={blocks_workspace_change || store.pending_workspace_action}
-                  onClick={() => void store.changeSessionWorkspace(session.session_id)}
-                  title={blocks_workspace_change ? "运行、队列或审批尚未结束" : "重新选择工作目录"}
-                  type="button"
-                >
-                  重新选择
                 </button>
               </div>
               <p className={styles.workspace_note}>Shell 仍以当前用户权限运行，Workspace 不是强沙盒。</p>
@@ -221,6 +238,9 @@ export const ContextPanel = observer(function ContextPanel() {
           attachment={preview_attachment}
           on_close={() => setPreviewAttachment(null)}
         />
+      )}
+      {system_context && (
+        <SystemContextDialog on_close={() => setSystemContext(null)} snapshot={system_context} />
       )}
     </aside>
   );

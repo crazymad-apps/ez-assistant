@@ -9,10 +9,10 @@ use assistant_protocol::{
     PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
     ReenterFromUserMessageResult, RenameSessionRequest, RenameSessionResult, RestoreSessionRequest,
     RestoreSessionResult, RunSnapshot, SessionLifecycle, SessionTitleOrigin,
-    SetEmptySessionWorkspaceRequest, SetEmptySessionWorkspaceResult, SetMessageFeedbackRequest,
-    SetMessageFeedbackResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
-    SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
-    SetSessionVariantRequest, SetSessionVariantResult,
+    SetMessageFeedbackRequest, SetMessageFeedbackResult, SetSessionApprovalModeRequest,
+    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
+    SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionVariantRequest,
+    SetSessionVariantResult,
 };
 
 use super::{
@@ -24,12 +24,10 @@ use super::{
     now_ms,
 };
 use crate::{
-    ApprovalModeChange, ArchiveChange, ConversationRewrite, EmptySessionWorkspaceChange,
+    ApprovalModeChange, ArchiveChange, ConversationRewrite, ForkSessionEnvironmentFactoryRequest,
     ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewStoredInput,
-    NewStoredSession, RuntimeError, RuntimeResult, SessionDeletion,
-    SessionEnvironmentFactoryRequest, SessionFork, SessionPinnedChange, SessionTitleChange,
-    StoredConversationState, StoredInputState, StoredSession, VariantChange,
-    WorkspaceEnvironmentSource,
+    NewStoredSession, RuntimeError, RuntimeResult, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoredInputState, VariantChange,
     journal::InMemoryJournal,
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
@@ -98,34 +96,12 @@ impl AssistantRuntime {
                     })?;
             crate::session::allocate_session_id(&sessions)?
         };
-        let workspace = source
-            .environment()
-            .workspace_id
-            .as_ref()
-            .map(|workspace_id| {
-                self.workspaces
-                    .read()
-                    .map_err(|_| RuntimeError::InternalStateUnavailable {
-                        component: "workspace registry",
-                    })?
-                    .get(workspace_id)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::WorkspaceUnavailable {
-                        workspace_id: workspace_id.clone(),
-                    })
-            })
-            .transpose()?;
         let prepared = self
             .session_environment_factory
-            .create_environment(SessionEnvironmentFactoryRequest {
+            .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
                 session_id: &session_id,
-                workspace: workspace
-                    .as_ref()
-                    .map(|workspace| WorkspaceEnvironmentSource {
-                        workspace_id: &workspace.workspace_id,
-                        user_directory: &workspace.user_directory,
-                        agent_directory: &workspace.agent_directory,
-                    }),
+                source_system_prompt: source.system_prompt(),
+                source_environment: source.environment(),
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
 
@@ -538,105 +514,6 @@ impl AssistantRuntime {
         Ok(SetSessionPinnedResult { session: summary })
     }
 
-    /// 仅为完全空的活动 Session 重新冻结 Workspace 与目录提示。
-    pub async fn set_empty_session_workspace(
-        &self,
-        request: SetEmptySessionWorkspaceRequest,
-    ) -> RuntimeResult<SetEmptySessionWorkspaceResult> {
-        let _operation = self.operation_gate.write().await;
-        self.ensure_running()?;
-        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
-        let session = self.session(&request.session_id)?;
-        let _mutation = session.mutation().await;
-        session.ensure_healthy()?;
-        session.ensure_active()?;
-        {
-            let state = session.lock_state()?;
-            if state.message_count != 0
-                || !state.inputs.is_empty()
-                || !state.runs.is_empty()
-                || state.active_run.is_some()
-            {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "session workspace can only change while empty",
-                });
-            }
-        }
-        if !self
-            .list_attachments(assistant_protocol::ListAttachmentsRequest {
-                session_id: request.session_id.clone(),
-            })?
-            .attachments
-            .is_empty()
-        {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "session workspace can only change while empty",
-            });
-        }
-        let workspace = request
-            .workspace_id
-            .as_ref()
-            .map(|workspace_id| self.workspace_for_new_session(workspace_id))
-            .transpose()?;
-        let prepared = self
-            .session_environment_factory
-            .create_environment(SessionEnvironmentFactoryRequest {
-                session_id: &request.session_id,
-                workspace: workspace
-                    .as_ref()
-                    .map(|workspace| WorkspaceEnvironmentSource {
-                        workspace_id: &workspace.workspace_id,
-                        user_directory: &workspace.user_directory,
-                        agent_directory: &workspace.agent_directory,
-                    }),
-            })
-            .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
-        let changed_at_ms = now_ms()?;
-        self.store
-            .set_empty_session_workspace(EmptySessionWorkspaceChange {
-                session_id: request.session_id.clone(),
-                system_prompt: prepared.system_prompt.clone(),
-                environment: prepared.environment.clone(),
-                changed_at_ms,
-            })
-            .await
-            .map_err(|source| RuntimeError::from_store("change empty session workspace", source))?;
-        let replacement = {
-            let state = session.lock_state()?;
-            StoredSession {
-                session_id: request.session_id.clone(),
-                title: state.title.clone(),
-                model_key: state.model_key.clone(),
-                system_prompt: prepared.system_prompt,
-                environment: prepared.environment,
-                lifecycle: crate::StoredSessionLifecycle::Active,
-                current_variant: state.current_variant,
-                approval_mode: state.approval_mode,
-                body_generation: state.body_generation,
-                message_count: 0,
-                created_at_ms: session.created_at_ms(),
-                updated_at_ms: state.updated_at_ms,
-                archived_at_ms: None,
-                is_pinned: state.is_pinned,
-                title_origin: state.title_origin,
-                conversation_state: StoredConversationState::Available,
-            }
-        };
-        let replacement = std::sync::Arc::new(crate::session::SessionController::new(replacement));
-        self.sessions
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .insert(request.session_id.clone(), replacement.clone());
-        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
-            session_id: request.session_id,
-        });
-        Ok(SetEmptySessionWorkspaceResult {
-            session: replacement.summary()?,
-        })
-    }
-
     /// 保存一条可靠 Assistant Message 的本地反馈。
     pub async fn set_message_feedback(
         &self,
@@ -888,6 +765,7 @@ impl AssistantRuntime {
                 child_task_workspace_factory: self.child_task_workspace_factory.clone(),
                 child_tasks: self.child_tasks.clone(),
                 store: self.store.clone(),
+                recall_reference_codec: self.recall_reference_codec.clone(),
             },
             RunAuthorizationInput {
                 permission_coordinator: self.permission_coordinator.clone(),

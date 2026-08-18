@@ -4,10 +4,9 @@ use std::fs;
 
 use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
 use assistant_runtime::{
-    ApprovalModeChange, ArchiveChange, ConversationRewrite, EmptySessionWorkspaceChange,
-    MessageFeedbackChange, ModelChange, RewriteResult, SessionPinnedChange, SessionTitleChange,
-    StoredInput, StoredInputState, StoredMessageFeedback, StoredRun, StoredWorkspaceLifecycle,
-    VariantChange,
+    ApprovalModeChange, ArchiveChange, ConversationRewrite, MessageFeedbackChange, ModelChange,
+    RewriteResult, SessionPinnedChange, SessionTitleChange, StoredInput, StoredInputState,
+    StoredMessageFeedback, StoredRun, VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -79,91 +78,6 @@ impl StorageEngine {
             return Err(conflict("session pinned state cannot be changed"));
         }
         Ok(())
-    }
-
-    pub(super) fn set_empty_session_workspace(
-        &mut self,
-        change: EmptySessionWorkspaceChange,
-    ) -> StorageResult<()> {
-        match change.environment.workspace_id.as_ref() {
-            Some(workspace_id) => {
-                let workspace = self.get_workspace(workspace_id)?;
-                if workspace.lifecycle != StoredWorkspaceLifecycle::Active
-                    || workspace.user_directory != change.environment.working_directory
-                    || change.environment.workspace_private_directory.as_deref()
-                        != Some(workspace.agent_directory.as_str())
-                {
-                    return Err(conflict("session workspace environment is unavailable"));
-                }
-                if !fs::metadata(&workspace.user_directory)
-                    .map(|metadata| metadata.is_dir())
-                    .unwrap_or(false)
-                {
-                    return Err(assistant_runtime::StoreError::new(
-                        assistant_runtime::StoreErrorKind::ResourceUnavailable,
-                        "workspace directory is unavailable",
-                    ));
-                }
-            }
-            None => {
-                if change.environment.workspace_private_directory.is_some()
-                    || change.environment.working_directory
-                        != change.environment.session_private_directory
-                {
-                    return Err(assistant_runtime::StoreError::new(
-                        assistant_runtime::StoreErrorKind::InvalidInput,
-                        "unbound session environment is invalid",
-                    ));
-                }
-            }
-        }
-        let prompt_json = serde_json::to_string(&change.system_prompt)
-            .map_err(|source| internal_error("system prompt could not be encoded", source))?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|source| {
-                database_write_error("session workspace change could not begin", source)
-            })?;
-        let changed = transaction
-            .execute(
-                "UPDATE sessions SET system_prompt_json = ?1
-             WHERE session_id = ?2 AND lifecycle = 'active' AND message_count = 0
-               AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?2)
-               AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?2)
-               AND NOT EXISTS (SELECT 1 FROM attachments WHERE session_id = ?2)
-               AND NOT EXISTS (SELECT 1 FROM child_tasks WHERE session_id = ?2)",
-                params![prompt_json, change.session_id.as_str()],
-            )
-            .map_err(|source| {
-                database_write_error("session workspace could not be changed", source)
-            })?;
-        if changed != 1 {
-            return Err(conflict("session workspace can only change while empty"));
-        }
-        let resources_changed = transaction
-            .execute(
-                "UPDATE session_resources SET workspace_id = ?1, working_directory = ?2
-             WHERE session_id = ?3",
-                params![
-                    change
-                        .environment
-                        .workspace_id
-                        .as_ref()
-                        .map(assistant_protocol::WorkspaceId::as_str),
-                    change.environment.working_directory,
-                    change.session_id.as_str(),
-                ],
-            )
-            .map_err(|source| {
-                database_write_error("session resources could not be changed", source)
-            })?;
-        if resources_changed != 1 {
-            return Err(conflict("session resources do not exist"));
-        }
-        transaction.commit().map_err(|source| {
-            database_write_error("session workspace change could not be committed", source)
-        })
     }
 
     pub(super) fn set_message_feedback(

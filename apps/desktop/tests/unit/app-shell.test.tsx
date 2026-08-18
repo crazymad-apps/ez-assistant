@@ -162,6 +162,7 @@ function applicationSnapshot(): ApplicationSnapshot {
       queue_control: true,
       approval_queue: true,
       child_task_view: true,
+      conversation_search: true,
     },
   };
 }

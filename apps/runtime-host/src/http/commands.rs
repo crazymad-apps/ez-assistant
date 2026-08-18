@@ -138,6 +138,26 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::GetConversationPageAroundMessage(request) => (
+            RuntimeCommandResult::GetConversationPageAroundMessage(
+                runtime
+                    .get_conversation_page_around_message(request)
+                    .await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::SearchConversationHistory(request) => (
+            RuntimeCommandResult::SearchConversationHistory(
+                runtime.search_conversation_history(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetConversationRecallWindow(request) => (
+            RuntimeCommandResult::GetConversationRecallWindow(
+                runtime.get_conversation_recall_window(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetToolDetail(request) => (
             RuntimeCommandResult::GetToolDetail(runtime.get_tool_detail(request).await?),
             false,
@@ -192,6 +212,40 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetDefaultModel(request) => (
             RuntimeCommandResult::SetDefaultModel(runtime.set_default_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetMemoryCapabilities(request) => (
+            RuntimeCommandResult::GetMemoryCapabilities(
+                runtime.get_memory_capabilities(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetPersona(request) => (
+            RuntimeCommandResult::GetPersona(runtime.get_persona(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetPersona(request) => (
+            RuntimeCommandResult::SetPersona(runtime.set_persona(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListPinnedMemories(request) => (
+            RuntimeCommandResult::ListPinnedMemories(runtime.list_pinned_memories(request).await?),
+            false,
+        ),
+        RuntimeCommand::CreatePinnedMemory(request) => (
+            RuntimeCommandResult::CreatePinnedMemory(runtime.create_pinned_memory(request).await?),
+            false,
+        ),
+        RuntimeCommand::UpdatePinnedMemory(request) => (
+            RuntimeCommandResult::UpdatePinnedMemory(runtime.update_pinned_memory(request).await?),
+            false,
+        ),
+        RuntimeCommand::DeletePinnedMemory(request) => (
+            RuntimeCommandResult::DeletePinnedMemory(runtime.delete_pinned_memory(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetSystemContext(request) => (
+            RuntimeCommandResult::GetSystemContext(runtime.get_system_context(request).await?),
             false,
         ),
         RuntimeCommand::ReloadPermissions(request) => (
@@ -324,12 +378,6 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetSessionPinned(request) => (
             RuntimeCommandResult::SetSessionPinned(runtime.set_session_pinned(request).await?),
-            false,
-        ),
-        RuntimeCommand::SetEmptySessionWorkspace(request) => (
-            RuntimeCommandResult::SetEmptySessionWorkspace(
-                runtime.set_empty_session_workspace(request).await?,
-            ),
             false,
         ),
         RuntimeCommand::SetMessageFeedback(request) => (

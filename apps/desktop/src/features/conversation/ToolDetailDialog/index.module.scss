@@ -81,6 +81,7 @@
 }
 
 .command,
+.json_block,
 .output pre {
   display: block;
   max-height: 220px;
@@ -92,6 +93,68 @@
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: var(--ez-font-base);
   white-space: pre-wrap;
+}
+
+.json_block {
+  margin: 0;
+  white-space: pre;
+}
+
+.recall_result {
+  display: grid;
+  gap: 10px;
+}
+
+.recall_list,
+.recall_failures {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recall_list li {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-muted);
+
+  > p {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--ez-text-secondary);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+  }
+
+  > button {
+    display: inline-flex;
+    width: fit-content;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 0;
+    border: 0;
+    color: var(--ez-accent);
+    background: transparent;
+    font-size: var(--ez-font-small);
+  }
+}
+
+.recall_meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+.recall_failures {
+  color: var(--ez-danger);
+  font-size: var(--ez-font-small);
 }
 
 .facts {

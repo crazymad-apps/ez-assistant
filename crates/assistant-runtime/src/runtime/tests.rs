@@ -38,9 +38,10 @@ use crate::{
     ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
     ChildTaskWorkspaceLease, ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind,
     ConfigSourceFuture, ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture,
-    ModelServiceFactoryError, ModelServiceFactoryRequest, PreparedSessionEnvironment,
-    RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
-    RuntimeConfigSource, SessionEnvironmentFactoryError, SessionExecutionEnvironment,
+    ForkSessionEnvironmentFactoryRequest, ModelServiceFactoryError, ModelServiceFactoryRequest,
+    PreparedSessionEnvironment, RunToolBundle, RunToolFactory, RunToolFactoryError,
+    RunToolFactoryErrorKind, RuntimeConfigSource, SessionEnvironmentFactoryError,
+    SessionExecutionEnvironment,
 };
 
 const TEST_CONFIG: &str = r#"
@@ -112,7 +113,7 @@ impl ChildTaskWorkspaceFactory for TestChildWorkspaceFactory {
 impl RunToolFactory for StaticRunToolFactory {
     fn compile(
         &self,
-        _environment: &SessionExecutionEnvironment,
+        _request: crate::RunToolFactoryRequest<'_>,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
         Ok(RunToolBundle::new(self.tools.clone(), Vec::new()))
     }
@@ -261,6 +262,14 @@ impl SessionEnvironmentFactory for CountingSystemPromptFactory {
             SystemPromptSnapshot::new(vec![format!("Session prompt {sequence}")]),
         ))
     }
+
+    fn create_fork_environment(
+        &self,
+        request: ForkSessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
+        self.created.fetch_add(1, Ordering::Relaxed);
+        Ok(test_fork_environment(request))
+    }
 }
 
 struct StaticSystemPromptFactory;
@@ -274,6 +283,37 @@ impl SessionEnvironmentFactory for StaticSystemPromptFactory {
             request,
             SystemPromptSnapshot::new(vec!["Runtime test agent".to_owned()]),
         ))
+    }
+
+    fn create_fork_environment(
+        &self,
+        request: ForkSessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
+        Ok(test_fork_environment(request))
+    }
+}
+
+fn test_fork_environment(
+    request: ForkSessionEnvironmentFactoryRequest<'_>,
+) -> PreparedSessionEnvironment {
+    let private = format!("/runtime/sessions/{}/private", request.session_id);
+    let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
+    let mut parts = request.source_system_prompt.parts().to_vec();
+    if let Some(directory_prompt) = parts.last_mut() {
+        *directory_prompt = format!("Session directories for {}", request.session_id);
+    }
+    PreparedSessionEnvironment {
+        system_prompt: SystemPromptSnapshot::new(parts),
+        environment: SessionExecutionEnvironment {
+            workspace_id: request.source_environment.workspace_id.clone(),
+            working_directory: request.source_environment.working_directory.clone(),
+            workspace_private_directory: request
+                .source_environment
+                .workspace_private_directory
+                .clone(),
+            session_attachment_directory: attachment,
+            session_private_directory: private,
+        },
     }
 }
 
@@ -738,6 +778,7 @@ mod connection_validation;
 mod delegation;
 mod failures;
 mod input;
+mod memory;
 mod permission;
 mod product;
 mod runs;

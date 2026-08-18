@@ -120,6 +120,7 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     pub(super) child_tasks: Arc<ChildTaskRegistry>,
     pub(super) store: Arc<dyn RuntimeStore>,
+    pub(super) recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
 }
 
 impl AssistantRuntime {
@@ -152,9 +153,26 @@ pub(super) fn compile_run_agent(
         model_attempt_observer,
     )?;
     let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
+    // Conversation Recall 同时具备检索和稳定引用续读能力，但两个 trait 保持独立，避免将
+    // 有序续读语义强加给所有通用 Recall Source。
+    let conversation_recall = Arc::new(crate::conversation_recall::RuntimeConversationRecall::new(
+        resources.store.clone(),
+        resources.recall_reference_codec.clone(),
+        session.id().clone(),
+        session.environment().workspace_id.clone(),
+    ));
     let bundle = resources
         .run_tool_factory
-        .compile(session.environment())
+        .compile(crate::RunToolFactoryRequest {
+            session_id: session.id(),
+            environment: session.environment(),
+            pinned_memory: Arc::new(crate::RuntimePinnedMemoryStore::new(
+                resources.store.clone(),
+                session.id().clone(),
+            )),
+            conversation_recall: conversation_recall.clone(),
+            conversation_recall_reader: conversation_recall,
+        })
         .map_err(|source| {
             if source.kind() == RunToolFactoryErrorKind::WorkingDirectoryUnavailable
                 && let Some(workspace_id) = session.environment().workspace_id.clone()

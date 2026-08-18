@@ -63,6 +63,12 @@
 - `pin_memory`、`update_pinned_memory`、`unpin_memory`、`list_pinned_memories` 和
   `recall_memory` 使用固定模型可见 Schema，通过普通 Registry/Dispatcher 路径工作；
   Source 列表不用于动态生成工具定义。
+- `recall_memory` 对模型保持统一的 `search/read` 判别输入，但内部按能力分派：搜索调用
+  `MemoryRecall`，续读调用可选的 `RecallReferenceReader`。工具未装配续读能力时返回稳定的
+  `recall_read_unsupported`，不得把可选能力反向塞进所有 Recall Source 的通用契约。
+- Pinned Memory 工具只允许模型处理稳定 ID、分类和正文；领域条目的 `attributes` 是 Runtime
+  业务元数据，不能出现在工具输入 Schema 或工具结果中。新增工具条目使用空属性，更新工具必须
+  保留 Store 中已有属性。
 - Shell 契约：stdin 封闭、命令原样进入审计，显式区分 `managed` / `detached`
   生命周期；敏感环境变量默认不传给子进程；超时、输出上限、取消、输出收敛与进程树
   清理由实现侧负责。`detached` 只是 fire-and-forget 交接，不代表服务健康或受 Session

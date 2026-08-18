@@ -9,8 +9,10 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use assistant_protocol::{ConversationOwner, ModelKey, SessionId, SessionTitleOrigin};
 use assistant_runtime::{
-    ConversationWindowRequest, NewStoredSession, RecoveredRuntime, StoredConversationState,
-    StoredConversationWindow, StoredSession, StoredSessionLifecycle,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationWindowRequest,
+    NewStoredSession, RecoveredRuntime, StoredConversationMessageLocation,
+    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredSession,
+    StoredSessionLifecycle,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -38,6 +40,7 @@ pub(super) struct StorageEngine {
     pub(super) unavailable_sessions: HashSet<String>,
     pub(super) unavailable_child_tasks: HashSet<String>,
     pub(super) conversation_indexes: conversation::ConversationIndexCache,
+    pub(super) recall_index_available: bool,
 }
 
 impl StorageEngine {
@@ -96,6 +99,7 @@ impl StorageEngine {
                 internal_error("runtime database foreign keys could not be enabled", source)
             })?;
         schema::initialize(&mut connection)?;
+        let recall_index_available = schema::initialize_recall_fts(&mut connection);
 
         let mut engine = Self {
             runtime_home: runtime_home.to_path_buf(),
@@ -108,6 +112,7 @@ impl StorageEngine {
             unavailable_sessions: HashSet::new(),
             unavailable_child_tasks: HashSet::new(),
             conversation_indexes: conversation::ConversationIndexCache::default(),
+            recall_index_available,
         };
         engine.recover_session_deletions()?;
         engine.repair_session_resources()?;
@@ -189,6 +194,11 @@ impl StorageEngine {
         }
         sync_directory(&self.sessions_directory)?;
 
+        let recall_owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.session_id.clone(),
+        };
+        let _ = self.initialize_recall_owner(&recall_owner, 1, session.created_at_ms);
+
         Ok(StoredSession {
             session_id: session.session_id,
             title: session.title,
@@ -256,6 +266,108 @@ impl StorageEngine {
         };
         self.conversation_indexes
             .read_window(&path, request.generation, request.end, request.limit)
+    }
+
+    pub(super) fn load_conversation_raw_window(
+        &mut self,
+        request: ConversationRawWindowRequest,
+    ) -> StorageResult<StoredConversationRawWindow> {
+        let path = match &request.owner {
+            ConversationOwner::MainSession { session_id } => {
+                super::filesystem::validate_session_component(session_id)?;
+                if self.unavailable_sessions.contains(session_id.as_str()) {
+                    return Err(invalid_data("session conversation is unavailable"));
+                }
+                if self.session_generation(session_id)? != request.generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                body_path(&self.session_directory(session_id)?, request.generation)
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                super::filesystem::validate_session_component(session_id)?;
+                super::filesystem::validate_child_task_component(child_task_id)?;
+                if self
+                    .unavailable_child_tasks
+                    .contains(child_task_id.as_str())
+                {
+                    return Err(invalid_data("child conversation is unavailable"));
+                }
+                if self.child_generation(session_id, child_task_id)? != request.generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                self.child_body(session_id, child_task_id, request.generation)?
+            }
+        };
+        let (conversation, end, total) =
+            self.conversation_indexes
+                .read_raw_window(&path, request.start, request.limit)?;
+        let start = request.start.min(total);
+        Ok(StoredConversationRawWindow {
+            generation: request.generation,
+            start,
+            end,
+            total,
+            conversation,
+        })
+    }
+
+    pub(super) fn locate_conversation_message(
+        &mut self,
+        request: ConversationMessageLocationRequest,
+    ) -> StorageResult<Option<StoredConversationMessageLocation>> {
+        let (generation, path) = match &request.owner {
+            ConversationOwner::MainSession { session_id } => {
+                super::filesystem::validate_session_component(session_id)?;
+                if self.unavailable_sessions.contains(session_id.as_str()) {
+                    return Err(invalid_data("session conversation is unavailable"));
+                }
+                let generation = self.session_generation(session_id)?;
+                (
+                    generation,
+                    body_path(&self.session_directory(session_id)?, generation),
+                )
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                super::filesystem::validate_session_component(session_id)?;
+                super::filesystem::validate_child_task_component(child_task_id)?;
+                if self
+                    .unavailable_child_tasks
+                    .contains(child_task_id.as_str())
+                {
+                    return Err(invalid_data("child conversation is unavailable"));
+                }
+                let generation = self.child_generation(session_id, child_task_id)?;
+                (
+                    generation,
+                    self.child_body(session_id, child_task_id, generation)?,
+                )
+            }
+        };
+        self.conversation_indexes
+            .locate_message(&path, &request.message_id)?
+            .map(|(ordinal, display_ordinal)| {
+                Ok(StoredConversationMessageLocation {
+                    generation,
+                    message_ordinal: u64::try_from(ordinal).map_err(|source| {
+                        internal_error("conversation ordinal exceeds storage range", source)
+                    })?,
+                    display_ordinal: display_ordinal.map(u64::try_from).transpose().map_err(
+                        |source| {
+                            internal_error(
+                                "conversation display ordinal exceeds storage range",
+                                source,
+                            )
+                        },
+                    )?,
+                })
+            })
+            .transpose()
     }
 
     fn load_sessions(&self) -> StorageResult<Vec<StoredSession>> {

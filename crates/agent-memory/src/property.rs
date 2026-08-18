@@ -1,10 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// 可提供给模型理解的记忆属性值。
+/// Pinned Memory 的 Runtime 业务属性值。
 ///
-/// 使用 untagged JSON 表达，模型工具与持久化层只会看到字符串或数字；布尔、数组、对象
-/// 和 null 在反序列化阶段直接失败。
+/// 使用 untagged JSON 表达，业务接口与持久化层只接受字符串或数字；该值不属于记忆正文，
+/// 不进入模型工具投影或 System Context。布尔、数组、对象和 null 在反序列化阶段直接失败。
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MemoryPropertyValue {
@@ -12,24 +12,6 @@ pub enum MemoryPropertyValue {
     String(String),
     /// JSON 可表示的有限数字。
     Number(serde_json::Number),
-}
-
-impl MemoryPropertyValue {
-    /// 属性值在 XML 与校验阶段使用的稳定类型名称。
-    pub(crate) fn kind(&self) -> &'static str {
-        match self {
-            Self::String(_) => "string",
-            Self::Number(_) => "number",
-        }
-    }
-
-    /// 将属性值转换为模型可见文本。
-    pub(crate) fn text(&self) -> String {
-        match self {
-            Self::String(value) => value.clone(),
-            Self::Number(value) => value.to_string(),
-        }
-    }
 }
 
 #[cfg(test)]

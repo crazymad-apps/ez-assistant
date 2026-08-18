@@ -140,9 +140,23 @@ export const ConversationView = observer(function ConversationView() {
     is_pinned_to_bottom.current = true;
     setShowScrollBottom(false);
     if (node) {
-      node.scrollTop = node.scrollHeight;
+      const location = store.navigation.current_conversation_location;
+      const matches_location = location?.session_id === session_id
+        && location.child_task_id === child_task_id;
+      if (matches_location && location.scroll_offset !== null) {
+        node.scrollTop = location.scroll_offset;
+        updateScrollState(node);
+      } else {
+        node.scrollTop = node.scrollHeight;
+      }
     }
-  }, [child_task_id, session_id]);
+  }, [
+    child_task_id,
+    session_id,
+    store.navigation,
+    store.navigation.conversation_history_index,
+    updateScrollState,
+  ]);
 
   useLayoutEffect(() => {
     const message_id = store.navigation.conversation_anchor_message_id;
@@ -154,6 +168,7 @@ export const ConversationView = observer(function ConversationView() {
     if (target) {
       is_pinned_to_bottom.current = false;
       target.scrollIntoView({ block: "center" });
+      store.navigation.updateCurrentScrollOffset(node.scrollTop);
       store.navigation.consumeConversationAnchor(message_id);
     }
   }, [history?.items, store.navigation, store.navigation.conversation_anchor_message_id]);
@@ -166,8 +181,9 @@ export const ConversationView = observer(function ConversationView() {
     if (node.scrollTop < 96) {
       void loadPrevious();
     }
+    store.navigation.updateCurrentScrollOffset(node.scrollTop);
     updateScrollState(node);
-  }, [loadPrevious, updateScrollState]);
+  }, [loadPrevious, store.navigation, updateScrollState]);
 
   const scrollToBottom = useCallback(() => {
     const node = scroll_ref.current;
@@ -203,7 +219,10 @@ export const ConversationView = observer(function ConversationView() {
         tool_name: tool.tool_name,
         status: tool.status,
         input: { type: "unavailable" },
+        request_json: null,
         result_summary: null,
+        result_json: null,
+        recall: null,
         stdout: tool.stdout.trim() || null,
         stderr: tool.stderr.trim() || null,
         error: null,
@@ -238,6 +257,10 @@ export const ConversationView = observer(function ConversationView() {
               error={detail_state.error}
               is_loading={detail_state.is_loading}
               on_close={() => setDetailState(null)}
+              on_recall_navigate={(target) => {
+                setDetailState(null);
+                void store.openRecallNavigationTarget(target);
+              }}
             />
           )}
         </>
@@ -330,6 +353,10 @@ export const ConversationView = observer(function ConversationView() {
           error={detail_state.error}
           is_loading={detail_state.is_loading}
           on_close={() => setDetailState(null)}
+          on_recall_navigate={(target) => {
+            setDetailState(null);
+            void store.openRecallNavigationTarget(target);
+          }}
         />
       )}
       {fork_point && (

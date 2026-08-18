@@ -11,6 +11,8 @@ mod endpoint;
 mod http;
 #[cfg(unix)]
 mod platform;
+#[cfg(unix)]
+mod recall_reference_key;
 mod resources;
 #[cfg(unix)]
 mod server;
@@ -78,10 +80,12 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 // 单实例锁必须先于 Store；HTTP 端口与发现文件在 Runtime 恢复后才发布。
                 let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
                 let resources = HostResources::new(&config.runtime_home)?;
+                let recall_reference_key =
+                    recall_reference_key::load_or_create(&config.runtime_home)?;
                 let store = Arc::new(
                     LocalRuntimeStore::open(&config.runtime_home, STORAGE_QUEUE_CAPACITY).await?,
                 );
-                let runtime = match AssistantRuntime::open(
+                let runtime = match AssistantRuntime::open_with_recall_key(
                     RuntimeConfig::new(config.event_capacity),
                     Arc::new(LocalConfigSource::new(config.config_path)),
                     resources.model_factory,
@@ -90,6 +94,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     resources.child_task_workspace_factory,
                     store.clone(),
                     store.clone(),
+                    recall_reference_key,
                 )
                 .await
                 {

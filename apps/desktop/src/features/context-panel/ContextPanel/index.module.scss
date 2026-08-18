@@ -152,6 +152,30 @@
   border-top: 1px solid var(--ez-border);
 }
 
+.system_context_row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 11px;
+  padding: 9px 0 0;
+  text-align: left;
+  color: var(--ez-text-secondary);
+  border: 0;
+  border-top: 1px solid var(--ez-border);
+  background: transparent;
+
+  strong { font-size: var(--ez-font-base); font-weight: 600; }
+  em { color: var(--ez-text-muted); font-size: var(--ez-font-small); font-style: normal; }
+  em { flex: 0 0 auto; }
+  &:hover strong, &:hover em { color: var(--ez-text); }
+}
+
+.context_error { margin: 4px 0 0; color: var(--ez-danger); font-size: var(--ez-font-small); line-height: 1.45; }
+
 .path_row {
   display: flex;
   align-items: center;

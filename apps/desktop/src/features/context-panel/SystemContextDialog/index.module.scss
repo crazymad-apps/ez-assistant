@@ -1,0 +1,91 @@
+.backdrop {
+  position: fixed;
+  z-index: calc(var(--ez-z-modal) + 1);
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(24 30 43 / 28%);
+  backdrop-filter: blur(3px);
+}
+
+.dialog {
+  display: grid;
+  width: min(760px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-large);
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-shell);
+
+  > header {
+    display: flex;
+    min-height: 58px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 14px 10px 18px;
+    border-bottom: 1px solid var(--ez-border);
+  }
+  h2 { margin: 0; font-size: var(--ez-font-large); }
+  header p { margin: 3px 0 0; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+}
+
+.header_actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+
+.view_toggle {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-muted);
+
+  button {
+    min-height: 26px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--ez-text-secondary);
+    background: transparent;
+
+    &[data-state="active"] {
+      color: var(--ez-text);
+      background: var(--ez-surface);
+      box-shadow: var(--ez-shadow-small);
+    }
+  }
+}
+
+.close_button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-muted);
+  background: transparent;
+
+  &:hover { color: var(--ez-text); background: var(--ez-surface-muted); }
+}
+
+.body {
+  overflow-y: auto;
+  padding: 16px 18px 20px;
+}
+
+.preview_part,
+.source_part {
+  margin: 0;
+  color: var(--ez-text);
+
+  + .preview_part,
+  + .source_part { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--ez-border); }
+}
+
+.source_part { overflow-wrap: anywhere; white-space: pre-wrap; font: inherit; line-height: 1.7; }
+
+.empty { margin: 30px 0; color: var(--ez-text-muted); text-align: center; }

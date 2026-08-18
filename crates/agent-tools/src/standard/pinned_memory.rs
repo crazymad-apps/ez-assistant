@@ -6,9 +6,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use agent_memory::{
-    MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryDraft, PinnedMemoryEntry,
-    PinnedMemoryId, PinnedMemoryLimits, PinnedMemoryPatch, PinnedMemoryStore,
-    PinnedMemoryStoreError,
+    PinnedMemoryCategory, PinnedMemoryDraft, PinnedMemoryEntry, PinnedMemoryId, PinnedMemoryLimits,
+    PinnedMemoryPatch, PinnedMemoryStore, PinnedMemoryStoreError,
 };
 use agent_types::ToolName;
 use schemars::JsonSchema;
@@ -24,8 +23,29 @@ pub struct PinMemoryInput {
     pub category: PinnedMemoryCategory,
     /// 需要长期置顶的正文。
     pub content: String,
-    /// 帮助模型理解记忆业务含义的字符串或数字属性。
-    pub attributes: BTreeMap<String, MemoryPropertyValue>,
+}
+
+/// Pinned Memory 工具返回给模型的稳定内容投影。
+///
+/// `attributes` 是 Runtime 业务元数据，不属于模型可见记忆内容。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PinnedMemoryToolEntry {
+    /// Store 分配的稳定 ID。
+    pub id: PinnedMemoryId,
+    /// 记忆的开放归类。
+    pub category: PinnedMemoryCategory,
+    /// 需要长期置顶的正文。
+    pub content: String,
+}
+
+impl From<PinnedMemoryEntry> for PinnedMemoryToolEntry {
+    fn from(entry: PinnedMemoryEntry) -> Self {
+        Self {
+            id: entry.id,
+            category: entry.category,
+            content: entry.content,
+        }
+    }
 }
 
 /// `pin_memory`：新增一条只影响未来新建会话的 Pinned Memory。
@@ -44,7 +64,7 @@ impl PinMemoryTool {
 impl Tool for PinMemoryTool {
     type Input = PinMemoryInput;
     type ResolvedInput = PinnedMemoryDraft;
-    type Output = PinnedMemoryEntry;
+    type Output = PinnedMemoryToolEntry;
 
     fn name(&self) -> ToolName {
         ToolName::new("pin_memory").expect("valid tool name")
@@ -64,7 +84,7 @@ impl Tool for PinMemoryTool {
         let draft = PinnedMemoryDraft {
             category: input.category,
             content: input.content,
-            attributes: input.attributes,
+            attributes: BTreeMap::new(),
         };
         draft
             .validate(&self.limits)
@@ -81,6 +101,7 @@ impl Tool for PinMemoryTool {
             self.store
                 .pin(input, context.cancellation)
                 .await
+                .map(PinnedMemoryToolEntry::from)
                 .map_err(map_store_error)
         })
     }
@@ -96,8 +117,6 @@ pub struct UpdatePinnedMemoryInput {
     pub category: Option<PinnedMemoryCategory>,
     /// 新正文；省略时保持原值。
     pub content: Option<String>,
-    /// 完整的新属性集合；省略时保持原值，空对象表示清空。
-    pub attributes: Option<BTreeMap<String, MemoryPropertyValue>>,
 }
 
 /// `update_pinned_memory` resolve 后冻结的 ID 与 Patch。
@@ -125,16 +144,16 @@ impl UpdatePinnedMemoryTool {
 impl Tool for UpdatePinnedMemoryTool {
     type Input = UpdatePinnedMemoryInput;
     type ResolvedInput = ResolvedUpdatePinnedMemoryInput;
-    type Output = PinnedMemoryEntry;
+    type Output = PinnedMemoryToolEntry;
 
     fn name(&self) -> ToolName {
         ToolName::new("update_pinned_memory").expect("valid tool name")
     }
 
     fn description(&self) -> String {
-        "Update one or more fields of an existing pinned memory. An empty attributes object clears \
-         attributes. The returned entry is current Store state, but this session's system prompt \
-         snapshot remains unchanged; the update applies to future new sessions."
+        "Update the category or content of an existing pinned memory. The returned entry is \
+         current Store state, but this session's system prompt snapshot remains unchanged; the \
+         update applies to future new sessions."
             .to_owned()
     }
 
@@ -149,7 +168,7 @@ impl Tool for UpdatePinnedMemoryTool {
         let patch = PinnedMemoryPatch {
             category: input.category,
             content: input.content,
-            attributes: input.attributes,
+            attributes: None,
         };
         patch
             .validate(&self.limits)
@@ -169,6 +188,7 @@ impl Tool for UpdatePinnedMemoryTool {
             self.store
                 .update(input.id, input.patch, context.cancellation)
                 .await
+                .map(PinnedMemoryToolEntry::from)
                 .map_err(map_store_error)
         })
     }
@@ -198,7 +218,7 @@ impl UnpinMemoryTool {
 impl Tool for UnpinMemoryTool {
     type Input = UnpinMemoryInput;
     type ResolvedInput = UnpinMemoryInput;
-    type Output = PinnedMemoryEntry;
+    type Output = PinnedMemoryToolEntry;
 
     fn name(&self) -> ToolName {
         ToolName::new("unpin_memory").expect("valid tool name")
@@ -230,6 +250,7 @@ impl Tool for UnpinMemoryTool {
             self.store
                 .unpin(input.id, context.cancellation)
                 .await
+                .map(PinnedMemoryToolEntry::from)
                 .map_err(map_store_error)
         })
     }
@@ -255,7 +276,7 @@ impl ListPinnedMemoriesTool {
 impl Tool for ListPinnedMemoriesTool {
     type Input = ListPinnedMemoriesInput;
     type ResolvedInput = ListPinnedMemoriesInput;
-    type Output = Vec<PinnedMemoryEntry>;
+    type Output = Vec<PinnedMemoryToolEntry>;
 
     fn name(&self) -> ToolName {
         ToolName::new("list_pinned_memories").expect("valid tool name")
@@ -283,6 +304,12 @@ impl Tool for ListPinnedMemoriesTool {
             self.store
                 .list(context.cancellation)
                 .await
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(PinnedMemoryToolEntry::from)
+                        .collect()
+                })
                 .map_err(map_store_error)
         })
     }
@@ -305,7 +332,7 @@ mod tests {
         },
     };
 
-    use agent_memory::{PinnedMemoryFuture, PinnedMemoryValidationError};
+    use agent_memory::{MemoryPropertyValue, PinnedMemoryFuture, PinnedMemoryValidationError};
     use agent_types::{ToolResultContent, ToolResultStatus};
     use serde_json::json;
 
@@ -539,7 +566,7 @@ mod tests {
         );
         assert_eq!(
             definitions[0].input_schema["required"],
-            json!(["category", "content", "attributes"])
+            json!(["category", "content"])
         );
         assert_eq!(definitions[3].input_schema["type"], json!("object"));
         assert_eq!(
@@ -566,7 +593,6 @@ mod tests {
         pin.resolve(PinMemoryInput {
             category: PinnedMemoryCategory::new("preference").expect("valid category"),
             content: "Use dark mode".to_owned(),
-            attributes: BTreeMap::new(),
         })
         .expect("valid pin resolves");
         let update = UpdatePinnedMemoryTool::new(store.clone(), limits());
@@ -575,7 +601,6 @@ mod tests {
                 id: PinnedMemoryId::new("pinned_1").expect("valid id"),
                 category: None,
                 content: None,
-                attributes: None,
             }),
             Err(ToolError::InvalidInput { .. })
         ));
@@ -604,8 +629,7 @@ mod tests {
             "pin_memory",
             json!({
                 "category": "preference",
-                "content": "Use dark mode",
-                "attributes": {"scope": "desktop"}
+                "content": "Use dark mode"
             }),
             ToolContext::default(),
         );
@@ -615,8 +639,7 @@ mod tests {
             ToolResultContent::Json(json!({
                 "id": "pinned_1",
                 "category": "preference",
-                "content": "Use dark mode",
-                "attributes": {"scope": "desktop"}
+                "content": "Use dark mode"
             }))
         );
 
@@ -651,8 +674,7 @@ mod tests {
             ToolResultContent::Json(json!([{
                 "id": "pinned_1",
                 "category": "preference",
-                "content": "Use light mode",
-                "attributes": {"scope": "desktop"}
+                "content": "Use light mode"
             }]))
         );
 
@@ -705,7 +727,7 @@ mod tests {
         let capacity = execute(
             registry,
             "pin_memory",
-            json!({"category": "preference", "content": "new", "attributes": {}}),
+            json!({"category": "preference", "content": "new"}),
             ToolContext::default(),
         );
         assert_eq!(capacity.status, ToolResultStatus::Error);
@@ -745,5 +767,95 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pinned_tool_inputs_reject_runtime_business_attributes() {
+        let store = Arc::new(ProbeStore::new(vec![]));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(PinMemoryTool::new(store.clone(), limits()))
+            .expect("register pin");
+        let pin = execute(
+            registry,
+            "pin_memory",
+            json!({
+                "category": "preference",
+                "content": "Use dark mode",
+                "attributes": {"source": "agent"}
+            }),
+            ToolContext::default(),
+        );
+        assert_eq!(pin.status, ToolResultStatus::Error);
+        assert!(store.calls().is_empty());
+
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(UpdatePinnedMemoryTool::new(store.clone(), limits()))
+            .expect("register update");
+        let update = execute(
+            registry,
+            "update_pinned_memory",
+            json!({
+                "id": "pinned_1",
+                "attributes": {"source": "agent"}
+            }),
+            ToolContext::default(),
+        );
+        assert_eq!(update.status, ToolResultStatus::Error);
+        assert!(store.calls().is_empty());
+    }
+
+    #[test]
+    fn pinned_tools_preserve_business_attributes_without_exposing_them() {
+        let mut existing = entry("pinned_1", "Use dark mode");
+        existing.attributes.insert(
+            "source".to_owned(),
+            MemoryPropertyValue::String("desktop".to_owned()),
+        );
+        let store = Arc::new(ProbeStore::new(vec![existing]));
+
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(UpdatePinnedMemoryTool::new(store.clone(), limits()))
+            .expect("register update");
+        let updated = execute(
+            registry,
+            "update_pinned_memory",
+            json!({"id": "pinned_1", "content": "Use light mode"}),
+            ToolContext::default(),
+        );
+        assert_eq!(updated.status, ToolResultStatus::Success);
+        assert_eq!(
+            updated.content,
+            ToolResultContent::Json(json!({
+                "id": "pinned_1",
+                "category": "preference",
+                "content": "Use light mode"
+            }))
+        );
+        assert_eq!(
+            store.entries.lock().expect("lock entries")[0]
+                .attributes
+                .get("source"),
+            Some(&MemoryPropertyValue::String("desktop".to_owned()))
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(ListPinnedMemoriesTool::new(store))
+            .expect("register list");
+        let listed = execute(
+            registry,
+            "list_pinned_memories",
+            json!({}),
+            ToolContext::default(),
+        );
+        assert_eq!(listed.status, ToolResultStatus::Success);
+        assert!(
+            !serde_json::to_string(&listed.content)
+                .expect("serialize tool content")
+                .contains("attributes")
+        );
     }
 }

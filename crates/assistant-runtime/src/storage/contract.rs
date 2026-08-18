@@ -1,0 +1,218 @@
+use agent_types::ConversationSnapshot;
+use assistant_protocol::{ChildTaskId, InputId, SessionId};
+
+use crate::{
+    MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, StoredPinnedMemory,
+};
+
+use super::{
+    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
+    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
+    NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, QueuePriorityChange, RewriteResult, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreFuture, StoredAttachment, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationWindow, StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement,
+    StoredSession, StoredSessionFork, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkspaceRemoval,
+};
+
+/// Runtime 启动时一次性取得的结构化恢复结果。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecoveredRuntime {
+    pub workspaces: Vec<StoredWorkspace>,
+    pub attachments: Vec<StoredAttachment>,
+    pub sessions: Vec<StoredSession>,
+    pub inputs: Vec<StoredInput>,
+    pub runs: Vec<StoredRun>,
+    pub child_tasks: Vec<StoredChildTask>,
+}
+
+/// Assistant Runtime 使用的持久化能力端口。
+///
+/// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
+pub trait RuntimeStore: Send + Sync {
+    /// 恢复未完成提交并加载 Runtime 的结构化启动投影。
+    fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime>;
+
+    /// 为新 Session 一致读取当前 Persona 与 Pinned Memory。
+    fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot>;
+
+    /// 读取单例 Persona 的当前权威投影。
+    fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot>;
+
+    /// 使用修订号 CAS 更新单例 Persona。
+    fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot>;
+
+    /// 读取当前全部 Pinned Memory；正式分页产品投影在后续里程碑提供。
+    fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>>;
+
+    /// 原子执行一条 Pinned Memory CAS 变更并递增集合修订。
+    fn mutate_pinned_memory(
+        &self,
+        mutation: PinnedMemoryMutation,
+    ) -> StoreFuture<'_, PinnedMemoryMutationResult>;
+
+    /// 按 canonical path 幂等登记或恢复 Workspace。
+    fn register_workspace(
+        &self,
+        registration: NewWorkspaceRegistration,
+    ) -> StoreFuture<'_, StoredWorkspace>;
+
+    /// 假删 Workspace，不删除任何目录或历史绑定。
+    fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace>;
+
+    /// 完成已流式接收到 staging 的上传；同 Session、同 Blob Hash 返回首次结果。
+    fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment>;
+
+    /// 创建 Session 稳定事实及其空 Conversation。
+    fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;
+
+    /// 基于已校验的正文前缀原子创建独立 Session，并重写 Attachment 稳定视图。
+    fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork>;
+
+    /// 读取永久删除的当前精确影响；实现不得缓存这个结果。
+    fn inspect_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_protocol::DeleteSessionImpact>;
+
+    /// 在再次核对影响后永久删除 Session 私有事实。
+    fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()>;
+
+    /// 创建 accepted 子任务关系及其空的 generation 1 正文。
+    fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask>;
+
+    /// 写入初始 User Message，并把 accepted 子任务可靠切到 running。
+    fn start_child_task(&self, start: ChildTaskStart) -> StoreFuture<'_, ()>;
+
+    /// 在任何子任务工具副作用前保存完整 Tool Call 批次。
+    fn begin_child_tool_exchange(&self, pending: PendingChildToolExchange) -> StoreFuture<'_, ()>;
+
+    /// 在子任务 Tool SPI 产生副作用前写入 started 标记。
+    fn mark_child_tool_execution_started(
+        &self,
+        start: ChildToolExecutionStart,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 提交子任务完整工具结果并清除对应 pending 事实。
+    fn complete_child_tool_exchange(
+        &self,
+        completed: CompletedChildToolExchange,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 可靠写入最终消息并结算子任务终态。
+    fn settle_child_task(&self, settlement: StoredChildTaskSettlement) -> StoreFuture<'_, ()>;
+
+    /// 在发布活动 child 取消令牌前可靠记录取消意图；终态任务幂等返回原投影。
+    fn request_child_task_cancellation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, StoredChildTask>;
+
+    /// 加载子任务独立的完整规范 Conversation，同时核对 Session 所有权。
+    fn load_child_conversation(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> StoreFuture<'_, ConversationSnapshot>;
+
+    /// 可靠切换父 Run 或 child 的压缩后有效正文 generation。
+    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()>;
+
+    /// 原子创建 Input 与首次 Accepted Run，或返回同 Session 幂等 key 的首次结果。
+    fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
+
+    /// 删除尚未进入规范 Conversation 的排队 Input 及其 Run。
+    fn cancel_queued_input(
+        &self,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> StoreFuture<'_, ()>;
+
+    /// 可靠调整尚未开始的输入优先级；不得改写原始接收时间或 Conversation。
+    fn prioritize_queued_input(&self, change: QueuePriorityChange) -> StoreFuture<'_, ()>;
+
+    /// 为最新的 Failed/Interrupted Run 创建递增 attempt。
+    fn create_run_attempt(&self, attempt: NewStoredRunAttempt) -> StoreFuture<'_, StoredRun>;
+
+    /// 可靠写入 User Message，并将对应 Run 从 accepted 转为 running。
+    fn commit_user_message(&self, commit: UserMessageCommit) -> StoreFuture<'_, ()>;
+
+    /// 在任何工具副作用前保存完整 Tool Call 批次并返回确认。
+    fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()>;
+
+    /// 在 Tool SPI 产生任何外部副作用前写入临时 started 标记。
+    fn mark_tool_execution_started(&self, start: ToolExecutionStart) -> StoreFuture<'_, ()>;
+
+    /// 保存完整结果、整批提交正文并清除对应 pending 事实。
+    fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()>;
+
+    /// 可靠写入本 Run 尚未提交的完整消息，并同时结算 Run 终态。
+    fn settle_run(&self, settlement: StoredRunSettlement) -> StoreFuture<'_, ()>;
+
+    /// 按当前权威 generation 加载并校验完整规范 Conversation。
+    fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot>;
+
+    /// 按可显示 User/Assistant 消息边界读取历史窗口；实现可使用可重建的私有索引。
+    fn load_conversation_window(
+        &self,
+        request: ConversationWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationWindow>;
+
+    /// 按权威 JSONL 原始消息序号读取有限窗口，仅供签名 Recall 引用二次定位。
+    fn load_conversation_raw_window(
+        &self,
+        request: ConversationRawWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationRawWindow>;
+
+    /// 在当前权威 generation 中按稳定 Message ID 定位；不存在时返回 `None`。
+    fn locate_conversation_message(
+        &self,
+        request: ConversationMessageLocationRequest,
+    ) -> StoreFuture<'_, Option<StoredConversationMessageLocation>>;
+
+    /// 检索可重建的 Conversation 派生索引；不得以索引正文替代权威 JSONL。
+    fn search_conversations(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, ConversationSearchPage>;
+
+    /// 原子切换 Session 归档状态；正文和运行历史保持不变。
+    fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()>;
+
+    /// 修改 Session 标题并持久化用户来源。
+    fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()>;
+
+    /// 幂等设置 Session 固定状态。
+    fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()>;
+
+    /// 保存或清除 Assistant Message 反馈。
+    fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()>;
+
+    /// 加载 Session 当前仍有效的 Assistant Message 反馈。
+    fn load_message_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<StoredMessageFeedback>>;
+
+    /// 原子切换 Session 后续 Run 使用的模型 key。
+    fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()>;
+
+    /// 原子切换 Session 当前 Agent 变体。
+    fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()>;
+
+    /// 原子切换 Session 当前审批模式。
+    fn set_session_approval_mode(&self, change: ApprovalModeChange) -> StoreFuture<'_, ()>;
+
+    /// 原子切换正文 generation、销毁目标及尾段关联，并创建新的 committed Input/Run。
+    fn rewrite_from_user(&self, rewrite: ConversationRewrite) -> StoreFuture<'_, RewriteResult>;
+
+    /// 停止接收新命令，flush 已接受操作并等待基础设施 worker 退出。
+    fn shutdown(&self) -> StoreFuture<'_, ()>;
+}

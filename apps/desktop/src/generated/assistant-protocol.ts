@@ -8,7 +8,11 @@ export type AgentVariant = "build" | "plan";
 /**
  * 当前 Desktop 可以依赖的产品能力。
  */
-export type ApplicationCapabilities = { conversation_paging: boolean, tool_detail: boolean, queue_control: boolean, approval_queue: boolean, child_task_view: boolean, };
+export type ApplicationCapabilities = { conversation_paging: boolean,
+/**
+ * 是否支持跨会话正文检索和按消息定位。
+ */
+conversation_search: boolean, tool_detail: boolean, queue_control: boolean, approval_queue: boolean, child_task_view: boolean, };
 
 /**
  * Desktop 首屏所需的稳定组合投影。
@@ -291,6 +295,25 @@ usage_basis_points: number, };
 export type ConversationFileReference = { message_id: MessageId, call_id: ToolCallId, file: ToolFileReference, };
 
 /**
+ * 一条可导航的历史搜索命中。
+ */
+export type ConversationHistoryHit = { owner: ConversationOwner, session_title: string, child_task_title: string | null,
+/**
+ * 标题命中没有具体消息锚点。
+ */
+message_id: MessageId | null, created_at_ms: number | null, snippet: string, match_kind: ConversationHistoryMatchKind, lifecycle: SessionLifecycle, };
+
+/**
+ * 历史搜索命中的来源类型。
+ */
+export type ConversationHistoryMatchKind = "title" | "message";
+
+/**
+ * Desktop 历史搜索的业务范围。
+ */
+export type ConversationHistoryScope = "session" | "workspace" | "global";
+
+/**
  * Conversation 中一条用户或助手消息。
  */
 export type ConversationItem = { "type": "user" } & UserMessageSnapshot | { "type": "assistant" } & AssistantMessageSnapshot;
@@ -318,6 +341,8 @@ items: Array<ConversationItem>,
 previous_cursor: string | null, has_more: boolean, };
 
 export type CreateModelRequest = { model: ModelConfigurationInput, expected_revision: string | null, set_default: boolean, };
+
+export type CreatePinnedMemoryRequest = { expected_collection_revision: number, category: string, content: string, attributes: { [key in string]: MemoryAttributeValue }, };
 
 /**
  * 创建一个空 Session。
@@ -375,6 +400,8 @@ decision: ApprovalDecision, };
 export type DeleteConfirmationToken = string;
 
 export type DeleteModelRequest = { model_key: ModelKey, expected_revision: string, replacement_default: ModelKey | null, };
+
+export type DeletePinnedMemoryRequest = { id: string, expected_revision: number, };
 
 /**
  * 永久删除将移除的 Runtime 私有事实摘要；不包含 Workspace 用户文件。
@@ -438,9 +465,30 @@ export type GetConfigStatusResult = {
  */
 status: ConfigurationStatus, };
 
+/**
+ * 按稳定 Message ID 读取包含目标消息的一页标准 Conversation。
+ */
+export type GetConversationPageAroundMessageRequest = { owner: ConversationOwner, message_id: MessageId, limit: number, };
+
+export type GetConversationPageAroundMessageResult = { snapshot: ObservedSnapshot<ConversationPage>, anchor_message_id: MessageId, };
+
 export type GetConversationPageAroundRunRequest = { session_id: SessionId, run_id: RunId, limit: number, };
 
 export type GetConversationPageAroundRunResult = { snapshot: ObservedSnapshot<ConversationPage>, anchor_message_id: MessageId, };
+
+/**
+ * 读取命中消息附近、只用于用户查看的正文窗口。
+ */
+export type GetConversationRecallWindowRequest = { session_id: SessionId, owner: ConversationOwner, message_id: MessageId, before: number, after: number, };
+
+/**
+ * 一段只读搜索上下文；不会写入 Agent 上下文。
+ */
+export type GetConversationRecallWindowResult = { owner: ConversationOwner, generation: number, anchor_message_id: MessageId, items: Array<ConversationItem>, has_more_before: boolean, has_more_after: boolean, };
+
+export type GetMemoryCapabilitiesRequest = Record<symbol, never>;
+
+export type GetMemoryCapabilitiesResult = { capabilities: MemoryCapabilities, };
 
 /**
  * 查询一个合法 model key 的脱敏投影。
@@ -463,6 +511,10 @@ model: ModelConfiguration, };
 export type GetPermissionDocumentRequest = { scope: PermissionDocumentScope, };
 
 export type GetPermissionDocumentResult = { document: PermissionDocumentSnapshot, };
+
+export type GetPersonaRequest = Record<symbol, never>;
+
+export type GetPersonaResult = { persona: PersonaSnapshot, capabilities: MemoryCapabilities, };
 
 /**
  * 查询指定 Session 中的 Run。
@@ -507,6 +559,10 @@ session: SessionSummary, };
 export type GetSessionViewRequest = { session_id: SessionId, };
 
 export type GetSessionViewResult = { snapshot: ObservedSnapshot<SessionViewSnapshot>, };
+
+export type GetSystemContextRequest = { session_id: SessionId, };
+
+export type GetSystemContextResult = { snapshot: SystemContextSnapshot, };
 
 export type GetToolDetailRequest = { owner: ConversationOwner, message_id: MessageId, call_id: ToolCallId, };
 
@@ -584,6 +640,10 @@ export type ListPendingApprovalsResult = {
  */
 approvals: Array<ApprovalSnapshot>, };
 
+export type ListPinnedMemoriesRequest = Record<symbol, never>;
+
+export type ListPinnedMemoriesResult = { collection: PinnedMemoryCollectionSnapshot, };
+
 /**
  * 查询指定 Session 的全部 Run。
  */
@@ -611,6 +671,10 @@ sessions: Array<SessionSummary>, };
 export type ListWorkspacesRequest = Record<symbol, never>;
 
 export type ListWorkspacesResult = { workspaces: Array<WorkspaceSummary>, };
+
+export type MemoryAttributeValue = { "type": "string", "value": string } | { "type": "number", "value": string };
+
+export type MemoryCapabilities = { max_persona_bytes: number, max_pinned_entries: number, max_pinned_category_bytes: number, max_pinned_content_bytes: number, max_attributes_per_entry: number, max_attribute_key_bytes: number, max_attribute_string_bytes: number, };
 
 /**
  * 用户对助手消息的反馈。
@@ -796,6 +860,16 @@ export type PermissionScope = "global" | "workspace" | "session";
 
 export type PermissionShellMatcher = { command: string, command_match: PermissionCommandMatch, working_directory: string, process_mode: PermissionProcessModeDefinition, };
 
+export type PersonaSnapshot = { enabled: boolean, content: string, revision: number, updated_at_ms: number, };
+
+export type PinnedMemoryCollectionSnapshot = { revision: number, items: Array<PinnedMemorySnapshot>, capabilities: MemoryCapabilities, };
+
+export type PinnedMemoryCreatedBy = { "type": "user" } | { "type": "agent_tool", "payload": { session_id: SessionId, } };
+
+export type PinnedMemoryMutationResult = { applied: boolean, memory: PinnedMemorySnapshot | null, collection: PinnedMemoryCollectionSnapshot, };
+
+export type PinnedMemorySnapshot = { id: string, category: string, content: string, attributes: { [key in string]: MemoryAttributeValue }, created_by: PinnedMemoryCreatedBy, created_at_ms: number, updated_at_ms: number, revision: number, };
+
 /**
  * 请求 Runtime 重新核对永久删除影响并签发短期确认 token。
  */
@@ -821,6 +895,28 @@ export type QueueSnapshot = { revision: number, state: QueueExecutionState, item
  * 一条尚未进入规范 Conversation 的输入。
  */
 export type QueuedInputSnapshot = { input_id: InputId, text_preview: string, submitted_at_ms: number, position: number, is_prioritized: boolean, };
+
+/**
+ * Runtime 校验 Recall 不透明引用后提供给桌面端的安全导航目标。
+ *
+ * WebView 只消费该投影，不接触也不解析带签名的 Recall reference。
+ */
+export type RecallNavigationTarget = { owner: ConversationOwner, message_id: MessageId, lifecycle: SessionLifecycle, };
+
+/**
+ * Recall Source 的非致命失败；不阻止其他候选继续展示。
+ */
+export type RecallToolDetailFailure = { source_id: string, kind: string, message: string, };
+
+/**
+ * Recall 工具详情中的单条正文及其可选来源导航。
+ */
+export type RecallToolDetailItem = { content: string, role: string | null, created_at_ms: number | null, navigation: RecallNavigationTarget | null, };
+
+/**
+ * `recall_memory` 的桌面专用详情投影。
+ */
+export type RecallToolDetailSnapshot = { items: Array<RecallToolDetailItem>, failures: Array<RecallToolDetailFailure>, truncated: boolean, };
 
 /**
  * 从历史 User Message 位置提交一条全新输入并销毁原目标及尾段。
@@ -998,12 +1094,12 @@ export type RunStatus = "accepted" | "running" | "cancelling" | "completed" | "f
 /**
  * Runtime 支持的最小客户端意图。
  */
-export type RuntimeCommand = { "type": "get_application_snapshot", "payload": GetApplicationSnapshotRequest } | { "type": "get_session_view", "payload": GetSessionViewRequest } | { "type": "get_child_task_view", "payload": GetChildTaskViewRequest } | { "type": "list_conversation_page", "payload": ListConversationPageRequest } | { "type": "get_conversation_page_around_run", "payload": GetConversationPageAroundRunRequest } | { "type": "get_tool_detail", "payload": GetToolDetailRequest } | { "type": "prioritize_queued_input", "payload": PrioritizeQueuedInputRequest } | { "type": "interrupt_run", "payload": InterruptRunRequest } | { "type": "resume_queued_input", "payload": ResumeQueuedInputRequest } | { "type": "reject_approval_and_stop_run", "payload": RejectApprovalAndStopRunRequest } | { "type": "get_config_status", "payload": GetConfigStatusRequest } | { "type": "list_models", "payload": ListModelsRequest } | { "type": "get_model", "payload": GetModelRequest } | { "type": "reload_config", "payload": ReloadConfigRequest } | { "type": "create_model", "payload": CreateModelRequest } | { "type": "update_model", "payload": UpdateModelRequest } | { "type": "delete_model", "payload": DeleteModelRequest } | { "type": "set_default_model", "payload": SetDefaultModelRequest } | { "type": "reload_permissions", "payload": ReloadPermissionsRequest } | { "type": "get_permission_document", "payload": GetPermissionDocumentRequest } | { "type": "replace_permission_document", "payload": ReplacePermissionDocumentRequest } | { "type": "list_pending_approvals", "payload": ListPendingApprovalsRequest } | { "type": "decide_approval", "payload": DecideApprovalRequest } | { "type": "validate_model_connection", "payload": ValidateModelConnectionRequest } | { "type": "register_workspace", "payload": RegisterWorkspaceRequest } | { "type": "get_workspace", "payload": GetWorkspaceRequest } | { "type": "list_workspaces", "payload": ListWorkspacesRequest } | { "type": "remove_workspace", "payload": RemoveWorkspaceRequest } | { "type": "get_attachment", "payload": GetAttachmentRequest } | { "type": "list_attachments", "payload": ListAttachmentsRequest } | { "type": "create_session", "payload": CreateSessionRequest } | { "type": "fork_session", "payload": ForkSessionRequest } | { "type": "prepare_delete_session", "payload": PrepareDeleteSessionRequest } | { "type": "delete_session", "payload": DeleteSessionRequest } | { "type": "list_sessions", "payload": ListSessionsRequest } | { "type": "get_session", "payload": GetSessionRequest } | { "type": "submit_input", "payload": SubmitInputRequest } | { "type": "cancel_queued_input", "payload": CancelQueuedInputRequest } | { "type": "resume_session", "payload": ResumeSessionRequest } | { "type": "retry_run", "payload": RetryRunRequest } | { "type": "get_run", "payload": GetRunRequest } | { "type": "list_runs", "payload": ListRunsRequest } | { "type": "list_child_tasks", "payload": ListChildTasksRequest } | { "type": "get_child_task", "payload": GetChildTaskRequest } | { "type": "cancel_child_task", "payload": CancelChildTaskRequest } | { "type": "archive_session", "payload": ArchiveSessionRequest } | { "type": "restore_session", "payload": RestoreSessionRequest } | { "type": "rename_session", "payload": RenameSessionRequest } | { "type": "set_session_pinned", "payload": SetSessionPinnedRequest } | { "type": "set_empty_session_workspace", "payload": SetEmptySessionWorkspaceRequest } | { "type": "set_message_feedback", "payload": SetMessageFeedbackRequest } | { "type": "set_session_model", "payload": SetSessionModelRequest } | { "type": "set_session_variant", "payload": SetSessionVariantRequest } | { "type": "set_session_approval_mode", "payload": SetSessionApprovalModeRequest } | { "type": "reenter_from_user_message", "payload": ReenterFromUserMessageRequest } | { "type": "cancel_run", "payload": CancelRunRequest } | { "type": "shutdown_runtime", "payload": ShutdownRuntimeRequest };
+export type RuntimeCommand = { "type": "get_application_snapshot", "payload": GetApplicationSnapshotRequest } | { "type": "get_session_view", "payload": GetSessionViewRequest } | { "type": "get_child_task_view", "payload": GetChildTaskViewRequest } | { "type": "list_conversation_page", "payload": ListConversationPageRequest } | { "type": "get_conversation_page_around_run", "payload": GetConversationPageAroundRunRequest } | { "type": "get_conversation_page_around_message", "payload": GetConversationPageAroundMessageRequest } | { "type": "search_conversation_history", "payload": SearchConversationHistoryRequest } | { "type": "get_conversation_recall_window", "payload": GetConversationRecallWindowRequest } | { "type": "get_tool_detail", "payload": GetToolDetailRequest } | { "type": "prioritize_queued_input", "payload": PrioritizeQueuedInputRequest } | { "type": "interrupt_run", "payload": InterruptRunRequest } | { "type": "resume_queued_input", "payload": ResumeQueuedInputRequest } | { "type": "reject_approval_and_stop_run", "payload": RejectApprovalAndStopRunRequest } | { "type": "get_config_status", "payload": GetConfigStatusRequest } | { "type": "list_models", "payload": ListModelsRequest } | { "type": "get_model", "payload": GetModelRequest } | { "type": "reload_config", "payload": ReloadConfigRequest } | { "type": "create_model", "payload": CreateModelRequest } | { "type": "update_model", "payload": UpdateModelRequest } | { "type": "delete_model", "payload": DeleteModelRequest } | { "type": "set_default_model", "payload": SetDefaultModelRequest } | { "type": "get_memory_capabilities", "payload": GetMemoryCapabilitiesRequest } | { "type": "get_persona", "payload": GetPersonaRequest } | { "type": "set_persona", "payload": SetPersonaRequest } | { "type": "list_pinned_memories", "payload": ListPinnedMemoriesRequest } | { "type": "create_pinned_memory", "payload": CreatePinnedMemoryRequest } | { "type": "update_pinned_memory", "payload": UpdatePinnedMemoryRequest } | { "type": "delete_pinned_memory", "payload": DeletePinnedMemoryRequest } | { "type": "get_system_context", "payload": GetSystemContextRequest } | { "type": "reload_permissions", "payload": ReloadPermissionsRequest } | { "type": "get_permission_document", "payload": GetPermissionDocumentRequest } | { "type": "replace_permission_document", "payload": ReplacePermissionDocumentRequest } | { "type": "list_pending_approvals", "payload": ListPendingApprovalsRequest } | { "type": "decide_approval", "payload": DecideApprovalRequest } | { "type": "validate_model_connection", "payload": ValidateModelConnectionRequest } | { "type": "register_workspace", "payload": RegisterWorkspaceRequest } | { "type": "get_workspace", "payload": GetWorkspaceRequest } | { "type": "list_workspaces", "payload": ListWorkspacesRequest } | { "type": "remove_workspace", "payload": RemoveWorkspaceRequest } | { "type": "get_attachment", "payload": GetAttachmentRequest } | { "type": "list_attachments", "payload": ListAttachmentsRequest } | { "type": "create_session", "payload": CreateSessionRequest } | { "type": "fork_session", "payload": ForkSessionRequest } | { "type": "prepare_delete_session", "payload": PrepareDeleteSessionRequest } | { "type": "delete_session", "payload": DeleteSessionRequest } | { "type": "list_sessions", "payload": ListSessionsRequest } | { "type": "get_session", "payload": GetSessionRequest } | { "type": "submit_input", "payload": SubmitInputRequest } | { "type": "cancel_queued_input", "payload": CancelQueuedInputRequest } | { "type": "resume_session", "payload": ResumeSessionRequest } | { "type": "retry_run", "payload": RetryRunRequest } | { "type": "get_run", "payload": GetRunRequest } | { "type": "list_runs", "payload": ListRunsRequest } | { "type": "list_child_tasks", "payload": ListChildTasksRequest } | { "type": "get_child_task", "payload": GetChildTaskRequest } | { "type": "cancel_child_task", "payload": CancelChildTaskRequest } | { "type": "archive_session", "payload": ArchiveSessionRequest } | { "type": "restore_session", "payload": RestoreSessionRequest } | { "type": "rename_session", "payload": RenameSessionRequest } | { "type": "set_session_pinned", "payload": SetSessionPinnedRequest } | { "type": "set_message_feedback", "payload": SetMessageFeedbackRequest } | { "type": "set_session_model", "payload": SetSessionModelRequest } | { "type": "set_session_variant", "payload": SetSessionVariantRequest } | { "type": "set_session_approval_mode", "payload": SetSessionApprovalModeRequest } | { "type": "reenter_from_user_message", "payload": ReenterFromUserMessageRequest } | { "type": "cancel_run", "payload": CancelRunRequest } | { "type": "shutdown_runtime", "payload": ShutdownRuntimeRequest };
 
 /**
  * Runtime 命令的成功结果；失败统一由 Host 发送 [`crate::RuntimeErrorInfo`]。
  */
-export type RuntimeCommandResult = { "type": "get_application_snapshot", "payload": GetApplicationSnapshotResult } | { "type": "get_session_view", "payload": GetSessionViewResult } | { "type": "get_child_task_view", "payload": GetChildTaskViewResult } | { "type": "list_conversation_page", "payload": ListConversationPageResult } | { "type": "get_conversation_page_around_run", "payload": GetConversationPageAroundRunResult } | { "type": "get_tool_detail", "payload": GetToolDetailResult } | { "type": "prioritize_queued_input", "payload": PrioritizeQueuedInputResult } | { "type": "interrupt_run", "payload": InterruptRunResult } | { "type": "resume_queued_input", "payload": ResumeQueuedInputResult } | { "type": "reject_approval_and_stop_run", "payload": RejectApprovalAndStopRunResult } | { "type": "get_config_status", "payload": GetConfigStatusResult } | { "type": "list_models", "payload": ListModelsResult } | { "type": "get_model", "payload": GetModelResult } | { "type": "reload_config", "payload": ReloadConfigResult } | { "type": "create_model", "payload": ConfigurationMutationResult } | { "type": "update_model", "payload": ConfigurationMutationResult } | { "type": "delete_model", "payload": ConfigurationMutationResult } | { "type": "set_default_model", "payload": ConfigurationMutationResult } | { "type": "reload_permissions", "payload": ReloadPermissionsResult } | { "type": "get_permission_document", "payload": GetPermissionDocumentResult } | { "type": "replace_permission_document", "payload": ReplacePermissionDocumentResult } | { "type": "list_pending_approvals", "payload": ListPendingApprovalsResult } | { "type": "decide_approval", "payload": DecideApprovalResult } | { "type": "validate_model_connection", "payload": ValidateModelConnectionResult } | { "type": "register_workspace", "payload": RegisterWorkspaceResult } | { "type": "get_workspace", "payload": GetWorkspaceResult } | { "type": "list_workspaces", "payload": ListWorkspacesResult } | { "type": "remove_workspace", "payload": RemoveWorkspaceResult } | { "type": "get_attachment", "payload": GetAttachmentResult } | { "type": "list_attachments", "payload": ListAttachmentsResult } | { "type": "create_session", "payload": CreateSessionResult } | { "type": "fork_session", "payload": ForkSessionResult } | { "type": "prepare_delete_session", "payload": PrepareDeleteSessionResult } | { "type": "delete_session", "payload": DeleteSessionResult } | { "type": "list_sessions", "payload": ListSessionsResult } | { "type": "get_session", "payload": GetSessionResult } | { "type": "submit_input", "payload": SubmitInputResult } | { "type": "cancel_queued_input", "payload": CancelQueuedInputResult } | { "type": "resume_session", "payload": ResumeSessionResult } | { "type": "retry_run", "payload": RetryRunResult } | { "type": "get_run", "payload": GetRunResult } | { "type": "list_runs", "payload": ListRunsResult } | { "type": "list_child_tasks", "payload": ListChildTasksResult } | { "type": "get_child_task", "payload": GetChildTaskResult } | { "type": "cancel_child_task", "payload": CancelChildTaskResult } | { "type": "archive_session", "payload": ArchiveSessionResult } | { "type": "restore_session", "payload": RestoreSessionResult } | { "type": "rename_session", "payload": RenameSessionResult } | { "type": "set_session_pinned", "payload": SetSessionPinnedResult } | { "type": "set_empty_session_workspace", "payload": SetEmptySessionWorkspaceResult } | { "type": "set_message_feedback", "payload": SetMessageFeedbackResult } | { "type": "set_session_model", "payload": SetSessionModelResult } | { "type": "set_session_variant", "payload": SetSessionVariantResult } | { "type": "set_session_approval_mode", "payload": SetSessionApprovalModeResult } | { "type": "reenter_from_user_message", "payload": ReenterFromUserMessageResult } | { "type": "cancel_run", "payload": CancelRunResult } | { "type": "shutdown_runtime", "payload": ShutdownRuntimeResult };
+export type RuntimeCommandResult = { "type": "get_application_snapshot", "payload": GetApplicationSnapshotResult } | { "type": "get_session_view", "payload": GetSessionViewResult } | { "type": "get_child_task_view", "payload": GetChildTaskViewResult } | { "type": "list_conversation_page", "payload": ListConversationPageResult } | { "type": "get_conversation_page_around_run", "payload": GetConversationPageAroundRunResult } | { "type": "get_conversation_page_around_message", "payload": GetConversationPageAroundMessageResult } | { "type": "search_conversation_history", "payload": SearchConversationHistoryResult } | { "type": "get_conversation_recall_window", "payload": GetConversationRecallWindowResult } | { "type": "get_tool_detail", "payload": GetToolDetailResult } | { "type": "prioritize_queued_input", "payload": PrioritizeQueuedInputResult } | { "type": "interrupt_run", "payload": InterruptRunResult } | { "type": "resume_queued_input", "payload": ResumeQueuedInputResult } | { "type": "reject_approval_and_stop_run", "payload": RejectApprovalAndStopRunResult } | { "type": "get_config_status", "payload": GetConfigStatusResult } | { "type": "list_models", "payload": ListModelsResult } | { "type": "get_model", "payload": GetModelResult } | { "type": "reload_config", "payload": ReloadConfigResult } | { "type": "create_model", "payload": ConfigurationMutationResult } | { "type": "update_model", "payload": ConfigurationMutationResult } | { "type": "delete_model", "payload": ConfigurationMutationResult } | { "type": "set_default_model", "payload": ConfigurationMutationResult } | { "type": "get_memory_capabilities", "payload": GetMemoryCapabilitiesResult } | { "type": "get_persona", "payload": GetPersonaResult } | { "type": "set_persona", "payload": SetPersonaResult } | { "type": "list_pinned_memories", "payload": ListPinnedMemoriesResult } | { "type": "create_pinned_memory", "payload": PinnedMemoryMutationResult } | { "type": "update_pinned_memory", "payload": PinnedMemoryMutationResult } | { "type": "delete_pinned_memory", "payload": PinnedMemoryMutationResult } | { "type": "get_system_context", "payload": GetSystemContextResult } | { "type": "reload_permissions", "payload": ReloadPermissionsResult } | { "type": "get_permission_document", "payload": GetPermissionDocumentResult } | { "type": "replace_permission_document", "payload": ReplacePermissionDocumentResult } | { "type": "list_pending_approvals", "payload": ListPendingApprovalsResult } | { "type": "decide_approval", "payload": DecideApprovalResult } | { "type": "validate_model_connection", "payload": ValidateModelConnectionResult } | { "type": "register_workspace", "payload": RegisterWorkspaceResult } | { "type": "get_workspace", "payload": GetWorkspaceResult } | { "type": "list_workspaces", "payload": ListWorkspacesResult } | { "type": "remove_workspace", "payload": RemoveWorkspaceResult } | { "type": "get_attachment", "payload": GetAttachmentResult } | { "type": "list_attachments", "payload": ListAttachmentsResult } | { "type": "create_session", "payload": CreateSessionResult } | { "type": "fork_session", "payload": ForkSessionResult } | { "type": "prepare_delete_session", "payload": PrepareDeleteSessionResult } | { "type": "delete_session", "payload": DeleteSessionResult } | { "type": "list_sessions", "payload": ListSessionsResult } | { "type": "get_session", "payload": GetSessionResult } | { "type": "submit_input", "payload": SubmitInputResult } | { "type": "cancel_queued_input", "payload": CancelQueuedInputResult } | { "type": "resume_session", "payload": ResumeSessionResult } | { "type": "retry_run", "payload": RetryRunResult } | { "type": "get_run", "payload": GetRunResult } | { "type": "list_runs", "payload": ListRunsResult } | { "type": "list_child_tasks", "payload": ListChildTasksResult } | { "type": "get_child_task", "payload": GetChildTaskResult } | { "type": "cancel_child_task", "payload": CancelChildTaskResult } | { "type": "archive_session", "payload": ArchiveSessionResult } | { "type": "restore_session", "payload": RestoreSessionResult } | { "type": "rename_session", "payload": RenameSessionResult } | { "type": "set_session_pinned", "payload": SetSessionPinnedResult } | { "type": "set_message_feedback", "payload": SetMessageFeedbackResult } | { "type": "set_session_model", "payload": SetSessionModelResult } | { "type": "set_session_variant", "payload": SetSessionVariantResult } | { "type": "set_session_approval_mode", "payload": SetSessionApprovalModeResult } | { "type": "reenter_from_user_message", "payload": ReenterFromUserMessageResult } | { "type": "cancel_run", "payload": CancelRunResult } | { "type": "shutdown_runtime", "payload": ShutdownRuntimeResult };
 
 /**
  * 客户端可以稳定分支处理的 Runtime 错误码。
@@ -1231,6 +1327,28 @@ export type RuntimeHostHealthStatus = "ready";
 export type RuntimeLifecycle = "running" | "shutting_down" | "stopped";
 
 /**
+ * 查询历史会话标题和正文。
+ */
+export type SearchConversationHistoryRequest = {
+/**
+ * 发起搜索的 Session，用于解析 Session/Workspace 范围。
+ */
+session_id: SessionId, query: string, scope: ConversationHistoryScope,
+/**
+ * 产品层分页偏移；客户端不得解析为存储序号。
+ */
+offset: number, limit: number, };
+
+/**
+ * 一页历史搜索结果。
+ */
+export type SearchConversationHistoryResult = { items: Array<ConversationHistoryHit>, next_offset: number | null,
+/**
+ * 部分派生索引仍在重建时，已就绪结果仍可展示。
+ */
+partial: boolean, failed_owners: Array<ConversationOwner>, };
+
+/**
  * Runtime 中一个会话的不透明标识。
  */
 export type SessionId = string;
@@ -1321,18 +1439,15 @@ export type SessionViewSnapshot = { session: SessionSummary, active_run: RunSnap
 export type SetDefaultModelRequest = { model_key: ModelKey, expected_revision: string, };
 
 /**
- * 为完全空的 Session 重新冻结可选 Workspace。
- */
-export type SetEmptySessionWorkspaceRequest = { session_id: SessionId, workspace_id: WorkspaceId | null, };
-
-export type SetEmptySessionWorkspaceResult = { session: SessionSummary, };
-
-/**
  * 保存或清除一条 Assistant Message 的本地反馈。
  */
 export type SetMessageFeedbackRequest = { session_id: SessionId, message_id: MessageId, feedback: MessageFeedback | null, };
 
 export type SetMessageFeedbackResult = { message_id: MessageId, feedback: MessageFeedback | null, };
+
+export type SetPersonaRequest = { expected_revision: number, enabled: boolean, content: string, };
+
+export type SetPersonaResult = { applied: boolean, persona: PersonaSnapshot, };
 
 /**
  * 更新 Session 后续 Run 捕获的审批模式。
@@ -1406,6 +1521,8 @@ idempotency_key?: IdempotencyKey | null, };
  */
 export type SubmitInputResult = { input_id: InputId, run: RunSnapshot, };
 
+export type SystemContextSnapshot = { session_id: SessionId, session_created_at_ms: number | null, parts: Array<string>, };
+
 /**
  * 一次完整模型请求由 Provider 最终确认的 token 用量。
  */
@@ -1467,7 +1584,19 @@ export type ToolCallId = string;
 /**
  * 点击工具事件后按需读取的详情。
  */
-export type ToolDetailSnapshot = { owner: ConversationOwner, message_id: MessageId, run_id: RunId | null, call_id: ToolCallId, tool_name: string, status: ToolActivityStatus, input: ToolInputSnapshot, result_summary: string | null, stdout: string | null, stderr: string | null, error: RuntimeErrorInfo | null, files: Array<ToolFileReference>, output_truncated: boolean, historical_fields_missing: boolean, };
+export type ToolDetailSnapshot = { owner: ConversationOwner, message_id: MessageId, run_id: RunId | null, call_id: ToolCallId, tool_name: string, status: ToolActivityStatus, input: ToolInputSnapshot,
+/**
+ * 有界、格式化后的完整请求 JSON；用于详情代码块，不替代结构化输入投影。
+ */
+request_json: string | null, result_summary: string | null,
+/**
+ * 有界、格式化后的完整结果 JSON；纯文本结果保持为空。
+ */
+result_json: string | null,
+/**
+ * 仅 `recall_memory` 提供；引用已由 Runtime 校验并转换为安全导航目标。
+ */
+recall: RecallToolDetailSnapshot | null, stdout: string | null, stderr: string | null, error: RuntimeErrorInfo | null, files: Array<ToolFileReference>, output_truncated: boolean, historical_fields_missing: boolean, };
 
 /**
  * 消息列表中的低干扰工具事件。
@@ -1501,6 +1630,8 @@ export type ToolInputSnapshot = { "type": "general", summary: string, } | { "typ
 export type ToolOutputChannel = "stdout" | "stderr";
 
 export type UpdateModelRequest = { model: ModelConfigurationInput, expected_revision: string, set_default: boolean, };
+
+export type UpdatePinnedMemoryRequest = { id: string, expected_revision: number, category: string, content: string, attributes: { [key in string]: MemoryAttributeValue }, };
 
 /**
  * HTTP 流式上传完成后的稳定业务结果。

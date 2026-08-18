@@ -19,8 +19,8 @@ use agent_core::{
     ToolAuthorization, ToolAuthorizer, ToolCompletionStatus,
 };
 use agent_memory::{
-    MemoryPropertyValue, MemoryRecallRequest, MemoryRecallResponse, PinnedMemoryCategory,
-    PinnedMemoryDraft, PinnedMemoryLimits, RecallItem, RecallOrigin, RecallSourceId,
+    MemoryRecallRequest, MemoryRecallResponse, PinnedMemoryCategory, PinnedMemoryDraft,
+    PinnedMemoryLimits, RecallItem, RecallOrigin, RecallSourceId,
 };
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelCapabilities, ModelError, ModelEvent,

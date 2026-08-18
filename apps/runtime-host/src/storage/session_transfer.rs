@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
-use assistant_protocol::{DeleteSessionImpact, SessionId};
+use assistant_protocol::{ConversationOwner, DeleteSessionImpact, SessionId};
 use assistant_runtime::{
     SessionDeletion, SessionFork, StoreError, StoreErrorKind, StoredAttachment,
     StoredAttachmentState, StoredConversationState, StoredSession, StoredSessionFork,
@@ -180,7 +180,7 @@ impl StorageEngine {
             remove_created_session_directories(&paths);
             return Err(error);
         }
-        Ok(StoredSessionFork {
+        let stored = StoredSessionFork {
             session: StoredSession {
                 session_id: fork.session.session_id,
                 title: fork.session.title,
@@ -201,7 +201,14 @@ impl StorageEngine {
             },
             conversation: forked_conversation,
             attachments,
-        })
+        };
+        self.mark_recall_owner_dirty_now(
+            &ConversationOwner::MainSession {
+                session_id: stored.session.session_id.clone(),
+            },
+            1,
+        );
+        Ok(stored)
     }
 
     pub(super) fn inspect_session_deletion(

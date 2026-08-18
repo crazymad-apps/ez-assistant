@@ -328,10 +328,6 @@ impl SessionController {
         &self.id
     }
 
-    pub(crate) fn created_at_ms(&self) -> i64 {
-        self.created_at_ms
-    }
-
     pub(crate) fn model_key(&self) -> RuntimeResult<ModelKey> {
         Ok(self.lock_state()?.model_key.clone())
     }

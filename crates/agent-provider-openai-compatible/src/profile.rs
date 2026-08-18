@@ -1,5 +1,17 @@
 use agent_types::{ProtocolId, ProviderId};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Provider 接受的 function parameters Schema 方言。
+///
+/// 规范工具定义仍保存完整 JSON Schema；这里只决定发送到 Provider 前是否需要降级，
+/// 避免把具体模型服务的兼容限制反向泄漏到工具领域类型。
+pub enum ToolSchemaDialect {
+    /// 原样发送完整 JSON Schema。
+    JsonSchema2020_12,
+    /// 发送 OpenAI function calling 常见兼容子集。
+    OpenAiFunctionSubset,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// 一个 OpenAI-compatible Provider 的协议方言配置。
 ///
@@ -34,6 +46,8 @@ pub struct Profile {
     /// 也不传该参数（<https://api-docs.deepseek.com/guides/thinking_mode/>），
     /// 因此 DeepSeek 方言为 `false`。
     pub supports_tool_choice: bool,
+    /// function parameters 使用的 Schema 方言。
+    pub tool_schema_dialect: ToolSchemaDialect,
     /// 带 tool calls 的 assistant 消息是否必须回传 reasoning 字段。
     ///
     /// DeepSeek thinking 模式要求：发生工具调用的轮次，其 `reasoning_content` 必须在
@@ -67,6 +81,9 @@ impl Profile {
             supports_stop: true,
             max_output_tokens_field: Some("max_tokens".to_owned()),
             supports_tool_choice: true,
+            // OpenAI-compatible 只描述传输形态，不保证第三方服务完整实现
+            // Draft 2020-12；默认采用 function calling 公共子集更稳妥。
+            tool_schema_dialect: ToolSchemaDialect::OpenAiFunctionSubset,
             tool_calls_require_reasoning: false,
             cached_input_tokens_field: None,
         }
@@ -101,6 +118,9 @@ impl Profile {
     ///   取值是 `high` / `max`（`low` / `medium` 兼容映射为 `high`），与规范
     ///   `ReasoningEffort` 三档无法无损对应；本里程碑按 M6 契约不声明该映射，
     ///   需要时调用方可经 `provider_options` 的 `deepseek` 命名空间原样透传。
+    /// - 工具参数先降级为 function calling 兼容子集。领域层由 schemars 生成的
+    ///   Draft 2020-12 Schema 会包含根级 `oneOf`、字符串 `const`、可空联合类型和
+    ///   `uint` format；这些结构不是 DeepSeek 工具 Schema 的稳定公共子集。
     pub fn deepseek() -> Self {
         Self {
             provider: ProviderId::new("deepseek").expect("`deepseek` is a valid provider id"),
@@ -113,6 +133,7 @@ impl Profile {
             supports_stop: true,
             max_output_tokens_field: Some("max_tokens".to_owned()),
             supports_tool_choice: false,
+            tool_schema_dialect: ToolSchemaDialect::OpenAiFunctionSubset,
             tool_calls_require_reasoning: true,
             cached_input_tokens_field: Some("prompt_cache_hit_tokens".to_owned()),
         }

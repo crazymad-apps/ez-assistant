@@ -98,7 +98,7 @@ export class RuntimeLifecycleCoordinator {
     const current_id = navigation.selected_session_id;
     const current_exists = application.active_sessions.some((session) => session.session_id === current_id);
     const session_id = current_exists ? current_id : (application.active_sessions[0]?.session_id ?? null);
-    navigation.selectSession(session_id);
+    navigation.selectSession(session_id, false);
     if (!navigation.workspace_expansion_initialized) {
       for (const workspace of application.workspaces) {
         navigation.ensureWorkspaceExpanded(workspace.workspace_id);
@@ -305,7 +305,7 @@ export class RuntimeLifecycleCoordinator {
     const event = envelope.event;
     if (event.type === "session_deleted") {
       if (this.dependencies.navigation.selected_session_id === event.session_id) {
-        this.dependencies.navigation.selectSession(null);
+        this.dependencies.navigation.selectSession(null, false);
       }
       void this.loadApplication().then(() => this.selectInitialSession());
       return;

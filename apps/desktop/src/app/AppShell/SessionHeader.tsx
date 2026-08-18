@@ -75,24 +75,42 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
 
   return (
     <header aria-label="会话标题栏" className={styles.session_header}>
-      <DropdownMenu>
-        <DropdownMenuTrigger aria-label="选择最近会话" className={styles.session_switcher}>
-          <Icon name="chevron-down" size={16} />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" aria-label="最近会话" className={styles.recent_menu}>
-          {recent.map((item) => (
-            <DropdownMenuItem
-              aria-current={item.session_id === session?.session_id ? "page" : undefined}
-              key={item.session_id}
-              onSelect={() => void store.selectSession(item.session_id)}
-            >
-              <span>{item.title}</span>
-              {item.session_id === session?.session_id && <Icon name="check" size={14} />}
-            </DropdownMenuItem>
-          ))}
-          {recent.length === 0 && <span className={styles.recent_empty}>暂无会话</span>}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className={styles.session_navigation}>
+        <button
+          aria-label="返回上一处会话位置"
+          disabled={!store.navigation.can_go_back}
+          onClick={() => void store.navigateBack()}
+          type="button"
+        >
+          <Icon name="chevron-left" size={15} />
+        </button>
+        <button
+          aria-label="前往下一处会话位置"
+          disabled={!store.navigation.can_go_forward}
+          onClick={() => void store.navigateForward()}
+          type="button"
+        >
+          <Icon name="chevron-right" size={15} />
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger aria-label="选择最近会话" className={styles.session_switcher}>
+            <Icon name="chevron-down" size={16} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" aria-label="最近会话" className={styles.recent_menu}>
+            {recent.map((item) => (
+              <DropdownMenuItem
+                aria-current={item.session_id === session?.session_id ? "page" : undefined}
+                key={item.session_id}
+                onSelect={() => void store.selectSession(item.session_id)}
+              >
+                <span>{item.title}</span>
+                {item.session_id === session?.session_id && <Icon name="check" size={14} />}
+              </DropdownMenuItem>
+            ))}
+            {recent.length === 0 && <span className={styles.recent_empty}>暂无会话</span>}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <div className={styles.session_title_slot}>
         {editing && session ? (
           <input
@@ -158,13 +176,6 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 <DropdownMenuItem onSelect={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}>
                   <span>固定会话</span>
                   {session.is_pinned && <Icon name="check" size={14} />}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={blocks_archive || store.pending_workspace_action}
-                  onSelect={() => void store.changeSessionWorkspace(session.session_id)}
-                  title={blocks_archive ? "运行、队列或审批尚未结束" : undefined}
-                >
-                  <span>重新选择工作目录</span>
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={blocks_archive}

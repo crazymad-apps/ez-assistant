@@ -81,7 +81,14 @@ function approvalQuestion(subject: ToolApprovalSubject): string {
 }
 
 function approvalContext(subject: ToolApprovalSubject): string {
-  return subject.type === "shell" ? subject.working_directory : "当前会话";
+  if (subject.type === "shell") return subject.working_directory;
+  if (subject.type === "general") {
+    if (subject.tool_name === "list_pinned_memories") return "读取置顶记忆的最新状态";
+    if (["pin_memory", "update_pinned_memory", "unpin_memory"].includes(subject.tool_name)) {
+      return "修改将影响未来新建会话使用的置顶记忆";
+    }
+  }
+  return "当前会话";
 }
 
 function approvalDecisionLabel(decision: ApprovalDecision): string {

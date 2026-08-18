@@ -620,6 +620,14 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         assistant_protocol::ToolInputSnapshot::File { path, .. } if path == "report.txt"
     ));
     assert_eq!(detail.result_summary.as_deref(), Some("{\"saved\":true}"));
+    assert_eq!(
+        detail.request_json.as_deref(),
+        Some("{\n  \"path\": \"report.txt\"\n}")
+    );
+    assert_eq!(
+        detail.result_json.as_deref(),
+        Some("{\n  \"saved\": true\n}")
+    );
     assert_eq!(detail.files.len(), 1);
     assert_eq!(detail.files[0].display_path.as_deref(), Some("report.txt"));
     let resolved = runtime

@@ -7,23 +7,28 @@ import type {
   ApprovalMode,
   ChildTaskId,
   ConversationOwner,
+  ConversationHistoryHit,
   InputId,
   MessageId,
   MessageFeedback,
   ModelKey,
   PrepareDeleteSessionResult,
+  RecallNavigationTarget,
   RunId,
   SessionId,
   ToolCallId,
   ToolDetailSnapshot,
+  SystemContextSnapshot,
   WorkspaceId,
 } from "../generated/assistant-protocol";
 import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import { RuntimeClientError } from "../runtime-client/RuntimeClient";
 import { ConnectionStore } from "./ConnectionStore";
+import { ConversationSearchStore } from "./ConversationSearchStore";
 import { DesktopLifecycleStore } from "./DesktopLifecycleStore";
 import { LiveExecutionStore } from "./LiveExecutionStore";
-import { NavigationStore } from "./NavigationStore";
+import { MemorySettingsStore } from "./MemorySettingsStore";
+import { NavigationStore, type ConversationLocation } from "./NavigationStore";
 import { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
 import { RuntimeProjectionStore } from "./RuntimeProjectionStore";
 import { RunInteractionController } from "./RunInteractionController";
@@ -35,7 +40,9 @@ export class RootStore {
   readonly projection = new RuntimeProjectionStore();
   readonly live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
+  readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
+  readonly memory_settings: MemorySettingsStore;
   readonly desktop_lifecycle: DesktopLifecycleStore;
   pending_session_action = false;
   pending_workspace_action = false;
@@ -49,6 +56,7 @@ export class RootStore {
   readonly #session_management: SessionManagementController;
   #disposed = false;
   #preferences_save_timer: number | null = null;
+  #conversation_search_revision = 0;
   #runtime_state_disposer: IReactionDisposer;
 
   constructor() {
@@ -88,10 +96,12 @@ export class RootStore {
       },
       refresh_application: () => this.#runtime.loadApplication(),
     });
+    this.memory_settings = new MemorySettingsStore({
+      get_client: () => this.#runtime.client,
+    });
     this.#session_management = new SessionManagementController({
       connection: this.connection,
       navigation: this.navigation,
-      projection: this.projection,
       runtime: this.#runtime,
       save_preferences: () => this.#schedulePreferencesSave(),
       select_session: (session_id) => this.selectSession(session_id),
@@ -115,13 +125,18 @@ export class RootStore {
       selectSession: action,
       openChildTask: action,
       closeChildTask: action,
+      navigateBack: action,
+      navigateForward: action,
+      searchConversationHistory: action,
+      selectConversationHistoryHit: action,
+      openConversationHistoryHit: action,
+      openRecallNavigationTarget: action,
       cancelChildTask: action,
       createSession: action,
       forkSession: action,
       prepareDeleteSession: action,
       deleteSession: action,
       addWorkspace: action,
-      changeSessionWorkspace: action,
       openWorkspace: action,
       copyWorkspacePath: action,
       submitInput: action,
@@ -144,6 +159,7 @@ export class RootStore {
       showInteractionError: action,
       loadPreviousConversationPage: action,
       locateConversationRun: action,
+      getSystemContext: action,
       toggleWorkspace: action,
       toggleLeftSidebar: action,
       toggleRightSidebar: action,
@@ -206,6 +222,127 @@ export class RootStore {
     this.navigation.closeChildTask();
   }
 
+  async navigateBack(): Promise<void> {
+    const location = this.navigation.goBack();
+    if (location) {
+      const loaded = await this.#loadConversationLocation(location);
+      if (!loaded) {
+        this.navigation.goForward();
+      }
+    }
+  }
+
+  async navigateForward(): Promise<void> {
+    const location = this.navigation.goForward();
+    if (location) {
+      const loaded = await this.#loadConversationLocation(location);
+      if (!loaded) {
+        this.navigation.goBack();
+      }
+    }
+  }
+
+  async searchConversationHistory(reset = true): Promise<void> {
+    const client = this.#runtime.client;
+    const session_id = this.navigation.selected_session_id;
+    const query = this.conversation_search.query.trim();
+    if (!client || !session_id || !query) {
+      return;
+    }
+    const offset = reset ? 0 : this.conversation_search.next_offset;
+    if (offset === null) {
+      return;
+    }
+    const revision = ++this.#conversation_search_revision;
+    const scope = this.conversation_search.scope;
+    this.conversation_search.beginSearch(reset);
+    try {
+      const result = await client.command({
+        type: "search_conversation_history",
+        payload: { session_id, query, scope, offset, limit: 40 },
+      });
+      if (
+        revision !== this.#conversation_search_revision
+        || query !== this.conversation_search.query.trim()
+        || scope !== this.conversation_search.scope
+      ) {
+        return;
+      }
+      runInAction(() => this.conversation_search.applySearch(
+        result.payload.items,
+        result.payload.next_offset,
+        result.payload.partial,
+        reset,
+      ));
+    } catch (error: unknown) {
+      if (revision === this.#conversation_search_revision) {
+        runInAction(() => this.conversation_search.failSearch(displayError(error)));
+      }
+    }
+  }
+
+  async selectConversationHistoryHit(hit: ConversationHistoryHit): Promise<void> {
+    this.conversation_search.selectHit(hit);
+    if (!hit.message_id) {
+      await this.openConversationHistoryHit(hit);
+      return;
+    }
+    const client = this.#runtime.client;
+    const session_id = this.navigation.selected_session_id;
+    if (!client || !session_id) {
+      this.conversation_search.failRecall("Runtime 当前不可用。");
+      return;
+    }
+    this.conversation_search.beginRecall();
+    try {
+      const result = await client.command({
+        type: "get_conversation_recall_window",
+        payload: {
+          session_id,
+          owner: hit.owner,
+          message_id: hit.message_id,
+          before: 3,
+          after: 3,
+        },
+      });
+      runInAction(() => this.conversation_search.applyRecall(result.payload));
+    } catch (error: unknown) {
+      runInAction(() => this.conversation_search.failRecall(displayError(error)));
+    }
+  }
+
+  async openConversationHistoryHit(hit: ConversationHistoryHit): Promise<void> {
+    const message_id = hit.message_id;
+    const location: ConversationLocation = {
+      session_id: hit.owner.session_id,
+      child_task_id: hit.owner.type === "child_task" ? hit.owner.child_task_id : null,
+      anchor_message_id: message_id,
+      scroll_offset: null,
+    };
+    // 先确认来源仍可读取，再提交 UI 导航，避免失效结果把用户带离当前会话。
+    if (!await this.#loadConversationLocation(location)) {
+      return;
+    }
+    this.navigation.setListMode(hit.lifecycle === "archived" ? "archived" : "active");
+    this.navigation.navigateTo(location);
+    this.conversation_search.closeRecall();
+  }
+
+  /** 打开 Runtime 已校验的 Recall 来源，并将当前位置压入 UI 导航历史栈。 */
+  async openRecallNavigationTarget(target: RecallNavigationTarget): Promise<void> {
+    const location: ConversationLocation = {
+      session_id: target.owner.session_id,
+      child_task_id: target.owner.type === "child_task" ? target.owner.child_task_id : null,
+      anchor_message_id: target.message_id,
+      scroll_offset: null,
+    };
+    if (!await this.#loadConversationLocation(location)) {
+      return;
+    }
+    this.navigation.setListMode(target.lifecycle === "archived" ? "archived" : "active");
+    this.navigation.navigateTo(location);
+  }
+
   async cancelChildTask(session_id: SessionId, child_task_id: ChildTaskId): Promise<void> {
     await this.#run_interaction.cancelChildTask(session_id, child_task_id);
   }
@@ -232,10 +369,6 @@ export class RootStore {
 
   async addWorkspace(): Promise<void> {
     await this.#session_management.addWorkspace();
-  }
-
-  async changeSessionWorkspace(session_id: SessionId): Promise<void> {
-    await this.#session_management.changeSessionWorkspace(session_id);
   }
 
   async openWorkspace(workspace_id: WorkspaceId): Promise<void> {
@@ -410,6 +543,70 @@ export class RootStore {
     }
   }
 
+  async #loadConversationLocation(location: ConversationLocation): Promise<boolean> {
+    const client = this.#runtime.client;
+    if (!client) {
+      this.showInteractionError("Runtime 当前不可用。");
+      return false;
+    }
+    try {
+      let located: Awaited<ReturnType<typeof client.command<"get_conversation_page_around_message">>> | null = null;
+      if (location.anchor_message_id) {
+        located = await client.command({
+          type: "get_conversation_page_around_message",
+          payload: {
+            owner: location.child_task_id
+              ? {
+                  type: "child_task",
+                  session_id: location.session_id,
+                  child_task_id: location.child_task_id,
+                }
+              : { type: "main_session", session_id: location.session_id },
+            message_id: location.anchor_message_id,
+            limit: 30,
+          },
+        });
+      }
+      await this.#runtime.loadSession(location.session_id);
+      if (location.child_task_id) {
+        await this.#runtime.loadChildTask(location.session_id, location.child_task_id);
+      }
+      if (located) {
+        runInAction(() => {
+          const applied = location.child_task_id
+            ? this.projection.applyLocatedChildConversationPage(
+                location.child_task_id,
+                located.payload.snapshot,
+              )
+            : this.projection.applyLocatedConversationPage(
+                location.session_id,
+                located.payload.snapshot,
+              );
+          if (applied && location.anchor_message_id) {
+            this.navigation.requestConversationAnchor(location.anchor_message_id);
+          }
+        });
+      }
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => this.showInteractionError(
+        conversationSourceError(error),
+      ));
+      return false;
+    }
+  }
+
+  async getSystemContext(session_id: SessionId): Promise<SystemContextSnapshot> {
+    if (!this.#runtime.client) {
+      throw new RuntimeClientError("runtime_unavailable", "Runtime 当前不可用。");
+    }
+    const result = await this.#runtime.client.command({
+      type: "get_system_context",
+      payload: { session_id },
+    });
+    return result.payload.snapshot;
+  }
+
   async reloadSelectedConversation(): Promise<void> {
     const session_id = this.navigation.selected_session_id;
     if (session_id) {
@@ -446,4 +643,17 @@ export class RootStore {
 
 function displayError(error: unknown): string {
   return error instanceof Error ? error.message : "无法连接本地 Runtime。";
+}
+
+/** 将来源导航错误转换成用户可行动的提示，同时保留未知 Runtime 错误详情。 */
+function conversationSourceError(error: unknown): string {
+  if (error instanceof RuntimeClientError) {
+    if (error.code === "snapshot_stale") {
+      return "来源会话已更新，请重新搜索后再打开。";
+    }
+    if (error.code === "session_not_found" || error.code === "child_task_not_found") {
+      return "来源会话已不存在，当前页面已保留。";
+    }
+  }
+  return displayError(error);
 }

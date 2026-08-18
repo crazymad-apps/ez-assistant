@@ -15,7 +15,7 @@ import type {
 } from "../generated/assistant-protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
-export type SettingsPage = "runtime" | "models" | "permissions";
+export type SettingsPage = "runtime" | "models" | "permissions" | "memory";
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;

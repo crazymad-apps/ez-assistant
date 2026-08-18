@@ -7,8 +7,9 @@ use std::sync::Mutex;
 use agent_memory::{
     MemoryRecall, MemoryRecallError, MemoryRecallFuture, MemoryRecallRequest, MemoryRecallResponse,
     PinnedMemoryDraft, PinnedMemoryEntry, PinnedMemoryFuture, PinnedMemoryId, PinnedMemoryPatch,
-    PinnedMemoryStore, PinnedMemoryStoreError, RecallSource, RecallSourceError, RecallSourceFuture,
-    RecallSourceId, RecallSourceRequest, RecallSourceResponse,
+    PinnedMemoryStore, PinnedMemoryStoreError, RecallReferenceReadFuture,
+    RecallReferenceReadRequest, RecallReferenceReader, RecallSource, RecallSourceError,
+    RecallSourceFuture, RecallSourceId, RecallSourceRequest, RecallSourceResponse,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -242,6 +243,7 @@ impl RecallSource for ScriptedRecallSource {
 pub struct ScriptedMemoryRecall {
     result: Result<MemoryRecallResponse, MemoryRecallError>,
     requests: Mutex<Vec<MemoryRecallRequest>>,
+    read_requests: Mutex<Vec<RecallReferenceReadRequest>>,
 }
 
 impl ScriptedMemoryRecall {
@@ -250,6 +252,7 @@ impl ScriptedMemoryRecall {
         Self {
             result,
             requests: Mutex::new(Vec::new()),
+            read_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -259,6 +262,33 @@ impl ScriptedMemoryRecall {
             .lock()
             .expect("memory recall requests poisoned")
             .clone()
+    }
+
+    /// 返回按调用顺序记录的全部稳定引用续读请求。
+    pub fn read_requests(&self) -> Vec<RecallReferenceReadRequest> {
+        self.read_requests
+            .lock()
+            .expect("recall read requests poisoned")
+            .clone()
+    }
+}
+
+impl RecallReferenceReader for ScriptedMemoryRecall {
+    fn read_reference(
+        &self,
+        request: RecallReferenceReadRequest,
+        cancellation: CancellationToken,
+    ) -> RecallReferenceReadFuture<'_, MemoryRecallResponse> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(MemoryRecallError::Cancelled);
+            }
+            self.read_requests
+                .lock()
+                .expect("recall read requests poisoned")
+                .push(request);
+            self.result.clone()
+        })
     }
 }
 
@@ -361,11 +391,13 @@ mod tests {
             }],
             failures: vec![],
             truncated: false,
+            window: None,
         }));
         recall
             .recall(
                 MemoryRecallRequest {
                     query: "query".to_owned(),
+                    scope: agent_memory::RecallScope::Session,
                     limit: std::num::NonZeroUsize::new(1).expect("non-zero"),
                     sources: None,
                 },

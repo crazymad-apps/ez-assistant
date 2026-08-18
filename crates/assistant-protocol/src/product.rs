@@ -8,8 +8,8 @@ use ts_rs::TS;
 use crate::{
     ApprovalId, ApprovalSnapshot, AttachmentId, AttachmentSummary, ChildTaskId, ChildTaskSnapshot,
     ConfigurationStatus, InputId, MessageId, ModelConfiguration, PartId, RunId, RunSnapshot,
-    RunStatus, RuntimeErrorInfo, RuntimeLifecycle, SessionId, SessionSummary, TokenUsageSnapshot,
-    ToolActivityStatus, ToolCallId, WorkspaceSummary,
+    RunStatus, RuntimeErrorInfo, RuntimeLifecycle, SessionId, SessionLifecycle, SessionSummary,
+    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, WorkspaceSummary,
 };
 
 /// 带有 Runtime 观察水位的权威快照。
@@ -27,6 +27,8 @@ pub struct ObservedSnapshot<T> {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ApplicationCapabilities {
     pub conversation_paging: bool,
+    /// 是否支持跨会话正文检索和按消息定位。
+    pub conversation_search: bool,
     pub tool_detail: bool,
     pub queue_control: bool,
     pub approval_queue: bool,
@@ -210,6 +212,45 @@ pub struct ConversationFileReference {
     pub file: ToolFileReference,
 }
 
+/// Runtime 校验 Recall 不透明引用后提供给桌面端的安全导航目标。
+///
+/// WebView 只消费该投影，不接触也不解析带签名的 Recall reference。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RecallNavigationTarget {
+    pub owner: ConversationOwner,
+    pub message_id: MessageId,
+    pub lifecycle: crate::SessionLifecycle,
+}
+
+/// Recall 工具详情中的单条正文及其可选来源导航。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RecallToolDetailItem {
+    pub content: String,
+    pub role: Option<String>,
+    pub created_at_ms: Option<i64>,
+    pub navigation: Option<RecallNavigationTarget>,
+}
+
+/// Recall Source 的非致命失败；不阻止其他候选继续展示。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RecallToolDetailFailure {
+    pub source_id: String,
+    pub kind: String,
+    pub message: String,
+}
+
+/// `recall_memory` 的桌面专用详情投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RecallToolDetailSnapshot {
+    pub items: Vec<RecallToolDetailItem>,
+    pub failures: Vec<RecallToolDetailFailure>,
+    pub truncated: bool,
+}
+
 /// 点击工具事件后按需读取的详情。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -221,7 +262,13 @@ pub struct ToolDetailSnapshot {
     pub tool_name: String,
     pub status: ToolActivityStatus,
     pub input: ToolInputSnapshot,
+    /// 有界、格式化后的完整请求 JSON；用于详情代码块，不替代结构化输入投影。
+    pub request_json: Option<String>,
     pub result_summary: Option<String>,
+    /// 有界、格式化后的完整结果 JSON；纯文本结果保持为空。
+    pub result_json: Option<String>,
+    /// 仅 `recall_memory` 提供；引用已由 Runtime 校验并转换为安全导航目标。
+    pub recall: Option<RecallToolDetailSnapshot>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub error: Option<RuntimeErrorInfo>,
@@ -405,6 +452,106 @@ pub struct GetConversationPageAroundRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct GetConversationPageAroundRunResult {
+    pub snapshot: ObservedSnapshot<ConversationPage>,
+    pub anchor_message_id: MessageId,
+}
+
+/// Desktop 历史搜索的业务范围。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationHistoryScope {
+    /// 当前 Session 主会话及其全部子任务会话。
+    Session,
+    /// 与当前 Session 绑定到同一 Workspace 的全部会话。
+    Workspace,
+    /// Runtime 中全部仍可访问的活动及归档会话。
+    Global,
+}
+
+/// 历史搜索命中的来源类型。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationHistoryMatchKind {
+    Title,
+    Message,
+}
+
+/// 查询历史会话标题和正文。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SearchConversationHistoryRequest {
+    /// 发起搜索的 Session，用于解析 Session/Workspace 范围。
+    pub session_id: SessionId,
+    pub query: String,
+    pub scope: ConversationHistoryScope,
+    /// 产品层分页偏移；客户端不得解析为存储序号。
+    pub offset: u32,
+    pub limit: u32,
+}
+
+/// 一条可导航的历史搜索命中。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConversationHistoryHit {
+    pub owner: ConversationOwner,
+    pub session_title: String,
+    pub child_task_title: Option<String>,
+    /// 标题命中没有具体消息锚点。
+    pub message_id: Option<MessageId>,
+    pub created_at_ms: Option<i64>,
+    pub snippet: String,
+    pub match_kind: ConversationHistoryMatchKind,
+    pub lifecycle: SessionLifecycle,
+}
+
+/// 一页历史搜索结果。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SearchConversationHistoryResult {
+    pub items: Vec<ConversationHistoryHit>,
+    pub next_offset: Option<u32>,
+    /// 部分派生索引仍在重建时，已就绪结果仍可展示。
+    pub partial: bool,
+    pub failed_owners: Vec<ConversationOwner>,
+}
+
+/// 读取命中消息附近、只用于用户查看的正文窗口。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationRecallWindowRequest {
+    pub session_id: SessionId,
+    pub owner: ConversationOwner,
+    pub message_id: MessageId,
+    pub before: u32,
+    pub after: u32,
+}
+
+/// 一段只读搜索上下文；不会写入 Agent 上下文。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationRecallWindowResult {
+    pub owner: ConversationOwner,
+    pub generation: u64,
+    pub anchor_message_id: MessageId,
+    pub items: Vec<ConversationItem>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+}
+
+/// 按稳定 Message ID 读取包含目标消息的一页标准 Conversation。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationPageAroundMessageRequest {
+    pub owner: ConversationOwner,
+    pub message_id: MessageId,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationPageAroundMessageResult {
     pub snapshot: ObservedSnapshot<ConversationPage>,
     pub anchor_message_id: MessageId,
 }

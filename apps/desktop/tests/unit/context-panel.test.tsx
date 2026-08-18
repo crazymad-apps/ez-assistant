@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
@@ -33,21 +33,44 @@ describe("ContextPanel", () => {
     expect(screen.queryByRole("button", { name: /report\.txt/ })).not.toBeInTheDocument();
   });
 
-  it("offers the three controlled Workspace actions", () => {
+  it("offers the immutable Workspace actions", () => {
     const store = contextStore();
     const open = vi.spyOn(store, "openWorkspace").mockResolvedValue();
     const copy = vi.spyOn(store, "copyWorkspacePath").mockResolvedValue();
-    const change = vi.spyOn(store, "changeSessionWorkspace").mockResolvedValue();
     renderPanel(store);
 
     fireEvent.click(screen.getByRole("button", { name: "打开目录" }));
     fireEvent.click(screen.getByRole("button", { name: "复制路径" }));
-    fireEvent.click(screen.getByRole("button", { name: "重新选择" }));
 
     expect(open).toHaveBeenCalledWith("workspace-1");
     expect(copy).toHaveBeenCalledWith("/workspace/project");
-    expect(change).toHaveBeenCalledWith("session-1");
+    expect(screen.queryByRole("button", { name: "重新选择" })).not.toBeInTheDocument();
     expect(screen.getByText("Workspace 不是强沙盒。", { exact: false })).toBeVisible();
+  });
+
+  it("previews the frozen System Context as Markdown and can reveal its source text", async () => {
+    const store = contextStore();
+    const get_system_context = vi.spyOn(store, "getSystemContext").mockResolvedValue({
+      session_id: "session-1",
+      session_created_at_ms: 1,
+      parts: ["# You are EZ Assistant.\n\nUse tools.", "<workspace_instructions file=\"AGENTS.md\">\n## 默认使用简体中文。\n</workspace_instructions>"],
+    });
+    renderPanel(store);
+
+    expect(screen.queryByText(/已冻结/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /System Context/ }));
+
+    await waitFor(() => expect(get_system_context).toHaveBeenCalledWith("session-1"));
+    const dialog = screen.getByRole("dialog", { name: "System Context" });
+    expect(within(dialog).getByRole("heading", { name: "You are EZ Assistant." })).toBeVisible();
+    expect(within(dialog).getByRole("heading", { name: "默认使用简体中文。" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "预览" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByText("当前会话创建时冻结的系统上下文原文", { exact: false })).toBeVisible();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "原文" }));
+    expect(within(dialog).getByText("# You are EZ Assistant.", { exact: false })).toBeVisible();
+    expect(within(dialog).getByText("<workspace_instructions file=\"AGENTS.md\">", { exact: false })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "原文" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("degrades missing historical fields and unavailable resources without inventing zero values", () => {

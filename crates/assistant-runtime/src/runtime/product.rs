@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use agent_memory::{MemoryPropertyValue, MemoryRecallResponse};
 use agent_types::{
     AssistantPart, ConversationMessage, ConversationSnapshot, ToolResultContent, ToolResultStatus,
     UserPart,
@@ -9,14 +10,19 @@ use agent_types::{
 use assistant_protocol::{
     ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,
     AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot,
-    ChildTaskViewSnapshot, ConversationFileReference, ConversationItem, ConversationOwner,
+    ChildTaskViewSnapshot, ConversationFileReference, ConversationHistoryHit,
+    ConversationHistoryMatchKind, ConversationHistoryScope, ConversationItem, ConversationOwner,
     ConversationPage, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
-    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundRunRequest,
-    GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
+    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
+    GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
+    GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, ListAttachmentsRequest, ListConversationPageRequest,
     ListConversationPageResult, ListSessionsRequest, ListWorkspacesRequest, MessageId,
     ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
-    ResourceRefId, RunId, RunSnapshot, SessionId, SessionListFilter, SessionUsageSnapshot,
+    RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
+    RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot, SearchConversationHistoryRequest,
+    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionUsageSnapshot,
     SessionViewSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
     ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
     ToolInputSnapshot, UsageTotals, UserMessageSnapshot,
@@ -26,14 +32,16 @@ use serde::{Deserialize, Serialize};
 
 use super::AssistantRuntime;
 use crate::{
-    ConversationWindowRequest, RuntimeError, RuntimeResult, StoreErrorKind,
-    StoredConversationWindow,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
+    ConversationSearchScope, ConversationWindowRequest, RuntimeError, RuntimeResult,
+    StoreErrorKind, StoredConversationWindow,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 30;
 const MAX_PAGE_SIZE: usize = 100;
 const SNAPSHOT_ATTEMPTS: usize = 4;
 const TOOL_SUMMARY_CHARS: usize = 160;
+const TOOL_DETAIL_JSON_CHARS: usize = 64 * 1024;
 
 #[derive(Deserialize, Serialize)]
 struct ConversationCursor {
@@ -174,6 +182,7 @@ impl AssistantRuntime {
                             archived_sessions,
                             capabilities: ApplicationCapabilities {
                                 conversation_paging: true,
+                                conversation_search: true,
                                 tool_detail: true,
                                 queue_control: true,
                                 approval_queue: true,
@@ -506,6 +515,277 @@ impl AssistantRuntime {
         Err(RuntimeError::SnapshotBusy)
     }
 
+    /// 查询历史会话标题和正文。正文来自可重建索引，标题来自 Runtime 权威 Session/child 投影。
+    pub async fn search_conversation_history(
+        &self,
+        request: SearchConversationHistoryRequest,
+    ) -> RuntimeResult<SearchConversationHistoryResult> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "conversation search query must not be empty",
+            });
+        }
+        let limit = validated_limit(request.limit)?;
+        let offset = usize::try_from(request.offset).map_err(|_| RuntimeError::InvalidRequest {
+            reason: "conversation search offset is too large",
+        })?;
+        let caller = self.session(&request.session_id)?.summary()?;
+        let store_scope = match request.scope {
+            ConversationHistoryScope::Session => ConversationSearchScope::Session {
+                session_id: request.session_id.clone(),
+            },
+            ConversationHistoryScope::Workspace => ConversationSearchScope::Workspace {
+                workspace_id: caller
+                    .workspace_id
+                    .clone()
+                    .ok_or(RuntimeError::InvalidRequest {
+                        reason: "workspace search is unavailable for an unbound session",
+                    })?,
+            },
+            ConversationHistoryScope::Global => ConversationSearchScope::Global,
+        };
+        let mut sessions = self
+            .list_sessions(ListSessionsRequest {
+                filter: SessionListFilter::Active,
+            })?
+            .sessions;
+        sessions.extend(
+            self.list_sessions(ListSessionsRequest {
+                filter: SessionListFilter::Archived,
+            })?
+            .sessions,
+        );
+        sessions.retain(|session| history_scope_matches(&request, &caller, session));
+        let sessions_by_id = sessions
+            .iter()
+            .map(|session| (session.session_id.as_str().to_owned(), session))
+            .collect::<HashMap<_, _>>();
+        let normalized_query = query.to_lowercase();
+        let mut items = Vec::new();
+        for session in &sessions {
+            if session.title.to_lowercase().contains(&normalized_query) {
+                items.push(ConversationHistoryHit {
+                    owner: ConversationOwner::MainSession {
+                        session_id: session.session_id.clone(),
+                    },
+                    session_title: session.title.clone(),
+                    child_task_title: None,
+                    message_id: None,
+                    created_at_ms: session.updated_at_ms,
+                    snippet: session.title.clone(),
+                    match_kind: ConversationHistoryMatchKind::Title,
+                    lifecycle: session.lifecycle,
+                });
+            }
+            for task in self.child_tasks.list_for_session(&session.session_id)? {
+                if task.title.to_lowercase().contains(&normalized_query) {
+                    items.push(ConversationHistoryHit {
+                        owner: ConversationOwner::ChildTask {
+                            session_id: session.session_id.clone(),
+                            child_task_id: task.child_task_id,
+                        },
+                        session_title: session.title.clone(),
+                        child_task_title: Some(task.title.clone()),
+                        message_id: None,
+                        created_at_ms: Some(task.finished_at_ms.unwrap_or(task.created_at_ms)),
+                        snippet: task.title,
+                        match_kind: ConversationHistoryMatchKind::Title,
+                        lifecycle: session.lifecycle,
+                    });
+                }
+            }
+        }
+
+        let mut partial = false;
+        let mut failed_owners = Vec::new();
+        if query.chars().count() >= 3 {
+            let search_limit = offset
+                .saturating_add(limit)
+                .saturating_add(1)
+                .clamp(1, MAX_PAGE_SIZE);
+            let page = self
+                .store
+                .search_conversations(ConversationSearchRequest {
+                    query: query.to_owned(),
+                    scope: store_scope,
+                    limit: search_limit,
+                })
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("search conversation history", source)
+                })?;
+            partial = page.partial;
+            failed_owners = page.failed_owners;
+            for hit in page.hits {
+                let session_id = owner_session_id(&hit.owner);
+                let Some(session) = sessions_by_id.get(session_id.as_str()) else {
+                    continue;
+                };
+                let child_task_title = match &hit.owner {
+                    ConversationOwner::MainSession { .. } => None,
+                    ConversationOwner::ChildTask { child_task_id, .. } => self
+                        .child_tasks
+                        .get(session_id, child_task_id)?
+                        .map(|task| task.title),
+                };
+                items.push(ConversationHistoryHit {
+                    owner: hit.owner,
+                    session_title: session.title.clone(),
+                    child_task_title,
+                    message_id: Some(protocol_message_id(hit.message_id.as_str())?),
+                    created_at_ms: Some(hit.created_at_ms),
+                    snippet: hit.text,
+                    match_kind: ConversationHistoryMatchKind::Message,
+                    lifecycle: session.lifecycle,
+                });
+            }
+        }
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_ms));
+        let has_more = items.len() > offset.saturating_add(limit);
+        let items = items.into_iter().skip(offset).take(limit).collect();
+        Ok(SearchConversationHistoryResult {
+            items,
+            next_offset: has_more.then(|| request.offset.saturating_add(request.limit)),
+            partial,
+            failed_owners,
+        })
+    }
+
+    /// 读取命中附近的有限正文，供搜索结果弹窗预览，不进入 Agent 上下文。
+    pub async fn get_conversation_recall_window(
+        &self,
+        request: GetConversationRecallWindowRequest,
+    ) -> RuntimeResult<GetConversationRecallWindowResult> {
+        self.session(&request.session_id)?;
+        let before = usize::try_from(request.before.min(50)).expect("u32 fits usize");
+        let after = usize::try_from(request.after.min(50)).expect("u32 fits usize");
+        let (window, projection) = self
+            .load_raw_window_around_message(&request.owner, &request.message_id, before, after)
+            .await?;
+        let items = project_conversation(&window.conversation, &projection)?;
+        Ok(GetConversationRecallWindowResult {
+            owner: request.owner,
+            generation: window.generation,
+            anchor_message_id: request.message_id,
+            items,
+            has_more_before: window.start > 0,
+            has_more_after: window.end < window.total,
+        })
+    }
+
+    /// 按消息 ID 加载有限 Conversation 页，避免为一次定位读取整份历史。
+    pub async fn get_conversation_page_around_message(
+        &self,
+        request: GetConversationPageAroundMessageRequest,
+    ) -> RuntimeResult<GetConversationPageAroundMessageResult> {
+        let limit = validated_limit(request.limit)?;
+        let location = self
+            .locate_conversation_message(&request.owner, &request.message_id)
+            .await?;
+        let display_ordinal = location
+            .display_ordinal
+            .ok_or(RuntimeError::InvalidRequest {
+                reason: "conversation message is not visible in the product conversation",
+            })?;
+        let requested_end = usize::try_from(display_ordinal)
+            .map_err(|_| RuntimeError::InvalidRequest {
+                reason: "conversation display position is outside the supported range",
+            })?
+            .saturating_add(1);
+        let projection = self.projection_context_for_owner(&request.owner).await?;
+        let window = self
+            .load_product_conversation_window(
+                request.owner.clone(),
+                location.generation,
+                Some(requested_end),
+                limit,
+            )
+            .await?;
+        let page = page_from_window(
+            request.owner.clone(),
+            &window,
+            project_conversation(&window.conversation, &projection)?,
+        )?;
+        Ok(GetConversationPageAroundMessageResult {
+            snapshot: ObservedSnapshot {
+                observed_sequence: self.event_sender.sequence(),
+                value: page,
+            },
+            anchor_message_id: request.message_id,
+        })
+    }
+
+    async fn load_raw_window_around_message(
+        &self,
+        owner: &ConversationOwner,
+        message_id: &MessageId,
+        before: usize,
+        after: usize,
+    ) -> RuntimeResult<(crate::StoredConversationRawWindow, ProjectionContext)> {
+        let location = self.locate_conversation_message(owner, message_id).await?;
+        let ordinal = usize::try_from(location.message_ordinal).map_err(|_| {
+            RuntimeError::InvalidRequest {
+                reason: "conversation message position is outside the supported range",
+            }
+        })?;
+        let start = ordinal.saturating_sub(before);
+        let limit = before.saturating_add(after).saturating_add(1).max(1);
+        let window = self
+            .store
+            .load_conversation_raw_window(ConversationRawWindowRequest {
+                owner: owner.clone(),
+                generation: location.generation,
+                start,
+                limit,
+            })
+            .await
+            .map_err(|source| {
+                RuntimeError::from_store("load conversation recall window", source)
+            })?;
+        let projection = self.projection_context_for_owner(owner).await?;
+        Ok((window, projection))
+    }
+
+    async fn locate_conversation_message(
+        &self,
+        owner: &ConversationOwner,
+        message_id: &MessageId,
+    ) -> RuntimeResult<crate::StoredConversationMessageLocation> {
+        self.store
+            .locate_conversation_message(ConversationMessageLocationRequest {
+                owner: owner.clone(),
+                message_id: agent_types::MessageId::new(message_id.as_str()).map_err(|_| {
+                    RuntimeError::InvalidRequest {
+                        reason: "conversation message id is invalid",
+                    }
+                })?,
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("locate conversation message", source))?
+            .ok_or(RuntimeError::InvalidRequest {
+                reason: "conversation message no longer exists",
+            })
+    }
+
+    async fn projection_context_for_owner(
+        &self,
+        owner: &ConversationOwner,
+    ) -> RuntimeResult<ProjectionContext> {
+        match owner {
+            ConversationOwner::MainSession { session_id } => {
+                let session = self.session(session_id)?;
+                let attachments = self
+                    .list_attachments(ListAttachmentsRequest {
+                        session_id: session_id.clone(),
+                    })?
+                    .attachments;
+                Ok(self.projection_context(&session, &attachments).await?)
+            }
+            ConversationOwner::ChildTask { .. } => Ok(empty_child_projection()),
+        }
+    }
+
     pub async fn get_tool_detail(
         &self,
         request: GetToolDetailRequest,
@@ -539,13 +819,18 @@ impl AssistantRuntime {
                     None,
                 ),
             };
-            let detail = project_tool_detail(
+            let mut detail = project_tool_detail(
                 &snapshot,
                 request.owner.clone(),
                 &request.message_id,
                 &request.call_id,
                 run_id,
             )?;
+            if detail.tool_name == "recall_memory" {
+                detail.recall = self
+                    .project_recall_tool_detail(&request.owner, detail.result_json.as_deref())
+                    .await;
+            }
             let end = self.event_sender.sequence();
             if start == end {
                 return Ok(GetToolDetailResult {
@@ -557,6 +842,68 @@ impl AssistantRuntime {
             }
         }
         Err(RuntimeError::SnapshotBusy)
+    }
+
+    /// 将模型可读的 Recall JSON 转换成桌面可消费的候选列表。
+    ///
+    /// signed reference 只在 Runtime 内解码与校验；任一旧引用失效时仅禁用该条导航，
+    /// 不影响其余正文和工具详情展示。
+    async fn project_recall_tool_detail(
+        &self,
+        caller: &ConversationOwner,
+        result_json: Option<&str>,
+    ) -> Option<RecallToolDetailSnapshot> {
+        let response = serde_json::from_str::<MemoryRecallResponse>(result_json?).ok()?;
+        let caller_session_id = match caller {
+            ConversationOwner::MainSession { session_id }
+            | ConversationOwner::ChildTask { session_id, .. } => session_id,
+        };
+        let caller_session = self.session(caller_session_id).ok()?;
+        let recall = crate::conversation_recall::RuntimeConversationRecall::new(
+            self.store.clone(),
+            self.recall_reference_codec.clone(),
+            caller_session_id.clone(),
+            caller_session.environment().workspace_id.clone(),
+        );
+        let mut items = Vec::with_capacity(response.items.len());
+        for item in response.items {
+            let navigation = item
+                .origins
+                .iter()
+                .filter_map(|origin| origin.reference.as_deref())
+                .find_map(|reference| recall.resolve_reference(reference).ok())
+                .and_then(|target| {
+                    let session_id = match &target.owner {
+                        ConversationOwner::MainSession { session_id }
+                        | ConversationOwner::ChildTask { session_id, .. } => session_id,
+                    };
+                    let lifecycle = self.session(session_id).ok()?.summary().ok()?.lifecycle;
+                    Some(RecallNavigationTarget {
+                        owner: target.owner,
+                        message_id: protocol_message_id(target.message_id.as_str()).ok()?,
+                        lifecycle,
+                    })
+                });
+            items.push(RecallToolDetailItem {
+                content: item.content,
+                role: memory_string_attribute(&item.attributes, "role"),
+                created_at_ms: memory_i64_attribute(&item.attributes, "created_at_ms"),
+                navigation,
+            });
+        }
+        Some(RecallToolDetailSnapshot {
+            items,
+            failures: response
+                .failures
+                .into_iter()
+                .map(|failure| RecallToolDetailFailure {
+                    source_id: failure.source_id.into_inner(),
+                    kind: format!("{:?}", failure.kind).to_lowercase(),
+                    message: failure.message,
+                })
+                .collect(),
+            truncated: response.truncated,
+        })
     }
 
     /// 重新从可靠 Conversation 解析工具文件引用，避免 WebView 把任意路径交给 Host。
@@ -913,6 +1260,14 @@ fn project_tool_detail(
     let summary = result.map(tool_result_summary);
     let input = project_tool_input(call.name.as_str(), &call.arguments);
     let files = project_tool_files(&call.id, &input, result, resources_available)?;
+    let (request_json, request_truncated) = formatted_json(&call.arguments);
+    let (result_json, result_truncated) =
+        result
+            .and_then(tool_result_json)
+            .map_or((None, false), |value| {
+                let (formatted, truncated) = formatted_json(&value);
+                (Some(formatted), truncated)
+            });
     Ok(ToolDetailSnapshot {
         owner,
         message_id: message_id.clone(),
@@ -921,12 +1276,15 @@ fn project_tool_detail(
         tool_name: call.name.as_str().to_owned(),
         status: tool_status(result),
         input,
+        request_json: Some(request_json),
         result_summary: summary,
+        result_json,
+        recall: None,
         stdout: None,
         stderr: None,
         error: None,
         files,
-        output_truncated: false,
+        output_truncated: request_truncated || result_truncated,
         historical_fields_missing: result.is_none(),
     })
 }
@@ -1246,6 +1604,28 @@ fn validated_limit(limit: u32) -> RuntimeResult<usize> {
     Ok(usize::try_from(limit).unwrap_or(MAX_PAGE_SIZE))
 }
 
+/// 产品搜索范围在进入派生索引前先由 Runtime 权威 Session 投影收窄。
+fn history_scope_matches(
+    request: &SearchConversationHistoryRequest,
+    caller: &assistant_protocol::SessionSummary,
+    candidate: &assistant_protocol::SessionSummary,
+) -> bool {
+    match request.scope {
+        ConversationHistoryScope::Session => candidate.session_id == request.session_id,
+        ConversationHistoryScope::Workspace => {
+            caller.workspace_id.is_some() && candidate.workspace_id == caller.workspace_id
+        }
+        ConversationHistoryScope::Global => true,
+    }
+}
+
+fn owner_session_id(owner: &ConversationOwner) -> &SessionId {
+    match owner {
+        ConversationOwner::MainSession { session_id }
+        | ConversationOwner::ChildTask { session_id, .. } => session_id,
+    }
+}
+
 fn encode_cursor(generation: u64, end: usize) -> RuntimeResult<String> {
     serde_json::to_vec(&ConversationCursor { generation, end })
         .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
@@ -1290,6 +1670,47 @@ fn tool_result_summary(result: &agent_types::ToolResult) -> String {
         ToolResultContent::Json(value) => value.to_string(),
     };
     truncate_chars(&text, TOOL_SUMMARY_CHARS)
+}
+
+fn tool_result_json(result: &agent_types::ToolResult) -> Option<serde_json::Value> {
+    match &result.content {
+        ToolResultContent::Json(value) => Some(value.clone()),
+        ToolResultContent::Text(text) => serde_json::from_str(text).ok(),
+    }
+}
+
+fn formatted_json(value: &serde_json::Value) -> (String, bool) {
+    let formatted = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let mut chars = formatted.chars();
+    let retained = chars
+        .by_ref()
+        .take(TOOL_DETAIL_JSON_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        (format!("{retained}\n…"), true)
+    } else {
+        (retained, false)
+    }
+}
+
+fn memory_string_attribute(
+    attributes: &std::collections::BTreeMap<String, MemoryPropertyValue>,
+    key: &str,
+) -> Option<String> {
+    match attributes.get(key) {
+        Some(MemoryPropertyValue::String(value)) => Some(value.clone()),
+        Some(MemoryPropertyValue::Number(_)) | None => None,
+    }
+}
+
+fn memory_i64_attribute(
+    attributes: &std::collections::BTreeMap<String, MemoryPropertyValue>,
+    key: &str,
+) -> Option<i64> {
+    match attributes.get(key) {
+        Some(MemoryPropertyValue::Number(value)) => value.as_i64(),
+        Some(MemoryPropertyValue::String(_)) | None => None,
+    }
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {

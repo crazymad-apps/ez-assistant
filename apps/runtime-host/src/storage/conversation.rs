@@ -18,7 +18,13 @@ const INDEX_CACHE_CAPACITY: usize = 32;
 struct CachedConversationIndex {
     path: PathBuf,
     file_length: u64,
+    message_offsets: Arc<[u64]>,
     display_offsets: Arc<[u64]>,
+}
+
+struct ConversationOffsets {
+    message: Arc<[u64]>,
+    display: Arc<[u64]>,
 }
 
 /// Store Worker 私有的可重建 LRU；只缓存字节 offset，不缓存 Conversation 正文。
@@ -51,7 +57,7 @@ impl ConversationIndexCache {
             .metadata()
             .map_err(|source| internal_error("conversation metadata could not be read", source))?
             .len();
-        let offsets = self.offsets(path, file_length)?;
+        let offsets = self.offsets(path, file_length)?.display;
         let total = offsets.len();
         let end = requested_end.unwrap_or(total).min(total);
         let start = end.saturating_sub(limit);
@@ -72,7 +78,81 @@ impl ConversationIndexCache {
         })
     }
 
-    fn offsets(&mut self, path: &Path, file_length: u64) -> StorageResult<Arc<[u64]>> {
+    pub(super) fn read_raw_window(
+        &mut self,
+        path: &Path,
+        start: usize,
+        limit: usize,
+    ) -> StorageResult<(ConversationSnapshot, usize, usize)> {
+        let file_length = path
+            .metadata()
+            .map_err(|source| internal_error("conversation metadata could not be read", source))?
+            .len();
+        let offsets = self.offsets(path, file_length)?.message;
+        let total = offsets.len();
+        let start = start.min(total);
+        let end = start.saturating_add(limit).min(total);
+        let byte_start = offsets.get(start).copied().unwrap_or(file_length);
+        let byte_end = offsets.get(end).copied().unwrap_or(file_length);
+        let mut file = File::open(path)
+            .map_err(|source| internal_error("conversation file could not be opened", source))?;
+        file.seek(SeekFrom::Start(byte_start)).map_err(|source| {
+            internal_error("conversation file could not be positioned", source)
+        })?;
+        let reader = BufReader::new(file.take(byte_end.saturating_sub(byte_start)));
+        Ok((decode(reader)?, end, total))
+    }
+
+    /// 在当前权威 JSONL 中按稳定 Message ID 定位，不把整份 Conversation 读入内存。
+    pub(super) fn locate_message(
+        &mut self,
+        path: &Path,
+        target: &MessageId,
+    ) -> StorageResult<Option<(usize, Option<usize>)>> {
+        let file_length = path
+            .metadata()
+            .map_err(|source| internal_error("conversation metadata could not be read", source))?
+            .len();
+        let offsets = self.offsets(path, file_length)?;
+        let message_offsets = offsets.message;
+        let display_offsets = offsets.display;
+        let mut file = File::open(path)
+            .map_err(|source| internal_error("conversation file could not be opened", source))?;
+        for (ordinal, byte_start) in message_offsets.iter().copied().enumerate() {
+            let byte_end = message_offsets
+                .get(ordinal + 1)
+                .copied()
+                .unwrap_or(file_length);
+            let record_length =
+                usize::try_from(byte_end.saturating_sub(byte_start)).map_err(|source| {
+                    internal_error("conversation record length exceeds storage range", source)
+                })?;
+            let mut record = vec![0_u8; record_length];
+            file.seek(SeekFrom::Start(byte_start)).map_err(|source| {
+                internal_error("conversation file could not be positioned", source)
+            })?;
+            file.read_exact(&mut record).map_err(|source| {
+                internal_error("conversation record could not be read", source)
+            })?;
+            if record.last() != Some(&b'\n') {
+                return Err(invalid_data(
+                    "conversation contains an incomplete JSONL record",
+                ));
+            }
+            record.pop();
+            let message: ConversationMessage =
+                serde_json::from_slice(&record).map_err(|source| {
+                    invalid_data_with_source("conversation JSONL is invalid", source)
+                })?;
+            if message_id(&message) == target {
+                let display_ordinal = display_offsets.binary_search(&byte_start).ok();
+                return Ok(Some((ordinal, display_ordinal)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn offsets(&mut self, path: &Path, file_length: u64) -> StorageResult<ConversationOffsets> {
         if let Some(position) = self
             .entries
             .iter()
@@ -82,30 +162,39 @@ impl ConversationIndexCache {
                 .entries
                 .remove(position)
                 .expect("cache position exists");
-            let offsets = entry.display_offsets.clone();
+            let offsets = ConversationOffsets {
+                message: entry.message_offsets.clone(),
+                display: entry.display_offsets.clone(),
+            };
             self.entries.push_back(entry);
             return Ok(offsets);
         }
         self.entries.retain(|entry| entry.path != path);
-        let display_offsets: Arc<[u64]> =
-            Arc::from(build_display_offsets(path)?.into_boxed_slice());
+        let (message_offsets, display_offsets) = build_offsets(path)?;
+        let message_offsets: Arc<[u64]> = Arc::from(message_offsets.into_boxed_slice());
+        let display_offsets: Arc<[u64]> = Arc::from(display_offsets.into_boxed_slice());
         if self.entries.len() == INDEX_CACHE_CAPACITY {
             self.entries.pop_front();
         }
         self.entries.push_back(CachedConversationIndex {
             path: path.to_path_buf(),
             file_length,
+            message_offsets: message_offsets.clone(),
             display_offsets: display_offsets.clone(),
         });
-        Ok(display_offsets)
+        Ok(ConversationOffsets {
+            message: message_offsets,
+            display: display_offsets,
+        })
     }
 }
 
-fn build_display_offsets(path: &Path) -> StorageResult<Vec<u64>> {
+fn build_offsets(path: &Path) -> StorageResult<(Vec<u64>, Vec<u64>)> {
     let file = File::open(path)
         .map_err(|source| internal_error("conversation file could not be opened", source))?;
     let mut reader = BufReader::new(file);
-    let mut offsets = Vec::new();
+    let mut message_offsets = Vec::new();
+    let mut display_offsets = Vec::new();
     let mut line = Vec::new();
     let mut offset = 0_u64;
     loop {
@@ -123,11 +212,12 @@ fn build_display_offsets(path: &Path) -> StorageResult<Vec<u64>> {
         }
         let message: ConversationMessage = serde_json::from_slice(&line[..line.len() - 1])
             .map_err(|source| invalid_data_with_source("conversation JSONL is invalid", source))?;
+        message_offsets.push(offset);
         if matches!(
             message,
             ConversationMessage::User(_) | ConversationMessage::Assistant(_)
         ) {
-            offsets.push(offset);
+            display_offsets.push(offset);
         }
         offset = offset
             .checked_add(u64::try_from(read).map_err(|source| {
@@ -135,7 +225,7 @@ fn build_display_offsets(path: &Path) -> StorageResult<Vec<u64>> {
             })?)
             .ok_or_else(|| invalid_data("conversation index offset exceeds storage range"))?;
     }
-    Ok(offsets)
+    Ok((message_offsets, display_offsets))
 }
 
 pub(super) fn encode_messages(messages: &[ConversationMessage]) -> StorageResult<Vec<u8>> {

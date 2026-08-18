@@ -7,15 +7,19 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 
 use crate::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement, ConversationRewrite,
-    ConversationWindowRequest, EmptySessionWorkspaceChange, MessageFeedbackChange, ModelChange,
-    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
+    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
+    NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PersonaMutation,
+    PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
     RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
     SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement, StoredConversationWindow,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
-    StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
+    StoredSessionFork, StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -66,6 +70,29 @@ impl FaultInjectingStore {
 impl RuntimeStore for FaultInjectingStore {
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         self.inner.load_runtime()
+    }
+
+    fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
+        self.inner.load_memory_context()
+    }
+
+    fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot> {
+        self.inner.get_persona()
+    }
+
+    fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
+        self.inner.set_persona(mutation)
+    }
+
+    fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {
+        self.inner.list_pinned_memories()
+    }
+
+    fn mutate_pinned_memory(
+        &self,
+        mutation: PinnedMemoryMutation,
+    ) -> StoreFuture<'_, PinnedMemoryMutationResult> {
+        self.inner.mutate_pinned_memory(mutation)
     }
 
     fn register_workspace(
@@ -214,6 +241,27 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.load_conversation_window(request)
     }
 
+    fn load_conversation_raw_window(
+        &self,
+        request: ConversationRawWindowRequest,
+    ) -> StoreFuture<'_, StoredConversationRawWindow> {
+        self.inner.load_conversation_raw_window(request)
+    }
+
+    fn locate_conversation_message(
+        &self,
+        request: ConversationMessageLocationRequest,
+    ) -> StoreFuture<'_, Option<StoredConversationMessageLocation>> {
+        self.inner.locate_conversation_message(request)
+    }
+
+    fn search_conversations(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, ConversationSearchPage> {
+        self.inner.search_conversations(request)
+    }
+
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()> {
         self.inner.set_session_archive(change)
     }
@@ -224,13 +272,6 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()> {
         self.inner.set_session_pinned(change)
-    }
-
-    fn set_empty_session_workspace(
-        &self,
-        change: EmptySessionWorkspaceChange,
-    ) -> StoreFuture<'_, ()> {
-        self.inner.set_empty_session_workspace(change)
     }
 
     fn set_message_feedback(&self, change: MessageFeedbackChange) -> StoreFuture<'_, ()> {

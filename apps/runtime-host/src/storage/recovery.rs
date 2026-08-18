@@ -3,7 +3,7 @@
 use std::{collections::HashSet, fs, io::BufReader};
 
 use agent_types::{ConversationMessage, ConversationSnapshot};
-use assistant_protocol::{ChildTaskId, RunId, SessionId};
+use assistant_protocol::{ChildTaskId, ConversationOwner, RunId, SessionId};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
@@ -230,6 +230,64 @@ impl StorageEngine {
             ));
         }
 
+        let (recall_owner, base_message_ordinal) = match &staged.target {
+            ConversationStorageTarget::Session { session_id, .. } => {
+                let count = self
+                    .connection
+                    .query_row(
+                        "SELECT message_count FROM sessions
+                     WHERE session_id = ?1 AND body_generation = ?2",
+                        params![
+                            session_id.as_str(),
+                            to_i64(
+                                staged.body_generation,
+                                "body generation exceeds SQLite range"
+                            )?
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|source| {
+                        internal_error("conversation message count could not be read", source)
+                    })?;
+                (
+                    ConversationOwner::MainSession {
+                        session_id: session_id.clone(),
+                    },
+                    non_negative_u64(count, "conversation message count is invalid")?,
+                )
+            }
+            ConversationStorageTarget::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                let count = self
+                    .connection
+                    .query_row(
+                        "SELECT message_count FROM child_tasks
+                     WHERE child_task_id = ?1 AND session_id = ?2 AND body_generation = ?3",
+                        params![
+                            child_task_id.as_str(),
+                            session_id.as_str(),
+                            to_i64(
+                                staged.body_generation,
+                                "body generation exceeds SQLite range"
+                            )?
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|source| {
+                        internal_error("child conversation message count could not be read", source)
+                    })?;
+                (
+                    ConversationOwner::ChildTask {
+                        session_id: session_id.clone(),
+                        child_task_id: child_task_id.clone(),
+                    },
+                    non_negative_u64(count, "child conversation message count is invalid")?,
+                )
+            }
+        };
+
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -315,9 +373,17 @@ impl StorageEngine {
                 "staged append disappeared during finalization",
             ));
         }
-        transaction
-            .commit()
-            .map_err(|source| internal_error("conversation append could not be finalized", source))
+        transaction.commit().map_err(|source| {
+            internal_error("conversation append could not be finalized", source)
+        })?;
+        self.index_committed_recall_batch(
+            &recall_owner,
+            staged.body_generation,
+            base_message_ordinal,
+            staged.created_at_ms,
+            &batch.messages,
+        );
+        Ok(())
     }
 
     pub(super) fn complete_staged_append(&mut self, operation_id: &str) -> StorageResult<()> {
@@ -410,6 +476,13 @@ impl StorageEngine {
                 source,
             )
         })?;
+
+        self.mark_recall_owner_dirty_now(
+            &ConversationOwner::MainSession {
+                session_id: plan.session_id.clone(),
+            },
+            plan.new_generation,
+        );
 
         // 旧 generation 已不再是权威正文；删除失败只留下不可见孤立文件，不回滚已提交切换。
         let old_path = body_path(&session_directory, plan.previous_generation);

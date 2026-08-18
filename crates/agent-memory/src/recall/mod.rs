@@ -8,10 +8,12 @@ pub use coordinator::{
     CoordinatedMemoryRecall, CoordinatedMemoryRecallConfig, CoordinatedMemoryRecallConfigError,
 };
 pub use source::{
-    MemoryRecall, MemoryRecallFuture, RecallSource, RecallSourceError, RecallSourceFuture,
+    MemoryRecall, MemoryRecallFuture, RecallReferenceReadFuture, RecallReferenceReader,
+    RecallSource, RecallSourceError, RecallSourceFuture,
 };
 pub use types::{
     MemoryRecallError, MemoryRecallFailure, MemoryRecallRequest, MemoryRecallResponse,
-    RecallFailureKind, RecallItem, RecallOrigin, RecallSourceId, RecallSourceItem,
-    RecallSourceRequest, RecallSourceResponse,
+    RecallFailureKind, RecallItem, RecallOrigin, RecallReadDirection, RecallReadWindow,
+    RecallReferenceReadRequest, RecallScope, RecallSourceId, RecallSourceItem, RecallSourceRequest,
+    RecallSourceResponse,
 };

@@ -5,6 +5,7 @@ mod attachment;
 mod connection_validation;
 mod delegation;
 mod input;
+mod memory;
 mod model;
 mod permission;
 mod product;
@@ -90,6 +91,7 @@ pub struct AssistantRuntime {
     run_tool_factory: Arc<dyn RunToolFactory>,
     child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     child_tasks: Arc<ChildTaskRegistry>,
+    recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     context_window: Arc<ContextWindowEvaluator>,
     event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
@@ -130,6 +132,7 @@ impl AssistantRuntime {
             Arc::new(crate::storage::VolatileRuntimeStore::default()),
             permission_coordinator,
             RecoveredRuntime::default(),
+            Arc::new(crate::HmacRecallReferenceCodec::new(random_recall_key())),
         )
         .expect("empty volatile runtime state is valid")
     }
@@ -145,6 +148,33 @@ impl AssistantRuntime {
         child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
         store: Arc<dyn RuntimeStore>,
         permission_store: Arc<dyn crate::PermissionFileStore>,
+    ) -> RuntimeResult<Self> {
+        Self::open_with_recall_key(
+            config,
+            config_source,
+            model_factory,
+            session_environment_factory,
+            run_tool_factory,
+            child_task_workspace_factory,
+            store,
+            permission_store,
+            random_recall_key(),
+        )
+        .await
+    }
+
+    /// 使用 Host 持久密钥恢复 Runtime；签名 Recall 引用可跨客户端重连继续校验。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_with_recall_key(
+        config: RuntimeConfig,
+        config_source: Arc<dyn RuntimeConfigSource>,
+        model_factory: Arc<dyn ModelServiceFactory>,
+        session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        run_tool_factory: Arc<dyn RunToolFactory>,
+        child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
+        store: Arc<dyn RuntimeStore>,
+        permission_store: Arc<dyn crate::PermissionFileStore>,
+        recall_reference_key: [u8; 32],
     ) -> RuntimeResult<Self> {
         let recovered = store
             .load_runtime()
@@ -163,6 +193,7 @@ impl AssistantRuntime {
             store,
             permission_coordinator,
             recovered,
+            Arc::new(crate::HmacRecallReferenceCodec::new(recall_reference_key)),
         )
     }
 
@@ -177,6 +208,7 @@ impl AssistantRuntime {
         store: Arc<dyn RuntimeStore>,
         permission_coordinator: Arc<PermissionCoordinator>,
         recovered: RecoveredRuntime,
+        recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     ) -> RuntimeResult<Self> {
         let event_sender = ObservationCoordinator::new(config.event_capacity.get());
         let recovered = recover_registries(recovered)?;
@@ -199,6 +231,7 @@ impl AssistantRuntime {
             run_tool_factory,
             child_task_workspace_factory,
             child_tasks: Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks)),
+            recall_reference_codec,
             context_window: Arc::new(
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
                     .expect("static context window threshold is valid"),
@@ -451,6 +484,11 @@ impl AssistantRuntime {
             .as_ref()
             .map(|workspace_id| self.workspace_for_new_session(workspace_id))
             .transpose()?;
+        let memory_context = self
+            .store
+            .load_memory_context()
+            .await
+            .map_err(|source| RuntimeError::from_store("load memory context", source))?;
         let prepared = self
             .session_environment_factory
             .create_environment(SessionEnvironmentFactoryRequest {
@@ -462,6 +500,7 @@ impl AssistantRuntime {
                         user_directory: &workspace.user_directory,
                         agent_directory: &workspace.agent_directory,
                     }),
+                memory_context: &memory_context,
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
         let stored = self
@@ -729,6 +768,12 @@ impl AssistantRuntime {
     fn session_for_test(&self, session_id: &SessionId) -> Arc<SessionController> {
         self.session(session_id).expect("session exists")
     }
+}
+
+fn random_recall_key() -> [u8; 32] {
+    let mut key = [0_u8; 32];
+    getrandom::fill(&mut key).expect("operating system randomness must be available");
+    key
 }
 
 fn permission_scopes(recovered: &RecoveredRuntime) -> Vec<PermissionFileScope> {

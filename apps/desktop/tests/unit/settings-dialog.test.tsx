@@ -2,7 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsDialog } from "../../src/features/settings/SettingsDialog";
 import type {
+  MemoryCapabilities,
   ModelConfiguration,
+  PersonaSnapshot,
+  PinnedMemoryCollectionSnapshot,
   PermissionDocumentSnapshot,
 } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
@@ -139,6 +142,23 @@ describe("SettingsDialog permission management", () => {
   });
 });
 
+describe("SettingsDialog memory management", () => {
+  it("shows a concise empty state and opens the shared inline editor", () => {
+    const store = settingsStore();
+    store.settings.page = "memory";
+    store.memory_settings.persona = personaSnapshot();
+    store.memory_settings.capabilities = memoryCapabilities;
+    store.memory_settings.collection = pinnedCollection();
+    renderDialog(store);
+
+    expect(screen.getByText("尚未添加 Pinned Memory。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    expect(screen.getByText("添加 Pinned Memory")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("例如：协作偏好、常用约定")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("记录需要跨会话长期保留的稳定信息")).toBeInTheDocument();
+  });
+});
+
 function settingsStore(): RootStore {
   const store = new RootStore();
   store.settings.is_open = true;
@@ -188,6 +208,33 @@ function permissionDocument(
     rules: [],
     diagnostics: [],
     editable,
+  };
+}
+
+const memoryCapabilities: MemoryCapabilities = {
+  max_persona_bytes: 16_384,
+  max_pinned_entries: 256,
+  max_pinned_category_bytes: 128,
+  max_pinned_content_bytes: 16_384,
+  max_attributes_per_entry: 32,
+  max_attribute_key_bytes: 128,
+  max_attribute_string_bytes: 4_096,
+};
+
+function personaSnapshot(): PersonaSnapshot {
+  return {
+    enabled: true,
+    content: "结论优先",
+    revision: 1,
+    updated_at_ms: 1,
+  };
+}
+
+function pinnedCollection(): PinnedMemoryCollectionSnapshot {
+  return {
+    revision: 0,
+    items: [],
+    capabilities: memoryCapabilities,
   };
 }
 

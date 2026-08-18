@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use assistant_protocol::ConversationOwner;
 use assistant_runtime::{ContextReplacement, ContextReplacementTarget};
 use rusqlite::{TransactionBehavior, params};
 
@@ -115,6 +116,14 @@ impl StorageEngine {
         transaction.commit().map_err(|source| {
             database_write_error("child context replacement could not be committed", source)
         })?;
+
+        self.mark_recall_owner_dirty_now(
+            &ConversationOwner::ChildTask {
+                session_id: session_id.clone(),
+                child_task_id: child_task_id.clone(),
+            },
+            new_generation,
+        );
 
         // SQLite 已指向新 generation；旧文件只做 best-effort 清理。
         if fs::remove_file(child_body_path(&task_directory, previous_generation)).is_ok() {

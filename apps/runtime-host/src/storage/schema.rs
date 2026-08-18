@@ -1,6 +1,6 @@
 //! SQLite schema 初始化与当前格式核验。
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{StorageResult, internal_error};
 
@@ -23,6 +23,39 @@ CREATE TABLE IF NOT EXISTS sessions (
     is_pinned           INTEGER NOT NULL DEFAULT 0 CHECK (is_pinned IN (0, 1)),
     title_origin        TEXT NOT NULL DEFAULT 'generated'
                             CHECK (title_origin IN ('generated', 'user'))
+);
+
+CREATE TABLE IF NOT EXISTS persona (
+    singleton_key      INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+    enabled            INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    content            TEXT NOT NULL,
+    revision           INTEGER NOT NULL CHECK (revision >= 0),
+    updated_at_ms      INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO persona (singleton_key, enabled, content, revision, updated_at_ms)
+VALUES (1, 0, '', 0, 0);
+
+CREATE TABLE IF NOT EXISTS memory_state (
+    singleton_key              INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+    pinned_collection_revision INTEGER NOT NULL CHECK (pinned_collection_revision >= 0)
+);
+
+INSERT OR IGNORE INTO memory_state (singleton_key, pinned_collection_revision)
+VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS pinned_memories (
+    id                    TEXT PRIMARY KEY,
+    category              TEXT NOT NULL,
+    content               TEXT NOT NULL,
+    attributes_json       TEXT NOT NULL,
+    created_by_kind       TEXT NOT NULL CHECK (created_by_kind IN ('user', 'agent_tool')),
+    created_by_session_id TEXT,
+    revision              INTEGER NOT NULL CHECK (revision > 0),
+    created_at_ms          INTEGER NOT NULL,
+    updated_at_ms          INTEGER NOT NULL,
+    CHECK ((created_by_kind = 'user' AND created_by_session_id IS NULL)
+        OR (created_by_kind = 'agent_tool' AND created_by_session_id IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS message_feedback (
@@ -197,10 +230,71 @@ CREATE TABLE IF NOT EXISTS body_appends (
     message_count_delta INTEGER NOT NULL CHECK (message_count_delta > 0),
     created_at_ms       INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS conversation_recall_documents (
+    document_rowid      INTEGER PRIMARY KEY,
+    document_id         TEXT NOT NULL UNIQUE,
+    owner_kind         TEXT NOT NULL CHECK (owner_kind IN ('session', 'child_task')),
+    owner_id           TEXT NOT NULL,
+    session_id         TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    child_task_id      TEXT REFERENCES child_tasks(child_task_id) ON DELETE CASCADE,
+    body_generation    INTEGER NOT NULL CHECK (body_generation > 0),
+    message_id         TEXT NOT NULL,
+    message_kind       TEXT NOT NULL CHECK (message_kind IN ('user', 'assistant')),
+    message_ordinal    INTEGER NOT NULL CHECK (message_ordinal >= 0),
+    created_at_ms      INTEGER NOT NULL,
+    normalized_text    TEXT NOT NULL,
+    content_hash       TEXT NOT NULL,
+    UNIQUE (owner_kind, owner_id, body_generation, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS conversation_recall_documents_owner
+    ON conversation_recall_documents(owner_kind, owner_id, body_generation, message_ordinal);
+CREATE INDEX IF NOT EXISTS conversation_recall_documents_session
+    ON conversation_recall_documents(session_id, child_task_id, body_generation);
+
+CREATE TABLE IF NOT EXISTS conversation_recall_heads (
+    owner_kind             TEXT NOT NULL CHECK (owner_kind IN ('session', 'child_task')),
+    owner_id               TEXT NOT NULL,
+    session_id             TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    child_task_id          TEXT REFERENCES child_tasks(child_task_id) ON DELETE CASCADE,
+    body_generation        INTEGER NOT NULL CHECK (body_generation > 0),
+    indexed_message_count  INTEGER NOT NULL CHECK (indexed_message_count >= 0),
+    state                  TEXT NOT NULL CHECK (state IN ('ready', 'dirty', 'rebuilding', 'unavailable')),
+    updated_at_ms          INTEGER NOT NULL,
+    PRIMARY KEY (owner_kind, owner_id)
+);
+"#;
+
+const RECALL_FTS_SCHEMA: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_recall_fts USING fts5(
+    normalized_text,
+    content='conversation_recall_documents',
+    content_rowid='document_rowid',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS conversation_recall_documents_ai AFTER INSERT ON conversation_recall_documents BEGIN
+    INSERT INTO conversation_recall_fts(rowid, normalized_text)
+    VALUES (new.document_rowid, new.normalized_text);
+END;
+CREATE TRIGGER IF NOT EXISTS conversation_recall_documents_ad AFTER DELETE ON conversation_recall_documents BEGIN
+    INSERT INTO conversation_recall_fts(conversation_recall_fts, rowid, normalized_text)
+    VALUES ('delete', old.document_rowid, old.normalized_text);
+END;
+CREATE TRIGGER IF NOT EXISTS conversation_recall_documents_au AFTER UPDATE ON conversation_recall_documents BEGIN
+    INSERT INTO conversation_recall_fts(conversation_recall_fts, rowid, normalized_text)
+    VALUES ('delete', old.document_rowid, old.normalized_text);
+    INSERT INTO conversation_recall_fts(rowid, normalized_text)
+    VALUES (new.document_rowid, new.normalized_text);
+END;
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, title, model_key, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
+    "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
+    "SELECT id, category, content, attributes_json, created_by_kind, created_by_session_id, revision, created_at_ms, updated_at_ms FROM pinned_memories LIMIT 0",
     "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
     "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
@@ -216,6 +310,8 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT receipt_id, session_id, run_id, assistant_json, results_json, state, created_at_ms FROM pending_tool_exchanges LIMIT 0",
     "SELECT receipt_id, call_id, started_at_ms FROM pending_tool_starts LIMIT 0",
     "SELECT operation_id, session_id, run_id, body_generation, base_byte_length, kind, payload, message_count_delta, created_at_ms FROM body_appends LIMIT 0",
+    "SELECT document_rowid, document_id, owner_kind, owner_id, session_id, child_task_id, body_generation, message_id, message_kind, message_ordinal, created_at_ms, normalized_text, content_hash FROM conversation_recall_documents LIMIT 0",
+    "SELECT owner_kind, owner_id, session_id, child_task_id, body_generation, indexed_message_count, state, updated_at_ms FROM conversation_recall_heads LIMIT 0",
 ];
 
 pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
@@ -269,6 +365,19 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "approval_mode",
         "ALTER TABLE runs ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'ask' CHECK (approval_mode IN ('ask', 'auto'))",
     )?;
+    transaction
+        .execute(
+            "UPDATE conversation_recall_heads
+             SET state = 'dirty'
+             WHERE state = 'rebuilding'",
+            [],
+        )
+        .map_err(|source| {
+            internal_error(
+                "interrupted conversation recall rebuilds could not be recovered",
+                source,
+            )
+        })?;
     transaction.commit().map_err(|source| {
         internal_error("runtime database schema could not be committed", source)
     })?;
@@ -281,6 +390,42 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
             .map_err(|source| internal_error("runtime database schema is incompatible", source))?;
     }
     Ok(())
+}
+
+/// 探测并初始化本机 SQLite 的 trigram FTS5 能力；失败只关闭 Recall，不阻断 Runtime。
+pub(super) fn initialize_recall_fts(connection: &mut Connection) -> bool {
+    let existed = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversation_recall_fts'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    let Ok(transaction) = connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    else {
+        return false;
+    };
+    if !existed
+        && transaction
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS conversation_recall_documents_ai;
+                 DROP TRIGGER IF EXISTS conversation_recall_documents_ad;
+                 DROP TRIGGER IF EXISTS conversation_recall_documents_au;
+                 DELETE FROM conversation_recall_documents;
+                 UPDATE conversation_recall_heads
+                 SET indexed_message_count = 0, state = 'dirty';",
+            )
+            .is_err()
+    {
+        return false;
+    }
+    if transaction.execute_batch(RECALL_FTS_SCHEMA).is_err() {
+        return false;
+    }
+    transaction.commit().is_ok()
 }
 
 fn ensure_column(
@@ -394,6 +539,34 @@ mod tests {
                 "ask".into(),
                 None,
             )
+        );
+        let persona: (i64, String, i64, i64) = connection
+            .query_row(
+                "SELECT enabled, content, revision, updated_at_ms
+                 FROM persona WHERE singleton_key = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("default persona");
+        assert_eq!(persona, (0, String::new(), 0, 0));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT pinned_collection_revision FROM memory_state
+                     WHERE singleton_key = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("default pinned collection revision"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pinned_memories", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("empty pinned memories"),
+            0
         );
     }
 }

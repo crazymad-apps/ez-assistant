@@ -32,6 +32,14 @@ pub struct WorkspaceEnvironmentSource<'a> {
 pub struct SessionEnvironmentFactoryRequest<'a> {
     pub session_id: &'a SessionId,
     pub workspace: Option<WorkspaceEnvironmentSource<'a>>,
+    pub memory_context: &'a crate::MemoryContextSnapshot,
+}
+
+/// Fork 只继承来源冻结前缀并重建新 Session 自有目录。
+pub struct ForkSessionEnvironmentFactoryRequest<'a> {
+    pub session_id: &'a SessionId,
+    pub source_system_prompt: &'a SystemPromptSnapshot,
+    pub source_environment: &'a SessionExecutionEnvironment,
 }
 
 /// 一次构造同时产生持久化 System Prompt 和目录环境，避免二者发生偏移。
@@ -72,5 +80,10 @@ pub trait SessionEnvironmentFactory: Send + Sync {
     fn create_environment(
         &self,
         request: SessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError>;
+
+    fn create_fork_environment(
+        &self,
+        request: ForkSessionEnvironmentFactoryRequest<'_>,
     ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError>;
 }

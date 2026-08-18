@@ -11,6 +11,7 @@ workspace = true
 agent-core = { path = "../agent-core" }
 agent-context = { path = "../agent-context" }
 agent-model = { path = "../agent-model" }
+agent-memory = { path = "../agent-memory" }
 agent-sdk = { path = "../agent-sdk" }
 agent-tools = { path = "../agent-tools" }
 agent-types = { path = "../agent-types" }
@@ -18,6 +19,8 @@ assistant-protocol = { path = "../assistant-protocol" }
 base64.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
+sha2 = "0.10.9"
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

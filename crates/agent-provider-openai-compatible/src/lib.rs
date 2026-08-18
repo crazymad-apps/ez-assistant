@@ -60,6 +60,7 @@ mod profile;
 mod schema;
 mod service;
 mod sse;
+mod tool_schema;
 mod transport;
 
 #[cfg(test)]
@@ -73,7 +74,7 @@ mod transport_tests;
 
 pub use decode::{ChunkAssembler, decode_assistant_message, decode_error_body, decode_response};
 pub use encode::encode_request;
-pub use profile::Profile;
+pub use profile::{Profile, ToolSchemaDialect};
 pub use schema::{
     ChatAssistantMessage, ChatChunk, ChatChunkChoice, ChatChunkDelta, ChatCompletionTokensDetails,
     ChatContentPart, ChatContentPartKind, ChatErrorBody, ChatErrorDetail, ChatFunctionDefinition,

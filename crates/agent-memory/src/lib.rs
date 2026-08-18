@@ -17,7 +17,8 @@ pub use property::MemoryPropertyValue;
 pub use recall::{
     CoordinatedMemoryRecall, CoordinatedMemoryRecallConfig, CoordinatedMemoryRecallConfigError,
     MemoryRecall, MemoryRecallError, MemoryRecallFailure, MemoryRecallFuture, MemoryRecallRequest,
-    MemoryRecallResponse, RecallFailureKind, RecallItem, RecallOrigin, RecallSource,
-    RecallSourceError, RecallSourceFuture, RecallSourceId, RecallSourceItem, RecallSourceRequest,
-    RecallSourceResponse,
+    MemoryRecallResponse, RecallFailureKind, RecallItem, RecallOrigin, RecallReadDirection,
+    RecallReadWindow, RecallReferenceReadFuture, RecallReferenceReadRequest, RecallReferenceReader,
+    RecallScope, RecallSource, RecallSourceError, RecallSourceFuture, RecallSourceId,
+    RecallSourceItem, RecallSourceRequest, RecallSourceResponse,
 };

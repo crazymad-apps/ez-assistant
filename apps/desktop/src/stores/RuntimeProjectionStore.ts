@@ -56,6 +56,7 @@ export class RuntimeProjectionStore {
       applyPreviousConversationPage: action,
       applyPreviousChildConversationPage: action,
       applyLocatedConversationPage: action,
+      applyLocatedChildConversationPage: action,
       failLoadingPrevious: action,
       failLoadingPreviousChild: action,
       acceptEvent: action,
@@ -198,6 +199,21 @@ export class RuntimeProjectionStore {
       return false;
     }
     this.conversation_histories.set(session_id, historyFromPage(page));
+    return true;
+  }
+
+  applyLocatedChildConversationPage(
+    child_task_id: ChildTaskId,
+    snapshot: ObservedSnapshot<ConversationPage>,
+  ): boolean {
+    const page = snapshot.value;
+    if (
+      page.owner.type !== "child_task"
+      || page.owner.child_task_id !== child_task_id
+    ) {
+      return false;
+    }
+    this.child_conversation_histories.set(child_task_id, historyFromPage(page));
     return true;
   }
 

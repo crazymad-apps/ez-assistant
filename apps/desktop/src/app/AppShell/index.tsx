@@ -9,6 +9,7 @@ import { ConversationView } from "../../features/conversation/ConversationView";
 import { RuntimeStatus } from "../../features/runtime-status/RuntimeStatus";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { SessionSidebar } from "../../features/sessions/SessionSidebar";
+import { ConversationSearchDialog } from "../../features/sessions/ConversationSearchDialog";
 import {
   getDesktopPlatform,
   isDesktopWindowMaximized,
@@ -114,6 +115,7 @@ export const AppShell = observer(function AppShell() {
       </div>
       <SettingsDialog />
       <DesktopLifecycleDialog />
+      <ConversationSearchDialog />
       <div id="overlay-root" />
     </main>
   );

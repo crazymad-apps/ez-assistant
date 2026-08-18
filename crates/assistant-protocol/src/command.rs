@@ -7,16 +7,20 @@ use crate::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, AttachmentId,
     AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus,
     DeleteConfirmationToken, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
-    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundRunRequest,
-    GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
+    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
+    GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
+    GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, IdempotencyKey, InputId, InterruptRunRequest,
-    InterruptRunResult, ListConversationPageRequest, ListConversationPageResult, MessageFeedback,
-    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionDocumentDraft,
-    PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
-    PermissionFileSummary, PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult,
-    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
-    ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle, SessionId, SessionListFilter,
-    SessionSummary, WorkspaceId, WorkspaceSummary,
+    InterruptRunResult, ListConversationPageRequest, ListConversationPageResult,
+    MemoryAttributeValue, MemoryCapabilities, MessageFeedback, MessageId, ModelConfiguration,
+    ModelKey, PermissionDiagnostic, PermissionDocumentDraft, PermissionDocumentRevision,
+    PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
+    PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
+    PrioritizeQueuedInputResult, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
+    ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle,
+    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
+    SessionListFilter, SessionSummary, SystemContextSnapshot, WorkspaceId, WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -697,20 +701,6 @@ pub struct SetSessionPinnedResult {
     pub session: SessionSummary,
 }
 
-/// 为完全空的 Session 重新冻结可选 Workspace。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct SetEmptySessionWorkspaceRequest {
-    pub session_id: SessionId,
-    pub workspace_id: Option<WorkspaceId>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct SetEmptySessionWorkspaceResult {
-    pub session: SessionSummary,
-}
-
 /// 保存或清除一条 Assistant Message 的本地反馈。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -823,6 +813,98 @@ pub struct ShutdownRuntimeResult {
     pub lifecycle: RuntimeLifecycle,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetMemoryCapabilitiesRequest {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetMemoryCapabilitiesResult {
+    pub capabilities: MemoryCapabilities,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetPersonaRequest {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetPersonaResult {
+    pub persona: PersonaSnapshot,
+    pub capabilities: MemoryCapabilities,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetPersonaRequest {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetPersonaResult {
+    pub applied: bool,
+    pub persona: PersonaSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListPinnedMemoriesRequest {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListPinnedMemoriesResult {
+    pub collection: PinnedMemoryCollectionSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CreatePinnedMemoryRequest {
+    pub expected_collection_revision: u64,
+    pub category: String,
+    pub content: String,
+    pub attributes: std::collections::BTreeMap<String, MemoryAttributeValue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UpdatePinnedMemoryRequest {
+    pub id: String,
+    pub expected_revision: u64,
+    pub category: String,
+    pub content: String,
+    pub attributes: std::collections::BTreeMap<String, MemoryAttributeValue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeletePinnedMemoryRequest {
+    pub id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct PinnedMemoryMutationResult {
+    pub applied: bool,
+    pub memory: Option<PinnedMemorySnapshot>,
+    pub collection: PinnedMemoryCollectionSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSystemContextRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSystemContextResult {
+    pub snapshot: SystemContextSnapshot,
+}
+
 /// Runtime 支持的最小客户端意图。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -838,6 +920,12 @@ pub enum RuntimeCommand {
     ListConversationPage(ListConversationPageRequest),
     /// 查询包含目标 Run 的主 Conversation 页。
     GetConversationPageAroundRun(GetConversationPageAroundRunRequest),
+    /// 按消息 ID 查询可继续分页的 Conversation 页。
+    GetConversationPageAroundMessage(GetConversationPageAroundMessageRequest),
+    /// 查询历史会话标题与正文。
+    SearchConversationHistory(SearchConversationHistoryRequest),
+    /// 读取搜索命中附近的只读正文。
+    GetConversationRecallWindow(GetConversationRecallWindowRequest),
     /// 按需查询一条工具调用的安全详情。
     GetToolDetail(GetToolDetailRequest),
     /// 把一条排队输入提升为下一条执行项。
@@ -864,6 +952,14 @@ pub enum RuntimeCommand {
     DeleteModel(DeleteModelRequest),
     /// 设置后续新会话使用的默认模型。
     SetDefaultModel(SetDefaultModelRequest),
+    GetMemoryCapabilities(GetMemoryCapabilitiesRequest),
+    GetPersona(GetPersonaRequest),
+    SetPersona(SetPersonaRequest),
+    ListPinnedMemories(ListPinnedMemoriesRequest),
+    CreatePinnedMemory(CreatePinnedMemoryRequest),
+    UpdatePinnedMemory(UpdatePinnedMemoryRequest),
+    DeletePinnedMemory(DeletePinnedMemoryRequest),
+    GetSystemContext(GetSystemContextRequest),
     /// 显式重新加载目标 Session 的权限 cohort。
     ReloadPermissions(ReloadPermissionsRequest),
     /// 查询一份权限文档的安全产品投影。
@@ -921,8 +1017,6 @@ pub enum RuntimeCommand {
     RenameSession(RenameSessionRequest),
     /// 设置 Session 固定状态。
     SetSessionPinned(SetSessionPinnedRequest),
-    /// 为空 Session 重新选择 Workspace。
-    SetEmptySessionWorkspace(SetEmptySessionWorkspaceRequest),
     /// 保存 Assistant Message 反馈。
     SetMessageFeedback(SetMessageFeedbackRequest),
     /// 切换 Session 模型。
@@ -949,6 +1043,9 @@ pub enum RuntimeCommandResult {
     GetChildTaskView(Box<GetChildTaskViewResult>),
     ListConversationPage(ListConversationPageResult),
     GetConversationPageAroundRun(GetConversationPageAroundRunResult),
+    GetConversationPageAroundMessage(GetConversationPageAroundMessageResult),
+    SearchConversationHistory(SearchConversationHistoryResult),
+    GetConversationRecallWindow(GetConversationRecallWindowResult),
     GetToolDetail(GetToolDetailResult),
     PrioritizeQueuedInput(PrioritizeQueuedInputResult),
     InterruptRun(InterruptRunResult),
@@ -966,6 +1063,14 @@ pub enum RuntimeCommandResult {
     UpdateModel(ConfigurationMutationResult),
     DeleteModel(ConfigurationMutationResult),
     SetDefaultModel(ConfigurationMutationResult),
+    GetMemoryCapabilities(GetMemoryCapabilitiesResult),
+    GetPersona(GetPersonaResult),
+    SetPersona(SetPersonaResult),
+    ListPinnedMemories(ListPinnedMemoriesResult),
+    CreatePinnedMemory(PinnedMemoryMutationResult),
+    UpdatePinnedMemory(PinnedMemoryMutationResult),
+    DeletePinnedMemory(PinnedMemoryMutationResult),
+    GetSystemContext(GetSystemContextResult),
     /// 权限 cohort 重载已完成。
     ReloadPermissions(ReloadPermissionsResult),
     GetPermissionDocument(GetPermissionDocumentResult),
@@ -1021,8 +1126,6 @@ pub enum RuntimeCommandResult {
     RenameSession(RenameSessionResult),
     /// Session 固定状态已设置。
     SetSessionPinned(SetSessionPinnedResult),
-    /// 空 Session 的 Workspace 已重新冻结。
-    SetEmptySessionWorkspace(SetEmptySessionWorkspaceResult),
     /// Assistant Message 反馈已保存。
     SetMessageFeedback(SetMessageFeedbackResult),
     /// Session 模型已切换。

@@ -1,17 +1,19 @@
 import { observer } from "mobx-react-lite";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import type { SettingsPage } from "../../../stores/SettingsStore";
 import { ModelsSettingsPage } from "./ModelsSettingsPage";
+import { MemorySettingsPage } from "./MemorySettingsPage";
 import { PermissionSettingsPage } from "./PermissionSettingsPage";
 import { RuntimeSettingsPage } from "./RuntimeSettingsPage";
 import styles from "./index.module.scss";
 
-const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: "terminal" | "bot" | "shield" }> = [
+const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: "terminal" | "bot" | "shield" | "pin" }> = [
   { id: "runtime", label: "Runtime", icon: "terminal" },
   { id: "models", label: "模型", icon: "bot" },
+  { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
 ];
 
@@ -20,6 +22,12 @@ export const SettingsDialog = observer(function SettingsDialog() {
   const settings = store.settings;
   const close_button_ref = useRef<HTMLButtonElement>(null);
   const [form_dirty, setFormDirty] = useState(false);
+
+  useEffect(() => {
+    if (settings.is_open && settings.page === "memory") {
+      void store.memory_settings.load();
+    }
+  }, [settings.is_open, settings.page, store.memory_settings]);
 
   if (!settings.is_open) return null;
 
@@ -70,6 +78,9 @@ export const SettingsDialog = observer(function SettingsDialog() {
             )}
             {settings.page === "permissions" && (
               <PermissionSettingsPage onDirtyChange={setFormDirty} />
+            )}
+            {settings.page === "memory" && (
+              <MemorySettingsPage onDirtyChange={setFormDirty} />
             )}
           </div>
         </div>

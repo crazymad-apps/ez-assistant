@@ -1932,7 +1932,7 @@ mod tests {
             &runtime,
             &session.session_id,
             start_request(
-                r#"/tool pin_memory {"category":"preference","content":"tool-created memory","attributes":{"scope":"demo"}}"#,
+                r#"/tool pin_memory {"category":"preference","content":"tool-created memory"}"#,
             ),
         )
         .await;
@@ -1946,7 +1946,7 @@ mod tests {
             &runtime,
             &session.session_id,
             start_request(
-                r#"/tool recall_memory {"query":"memory","limit":4,"sources":["demo_records","failing_demo"]}"#,
+                r#"/tool recall_memory {"action":"search","query":"memory","limit":4,"sources":["demo_records","failing_demo"]}"#,
             ),
         )
         .await;

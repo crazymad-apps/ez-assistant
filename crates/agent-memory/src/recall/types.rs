@@ -71,15 +71,57 @@ impl<'de> Deserialize<'de> for RecallSourceId {
     }
 }
 
-/// 统一召回能力接收的模型检索意图。
+/// Conversation Recall 的信息边界；具体 Session/Workspace 身份由 Runtime 绑定。
+#[derive(Clone, Copy, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallScope {
+    /// 当前 Session 主会话及其全部子会话。
+    #[default]
+    Session,
+    /// 当前 Session 所属 Workspace 中的全部可访问会话。
+    Workspace,
+    /// 当前 Runtime Home 中的全部可访问会话。
+    Global,
+}
+
+/// 以稳定引用为边界的有限续读方向。
+#[derive(Clone, Copy, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallReadDirection {
+    /// 返回命中前后有限正文。
+    #[default]
+    Around,
+    /// 从引用向前读取。
+    Before,
+    /// 从引用向后读取。
+    After,
+}
+
+/// 多 Source 召回能力接收的检索请求。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRecallRequest {
     /// 非空检索文本。
     pub query: String,
+    /// 调用方要求的信息边界。
+    pub scope: RecallScope,
     /// 模型明确要求返回的最大结果数。
     pub limit: NonZeroUsize,
     /// 指定 Source；`None` 表示使用协调器的显式默认集合。
     pub sources: Option<Vec<RecallSourceId>>,
+}
+
+/// 围绕稳定引用续读有限正文的请求。
+///
+/// 续读要求数据源具有稳定顺序和可验证引用，因此不属于所有 Recall Source 都必须实现的
+/// 通用检索契约。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecallReferenceReadRequest {
+    /// Source 生成的不透明稳定引用。
+    pub reference: String,
+    /// 读取方向。
+    pub direction: RecallReadDirection,
+    /// 模型明确要求返回的最大消息数。
+    pub limit: NonZeroUsize,
 }
 
 /// 单个 RecallSource 实际接收的最小请求。
@@ -169,6 +211,17 @@ pub struct MemoryRecallResponse {
     pub failures: Vec<MemoryRecallFailure>,
     /// 是否还有候选因 Source 或统一请求上限而未返回。
     pub truncated: bool,
+    /// 续读窗口的边界信息；搜索响应为 `None`。
+    pub window: Option<RecallReadWindow>,
+}
+
+/// 一次有限续读的边界信息。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecallReadWindow {
+    /// 当前窗口前方是否仍有可续读正文。
+    pub has_more_before: bool,
+    /// 当前窗口后方是否仍有可续读正文。
+    pub has_more_after: bool,
 }
 
 /// 统一 Memory Recall 调用失败。
@@ -186,13 +239,26 @@ pub enum MemoryRecallError {
         /// 按 Source 构造顺序排列的失败明细。
         failures: Vec<MemoryRecallFailure>,
     },
+    /// 当前调用方无法成立请求的 scope。
+    #[error("requested recall scope is unavailable")]
+    ScopeUnavailable,
+    /// 稳定引用格式、签名或 caller 绑定不合法。
+    #[error("recall reference is invalid")]
+    ReferenceInvalid,
+    /// 引用指向的 generation 或 message 已不可定位。
+    #[error("recall reference is stale")]
+    ReferenceStale,
+    /// 引用来源已删除、损坏或当前不可访问。
+    #[error("recall source is unavailable")]
+    SourceUnavailable,
     /// 整体调用已被取消。
     #[error("memory recall was cancelled")]
     Cancelled,
 }
 
 impl MemoryRecallError {
-    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
+    /// 创建不携带检索正文的受控输入错误。
+    pub fn invalid_input(message: impl Into<String>) -> Self {
         Self::InvalidInput {
             message: message.into(),
         }

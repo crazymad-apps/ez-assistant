@@ -366,6 +366,10 @@ v0.6.0 不修改正式 Runtime，由顶层 `tools/reliability-demo` 私有验证
 表示可替换的数据源适配器，具体 `MemoryRecall` 实现可以协调多个 Source，负责显式默认
 集合、并发、超时、确定排序、精确去重、截断和部分失败。
 
+稳定引用的 `before/after/around` 续读不是所有 Source 的共同能力，由独立可选的
+`RecallReferenceReader` 承担。模型仍看到一个 `recall_memory` 工具，但工具层按 action 路由到检索或
+续读能力，避免通用协调器被应用层有序读取语义污染。
+
 - Recall 结果天然携带来源，不自动写入 Pinned Memory 或修改 Session Prompt。
 - Source 是否对模型可见、是否允许模型指定，由 System Prompt、Skill 和上层授权决定，
   不进入 Source trait 或动态工具定义。
