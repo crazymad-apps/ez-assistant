@@ -28,6 +28,10 @@ pub use capability::{
         SearchMatch, SearchTruncationReason, WriteFileRequest, WriteFileResult, exact_replace,
         paginate_with_line_numbers,
     },
+    image::{
+        ImageInspection, ImageInspectionFuture, ImageInspector, ImageInspectorError,
+        InspectImagesRequest, SharedImageInspector,
+    },
     shell::{
         ShellAuthorizationFacts, ShellFuture, ShellOutcome, ShellOutputChannel, ShellOutputChunk,
         ShellOutputSink, ShellProcessMode, ShellRequest, ShellTool, ShellToolError, utf8_prefix,
@@ -46,6 +50,9 @@ pub use standard::{
         DeleteFileInput, EditFileInput, FindFilesInput, FsDeleteTool, FsEditTool, FsFindTool,
         FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ListDirectoryInput, ReadFileInput,
         ReadFileToolConfig, SearchContentInput, SearchFilesToolConfig, WriteFileInput,
+    },
+    inspect_images::{
+        InspectImagesInput, InspectImagesOutput, InspectImagesTool, ResolvedInspectImagesInput,
     },
     pinned_memory::{
         ListPinnedMemoriesInput, ListPinnedMemoriesTool, PinMemoryInput, PinMemoryTool,

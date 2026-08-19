@@ -274,6 +274,18 @@ pub trait Tool: Send + Sync + 'static {
         input: Self::ResolvedInput,
         context: ToolContext,
     ) -> ToolExecuteFuture<'a, Self::Output>;
+
+    /// 把成功输出编码为模型可见内容；普通工具默认使用 JSON。
+    fn encode_output(output: Self::Output) -> Result<ToolResultContent, String> {
+        serde_json::to_value(output)
+            .map(ToolResultContent::Json)
+            .map_err(|error| error.to_string())
+    }
+
+    /// 提取不进入模型上下文、但需要随可靠结果保存的执行观测信息。
+    fn execution_metadata(_output: &Self::Output) -> Option<agent_types::ToolExecutionMetadata> {
+        None
+    }
 }
 
 pub(crate) trait ErasedTool: Send + Sync {
@@ -360,17 +372,21 @@ impl<T: Tool> ErasedResolvedExecution for TypedResolvedExecution<T> {
                 call_id,
             } = *self;
             match tool.execute(input, context).await {
-                Ok(output) => match serde_json::to_value(output) {
-                    Ok(value) => ToolResult {
-                        call_id,
-                        status: ToolResultStatus::Success,
-                        content: ToolResultContent::Json(value),
-                    },
-                    Err(error) => text_error_result_for_id(
-                        call_id,
-                        format!("failed to serialize tool output: {error}"),
-                    ),
-                },
+                Ok(output) => {
+                    let metadata = T::execution_metadata(&output);
+                    match T::encode_output(output) {
+                        Ok(content) => ToolResult {
+                            call_id,
+                            status: ToolResultStatus::Success,
+                            content,
+                            metadata: metadata.map(Box::new),
+                        },
+                        Err(error) => text_error_result_for_id(
+                            call_id,
+                            format!("failed to serialize tool output: {error}"),
+                        ),
+                    }
+                }
                 Err(error) => tool_error_result(&call_id, error),
             }
         })
@@ -408,6 +424,7 @@ pub(crate) fn text_error_result_for_id(
         call_id,
         status: ToolResultStatus::Error,
         content: ToolResultContent::Text(message),
+        metadata: None,
     }
 }
 
@@ -432,6 +449,7 @@ fn tool_error_result(call_id: &agent_types::ToolCallId, error: ToolError) -> Too
                     "details": details,
                 }
             })),
+            metadata: None,
         },
     }
 }

@@ -73,6 +73,7 @@ impl DemoJournal {
                              stopped before the exchange completed"
                                 .to_owned(),
                         ),
+                        metadata: None,
                     },
                 })
             })
@@ -316,6 +317,7 @@ mod tests {
                 call_id: ToolCallId::new(id).expect("valid call id"),
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text("ok".to_owned()),
+                metadata: None,
             },
         }
     }

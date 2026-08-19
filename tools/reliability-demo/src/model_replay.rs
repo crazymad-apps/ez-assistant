@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     replay::{
-        RecordedModelCall, RecordedModelOutcome, ReplayError, capabilities_from_profile,
-        profile_from_metadata, recorded_model_calls, request_mismatch_field,
+        RecordedModelCall, RecordedModelOutcome, ReplayError, adapter_from_metadata,
+        capabilities_from_adapter, recorded_model_calls, request_mismatch_field,
     },
     trace::LoadedTrace,
 };
@@ -32,11 +32,11 @@ pub(crate) struct ReplayModelService {
 
 impl ReplayModelService {
     pub(crate) fn from_trace(trace: &LoadedTrace) -> Result<Self, ReplayError> {
-        let profile = profile_from_metadata(&trace.started.provider)?;
+        let protocol_adapter = adapter_from_metadata(&trace.started.provider)?;
         Ok(Self {
             scripts: Arc::new(Mutex::new(VecDeque::from(recorded_model_calls(trace)?))),
             mismatch: Arc::new(Mutex::new(None)),
-            capabilities: capabilities_from_profile(&profile),
+            capabilities: capabilities_from_adapter(&protocol_adapter),
             context_window_tokens: trace.started.provider.context_window_tokens,
         })
     }
@@ -168,6 +168,7 @@ pub(crate) async fn run_model_replay(trace: &LoadedTrace) -> Result<usize, Repla
                 ModelCallContext {
                     cancellation: CancellationToken::new(),
                     trace: Some(agent_model::TraceContext::new(call.correlation_id.clone())),
+                    prepared_images: Default::default(),
                 },
             )
             .await;
@@ -303,6 +304,7 @@ mod tests {
                 ModelCallContext {
                     cancellation,
                     trace: None,
+                    prepared_images: Default::default(),
                 },
             )
             .await
@@ -319,6 +321,7 @@ mod tests {
                 ModelCallContext {
                     cancellation: cancellation.clone(),
                     trace: None,
+                    prepared_images: Default::default(),
                 },
             )
             .await

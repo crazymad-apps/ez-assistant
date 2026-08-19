@@ -1,6 +1,6 @@
 //! Agent 变体与审批模式的 SQLite 稳定字符串转换。
 
-use assistant_protocol::{AgentVariant, ApprovalMode, ChildTaskStatus};
+use assistant_protocol::{AgentVariant, ApprovalMode, ChildTaskStatus, ReasoningEffortKey};
 
 use super::{StorageResult, invalid_data};
 
@@ -9,6 +9,31 @@ pub(super) fn agent_variant_value(value: AgentVariant) -> &'static str {
         AgentVariant::Plan => "plan",
         AgentVariant::Build => "build",
     }
+}
+
+pub(super) fn reasoning_effort_value(value: ReasoningEffortKey) -> &'static str {
+    match value {
+        ReasoningEffortKey::Low => "low",
+        ReasoningEffortKey::Medium => "medium",
+        ReasoningEffortKey::High => "high",
+        ReasoningEffortKey::XHigh => "xhigh",
+        ReasoningEffortKey::Max => "max",
+    }
+}
+
+pub(super) fn parse_reasoning_effort(
+    value: Option<String>,
+) -> StorageResult<Option<ReasoningEffortKey>> {
+    value
+        .map(|value| match value.as_str() {
+            "low" => Ok(ReasoningEffortKey::Low),
+            "medium" => Ok(ReasoningEffortKey::Medium),
+            "high" => Ok(ReasoningEffortKey::High),
+            "xhigh" => Ok(ReasoningEffortKey::XHigh),
+            "max" => Ok(ReasoningEffortKey::Max),
+            _ => Err(invalid_data("stored reasoning effort is invalid")),
+        })
+        .transpose()
 }
 
 pub(super) fn parse_agent_variant(value: &str) -> StorageResult<AgentVariant> {

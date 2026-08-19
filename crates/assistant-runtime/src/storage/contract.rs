@@ -13,11 +13,12 @@ use super::{
     ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
     MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
     NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, QueuePriorityChange, RewriteResult, SessionDeletion, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoreFuture, StoredAttachment, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationWindow, StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement,
-    StoredSession, StoredSessionFork, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
+    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RewriteResult,
+    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreFuture,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession,
+    StoredSessionFork, StoredSessionUsage, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
     VariantChange, WorkspaceRemoval,
 };
 
@@ -159,6 +160,9 @@ pub trait RuntimeStore: Send + Sync {
     /// 按当前权威 generation 加载并校验完整规范 Conversation。
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot>;
 
+    /// 读取 Session 已可靠提交的模型请求用量汇总。
+    fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage>;
+
     /// 按可显示 User/Assistant 消息边界读取历史窗口；实现可使用可重建的私有索引。
     fn load_conversation_window(
         &self,
@@ -203,6 +207,8 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 原子切换 Session 后续 Run 使用的模型 key。
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()>;
+
+    fn set_session_reasoning_effort(&self, change: ReasoningEffortChange) -> StoreFuture<'_, ()>;
 
     /// 原子切换 Session 当前 Agent 变体。
     fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()>;

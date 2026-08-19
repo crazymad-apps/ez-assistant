@@ -350,6 +350,48 @@ pub(crate) async fn preview_attachment(
 }
 
 #[tauri::command]
+pub(crate) async fn thumbnail_attachment(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    attachment_id: String,
+) -> Result<String, NativeResourceError> {
+    let session_id = SessionId::new(session_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
+    let attachment_id = AttachmentId::new(attachment_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "附件标识无效。"))?;
+    let bootstrap = coordinator
+        .bootstrap()
+        .await
+        .map_err(|_| runtime_unavailable())?;
+    let response = bridge
+        .http
+        .get(format!(
+            "{}/sessions/{}/attachments/{}/thumbnail",
+            bootstrap.base_url,
+            session_id.as_str(),
+            attachment_id.as_str()
+        ))
+        .bearer_auth(&bootstrap.access_token)
+        .send()
+        .await
+        .map_err(|_| runtime_unavailable())?;
+    if !response.status().is_success() {
+        return Err(
+            decode_runtime_failure(response, NativeResourceErrorCode::PreviewUnavailable).await,
+        );
+    }
+    let bytes = response.bytes().await.map_err(|_| runtime_unavailable())?;
+    if bytes.len() > MAX_PREVIEW_RESPONSE_BYTES {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "缩略图响应过大。",
+        ));
+    }
+    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
+}
+
+#[tauri::command]
 pub(crate) async fn preview_tool_file(
     bridge: State<'_, NativeResourceBridge>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,

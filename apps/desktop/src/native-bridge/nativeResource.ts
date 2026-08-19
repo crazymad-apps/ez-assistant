@@ -70,6 +70,17 @@ export async function previewAttachment(
   }).catch(normalizeResourceFailure);
 }
 
+export async function thumbnailAttachment(
+  session_id: SessionId,
+  attachment_id: AttachmentId,
+): Promise<string> {
+  ensureDesktopBridge();
+  return invoke<string>("thumbnail_attachment", {
+    sessionId: session_id,
+    attachmentId: attachment_id,
+  }).catch(normalizeResourceFailure);
+}
+
 export async function openAttachmentInSystem(
   session_id: SessionId,
   attachment_id: AttachmentId,

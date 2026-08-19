@@ -29,6 +29,6 @@ cargo clippy -p debug-viewer --all-targets --all-features -- -D warnings
 
 # 手动端到端：
 cargo run -p debug-viewer
-cargo run -p agent-provider-openai-compatible --example chat -- --debug http://localhost:7331
+cargo run -p agent-openai-compatible --example chat -- --debug http://localhost:7331
 # 浏览器打开 http://localhost:7331
 ```

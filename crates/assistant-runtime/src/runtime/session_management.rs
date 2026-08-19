@@ -6,12 +6,13 @@ use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
 use assistant_protocol::{
     ArchiveSessionRequest, ArchiveSessionResult, DeleteConfirmationToken, DeleteSessionRequest,
     DeleteSessionResult, ForkSessionRequest, ForkSessionResult, ListRunsRequest, ListRunsResult,
-    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
-    ReenterFromUserMessageResult, RenameSessionRequest, RenameSessionResult, RestoreSessionRequest,
-    RestoreSessionResult, RunSnapshot, SessionLifecycle, SessionTitleOrigin,
-    SetMessageFeedbackRequest, SetMessageFeedbackResult, SetSessionApprovalModeRequest,
-    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
-    SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionVariantRequest,
+    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReasoningEffortKey as ProtocolEffort,
+    ReenterFromUserMessageRequest, ReenterFromUserMessageResult, RenameSessionRequest,
+    RenameSessionResult, RestoreSessionRequest, RestoreSessionResult, RunSnapshot,
+    SessionLifecycle, SessionTitleOrigin, SetMessageFeedbackRequest, SetMessageFeedbackResult,
+    SetSessionApprovalModeRequest, SetSessionApprovalModeResult, SetSessionModelRequest,
+    SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
+    SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
     SetSessionVariantResult,
 };
 
@@ -26,8 +27,8 @@ use super::{
 use crate::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, ForkSessionEnvironmentFactoryRequest,
     ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewStoredInput,
-    NewStoredSession, RuntimeError, RuntimeResult, SessionDeletion, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoredInputState, VariantChange,
+    NewStoredSession, ReasoningEffortChange, RuntimeError, RuntimeResult, SessionDeletion,
+    SessionFork, SessionPinnedChange, SessionTitleChange, StoredInputState, VariantChange,
     journal::InMemoryJournal,
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
@@ -49,12 +50,13 @@ impl AssistantRuntime {
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
         let _mutation = source.mutation().await;
-        let (source_generation, title, model_key, current_variant, approval_mode) = {
+        let (source_generation, title, model_key, reasoning_effort, current_variant, approval_mode) = {
             let state = source.lock_state()?;
             (
                 state.body_generation,
                 state.title.clone(),
                 state.model_key.clone(),
+                state.reasoning_effort,
                 state.current_variant,
                 state.approval_mode,
             )
@@ -164,6 +166,7 @@ impl AssistantRuntime {
                     title: fork_title(&title),
                     title_origin: SessionTitleOrigin::Generated,
                     model_key,
+                    reasoning_effort,
                     system_prompt: prepared.system_prompt,
                     environment: prepared.environment,
                     current_variant,
@@ -574,11 +577,19 @@ impl AssistantRuntime {
         session.ensure_idle()?;
         let snapshot = self.config_registry.snapshot()?;
         let model_key = resolve_session_model_key(&snapshot, Some(request.model_key))?;
+        let current_effort = session.lock_state()?.reasoning_effort;
+        let model = snapshot
+            .model(&model_key)
+            .ok_or_else(|| RuntimeError::ModelUnavailable {
+                model_key: model_key.clone(),
+            })?;
+        let reasoning_effort = downgrade_effort(current_effort, model.capabilities());
         let changed_at_ms = now_ms()?;
         self.store
             .set_session_model(ModelChange {
                 session_id: request.session_id.clone(),
                 model_key: model_key.clone(),
+                reasoning_effort,
                 changed_at_ms,
             })
             .await
@@ -586,11 +597,54 @@ impl AssistantRuntime {
         {
             let mut state = session.lock_state()?;
             state.model_key = model_key;
+            state.reasoning_effort = reasoning_effort;
         }
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
             session_id: request.session_id,
         });
         Ok(SetSessionModelResult {
+            session: session.summary()?,
+        })
+    }
+
+    pub async fn set_session_reasoning_effort(
+        &self,
+        request: SetSessionReasoningEffortRequest,
+    ) -> RuntimeResult<SetSessionReasoningEffortResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        let _mutation = session.mutation().await;
+        session.ensure_healthy()?;
+        session.ensure_active()?;
+        let model_key = session.model_key()?;
+        let snapshot = self.config_registry.snapshot()?;
+        let model = snapshot
+            .model(&model_key)
+            .ok_or_else(|| RuntimeError::ModelUnavailable { model_key })?;
+        if request
+            .effort
+            .is_some_and(|effort| !supports_effort(model.capabilities(), effort))
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "reasoning effort is not supported by the current model",
+            });
+        }
+        self.store
+            .set_session_reasoning_effort(ReasoningEffortChange {
+                session_id: request.session_id.clone(),
+                reasoning_effort: request.effort,
+                changed_at_ms: now_ms()?,
+            })
+            .await
+            .map_err(|source| {
+                RuntimeError::from_store("change session reasoning effort", source)
+            })?;
+        session.lock_state()?.reasoning_effort = request.effort;
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id,
+        });
+        Ok(SetSessionReasoningEffortResult {
             session: session.summary()?,
         })
     }
@@ -815,7 +869,6 @@ impl AssistantRuntime {
             state.resume_required = false;
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
-            state.retry_override_input = None;
             state.message_count = replacement_message_count;
             state.persisted_message_count = replacement.messages.len();
             state.body_generation = rewritten.body_generation;
@@ -858,4 +911,99 @@ fn fork_title(source: &str) -> String {
     let mut title = source.chars().take(available).collect::<String>();
     title.push_str(SUFFIX);
     title
+}
+
+fn supports_effort(
+    capabilities: &crate::ResolvedModelCapabilities,
+    effort: ProtocolEffort,
+) -> bool {
+    capabilities.reasoning.as_ref().is_some_and(|reasoning| {
+        reasoning
+            .efforts
+            .iter()
+            .any(|candidate| protocol_effort(candidate.key) == effort)
+    })
+}
+
+fn downgrade_effort(
+    current: Option<ProtocolEffort>,
+    capabilities: &crate::ResolvedModelCapabilities,
+) -> Option<ProtocolEffort> {
+    let current = current?;
+    capabilities
+        .reasoning
+        .as_ref()?
+        .efforts
+        .iter()
+        .map(|candidate| protocol_effort(candidate.key))
+        .filter(|candidate| *candidate <= current)
+        .max()
+}
+
+fn protocol_effort(value: crate::ReasoningEffortKey) -> ProtocolEffort {
+    match value {
+        crate::ReasoningEffortKey::Low => ProtocolEffort::Low,
+        crate::ReasoningEffortKey::Medium => ProtocolEffort::Medium,
+        crate::ReasoningEffortKey::High => ProtocolEffort::High,
+        crate::ReasoningEffortKey::XHigh => ProtocolEffort::XHigh,
+        crate::ReasoningEffortKey::Max => ProtocolEffort::Max,
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    use crate::{
+        ReasoningEffortKey, ReasoningEffortWireValue, ResolvedReasoningCapability,
+        ResolvedReasoningEffort,
+    };
+
+    fn capabilities(keys: &[ReasoningEffortKey]) -> crate::ResolvedModelCapabilities {
+        crate::ResolvedModelCapabilities {
+            image_input: false,
+            reasoning: Some(ResolvedReasoningCapability {
+                efforts: keys
+                    .iter()
+                    .copied()
+                    .map(|key| ResolvedReasoningEffort {
+                        key,
+                        label: key.as_str().to_owned(),
+                        wire_value: ReasoningEffortWireValue::String(key.as_str().to_owned()),
+                    })
+                    .collect(),
+                default_effort: None,
+            }),
+            tool_calls: true,
+            streaming: true,
+        }
+    }
+
+    #[test]
+    fn model_switch_keeps_or_only_downgrades_explicit_effort() {
+        let target = capabilities(&[
+            ReasoningEffortKey::Low,
+            ReasoningEffortKey::High,
+            ReasoningEffortKey::Max,
+        ]);
+        assert_eq!(
+            downgrade_effort(Some(ProtocolEffort::Max), &target),
+            Some(ProtocolEffort::Max)
+        );
+        assert_eq!(
+            downgrade_effort(Some(ProtocolEffort::XHigh), &target),
+            Some(ProtocolEffort::High)
+        );
+        assert_eq!(
+            downgrade_effort(Some(ProtocolEffort::Medium), &target),
+            Some(ProtocolEffort::Low)
+        );
+        assert_eq!(downgrade_effort(None, &target), None);
+        assert_eq!(
+            downgrade_effort(
+                Some(ProtocolEffort::High),
+                &crate::ResolvedModelCapabilities::conservative_openai_chat_completions(),
+            ),
+            None
+        );
+    }
 }

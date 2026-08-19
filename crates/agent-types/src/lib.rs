@@ -22,6 +22,6 @@ pub use conversation::{
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
 pub use model::{FinishReason, ModelIdentity, TokenUsage};
 pub use tool::{
-    ToolChoice, ToolDefinition, ToolName, ToolNameError, ToolResult, ToolResultContent,
-    ToolResultStatus,
+    ToolChoice, ToolDefinition, ToolExecutionMetadata, ToolName, ToolNameError, ToolResult,
+    ToolResultContent, ToolResultStatus,
 };

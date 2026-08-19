@@ -65,6 +65,7 @@ impl StorageEngine {
             status: RunStatus::Accepted,
             agent_variant,
             approval_mode: attempt.approval_mode,
+            reasoning_effort: None,
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),
@@ -77,7 +78,7 @@ impl StorageEngine {
     /// 首次领取提交 User Message；后续 attempt 只把新的 Run 转为 Running。
     pub(super) fn commit_user_message(&mut self, commit: UserMessageCommit) -> StorageResult<()> {
         if commit.message.is_none() {
-            let changed = self.connection.execute("UPDATE runs SET status = 'running', started_at_ms = ?1 WHERE run_id = ?2 AND session_id = ?3 AND input_id = ?4 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?4 AND state = 'committed')", params![commit.created_at_ms, commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str()]).map_err(|source| database_write_error("run could not be started", source))?;
+            let changed = self.connection.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str()]).map_err(|source| database_write_error("run could not be started", source))?;
             if changed != 1 {
                 return Err(conflict("run cannot be started"));
             }
@@ -94,7 +95,9 @@ impl StorageEngine {
                 messages: vec![ConversationMessage::User(message)],
                 created_at_ms: commit.created_at_ms,
             },
-            AppendPurpose::UserMessage,
+            AppendPurpose::UserMessage {
+                reasoning_effort: commit.reasoning_effort,
+            },
         )?;
         self.complete_staged_append(&commit.operation_id)
     }

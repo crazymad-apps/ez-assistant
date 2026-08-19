@@ -21,12 +21,13 @@
 //!
 //! 最小调用示例见 `service.rs` 内联测试：`FakeModelService` 演示了通过
 //! [`ModelService`] SPI 完成一次 Turn 的完整路径；真实 Adapter 的端到端调用见
-//! `agent-provider-openai-compatible` 的 `examples/chat.rs`。
+//! `agent-openai-compatible` 的 `examples/chat.rs`。
 
 mod capabilities;
 mod context;
 mod error;
 mod event;
+mod image;
 mod lifecycle;
 mod request;
 mod retry;
@@ -39,6 +40,10 @@ pub use capabilities::ModelCapabilities;
 pub use context::{ModelCallContext, TraceContext};
 pub use error::{ModelError, ModelTransportErrorKind};
 pub use event::ModelEvent;
+pub use image::{
+    ModelImagePreparation, ModelImagePreparationFuture, ModelImagePreprocessor, ModelServiceBundle,
+    PreparedModelImage, PreparedModelImages,
+};
 pub use lifecycle::LifecycleValidator;
 pub use request::{
     GenerationConfig, ModelRequest, ProviderOptions, ProviderOptionsError, ReasoningConfig,

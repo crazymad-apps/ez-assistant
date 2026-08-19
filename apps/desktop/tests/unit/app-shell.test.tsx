@@ -147,6 +147,7 @@ function applicationSnapshot(): ApplicationSnapshot {
       state: "ready",
       schema_version: 1,
       default_model: "fixture",
+      auxiliary_vision_model: null,
       issues: [],
     },
     models: [],

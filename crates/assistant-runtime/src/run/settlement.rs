@@ -308,6 +308,7 @@ fn model_failure_kind_value(kind: assistant_protocol::ModelFailureKind) -> &'sta
         ModelFailureKind::ContextOverflow => "context_overflow",
         ModelFailureKind::Protocol => "protocol",
         ModelFailureKind::ToolArguments => "tool_arguments",
+        ModelFailureKind::Resource => "resource",
         ModelFailureKind::Cancelled => "cancelled",
     }
 }

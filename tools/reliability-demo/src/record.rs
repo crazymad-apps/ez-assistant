@@ -21,9 +21,9 @@ use agent_model::{
     ModelRetryPolicy, ModelService, ModelStreamFuture, ProviderOptions, ReasoningConfig,
     RetryingModelService, SystemPromptSnapshot, TraceContext,
 };
-use agent_provider_openai_compatible::{
-    BearerCredential, ObservedTransport, OpenAiCompatibleService, Profile, ReqwestTransport,
-    Transport, TransportTimeouts,
+use agent_openai_compatible::{
+    BearerCredential, ObservedTransport, OpenAiCompatibleService, ProtocolAdapter,
+    ReqwestTransport, Transport, TransportTimeouts,
 };
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolRegistry, ToolResolution};
 use agent_types::{
@@ -134,7 +134,7 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
         BearerCredential::new(provider.api_key.clone()),
         provider.model.clone(),
         provider.context_window_tokens,
-        Profile::deepseek(),
+        ProtocolAdapter::deepseek(),
         raw_transport.clone(),
     )
     .map_err(|error| RecordCommandError::Provider(error.to_string()))?;
@@ -151,7 +151,7 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
     let metadata = ProviderMetadata {
         adapter: OPENAI_COMPATIBLE_ADAPTER.into(),
         adapter_version: OPENAI_COMPATIBLE_ADAPTER_VERSION,
-        profile: "deepseek".into(),
+        protocol_adapter: "deepseek".into(),
         provider_id: "deepseek".into(),
         protocol: OPENAI_CHAT_COMPLETIONS_PROTOCOL.into(),
         endpoint: provider.endpoint.clone(),
@@ -170,7 +170,7 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
         BearerCredential::new(provider.api_key.clone()),
         provider.model.clone(),
         provider.context_window_tokens,
-        Profile::deepseek(),
+        ProtocolAdapter::deepseek(),
         observed_transport,
     ) {
         Ok(service) => service,
@@ -452,7 +452,7 @@ fn statistics(trace: &LoadedTrace) -> TraceStatistics {
         if matches!(
             record.payload,
             NativeTracePayload::ProviderWire(
-                agent_provider_openai_compatible::ProviderWireEvent::Request { .. }
+                agent_openai_compatible::ProviderWireEvent::Request { .. }
             )
         ) {
             statistics.attempts += 1;
@@ -502,6 +502,7 @@ impl ModelService for ObservedModelService {
                     ModelCallContext {
                         cancellation: context.cancellation,
                         trace: Some(trace.clone()),
+                        prepared_images: context.prepared_images,
                     },
                 )
                 .await;
@@ -664,7 +665,7 @@ mod tests {
     use std::{collections::BTreeSet, time::Duration};
 
     use agent_model::{ModelEvent, ModelRetryReason};
-    use agent_provider_openai_compatible::{ProviderWireEvent, RecordedWireRequest};
+    use agent_openai_compatible::{ProviderWireEvent, RecordedWireRequest};
     use agent_testkit::{ModelScript, ScriptedModelService, message_events};
     use agent_types::{
         AssistantMessage, AssistantPart, FinishReason, ModelIdentity, ProviderId, ToolCall,
@@ -733,6 +734,7 @@ mod tests {
             Arc::new(ImmediateModel {
                 capabilities: ModelCapabilities {
                     reasoning: false,
+                    image_input: false,
                     tool_calls: true,
                     streaming: true,
                 },
@@ -782,6 +784,7 @@ mod tests {
             Arc::new(ImmediateModel {
                 capabilities: ModelCapabilities {
                     reasoning: false,
+                    image_input: false,
                     tool_calls: true,
                     streaming: true,
                 },
@@ -824,6 +827,7 @@ mod tests {
         let scripted: Arc<dyn ModelService> = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },
@@ -901,6 +905,7 @@ mod tests {
         let scripted: Arc<dyn ModelService> = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },

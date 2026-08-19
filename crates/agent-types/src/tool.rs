@@ -119,6 +119,23 @@ pub enum ToolResultContent {
     Json(Value),
 }
 
+/// 不发送给模型、但随可靠 Tool Result 保存的执行观测信息。
+///
+/// 这里只承载跨工具通用且已经脱敏的事实；工具业务输出仍由
+/// [`ToolResultContent`] 表达，Provider Adapter 必须忽略本字段。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolExecutionMetadata {
+    /// 执行该工具内部模型调用的配置标识；普通工具保持为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
+    /// 工具执行内部调用的墙钟耗时。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// 工具内部模型调用由 Provider 确认的 token 用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::TokenUsage>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// 一次工具调用的规范结果。
 pub struct ToolResult {
@@ -128,6 +145,9 @@ pub struct ToolResult {
     pub status: ToolResultStatus,
     /// 返回给模型的内容。
     pub content: ToolResultContent,
+    /// 不进入模型上下文的可选执行观测信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Box<ToolExecutionMetadata>>,
 }
 
 #[cfg(test)]
@@ -148,6 +168,7 @@ mod tests {
             call_id: ToolCallId::new("call_1").expect("valid call id"),
             status: ToolResultStatus::Success,
             content: ToolResultContent::Json(serde_json::json!({"ok": true})),
+            metadata: None,
         };
         let json = serde_json::to_string(&result).expect("serialize result");
         assert_eq!(

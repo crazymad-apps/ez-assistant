@@ -220,6 +220,7 @@ impl ModelService for PerTraceService {
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         reasoning: true,
+        image_input: false,
         tool_calls: true,
         streaming: true,
     }

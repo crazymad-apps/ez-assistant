@@ -9,6 +9,7 @@ mod config_source;
 mod endpoint;
 #[cfg(unix)]
 mod http;
+mod image;
 #[cfg(unix)]
 mod platform;
 #[cfg(unix)]
@@ -26,7 +27,7 @@ use std::sync::Arc;
 #[cfg(unix)]
 use assistant_protocol::{ReloadConfigRequest, ShutdownRuntimeRequest};
 #[cfg(unix)]
-use assistant_runtime::{AssistantRuntime, RuntimeConfig, RuntimeStore};
+use assistant_runtime::{AssistantRuntime, ModelCatalog, RuntimeConfig, RuntimeStore};
 #[cfg(not(unix))]
 use thiserror::Error;
 
@@ -43,6 +44,8 @@ use crate::{
 
 #[cfg(unix)]
 const STORAGE_QUEUE_CAPACITY: usize = 64;
+#[cfg(unix)]
+const MODEL_CATALOG_JSON: &str = include_str!("../resources/model-catalog.json");
 
 #[tokio::main]
 async fn main() {
@@ -80,6 +83,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 // 单实例锁必须先于 Store；HTTP 端口与发现文件在 Runtime 恢复后才发布。
                 let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
                 let resources = HostResources::new(&config.runtime_home)?;
+                let model_catalog = Arc::new(ModelCatalog::from_json(MODEL_CATALOG_JSON)?);
                 let recall_reference_key =
                     recall_reference_key::load_or_create(&config.runtime_home)?;
                 let store = Arc::new(
@@ -88,6 +92,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 let runtime = match AssistantRuntime::open_with_recall_key(
                     RuntimeConfig::new(config.event_capacity),
                     Arc::new(LocalConfigSource::new(config.config_path)),
+                    model_catalog,
                     resources.model_factory,
                     resources.session_environment_factory,
                     resources.run_tool_factory,

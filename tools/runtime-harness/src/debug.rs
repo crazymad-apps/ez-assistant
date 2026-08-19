@@ -454,6 +454,7 @@ mod tests {
     fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
             reasoning: false,
+            image_input: false,
             tool_calls: true,
             streaming: true,
         }

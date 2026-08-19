@@ -17,7 +17,7 @@ use assistant_protocol::{
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use super::{AssistantRuntime, model::profile_request_options};
+use super::{AssistantRuntime, model::protocol_request_options};
 use crate::{RuntimeError, RuntimeResult};
 
 pub(super) const CONNECTION_VALIDATION_PROMPT: &str = "Reply with OK.";
@@ -61,8 +61,13 @@ impl AssistantRuntime {
             }
             Err(error) => return Err(error),
         };
-        let model_request =
-            connection_validation_request(compiled.profile, compiled.max_output_tokens)?;
+        let model_request = connection_validation_request(
+            &compiled.provider,
+            compiled.protocol,
+            &compiled.model_id,
+            &compiled.capabilities,
+            compiled.max_output_tokens,
+        )?;
         let cancellation = self.root_cancellation.child_token();
         let validation =
             consume_validation_stream(compiled.model, model_request, cancellation.clone());
@@ -103,10 +108,14 @@ impl AssistantRuntime {
 
 /// 构造不携带 Session、System Prompt、工具或用户数据的固定最小请求。
 fn connection_validation_request(
-    profile: crate::ModelCompatibilityProfile,
+    provider: &agent_types::ProviderId,
+    protocol: crate::ModelProtocol,
+    model_id: &str,
+    capabilities: &crate::ResolvedModelCapabilities,
     model_max_output_tokens: u32,
 ) -> RuntimeResult<ModelRequest> {
-    let (reasoning, provider_options) = profile_request_options(profile)?;
+    let (reasoning, provider_options) =
+        protocol_request_options(provider, protocol, model_id, capabilities, None)?;
     let user_message = UserMessage {
         id: MessageId::new("connection-validation-message")
             .expect("static validation message id is valid"),
@@ -177,9 +186,10 @@ fn connection_validation_failure_kind(error: &ModelError) -> ConnectionValidatio
         ModelError::RateLimited { .. } => ConnectionValidationFailureKind::RateLimited,
         ModelError::Unavailable { .. } => ConnectionValidationFailureKind::ServiceUnavailable,
         ModelError::ContextOverflow { .. } => ConnectionValidationFailureKind::ModelUnavailable,
-        ModelError::Protocol(_) | ModelError::ToolArguments(_) | ModelError::Cancelled => {
-            ConnectionValidationFailureKind::Protocol
-        }
+        ModelError::Protocol(_)
+        | ModelError::ToolArguments(_)
+        | ModelError::Resource(_)
+        | ModelError::Cancelled => ConnectionValidationFailureKind::Protocol,
     }
 }
 

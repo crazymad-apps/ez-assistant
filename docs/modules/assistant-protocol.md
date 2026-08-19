@@ -61,7 +61,7 @@
   credential 只能表示为 `api_key_configured`，不得进入响应、事件或错误。
 - reload 的 Missing/Invalid/Degraded/Ready 是可诊断业务结果；连接验证返回稳定失败分类，
   原始 Provider body、认证 header 和内部错误链不进入协议。
-- Runtime Home 文件路径可以作为本机诊断信息返回，但私有 wire、Demo 交互、模型 Profile 和
+- Runtime Home 文件路径可以作为本机诊断信息返回，但私有 wire、Demo 交互、模型协议 Adapter 和
   Runtime 内部配置对象仍不属于公共协议。
 
 ## v0.10.0 可靠输入契约
@@ -121,6 +121,22 @@
   覆盖生命周期、text/reasoning、usage 及工具活动；不得用父 Run 的 delta 冒充 child 事件。
 - child 的完整 Conversation 仍不是公共协议 DTO。SSE 可以丢失，客户端必须用 list/get 和 Host
   私有 Conversation 查询重建；取消先形成持久请求事实，终态重复取消幂等返回当前快照。
+
+## v0.16.0 图片、推理、队列与 usage 增量契约
+
+- 附件投影增加实际 `media_type`，图片仍沿用统一 `AttachmentId` 和文件引用；图片字节、Base64、
+  像素尺寸、缩略图路径和模型请求对象不进入公共协议。
+- 模型与 Session 投影只公开图片输入、reasoning、可用 effort key/label、默认 effort 和辅助视觉
+  模型引用等最小能力事实；Provider 的 wire value、thinking 私有字段和 credential 不进入协议。
+- Session 保存 reasoning effort 意图，Run 快照保存启动时冻结值。模型切换与 effort 降级由 Runtime
+  原子完成，Desktop 不根据 Provider 或模型名称自行映射。
+- `resume_queued_input` 是队列恢复的统一命令，可整体恢复或指定一个排队输入优先执行；旧
+  `resume_session` 仅保留一个版本的兼容转发并视为弃用，新 Desktop 与测试不得继续调用。
+- `SessionUsageSnapshot` 同时投影最新一轮 input/output/cached input、会话累计 input/output/cached
+  input，以及由这些权威计数计算的最新命中率和综合命中率。累计值在每次已结算模型请求时持久化，
+  Desktop 不为重建会话统计反复扫描 Run 日志。
+- 队列、usage、effort 和模型能力事件允许丢失；客户端重连后必须以 Session/Run 快照恢复，不把
+  本地乐观状态当作权威事实。
 
 ## Harness 验证
 

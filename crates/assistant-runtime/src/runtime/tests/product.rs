@@ -103,6 +103,64 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
 }
 
 #[tokio::test]
+async fn session_usage_projects_latest_and_token_weighted_cache_hit_rates() {
+    let mut first = assistant_text("cache-rate-first", "first");
+    first.usage = Some(agent_types::TokenUsage {
+        input_tokens: 100,
+        output_tokens: 10,
+        total_tokens: 110,
+        cached_input_tokens: Some(20),
+        reasoning_tokens: None,
+    });
+    let mut second = assistant_text("cache-rate-second", "second");
+    second.usage = Some(agent_types::TokenUsage {
+        input_tokens: 300,
+        output_tokens: 20,
+        total_tokens: 320,
+        cached_input_tokens: Some(150),
+        reasoning_tokens: None,
+    });
+    let runtime = runtime(Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::Events(message_events(&second)),
+        ],
+    )));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    for message in ["first request", "second request"] {
+        let run = runtime
+            .submit_input(SubmitInputRequest {
+                session_id: session_id.clone(),
+                message: message.to_owned(),
+                attachment_ids: Vec::new(),
+                idempotency_key: None,
+                variant: assistant_protocol::AgentVariant::Build,
+            })
+            .await
+            .expect("submit")
+            .run;
+        wait_for_terminal(&runtime, &session_id, &run.run_id).await;
+    }
+
+    let usage = runtime
+        .get_session_view(GetSessionViewRequest { session_id })
+        .await
+        .expect("session view")
+        .snapshot
+        .value
+        .usage;
+    assert_eq!(usage.latest_cache_hit_basis_points, Some(5_000));
+    assert_eq!(usage.overall_cache_hit_basis_points, Some(4_250));
+}
+
+#[tokio::test]
 async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_be_cleared() {
     let runtime = runtime(Arc::new(ScriptedModelService::new(
         model_capabilities(false),
@@ -380,7 +438,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
 }
 
 #[tokio::test]
-async fn queue_priority_uses_revision_and_user_interrupt_pauses_remaining_inputs() {
+async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
     let entered = Arc::new(Notify::new());
     let runtime = runtime_with_tools(
         Arc::new(CancellationAwareModel {
@@ -482,7 +540,9 @@ async fn queue_priority_uses_revision_and_user_interrupt_pauses_remaining_inputs
         assistant_protocol::RunStatus::Cancelled
     );
     let paused = runtime
-        .get_session_view(GetSessionViewRequest { session_id })
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
         .await
         .expect("paused session view")
         .snapshot
@@ -490,6 +550,24 @@ async fn queue_priority_uses_revision_and_user_interrupt_pauses_remaining_inputs
         .queue;
     assert_eq!(paused.state, QueueExecutionState::PausedByUser);
     assert_eq!(paused.items[0].input_id, third.input_id);
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+            variant: assistant_protocol::AgentVariant::Build,
+        })
+        .await
+        .expect("new user intent");
+    let resumed = runtime
+        .get_session_view(GetSessionViewRequest { session_id })
+        .await
+        .expect("resumed session view")
+        .snapshot
+        .value
+        .queue;
+    assert_eq!(resumed.state, QueueExecutionState::Automatic);
 }
 
 #[tokio::test]

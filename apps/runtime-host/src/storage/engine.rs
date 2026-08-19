@@ -21,7 +21,10 @@ use super::{
     SESSIONS_DIRECTORY, STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path,
     conflict, conversation, create_new_private_file, database_write_error, internal_error,
     invalid_data, invalid_data_with_source,
-    mode::{agent_variant_value, approval_mode_value, parse_agent_variant, parse_approval_mode},
+    mode::{
+        agent_variant_value, approval_mode_value, parse_agent_variant, parse_approval_mode,
+        parse_reasoning_effort, reasoning_effort_value,
+    },
     non_negative_u64, positive_u64, schema,
     session_resources::remove_created_session_directories,
     sync_directory,
@@ -128,6 +131,7 @@ impl StorageEngine {
         unavailable.extend(self.recover_pending_tool_exchanges()?);
         self.unavailable_sessions = unavailable;
         self.interrupt_nonterminal_runs()?;
+        self.backfill_session_usage()?;
         Ok(RecoveredRuntime {
             workspaces: self.load_all_workspaces()?,
             attachments: self.load_attachments()?,
@@ -160,14 +164,15 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, system_prompt_json, current_variant,
+                        session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, 0, ?7, ?7, NULL, 0, ?8)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', 1, 0, ?8, ?8, NULL, 0, ?9)",
                     params![
                         session.session_id.as_str(),
                         session.title,
                         session.model_key.as_str(),
+                        session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
                         agent_variant_value(session.current_variant),
                         approval_mode_value(session.approval_mode),
@@ -182,6 +187,15 @@ impl StorageEngine {
                     database_write_error("session could not be created in runtime storage", source)
                 })?;
             Self::insert_session_resources(&transaction, &session)?;
+            transaction
+                .execute(
+                    "INSERT INTO session_usage (session_id, backfilled, updated_at_ms)
+                     VALUES (?1, 1, ?2)",
+                    params![session.session_id.as_str(), session.created_at_ms],
+                )
+                .map_err(|source| {
+                    database_write_error("session usage could not be initialized", source)
+                })?;
             transaction.commit().map_err(|source| {
                 database_write_error("session transaction could not be committed", source)
             })?;
@@ -203,6 +217,7 @@ impl StorageEngine {
             session_id: session.session_id,
             title: session.title,
             model_key: session.model_key,
+            reasoning_effort: session.reasoning_effort,
             system_prompt: session.system_prompt,
             environment: session.environment,
             lifecycle: StoredSessionLifecycle::Active,
@@ -374,7 +389,7 @@ impl StorageEngine {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT session_id, title, model_key, system_prompt_json, current_variant,
+                "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
@@ -389,17 +404,18 @@ impl StorageEngine {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, String>(14)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -410,6 +426,7 @@ impl StorageEngine {
                 session_id,
                 title,
                 model_key,
+                reasoning_effort,
                 prompt_json,
                 current_variant,
                 approval_mode,
@@ -446,6 +463,7 @@ impl StorageEngine {
                 session_id: parsed_session_id.clone(),
                 title,
                 model_key: parsed_model_key,
+                reasoning_effort: parse_reasoning_effort(reasoning_effort)?,
                 system_prompt,
                 environment: self.load_session_environment(&parsed_session_id)?,
                 lifecycle,

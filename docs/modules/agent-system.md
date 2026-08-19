@@ -14,7 +14,7 @@
   工具接入，不形成巨型 Agent 对象或 Core 专用阶段。
 - Provider 特殊协议限制在适配层，不污染 Agent Loop。
 - Runtime 持有业务 Run、会话和持久化权威状态；Core 只执行一次 `AgentExecution`。
-- 所有策略来源在进入 Core 前解析为一份不可变执行规格，不在 Core 内重复维护 Profile、默认值和覆盖关系。
+- 所有策略来源在进入 Core 前解析为一份不可变执行规格，不在 Core 内重复维护协议适配、默认值和覆盖关系。
 
 ## 三、总体分层
 

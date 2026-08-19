@@ -7,6 +7,7 @@ import type {
   ChildTaskId,
   InputId,
   RunId,
+  ReasoningEffortKey,
   SessionId,
 } from "../generated/assistant-protocol";
 import type { ConnectionStore } from "./ConnectionStore";
@@ -112,10 +113,24 @@ export class RunInteractionController {
     }));
   }
 
+  async resumeAllQueuedInputs(session_id: SessionId, revision: number): Promise<void> {
+    await this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "resume_queued_input",
+      payload: { session_id, expected_revision: revision },
+    }));
+  }
+
   async interruptRun(session_id: SessionId, run_id: RunId): Promise<void> {
     await this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
       type: "interrupt_run",
       payload: { session_id, run_id },
+    }));
+  }
+
+  async setSessionReasoningEffort(session_id: SessionId, effort: ReasoningEffortKey | null): Promise<void> {
+    await this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "set_session_reasoning_effort",
+      payload: { session_id, effort },
     }));
   }
 

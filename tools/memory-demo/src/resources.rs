@@ -12,8 +12,8 @@ use agent_memory::{
 use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
-use agent_provider_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
+use agent_openai_compatible::{
+    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
 };
 use agent_tools::{
     ListPinnedMemoriesTool, PinMemoryTool, RecallMemoryTool, RecallMemoryToolConfig, ToolRegistry,
@@ -76,7 +76,7 @@ pub(crate) async fn build_chat_resources(
         BearerCredential::new(config.api_key),
         config.model,
         config.context_window_tokens,
-        Profile::deepseek(),
+        ProtocolAdapter::deepseek(),
         TransportTimeouts::default(),
     )
     .map_err(|error| DemoError::Provider(error.to_string()))?;

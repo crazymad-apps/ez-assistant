@@ -56,6 +56,7 @@ const TEST_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         reasoning: true,
+        image_input: false,
         tool_calls: true,
         streaming: true,
     }
@@ -133,6 +134,7 @@ fn success_result(id: &str, output: Value) -> ToolResult {
         call_id: call_id(id),
         status: ToolResultStatus::Success,
         content: ToolResultContent::Json(output),
+        metadata: None,
     }
 }
 
@@ -141,6 +143,7 @@ fn error_result(id: &str, message: &str) -> ToolResult {
         call_id: call_id(id),
         status: ToolResultStatus::Error,
         content: ToolResultContent::Text(message.to_owned()),
+        metadata: None,
     }
 }
 

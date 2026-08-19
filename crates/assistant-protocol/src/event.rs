@@ -337,6 +337,7 @@ mod tests {
             session_id: session_id(),
             title: "Session 1".to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
+            reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
             current_variant: crate::AgentVariant::Build,
             approval_mode: crate::ApprovalMode::Ask,

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct ModelCapabilities {
     /// 是否支持 reasoning/thinking 内容的产出与回传。
     pub reasoning: bool,
+    /// 是否支持规范文件引用投影为原生图片输入。
+    pub image_input: bool,
     /// 是否支持工具调用。
     pub tool_calls: bool,
     /// 是否支持流式事件输出。
@@ -24,6 +26,7 @@ mod tests {
     fn capabilities_round_trip() {
         let capabilities = ModelCapabilities {
             reasoning: true,
+            image_input: true,
             tool_calls: true,
             streaming: true,
         };
@@ -40,6 +43,7 @@ mod tests {
             ModelCapabilities::default(),
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: false,
                 streaming: false,
             }

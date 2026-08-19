@@ -12,7 +12,6 @@ use agent_types::ProviderId;
 use assistant_protocol::ModelKey;
 
 use super::source::ConfigSourceFailureKind;
-use crate::ModelCompatibilityProfile;
 
 /// 当前配置源可供 Runtime 使用的程度。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,7 +59,7 @@ pub enum ConfigIssueCode {
     InvalidLimit,
     /// Runtime/Agent 策略无效。
     InvalidPolicy,
-    /// 模型 Profile 与 Agent 全局请求参数不兼容。
+    /// 模型 ProtocolAdapter 与 Agent 全局请求参数不兼容。
     UnsupportedProfileCombination,
     /// 默认 key 不存在或指向无效模型。
     DefaultModelUnavailable,
@@ -92,37 +91,30 @@ impl ConfigIssue {
 }
 
 /// 当前 schema 支持的模型协议。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ModelProtocol {
     /// OpenAI Chat Completions 协议。
-    ChatCompletions,
+    OpenAiChatCompletions,
 }
 
-/// Runtime 根据 Provider 标识推导出的内部兼容 Profile。
-///
-/// Profile 不属于用户配置：它只帮助后续模型装配选择 Codec 方言，不能越过 Runtime
-/// 进入应用协议或要求用户重复声明。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ModelProfile {
-    /// DeepSeek thinking-enabled Profile。
-    DeepSeek,
-    /// 没有额外供应商方言的标准 Chat Completions Profile。
-    Standard,
-}
-
-impl ModelProfile {
-    /// 已知供应商绑定具名方言；其他供应商使用标准 Chat Completions Profile。
-    pub(crate) fn for_provider(provider: &ProviderId) -> Self {
-        match provider.as_str() {
-            "deepseek" => Self::DeepSeek,
-            _ => Self::Standard,
+impl ModelProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiChatCompletions => "openai_chat_completions",
         }
     }
 
-    pub(crate) fn compatibility(self) -> ModelCompatibilityProfile {
-        match self {
-            Self::DeepSeek => ModelCompatibilityProfile::DeepSeek,
-            Self::Standard => ModelCompatibilityProfile::Standard,
+    pub(crate) fn parse_config(value: &str) -> Option<Self> {
+        match value {
+            "openai_chat_completions" | "chat_completions" => Some(Self::OpenAiChatCompletions),
+            _ => None,
+        }
+    }
+
+    pub(super) fn parse_catalog(value: &str) -> Option<Self> {
+        match value {
+            "openai_chat_completions" => Some(Self::OpenAiChatCompletions),
+            _ => None,
         }
     }
 }
@@ -223,6 +215,7 @@ pub struct ResolvedModelConfig {
     pub(super) context_window_tokens: u64,
     pub(super) max_output_tokens: u32,
     pub(super) generation: GenerationConfig,
+    pub(super) capabilities: super::catalog::ResolvedModelCapabilities,
 }
 
 impl ResolvedModelConfig {
@@ -244,11 +237,6 @@ impl ResolvedModelConfig {
     /// 用户配置的供应商标识；它不是协议或方言名称。
     pub fn provider(&self) -> &ProviderId {
         &self.provider
-    }
-
-    /// 供 Host ModelService 工厂选择具体 Codec 方言的内部编译结果。
-    pub(crate) fn compatibility_profile(&self) -> ModelCompatibilityProfile {
-        ModelProfile::for_provider(&self.provider).compatibility()
     }
 
     /// 已通过安全规则校验的 endpoint 原值。
@@ -280,6 +268,11 @@ impl ResolvedModelConfig {
     pub fn generation(&self) -> &GenerationConfig {
         &self.generation
     }
+
+    /// 静态目录、用户 override 与协议基线合并后的唯一能力事实。
+    pub fn capabilities(&self) -> &super::catalog::ResolvedModelCapabilities {
+        &self.capabilities
+    }
 }
 
 /// 已通过顶层与全局校验的配置快照。
@@ -294,7 +287,15 @@ pub struct ResolvedConfig {
     pub(super) budget: ExecutionBudget,
     pub(super) guardrails: GuardrailConfig,
     pub(super) delegation: DelegationConfig,
+    pub(super) vision: Option<VisionConfig>,
     pub(super) models: BTreeMap<ModelKey, ResolvedModelConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisionConfig {
+    pub model_key: ModelKey,
+    pub timeout: Duration,
+    pub max_output_tokens: u32,
 }
 
 impl ResolvedConfig {
@@ -331,6 +332,10 @@ impl ResolvedConfig {
     /// 单层子任务委派的模型无关调度与执行上限。
     pub fn delegation(&self) -> DelegationConfig {
         self.delegation
+    }
+
+    pub fn vision(&self) -> Option<&VisionConfig> {
+        self.vision.as_ref()
     }
 
     /// 按 key 确定性排序的有效模型集合。
@@ -370,6 +375,8 @@ pub struct ModelConfigProjection {
     pub agent_max_output_tokens: Option<u32>,
     /// 两个输出维度取最小值后的结果。
     pub effective_max_output_tokens: Option<u32>,
+    /// 已编译能力是否支持原生图片输入；无效模型保持 false。
+    pub supports_image_input: bool,
     /// 只表示 API Key 已通过本地非空格式校验，不包含其值。
     pub api_key_configured: bool,
     /// 是否对应配置中的默认 key。
@@ -392,6 +399,8 @@ pub struct ConfigProjection {
     pub schema_version: Option<u32>,
     /// 合法的默认模型 key。
     pub default_model: Option<ModelKey>,
+    /// 形式合法的辅助视觉模型 key；目标模型无效时仍保留以便诊断和修复。
+    pub auxiliary_vision_model: Option<ModelKey>,
     /// 已成功编译的委派上限；全局配置无效或缺失时不存在。
     pub delegation: Option<DelegationConfig>,
     /// 按配置 key 确定性排序的模型投影。
@@ -422,6 +431,7 @@ impl ConfigCompilation {
                 state: ConfigState::Missing,
                 schema_version: None,
                 default_model: None,
+                auxiliary_vision_model: None,
                 delegation: None,
                 models: Vec::new(),
                 issues: Vec::new(),
@@ -447,6 +457,7 @@ impl ConfigCompilation {
                 state: ConfigState::Invalid,
                 schema_version: None,
                 default_model: None,
+                auxiliary_vision_model: None,
                 delegation: None,
                 models: Vec::new(),
                 issues: vec![issue],

@@ -94,7 +94,7 @@ Worker 池。
   绝对路径。`--runtime-home` 仍只接受绝对路径，不建立旧目录回退或并行配置源。
 - Host 从 Runtime Home 安全读取唯一 `config.toml`，将解析结果交给 Runtime；不再从环境变量、
   `.env` 或模型 CLI 参数读取 endpoint、model 和 credential。
-- Host 的 ModelServiceFactory 根据 Runtime 已编译的 provider/profile、endpoint、credential 和
+- Host 的 ModelServiceFactory 根据 Runtime 已编译的 provider/protocol/capabilities、endpoint、credential 和
   transport 构造具体 OpenAI-compatible 服务，不自行保存第二份模型配置或选择状态。
 - 私有 Ratatui Demo 可以查询/reload 配置、选择 model key、创建 Session 和显式触发连接验证；
   v0.10.0 又增加全部 Session 列表、持久化 Run 查询、应用选中模型和归档/恢复入口。连接验证
@@ -259,6 +259,15 @@ Worker 池。
   继续归入父 Session 的唯一 Runtime 审批队列，不建立 Host 或 Desktop 私有审批状态。
 - child Usage 只投影到对应任务和子视图；Host 不计算父子聚合值，右侧当前上下文继续以主 Session
   为 owner。
+
+## v0.16.0 随包模型目录边界
+
+- 只读目录位于 `apps/runtime-host/resources/model-catalog.json`，通过 `include_str!` 随 Host
+  构建；运行期不读取用户副本、不写回、不远程更新。
+- Host 在打开 Store 和对外发布 endpoint 前严格解析目录，并把已校验目录注入 Runtime；目录错误
+  直接阻止启动，不能回退为猜测能力。
+- Host 模型工厂只消费 Runtime 已编译的 provider、protocol、capabilities 和 Route 连接信息，
+  不持有第二份目录或模型选择状态。
 
 ## 验证
 

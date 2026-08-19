@@ -23,12 +23,12 @@
 //! - `examples/engine_demo.rs`：可直接运行的 v0.2.0 两轮工具循环效果演示。
 //!
 //! Fixture 约定：可审阅文本格式；不包含真实 credential、用户内容或不可再现
-//! 动态值；明确 Provider profile 和预期规范事件。
+//! 动态值；明确协议 Adapter 和预期规范事件。
 //!
 //! 本 crate 只允许出现在其他 crate 的 `dev-dependencies` 中，不进入生产依赖闭包。
 //!
 //! 最小使用示例：`script.rs` 内联测试演示脚本化模型服务；`RecordedTransport` 等
-//! 组件的真实消费见 `agent-provider-openai-compatible` 的 `stream_tests.rs` 与
+//! 组件的真实消费见 `agent-openai-compatible` 的 `stream_tests.rs` 与
 //! `deepseek_tests.rs`；引擎 Harness 见 `tests/`（行为矩阵宿主）。完整 Engine
 //! 离线演示运行 `cargo run -p agent-testkit --example engine_demo`。
 

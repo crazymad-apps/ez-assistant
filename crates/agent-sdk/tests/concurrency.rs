@@ -91,6 +91,7 @@ async fn agents_share_model_service_while_cancellation_remains_execution_local()
     let model = Arc::new(SharedGateModel {
         capabilities: ModelCapabilities {
             reasoning: false,
+            image_input: false,
             tool_calls: false,
             streaming: true,
         },

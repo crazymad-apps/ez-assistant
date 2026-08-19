@@ -32,6 +32,18 @@ pub enum SessionLifecycle {
     Archived,
 }
 
+/// 跨 Provider 稳定的推理强度 key。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffortKey {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
 /// Agent 在一次用户输入中采用的行为变体。
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS,
@@ -177,6 +189,9 @@ pub struct AttachmentSummary {
     pub session_id: SessionId,
     pub original_name: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub media_type: Option<String>,
     pub agent_readable_path: String,
     pub state: AttachmentState,
     pub created_at_ms: i64,
@@ -404,6 +419,10 @@ pub struct SessionSummary {
     pub title: String,
     /// Session 后续 Run 当前使用的用户模型 key。
     pub model_key: ModelKey,
+    /// 后续 Run 使用的显式强度；空值表示使用模型默认开启档位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     /// Session 当前是活动还是归档状态。
     pub lifecycle: SessionLifecycle,
     /// UI 当前选中的 Agent 变体；具体 Run 仍以提交 Input 携带的值为准。
@@ -500,6 +519,10 @@ pub struct RunSnapshot {
     /// 本次 Run 创建时捕获的 Session 审批模式。
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Run 启动时冻结的实际强度。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     /// 是否已经接受过取消请求。
     pub cancel_requested: bool,
     /// 截至快照时观察到的 reasoning；运行中可能因事件丢失而不完整。
@@ -629,6 +652,7 @@ mod tests {
             status: RunStatus::Failed,
             variant: AgentVariant::Plan,
             approval_mode: ApprovalMode::Auto,
+            reasoning_effort: None,
             cancel_requested: false,
             reasoning: "checked".to_owned(),
             text: "partial".to_owned(),

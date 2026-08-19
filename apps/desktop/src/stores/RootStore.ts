@@ -144,6 +144,7 @@ export class RootStore {
       setSessionModel: action,
       setSessionVariant: action,
       setSessionApprovalMode: action,
+      setSessionReasoningEffort: action,
       renameSession: action,
       setSessionPinned: action,
       setMessageFeedback: action,
@@ -151,6 +152,7 @@ export class RootStore {
       prioritizeQueuedInput: action,
       cancelQueuedInput: action,
       resumeQueuedInput: action,
+      resumeAllQueuedInputs: action,
       interruptRun: action,
       decideApproval: action,
       rejectApprovalAndStopRun: action,
@@ -444,8 +446,16 @@ export class RootStore {
     await this.#run_interaction.resumeQueuedInput(session_id, input_id, revision);
   }
 
+  async resumeAllQueuedInputs(session_id: SessionId, revision: number): Promise<void> {
+    await this.#run_interaction.resumeAllQueuedInputs(session_id, revision);
+  }
+
   async interruptRun(session_id: SessionId, run_id: RunId): Promise<void> {
     await this.#run_interaction.interruptRun(session_id, run_id);
+  }
+
+  async setSessionReasoningEffort(session_id: SessionId, effort: import("../generated/assistant-protocol").ReasoningEffortKey | null): Promise<void> {
+    await this.#run_interaction.setSessionReasoningEffort(session_id, effort);
   }
 
   async decideApproval(session_id: SessionId, approval_id: ApprovalId, decision: ApprovalDecision): Promise<void> {

@@ -7,10 +7,34 @@ use ts_rs::TS;
 
 use crate::{
     ApprovalId, ApprovalSnapshot, AttachmentId, AttachmentSummary, ChildTaskId, ChildTaskSnapshot,
-    ConfigurationStatus, InputId, MessageId, ModelConfiguration, PartId, RunId, RunSnapshot,
-    RunStatus, RuntimeErrorInfo, RuntimeLifecycle, SessionId, SessionLifecycle, SessionSummary,
-    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, WorkspaceSummary,
+    ConfigurationStatus, InputId, MessageId, ModelConfiguration, ModelKey, PartId,
+    ReasoningEffortKey, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeLifecycle,
+    SessionId, SessionLifecycle, SessionSummary, TokenUsageSnapshot, ToolActivityStatus,
+    ToolCallId, WorkspaceSummary,
 };
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReasoningEffortOptionSnapshot {
+    pub key: ReasoningEffortKey,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ImageHandlingMode {
+    Native,
+    Tool,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ComposerCapabilitiesSnapshot {
+    pub reasoning_effort_options: Vec<ReasoningEffortOptionSnapshot>,
+    pub image_handling: ImageHandlingMode,
+}
 
 /// 带有 Runtime 观察水位的权威快照。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -169,8 +193,22 @@ pub enum ToolInputSnapshot {
         timeout_ms: u64,
         process_mode: String,
     },
+    ImageInspection {
+        image_paths: Vec<String>,
+        goal: String,
+        background: Option<String>,
+    },
     /// 老记录缺少可安全恢复的输入事实。
     Unavailable,
+}
+
+/// `inspect_images` 内部那一次辅助模型调用的可靠执行事实。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ImageInspectionDetailSnapshot {
+    pub auxiliary_model: ModelKey,
+    pub elapsed_ms: u64,
+    pub usage: Option<TokenUsageSnapshot>,
 }
 
 /// 工具结果中可引用的文件。
@@ -269,6 +307,9 @@ pub struct ToolDetailSnapshot {
     pub result_json: Option<String>,
     /// 仅 `recall_memory` 提供；引用已由 Runtime 校验并转换为安全导航目标。
     pub recall: Option<RecallToolDetailSnapshot>,
+    /// 仅 `inspect_images` 成功结果提供；正文仍是直接文本 Tool Result。
+    #[serde(default)]
+    pub image_inspection: Option<ImageInspectionDetailSnapshot>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub error: Option<RuntimeErrorInfo>,
@@ -303,6 +344,12 @@ pub struct ContextUsageSnapshot {
 pub struct SessionUsageSnapshot {
     pub accumulated: Option<UsageTotals>,
     pub previous_turn: Option<UsageTotals>,
+    /// 最近一次主会话模型请求的缓存命中率；0..=10000 表示 0.00%..=100.00%。
+    #[serde(default)]
+    pub latest_cache_hit_basis_points: Option<u16>,
+    /// 主会话全部模型请求按 token 加权后的缓存命中率。
+    #[serde(default)]
+    pub overall_cache_hit_basis_points: Option<u16>,
     pub context: Option<ContextUsageSnapshot>,
 }
 
@@ -376,6 +423,7 @@ pub struct ApprovalQueueSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SessionViewSnapshot {
     pub session: SessionSummary,
+    pub composer_capabilities: ComposerCapabilitiesSnapshot,
     pub active_run: Option<RunSnapshot>,
     pub queue: QueueSnapshot,
     pub approvals: ApprovalQueueSnapshot,
@@ -602,14 +650,15 @@ pub struct InterruptRunResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ResumeQueuedInputRequest {
     pub session_id: SessionId,
-    pub input_id: InputId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_id: Option<InputId>,
     pub expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ResumeQueuedInputResult {
-    pub run: RunSnapshot,
     pub queue: QueueSnapshot,
 }
 

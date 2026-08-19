@@ -171,6 +171,7 @@ impl ModelService for RetryingModelService {
                 let attempt_context = ModelCallContext {
                     cancellation: cancellation.clone(),
                     trace: trace.clone(),
+                    prepared_images: context.prepared_images.clone(),
                 };
                 let result = tokio::select! {
                     biased;

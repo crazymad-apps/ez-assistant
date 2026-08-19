@@ -73,7 +73,7 @@ Runtime Host 进程
 ## 配置与持久化
 
 - 配置来源、默认值、覆盖顺序和校验必须显式。
-- 配置合并结果只生成一份 `ExecutionSpec`；Core 不再二次解释 Profile、默认值或覆盖关系。
+- 配置合并结果只生成一份 `ExecutionSpec`；Core 不再二次解释协议适配、默认值或覆盖关系。
 - 会话、消息、Run、定时任务和工具中断恢复事实由 Repository trait 隔离具体存储。
 - Conversation Journal 是规范对话的权威状态；流式 `AgentEvent` 不是消息恢复来源。
 - Runtime 提供绑定当前 Run 的 `ExecutionRecorder`，但其接口不向 Core 暴露 `RunId`、事务或数据库实体。
@@ -292,6 +292,17 @@ Runtime Host 进程
   使用独立 Recorder/Journal。子终态必须先可靠提交，父 Tool Result 才能返回最终文本或受控错误。
 - OS 临时目录通过 `ChildTaskWorkspaceFactory` 端口由 Host 创建并以 lease 管理；Runtime 不直接
   操作文件系统。并发、timeout、独立取消和公共查询均由 Runtime 在同一 child 生命周期上编排。
+
+## v0.16.0 模型协议与能力编译边界
+
+- `protocol` 当前规范值为 `openai_chat_completions`；读取旧 `chat_completions` 时只在内存中
+  归一化，新的模型配置写入规范值。未知协议在模型配置编译期失败。
+- Runtime 接收 Host 已严格校验的只读 `ModelCatalog`，并按
+  `(provider, protocol, model_id)` 精确匹配；目录未命中时使用当前协议的保守能力基线。
+- 用户 capability override 优先于目录；reasoning 块只允许整块替换。effort 只接受五个稳定 key、
+  非空 label 和字符串或正整数 wire value，不接受字段名、JSON path 或请求片段。
+- `ResolvedModelConfig` 同时持有 Route、Protocol 和唯一 `ResolvedModelCapabilities`；Core、Host
+  与连接验证不得再次按模型名前缀猜测能力。
 
 ## Harness 验证
 

@@ -24,8 +24,8 @@ use agent_core::{
 use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
-use agent_provider_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
+use agent_openai_compatible::{
+    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
 };
 use agent_tools::{ToolRegistry, ToolSetSnapshot};
 use agent_types::ToolChoice;
@@ -228,7 +228,7 @@ async fn run_chat(
         BearerCredential::new(config.api_key),
         config.model.clone(),
         config.context_window_tokens,
-        Profile::deepseek(),
+        ProtocolAdapter::deepseek(),
         TransportTimeouts::default(),
     )
     .map_err(|error| HarnessError::Provider(error.to_string()))?;

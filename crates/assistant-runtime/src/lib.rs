@@ -25,9 +25,11 @@ mod workspace;
 pub use config::{
     ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig,
-    ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig, RuntimeConfig,
-    RuntimeConfigSource, RuntimeModelTransportConfig, compile_runtime_config,
+    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig, ModelCatalog,
+    ModelCatalogError, ModelConfigProjection, ModelProtocol, ReasoningEffortKey,
+    ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities, ResolvedModelConfig,
+    ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig, RuntimeConfigSource,
+    RuntimeModelTransportConfig, compile_runtime_config, compile_runtime_config_with_catalog,
 };
 pub use conversation_recall::HmacRecallReferenceCodec;
 pub use delegation::DELEGATE_TASK_TOOL_NAME;
@@ -39,9 +41,9 @@ pub use environment::{
 pub use error::{RuntimeError, RuntimeResult};
 pub use factory::{
     ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
-    ChildTaskWorkspaceLease, ModelCompatibilityProfile, ModelServiceFactory,
-    ModelServiceFactoryError, ModelServiceFactoryRequest, RunToolBundle, RunToolFactory,
-    RunToolFactoryError, RunToolFactoryErrorKind, RunToolFactoryRequest,
+    ChildTaskWorkspaceLease, ModelServiceFactory, ModelServiceFactoryError,
+    ModelServiceFactoryRequest, RunToolBundle, RunToolFactory, RunToolFactoryError,
+    RunToolFactoryErrorKind, RunToolFactoryRequest,
 };
 pub use memory::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryCreatedBy,
@@ -64,12 +66,13 @@ pub use storage::{
     ConversationSearchScope, ConversationWindowRequest, ForkedAttachmentReference,
     MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
     NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, QueuePriorityChange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
-    StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationState, StoredConversationWindow, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession, StoredSessionFork,
-    StoredSessionLifecycle, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
+    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteResult, RuntimeStore, SessionDeletion, SessionFork, SessionPinnedChange,
+    SessionTitleChange, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
+    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
+    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionUsage, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
     UserMessageCommit, VariantChange, WorkspaceRemoval,
 };

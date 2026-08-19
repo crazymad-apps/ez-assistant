@@ -88,6 +88,9 @@ pub enum ModelError {
     /// Tool arguments 分片无法组装成完整 JSON 值。
     #[error("tool call arguments could not be assembled: {0}")]
     ToolArguments(String),
+    /// 请求引用的受控本地资源无法安全读取或预处理。
+    #[error("model resource could not be prepared: {0}")]
+    Resource(String),
     /// 调用方取消了本次调用。
     #[error("model call was cancelled")]
     Cancelled,

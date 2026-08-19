@@ -32,8 +32,9 @@ use assistant_protocol::{
     CreateSessionResult, DeleteConfirmationToken, DeleteModelRequest, DeleteSessionImpact,
     GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest,
     GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult,
-    ListSessionsRequest, ListSessionsResult, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent,
-    RuntimeEventEnvelope, RuntimeLifecycle, SessionId, SessionLifecycle, SessionSummary,
+    ListSessionsRequest, ListSessionsResult, ModelCatalogEntrySnapshot, ModelCatalogSnapshot,
+    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
+    SessionId, SessionLifecycle, SessionSummary, SetAuxiliaryVisionModelRequest,
     SetDefaultModelRequest, UpdateModelRequest, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
@@ -125,6 +126,7 @@ impl AssistantRuntime {
         Self::from_recovered(
             config,
             config_source,
+            Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
             run_tool_factory,
@@ -152,6 +154,7 @@ impl AssistantRuntime {
         Self::open_with_recall_key(
             config,
             config_source,
+            Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
             run_tool_factory,
@@ -168,6 +171,7 @@ impl AssistantRuntime {
     pub async fn open_with_recall_key(
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
+        model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         run_tool_factory: Arc<dyn RunToolFactory>,
@@ -186,6 +190,7 @@ impl AssistantRuntime {
         Self::from_recovered(
             config,
             config_source,
+            model_catalog,
             model_factory,
             session_environment_factory,
             run_tool_factory,
@@ -201,6 +206,7 @@ impl AssistantRuntime {
     fn from_recovered(
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
+        model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         run_tool_factory: Arc<dyn RunToolFactory>,
@@ -223,7 +229,7 @@ impl AssistantRuntime {
             operation_gate: AsyncRwLock::new(()),
             model_binding_gate: AsyncRwLock::new(()),
             workspace_mutation_gate: AsyncMutex::new(()),
-            config_registry: Arc::new(ConfigRegistry::new(config_source)),
+            config_registry: Arc::new(ConfigRegistry::new(config_source, model_catalog)),
             permission_coordinator,
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
@@ -281,8 +287,23 @@ impl AssistantRuntime {
     /// 按配置中的确定性顺序列出全部模型脱敏投影。
     pub fn list_models(&self, _request: ListModelsRequest) -> RuntimeResult<ListModelsResult> {
         let snapshot = self.config_registry.snapshot()?;
+        let catalog = self.config_registry.catalog();
         Ok(ListModelsResult {
             models: project_models(snapshot.projection()),
+            catalog: ModelCatalogSnapshot {
+                revision: catalog.revision().to_owned(),
+                entries: catalog
+                    .routes()
+                    .iter()
+                    .map(|route| ModelCatalogEntrySnapshot {
+                        provider: route.provider.as_str().to_owned(),
+                        provider_label: route.provider_label.clone(),
+                        protocol: route.protocol.as_str().to_owned(),
+                        protocol_label: route.protocol_label.clone(),
+                        model_ids: route.model_ids.clone(),
+                    })
+                    .collect(),
+            },
         })
     }
 
@@ -393,6 +414,25 @@ impl AssistantRuntime {
         self.configuration_mutated(&snapshot)
     }
 
+    pub async fn set_auxiliary_vision_model(
+        &self,
+        request: SetAuxiliaryVisionModelRequest,
+    ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.write().await;
+        self.ensure_running()?;
+        let snapshot = self
+            .config_registry
+            .mutate(
+                Some(request.expected_revision),
+                crate::config::ConfigMutation::SetAuxiliaryVision {
+                    model_key: request.model_key,
+                },
+            )
+            .await?;
+        self.configuration_mutated(&snapshot)
+    }
+
     fn configuration_mutated(
         &self,
         snapshot: &ConfigSnapshot,
@@ -432,6 +472,16 @@ impl AssistantRuntime {
         &self,
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<()> {
+        let snapshot = self.config_registry.snapshot()?;
+        if snapshot
+            .active()
+            .and_then(|config| config.vision())
+            .is_some_and(|vision| &vision.model_key == model_key)
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "model is configured as the auxiliary vision model",
+            });
+        }
         for session in self
             .sessions
             .read()
@@ -510,6 +560,7 @@ impl AssistantRuntime {
                 title,
                 title_origin,
                 model_key,
+                reasoning_effort: None,
                 system_prompt: prepared.system_prompt,
                 environment: prepared.environment,
                 current_variant: AgentVariant::Build,
@@ -703,9 +754,7 @@ impl AssistantRuntime {
                     reason: "only the active run can be interrupted",
                 });
             }
-            state.resume_required = true;
             state.queue_paused_by_user = true;
-            state.retry_override_input = None;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.queue_revision
         };

@@ -666,5 +666,5 @@ Hermes 展示了大量生产故障的现实复杂度；OpenCode V2 展示了将�
 - [`crates/agent-core/src/engine.rs`](../../crates/agent-core/src/engine.rs)
 - [`crates/agent-context/src/rolling.rs`](../../crates/agent-context/src/rolling.rs)
 - [`crates/assistant-runtime/src/run.rs`](../../crates/assistant-runtime/src/run.rs)
-- [`crates/agent-provider-openai-compatible/src/service.rs`](../../crates/agent-provider-openai-compatible/src/service.rs)
+- [`crates/agent-openai-compatible/src/service.rs`](../../crates/agent-openai-compatible/src/service.rs)
 - [`tools/runtime-harness/src/runtime.rs`](../../tools/runtime-harness/src/runtime.rs)

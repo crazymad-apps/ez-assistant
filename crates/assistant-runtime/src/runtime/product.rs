@@ -10,22 +10,24 @@ use agent_types::{
 use assistant_protocol::{
     ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,
     AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot,
-    ChildTaskViewSnapshot, ConversationFileReference, ConversationHistoryHit,
-    ConversationHistoryMatchKind, ConversationHistoryScope, ConversationItem, ConversationOwner,
-    ConversationPage, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
-    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
-    GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
-    GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
-    GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
-    GetToolDetailRequest, GetToolDetailResult, ListAttachmentsRequest, ListConversationPageRequest,
-    ListConversationPageResult, ListSessionsRequest, ListWorkspacesRequest, MessageId,
-    ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
-    RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
-    RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot, SearchConversationHistoryRequest,
-    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionUsageSnapshot,
-    SessionViewSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
-    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot,
+    ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot, ConversationFileReference,
+    ConversationHistoryHit, ConversationHistoryMatchKind, ConversationHistoryScope,
+    ConversationItem, ConversationOwner, ConversationPage, GetApplicationSnapshotRequest,
+    GetApplicationSnapshotResult, GetChildTaskViewRequest, GetChildTaskViewResult,
+    GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
+    GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
+    GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
+    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, ImageHandlingMode,
+    ListAttachmentsRequest, ListConversationPageRequest, ListConversationPageResult,
+    ListSessionsRequest, ListWorkspacesRequest, MessageId, ObservedSnapshot, PartId,
+    QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, ReasoningEffortKey,
+    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
+    RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot,
+    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
+    SessionListFilter, SessionUsageSnapshot, SessionViewSnapshot, TokenUsageSnapshot,
+    ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference,
+    ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot, UsageTotals,
+    UserMessageSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -251,8 +253,14 @@ impl AssistantRuntime {
                 project_conversation(&window.conversation, &projection)?,
             )?;
             let conversation_snapshot = conversation_snapshot_for_usage(&session)?;
-            let usage = project_usage(&conversation_snapshot, &summary, self)?;
+            let stored_usage = self
+                .store
+                .get_session_usage(&request.session_id)
+                .await
+                .map_err(|source| RuntimeError::from_store("load session usage", source))?;
+            let usage = project_usage(&stored_usage, &summary, self)?;
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
+            let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
             let child_tasks = self.child_tasks.list_for_session(&request.session_id)?;
             let mut child_task_items = Vec::with_capacity(child_tasks.len());
             for task in child_tasks {
@@ -265,6 +273,7 @@ impl AssistantRuntime {
                         observed_sequence: end,
                         value: SessionViewSnapshot {
                             session: summary,
+                            composer_capabilities,
                             active_run,
                             queue,
                             approvals,
@@ -1073,6 +1082,59 @@ impl AssistantRuntime {
     }
 }
 
+impl AssistantRuntime {
+    fn composer_capabilities(
+        &self,
+        model_key: &assistant_protocol::ModelKey,
+    ) -> RuntimeResult<ComposerCapabilitiesSnapshot> {
+        let snapshot = self.config_registry.snapshot()?;
+        let active = snapshot
+            .active()
+            .ok_or(RuntimeError::ConfigurationUnavailable)?;
+        let model = active
+            .model(model_key)
+            .ok_or_else(|| RuntimeError::ModelUnavailable {
+                model_key: model_key.clone(),
+            })?;
+        let reasoning_effort_options = model
+            .capabilities()
+            .reasoning
+            .as_ref()
+            .map(|reasoning| {
+                reasoning
+                    .efforts
+                    .iter()
+                    .map(|effort| ReasoningEffortOptionSnapshot {
+                        key: protocol_effort_key(effort.key),
+                        label: effort.label.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let image_handling = if model.capabilities().image_input {
+            ImageHandlingMode::Native
+        } else if model.capabilities().tool_calls && active.vision().is_some() {
+            ImageHandlingMode::Tool
+        } else {
+            ImageHandlingMode::Unavailable
+        };
+        Ok(ComposerCapabilitiesSnapshot {
+            reasoning_effort_options,
+            image_handling,
+        })
+    }
+}
+
+fn protocol_effort_key(value: crate::ReasoningEffortKey) -> ReasoningEffortKey {
+    match value {
+        crate::ReasoningEffortKey::Low => ReasoningEffortKey::Low,
+        crate::ReasoningEffortKey::Medium => ReasoningEffortKey::Medium,
+        crate::ReasoningEffortKey::High => ReasoningEffortKey::High,
+        crate::ReasoningEffortKey::XHigh => ReasoningEffortKey::XHigh,
+        crate::ReasoningEffortKey::Max => ReasoningEffortKey::Max,
+    }
+}
+
 fn empty_child_projection() -> ProjectionContext {
     ProjectionContext {
         run_by_message: HashMap::new(),
@@ -1280,6 +1342,7 @@ fn project_tool_detail(
         result_summary: summary,
         result_json,
         recall: None,
+        image_inspection: result.and_then(project_image_inspection_detail),
         stdout: None,
         stderr: None,
         error: None,
@@ -1419,6 +1482,23 @@ fn escape_inline_code(value: &str) -> String {
 }
 
 fn project_tool_input(name: &str, arguments: &serde_json::Value) -> ToolInputSnapshot {
+    if name == "inspect_images" {
+        return ToolInputSnapshot::ImageInspection {
+            image_paths: arguments
+                .get("image_paths")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            goal: string_field(arguments, "goal"),
+            background: arguments
+                .get("background")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
     if name == "delegate_task" {
         return ToolInputSnapshot::Delegation {
             title: arguments
@@ -1456,28 +1536,35 @@ fn project_tool_input(name: &str, arguments: &serde_json::Value) -> ToolInputSna
     }
 }
 
+fn project_image_inspection_detail(
+    result: &agent_types::ToolResult,
+) -> Option<assistant_protocol::ImageInspectionDetailSnapshot> {
+    let metadata = result.metadata.as_deref()?;
+    Some(assistant_protocol::ImageInspectionDetailSnapshot {
+        auxiliary_model: assistant_protocol::ModelKey::new(metadata.model_key.clone()?).ok()?,
+        elapsed_ms: metadata.elapsed_ms?,
+        usage: metadata.usage.as_ref().map(token_usage),
+    })
+}
+
 fn project_usage(
-    snapshot: &ConversationSnapshot,
+    stored: &crate::StoredSessionUsage,
     session: &assistant_protocol::SessionSummary,
     runtime: &AssistantRuntime,
 ) -> RuntimeResult<SessionUsageSnapshot> {
-    let mut usages = Vec::new();
-    let mut compacted = Vec::new();
-    for message in &snapshot.messages {
-        match message {
-            ConversationMessage::Assistant(message) => {
-                usages.extend(message.usage.as_ref());
-            }
-            ConversationMessage::ContextSummary(message) => {
-                usages.extend(message.usage.as_ref());
-                compacted.extend(message.compacted_usage.as_ref());
-            }
-            _ => {}
-        }
-    }
-    let previous = usages.last().copied();
-    let all = compacted.into_iter().chain(usages.iter().copied());
-    let accumulated = sum_usage(all);
+    let previous = stored.latest.as_ref();
+    let accumulated = (stored.request_count > 0).then_some(UsageTotals {
+        input_tokens: Some(stored.input_tokens),
+        output_tokens: Some(stored.output_tokens),
+        total_tokens: Some(stored.total_tokens),
+        cached_input_tokens: (stored.cached_request_count > 0)
+            .then_some(stored.cached_input_tokens),
+    });
+    let latest_cache_hit_basis_points = previous.and_then(cache_hit_basis_points);
+    let overall_cache_hit_basis_points = (stored.request_count > 0
+        && stored.cached_request_count == stored.request_count)
+        .then(|| ratio_basis_points(stored.cached_input_tokens, stored.input_tokens))
+        .flatten();
     let context_window = runtime
         .list_models(Default::default())?
         .models
@@ -1500,6 +1587,8 @@ fn project_usage(
     Ok(SessionUsageSnapshot {
         accumulated,
         previous_turn: previous.map(usage_totals),
+        latest_cache_hit_basis_points,
+        overall_cache_hit_basis_points,
         context,
     })
 }
@@ -1562,6 +1651,20 @@ fn usage_totals(usage: &agent_types::TokenUsage) -> UsageTotals {
         total_tokens: Some(usage.total_tokens),
         cached_input_tokens: usage.cached_input_tokens,
     }
+}
+
+fn cache_hit_basis_points(usage: &agent_types::TokenUsage) -> Option<u16> {
+    let cached = usage.cached_input_tokens?;
+    ratio_basis_points(cached, usage.input_tokens)
+}
+
+fn ratio_basis_points(numerator: u64, denominator: u64) -> Option<u16> {
+    if denominator == 0 {
+        return None;
+    }
+    let basis_points =
+        u128::from(numerator.min(denominator)).saturating_mul(10_000) / u128::from(denominator);
+    u16::try_from(basis_points).ok()
 }
 
 fn token_usage(usage: &agent_types::TokenUsage) -> TokenUsageSnapshot {

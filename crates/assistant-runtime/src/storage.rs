@@ -32,9 +32,9 @@ pub use execution::{
 };
 pub use session::{
     ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, MessageFeedbackChange,
-    ModelChange, NewStoredSession, SessionDeletion, SessionFork, SessionPinnedChange,
-    SessionTitleChange, StoredConversationState, StoredMessageFeedback, StoredSession,
-    StoredSessionFork, StoredSessionLifecycle, VariantChange,
+    ModelChange, NewStoredSession, ReasoningEffortChange, SessionDeletion, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoredConversationState, StoredMessageFeedback,
+    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, VariantChange,
 };
 pub(crate) use volatile::VolatileRuntimeStore;
 pub use workspace::{

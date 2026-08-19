@@ -72,12 +72,18 @@ impl StorageEngine {
             .expect("blobs directory is inside data directory");
         let expected_blob_relative =
             attachment_io::blob_relative_path(&upload.blob_hash, &upload.original_name);
-        if let Some((stored_size, stored_relative)) = self
+        if let Some((stored_size, stored_relative, stored_media_type)) = self
             .connection
             .query_row(
-                "SELECT size_bytes, relative_path FROM attachment_blobs WHERE blob_hash = ?1",
+                "SELECT size_bytes, relative_path, media_type FROM attachment_blobs WHERE blob_hash = ?1",
                 [upload.blob_hash.as_str()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|source| {
@@ -85,7 +91,8 @@ impl StorageEngine {
             })?
             && (non_negative_u64(stored_size, "stored attachment size is invalid")?
                 != upload.size_bytes
-                || Path::new(&stored_relative) != expected_blob_relative)
+                || Path::new(&stored_relative) != expected_blob_relative
+                || (stored_media_type.is_some() && stored_media_type != upload.media_type))
         {
             return Err(invalid_data(
                 "stored attachment blob metadata is inconsistent",
@@ -125,12 +132,13 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO attachment_blobs (
-                        blob_hash, size_bytes, relative_path, created_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4)",
+                        blob_hash, size_bytes, relative_path, media_type, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         upload.blob_hash,
                         to_i64(upload.size_bytes, "attachment size is too large")?,
                         path_text(&blob_relative_path)?,
+                        upload.media_type,
                         upload.created_at_ms,
                     ],
                 )
@@ -205,7 +213,7 @@ impl StorageEngine {
             .connection
             .prepare(
                 "SELECT a.attachment_id, a.session_id, a.blob_hash, a.original_name,
-                        b.size_bytes, a.agent_readable_path, a.state, a.created_at_ms
+                        b.size_bytes, b.media_type, a.agent_readable_path, a.state, a.created_at_ms
                  FROM attachments a
                  JOIN attachment_blobs b ON b.blob_hash = a.blob_hash
                  ORDER BY a.created_at_ms, a.attachment_id",
@@ -219,9 +227,10 @@ impl StorageEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .map_err(|source| internal_error("attachments could not be read", source))?;
@@ -261,7 +270,7 @@ impl StorageEngine {
     ) -> StorageResult<Option<StoredAttachment>> {
         let sql = format!(
             "SELECT a.attachment_id, a.session_id, a.blob_hash, a.original_name,
-                    b.size_bytes, a.agent_readable_path, a.state, a.created_at_ms
+                    b.size_bytes, b.media_type, a.agent_readable_path, a.state, a.created_at_ms
              FROM attachments a
              JOIN attachment_blobs b ON b.blob_hash = a.blob_hash {predicate}"
         );
@@ -273,9 +282,10 @@ impl StorageEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .optional()
@@ -417,9 +427,22 @@ impl StorageEngine {
     }
 }
 
-type AttachmentRow = (String, String, String, String, i64, String, String, i64);
+type AttachmentRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    String,
+    String,
+    i64,
+);
 
 fn parse_attachment(row: AttachmentRow) -> StorageResult<StoredAttachment> {
+    let media_type = row
+        .5
+        .or_else(|| crate::image::sniff_media_type(Path::new(&row.6)).ok());
     Ok(StoredAttachment {
         attachment_id: AttachmentId::new(row.0).map_err(|source| {
             invalid_data_with_source("stored attachment id is invalid", source)
@@ -430,13 +453,14 @@ fn parse_attachment(row: AttachmentRow) -> StorageResult<StoredAttachment> {
         blob_hash: row.2,
         original_name: row.3,
         size_bytes: non_negative_u64(row.4, "stored attachment size is invalid")?,
-        agent_readable_path: row.5,
-        state: match row.6.as_str() {
+        media_type,
+        agent_readable_path: row.6,
+        state: match row.7.as_str() {
             "ready" => StoredAttachmentState::Ready,
             "unavailable" => StoredAttachmentState::Unavailable,
             _ => return Err(invalid_data("stored attachment state is invalid")),
         },
-        created_at_ms: row.7,
+        created_at_ms: row.8,
     })
 }
 

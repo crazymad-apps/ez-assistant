@@ -474,3 +474,55 @@ async fn model_mutations_use_revision_cas_and_never_publish_invalid_candidates()
         Some(test_config_revision(&external))
     );
 }
+
+#[tokio::test]
+async fn auxiliary_vision_model_mutation_is_capability_checked_and_clearable() {
+    let document = format!("{TEST_CONFIG}\n[models.fixture.capabilities]\nimage_input = true\n");
+    let source = Arc::new(MutableConfigSource::new(document));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source.clone(),
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    let loaded = runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .expect("reload");
+    let selected = runtime
+        .set_auxiliary_vision_model(assistant_protocol::SetAuxiliaryVisionModelRequest {
+            model_key: Some(assistant_protocol::ModelKey::new("fixture").expect("key")),
+            expected_revision: loaded.status.revision.expect("revision"),
+        })
+        .await
+        .expect("select auxiliary vision model");
+    assert_eq!(
+        selected
+            .status
+            .auxiliary_vision_model
+            .as_ref()
+            .map(assistant_protocol::ModelKey::as_str),
+        Some("fixture")
+    );
+    assert!(selected.models[0].supports_image_input);
+
+    let cleared = runtime
+        .set_auxiliary_vision_model(assistant_protocol::SetAuxiliaryVisionModelRequest {
+            model_key: None,
+            expected_revision: selected.status.revision.expect("revision"),
+        })
+        .await
+        .expect("clear auxiliary vision model");
+    assert!(cleared.status.auxiliary_vision_model.is_none());
+    assert!(
+        !source
+            .document
+            .lock()
+            .expect("source lock")
+            .as_deref()
+            .expect("document")
+            .contains("[agent.vision]")
+    );
+}

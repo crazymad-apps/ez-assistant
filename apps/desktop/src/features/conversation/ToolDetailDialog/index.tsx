@@ -5,6 +5,7 @@ import type {
   ToolDetailSnapshot,
   ToolFileReference,
   ToolInputSnapshot,
+  TokenUsageSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { Dialog } from "../../../components/Dialog";
@@ -41,7 +42,7 @@ export type ToolDetailView = Pick<
   | "files"
   | "output_truncated"
   | "historical_fields_missing"
-> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id">>
+> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id" | "image_inspection">>
   & Readonly<{ source?: "reliable" | "live" }>;
 
 export function ToolDetailDialog({
@@ -152,11 +153,18 @@ export function ToolDetailDialog({
           {detail && (
             <>
               <DetailSection title="请求参数">
-                {detail.request_json
+                {detail.input.type !== "image_inspection" && detail.request_json
                   ? <JsonBlock text={detail.request_json} />
                   : <ToolInput input={detail.input} is_live={detail.source === "live"} />}
               </DetailSection>
               <DetailSection title="执行结果">
+                {detail.image_inspection && (
+                  <dl className={styles.facts}>
+                    <div><dt>辅助模型</dt><dd>{detail.image_inspection.auxiliary_model}</dd></div>
+                    <div><dt>耗时</dt><dd>{detail.image_inspection.elapsed_ms} ms</dd></div>
+                    <div><dt>辅助用量</dt><dd>{formatUsage(detail.image_inspection.usage)}</dd></div>
+                  </dl>
+                )}
                 {detail.recall
                   ? <RecallResult on_navigate={on_recall_navigate} recall={detail.recall} />
                   : detail.result_json
@@ -256,11 +264,24 @@ function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_l
       return <><strong>{input.title}</strong><p>{input.task_summary}</p></>;
     case "general":
       return <p>{input.summary}</p>;
+    case "image_inspection":
+      return <dl className={styles.facts}>
+        <div><dt>识别目标</dt><dd>{input.goal}</dd></div>
+        {input.background && <div><dt>补充背景</dt><dd>{input.background}</dd></div>}
+        <div><dt>图片</dt><dd>{input.image_paths.join("、")}</dd></div>
+      </dl>;
     case "unavailable":
       return <p className={styles.muted}>
         {is_live ? "执行期间暂未提供结构化输入。" : "较早记录没有可安全恢复的输入事实。"}
       </p>;
   }
+}
+
+function formatUsage(usage: TokenUsageSnapshot | null): string {
+  if (!usage) {
+    return "Provider 未返回";
+  }
+  return `${usage.input_tokens} 输入 / ${usage.output_tokens} 输出 / ${usage.total_tokens} 总计`;
 }
 
 function OutputBlock({ label, text }: Readonly<{ label: string; text: string }>) {

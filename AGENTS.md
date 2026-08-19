@@ -15,7 +15,7 @@
 │   ├── agent-context/           # 共享上下文窗口判断、布局、校验与压缩策略
 │   ├── agent-model/             # Provider-neutral 单次模型调用契约
 │   ├── agent-memory/            # Pinned Memory、RecallSource 与协调契约
-│   ├── agent-provider-openai-compatible/ # OpenAI-compatible Adapter
+│   ├── agent-openai-compatible/ # OpenAI-compatible Adapter
 │   ├── agent-sdk/               # Agent Core 候选便利装配 Facade
 │   ├── agent-testkit/           # Agent 确定性测试支持
 │   ├── agent-tools/             # Agent 工具 SPI、Registry/Dispatcher、能力契约与标准工具壳
@@ -66,7 +66,7 @@
 | `crates/agent-memory/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-memory.md`](docs/modules/agent-memory.md) |
 | `crates/agent-types/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-types.md`](docs/modules/agent-types.md) |
 | `crates/agent-model/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-model.md`](docs/modules/agent-model.md) |
-| `crates/agent-provider-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-provider-openai-compatible.md`](docs/modules/agent-provider-openai-compatible.md) |
+| `crates/agent-openai-compatible/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-openai-compatible.md`](docs/modules/agent-openai-compatible.md) |
 | `crates/agent-sdk/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-sdk.md`](docs/modules/agent-sdk.md) |
 | `crates/agent-testkit/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-testkit.md`](docs/modules/agent-testkit.md) |
 | `crates/agent-tools/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools.md`](docs/modules/agent-tools.md) |

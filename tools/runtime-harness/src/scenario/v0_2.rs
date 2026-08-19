@@ -582,6 +582,7 @@ fn ensure_lifecycle(events: &[AgentEvent]) -> Result<(), HarnessError> {
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         reasoning: true,
+        image_input: false,
         tool_calls: true,
         streaming: true,
     }

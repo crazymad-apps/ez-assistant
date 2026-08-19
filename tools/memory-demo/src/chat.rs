@@ -475,6 +475,7 @@ mod tests {
         let model = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },
@@ -565,6 +566,7 @@ mod tests {
         let model = Arc::new(ScriptedModelService::completing(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },

@@ -18,7 +18,7 @@ impl StorageEngine {
             .connection
             .prepare(
                 "SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
-                        runs.cancel_requested, inputs.agent_variant, runs.approval_mode,
+                        runs.cancel_requested, inputs.agent_variant, runs.approval_mode, runs.reasoning_effort,
                         runs.error_code, runs.error_message, runs.created_at_ms,
                         runs.started_at_ms, runs.finished_at_ms
                  FROM runs JOIN inputs ON inputs.input_id = runs.input_id
@@ -38,9 +38,10 @@ impl StorageEngine {
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                     row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
                 ))
             })
             .map_err(|source| internal_error("runtime runs could not be read", source))?;
@@ -55,6 +56,7 @@ impl StorageEngine {
                 cancel_requested,
                 agent_variant,
                 approval_mode,
+                reasoning_effort,
                 error_code,
                 error_message,
                 created_at_ms,
@@ -90,6 +92,7 @@ impl StorageEngine {
                 status: parse_run_status(&status)?,
                 agent_variant: parse_agent_variant(&agent_variant)?,
                 approval_mode: parse_approval_mode(&approval_mode)?,
+                reasoning_effort: super::mode::parse_reasoning_effort(reasoning_effort)?,
                 cancel_requested: cancel_requested == 1,
                 error,
                 created_at_ms,

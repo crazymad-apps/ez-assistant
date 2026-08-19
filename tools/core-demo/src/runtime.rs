@@ -1150,6 +1150,7 @@ mod tests {
             Self {
                 capabilities: ModelCapabilities {
                     reasoning: true,
+                    image_input: false,
                     tool_calls: true,
                     streaming: true,
                 },
@@ -1224,6 +1225,7 @@ mod tests {
             Self {
                 capabilities: ModelCapabilities {
                     reasoning: true,
+                    image_input: false,
                     tool_calls: true,
                     streaming: true,
                 },

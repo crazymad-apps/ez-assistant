@@ -4,6 +4,7 @@
 //! 分开执行快照与安全投影。`source`/`registry` 管理读取边界和 reload 生命周期；真实文件权限
 //! 检查仍属于生产 Host，不能进入纯编译模块。
 
+mod catalog;
 mod compile;
 mod domain;
 mod editor;
@@ -15,7 +16,12 @@ mod source;
 
 use std::{num::NonZeroUsize, time::Duration};
 
-pub use compile::compile_runtime_config;
+pub use catalog::{
+    ModelCatalog, ModelCatalogError, ModelCatalogRoute, ReasoningEffortKey,
+    ReasoningEffortWireValue, ResolvedModelCapabilities, ResolvedReasoningCapability,
+    ResolvedReasoningEffort,
+};
+pub use compile::{compile_runtime_config, compile_runtime_config_with_catalog};
 pub use domain::{
     ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
     DelegationConfig, ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig,

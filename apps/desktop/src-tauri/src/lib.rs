@@ -60,6 +60,7 @@ pub fn run() {
             native_resource::open_attachment_in_system,
             native_resource::open_tool_file_in_system,
             native_resource::preview_attachment,
+            native_resource::thumbnail_attachment,
             native_resource::preview_tool_file,
             native_resource::reveal_attachment_in_directory,
             native_resource::reveal_tool_file_in_directory,

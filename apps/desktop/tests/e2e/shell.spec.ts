@@ -78,6 +78,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByRole("complementary", { name: "当前上下文" })).toBeVisible();
   await expect(page.getByText("Runtime 已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
+  await expectModelCatalogForm(page);
   const navigation = page.getByRole("complementary", { name: "会话导航" });
   const session_header = page.locator('header[aria-label="会话标题栏"]');
   const seeded_session = navigation.getByRole("button", { name: /^M2 临时会话(?:\s|$)/ });
@@ -92,7 +93,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
 
   await navigation.getByRole("button", { name: "搜索会话" }).click();
-  const search_input = navigation.getByRole("searchbox", { name: "搜索历史会话" });
+  const search_input = navigation.getByRole("searchbox", { name: "搜索会话名称" });
   await search_input.fill("M2 临时");
   await expect(navigation.getByRole("button", { name: /M2 临时会话/ })).toBeVisible();
   await navigation.getByRole("button", { name: "关闭搜索" }).click();
@@ -148,15 +149,9 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByRole("button", { name: "切换会话模型" })).toBeEnabled();
 
   await navigation.getByRole("button", { name: "搜索会话" }).click();
-  const history_search = navigation.getByRole("searchbox", { name: "搜索历史会话" });
-  await history_search.fill("SOURCE_CASE");
-  await navigation.getByRole("button", { name: "选择历史检索范围" }).click();
-  await page.getByRole("option", { name: /全局/ }).click();
-  // FTS snippet 会按归一化后的大小写返回，来源窗口中的权威正文仍保留原始文本。
-  await navigation.getByRole("button", { name: /消息.*source_case/i }).click();
-  const recall_dialog = page.getByRole("dialog");
-  await expect(recall_dialog.getByText("SOURCE_CASE", { exact: true })).toBeVisible();
-  await recall_dialog.getByRole("button", { name: "在原会话中查看" }).click();
+  const title_search = navigation.getByRole("searchbox", { name: "搜索会话名称" });
+  await title_search.fill("SOURCE_CASE");
+  await navigation.getByRole("button", { name: /^SOURCE_CASE/ }).click();
   await expect(session_header.getByRole("button", { name: "SOURCE_CASE" })).toBeVisible();
   await session_header.getByRole("button", { name: "返回上一处会话位置" }).click();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
@@ -243,6 +238,35 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByRole("button", { name: forked_title })).toBeHidden();
   await expect(navigation.getByRole("button", { name: new RegExp(forked_title) })).toHaveCount(0);
 });
+
+async function expectModelCatalogForm(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByRole("button", { name: "模型", exact: true }).click();
+  await settings.getByRole("button", { name: "添加模型" }).click();
+  await expect(settings.getByRole("button", { name: "选择接口协议" })).toContainText(
+    "Chat Completions（OpenAI Compatible）",
+  );
+
+  const provider = settings.getByRole("combobox", { name: "供应商（Provider）" });
+  await provider.click();
+  const provider_options = page.getByRole("listbox", { name: "供应商（Provider）" });
+  await expect(provider_options.getByRole("option")).toHaveCount(5);
+  await expect(provider_options.getByRole("option", { name: /Moonshot（Kimi）/ })).toBeVisible();
+  const trigger_width = await provider.evaluate((element) => element.parentElement?.getBoundingClientRect().width ?? 0);
+  const popup_width = await provider_options.evaluate((element) => element.getBoundingClientRect().width);
+  expect(popup_width).toBeGreaterThanOrEqual(trigger_width);
+
+  await provider_options.getByRole("option", { name: /Moonshot（Kimi）/ }).click();
+  await expect(provider).toHaveValue("moonshot");
+  const model = settings.getByRole("combobox", { name: "模型 ID" });
+  await model.click();
+  await expect(page.getByRole("option", { name: "kimi-k3" })).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await settings.getByRole("button", { name: "取消" }).click();
+  await settings.getByRole("button", { name: "关闭设置" }).click();
+}
 
 async function expectComposerAtBottom(page: Page): Promise<void> {
   const composer = page.getByRole("textbox", { name: "输入消息" });

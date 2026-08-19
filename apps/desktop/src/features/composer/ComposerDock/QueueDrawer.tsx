@@ -22,6 +22,15 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
       </button>
       {props.open && (
         <div className={styles.queue_items}>
+          {needs_resume && (
+            <button
+              disabled={store.pending_queue_input_id !== null}
+              onClick={() => void store.resumeAllQueuedInputs(props.session_id, props.queue.revision)}
+              type="button"
+            >
+              {props.queue.state === "resume_required" ? "确认并继续全部" : "继续全部"}
+            </button>
+          )}
           {props.queue.items.map((item) => (
             <div className={styles.queue_item} key={item.input_id}>
               <span>{item.position}</span>

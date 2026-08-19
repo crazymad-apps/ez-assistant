@@ -110,6 +110,8 @@ export function toolInputLabel(input: ToolInputSnapshot): string | null {
       return input.command;
     case "general":
       return input.summary;
+    case "image_inspection":
+      return input.goal;
     case "delegation":
     case "unavailable":
       return null;

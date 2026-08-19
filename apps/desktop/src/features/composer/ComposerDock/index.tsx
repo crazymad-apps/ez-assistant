@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApprovalDecision,
   ModelKey,
+  ReasoningEffortKey,
   SessionViewSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
@@ -57,6 +58,14 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
         .filter(Boolean).join(" · "),
       icon: <Icon name="message" size={15} />,
     }] : []), [application?.models]);
+  type EffortSelection = ReasoningEffortKey | "default";
+  const effort_options = useMemo<readonly SelectionOption<EffortSelection>[]>(() => [
+    { value: "default", label: "默认", description: "使用当前模型的默认思考强度" },
+    ...(session_view?.composer_capabilities.reasoning_effort_options ?? []).map((option) => ({
+      value: option.key,
+      label: option.label,
+    })),
+  ], [session_view?.composer_capabilities.reasoning_effort_options]);
 
   const slash_query = draft.startsWith("/") && !draft.includes("\n") ? draft.toLocaleLowerCase() : null;
   const slash_items = slash_query === null ? [] : SLASH_COMMANDS.filter((item) =>
@@ -283,6 +292,28 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
                   selected={session.approval_mode}
                   trigger_class_name={styles.compact_selector}
                 />
+                {session_view.composer_capabilities.reasoning_effort_options.length > 0 && (
+                  <SelectionPopover
+                    aria_label="推理强度"
+                    content_width="content"
+                    disabled={store.composer_pending}
+                    on_open_change={(open) => setOpenPicker(open ? "effort" : null)}
+                    on_select={(effort) => void store.setSessionReasoningEffort(
+                      session.session_id,
+                      effort === "default" ? null : effort,
+                    )}
+                    open={open_picker === "effort"}
+                    options={effort_options}
+                    selected={session.reasoning_effort ?? "default"}
+                    title="推理强度"
+                    trigger_class_name={styles.compact_selector}
+                  />
+                )}
+                <Tooltip content={imageHandlingText(session_view.composer_capabilities.image_handling)}>
+                  <span aria-label={imageHandlingText(session_view.composer_capabilities.image_handling)} className={styles.image_capability} role="status">
+                    {session_view.composer_capabilities.image_handling === "native" ? "原生识图" : session_view.composer_capabilities.image_handling === "tool" ? "工具识图" : "暂不可识图"}
+                  </span>
+                </Tooltip>
                 <span className={styles.action_spacer} />
                 <ContextUsageRing view={session_view} />
                 {model_options.length > 0 && (
@@ -359,4 +390,10 @@ function formatBytes(value: number): string {
     return `${(value / 1024).toFixed(1)} KB`;
   }
   return `${value} B`;
+}
+
+function imageHandlingText(mode: SessionViewSnapshot["composer_capabilities"]["image_handling"]): string {
+  if (mode === "native") return "当前模型可直接理解图片";
+  if (mode === "tool") return "当前模型将通过辅助视觉模型理解图片";
+  return "当前没有可用的图片理解模型；图片仍会作为普通附件发送";
 }

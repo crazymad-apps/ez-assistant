@@ -116,6 +116,7 @@ pub enum ModelFailureKind {
     ContextOverflow,
     Protocol,
     ToolArguments,
+    Resource,
     Cancelled,
 }
 

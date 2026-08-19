@@ -26,7 +26,7 @@ pub(crate) struct HostResources {
 impl HostResources {
     pub(crate) fn new(runtime_home: &Path) -> Result<Self, ToolResourceError> {
         Ok(Self {
-            model_factory: Arc::new(HostModelServiceFactory),
+            model_factory: Arc::new(HostModelServiceFactory::new(runtime_home)),
             session_environment_factory: Arc::new(HostSessionEnvironmentFactory::new(runtime_home)),
             run_tool_factory: Arc::new(HostRunToolFactory::new(runtime_home)?),
             child_task_workspace_factory: Arc::new(HostChildTaskWorkspaceFactory),

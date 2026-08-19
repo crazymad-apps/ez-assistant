@@ -7,7 +7,7 @@ use std::{
 
 use agent_core::{AgentEvent, ExecutionOutcome};
 use agent_model::{ModelAttemptEvent, ModelError, ModelEvent, ModelRequest, TraceContext};
-use agent_provider_openai_compatible::ProviderWireEvent;
+use agent_openai_compatible::ProviderWireEvent;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -19,7 +19,8 @@ pub(crate) const TRACE_FORMAT_VERSION: u32 = 1;
 pub(crate) struct ProviderMetadata {
     pub(crate) adapter: String,
     pub(crate) adapter_version: u32,
-    pub(crate) profile: String,
+    #[serde(alias = "profile")]
+    pub(crate) protocol_adapter: String,
     pub(crate) provider_id: String,
     pub(crate) protocol: String,
     pub(crate) endpoint: String,
@@ -527,13 +528,29 @@ mod tests {
         ProviderMetadata {
             adapter: "openai-compatible".into(),
             adapter_version: 1,
-            profile: "generic".into(),
+            protocol_adapter: "generic".into(),
             provider_id: "fixture".into(),
             protocol: "openai.chat_completions".into(),
             endpoint: "https://example.invalid/v1".into(),
             model: "fixture".into(),
             context_window_tokens: 4096,
         }
+    }
+
+    #[test]
+    fn provider_metadata_reads_legacy_profile_field_as_protocol_adapter() {
+        let legacy = r#"{
+            "adapter":"openai-compatible",
+            "adapter_version":1,
+            "profile":"generic",
+            "provider_id":"fixture",
+            "protocol":"openai.chat_completions",
+            "endpoint":"https://example.invalid/v1",
+            "model":"fixture",
+            "context_window_tokens":4096
+        }"#;
+        let metadata: ProviderMetadata = serde_json::from_str(legacy).expect("legacy metadata");
+        assert_eq!(metadata.protocol_adapter, "generic");
     }
 
     fn started(id: &str) -> TraceLine {

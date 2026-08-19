@@ -10,7 +10,7 @@ Provider wire 观察、模型建立重试、完整 Trace Collector 和离线分�
 - [`Rust 编程规范`](../specs/Rust编程规范.md)
 - [`Agent 系统技术架构`](agent-system.md)
 - [`agent-model 模块约束`](agent-model.md)
-- [`OpenAI-compatible Provider 模块约束`](agent-provider-openai-compatible.md)
+- [`OpenAI-compatible Provider 模块约束`](agent-openai-compatible.md)
 - 当前版本功能设计、技术方案和开发计划
 
 ## 职责

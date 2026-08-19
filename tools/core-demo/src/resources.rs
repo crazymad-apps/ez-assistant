@@ -16,8 +16,8 @@ use agent_model::{
     ModelEventStream, ModelRequest, ModelRetryPolicy, ModelRetryReason, ModelService,
     ModelStreamFuture, ProviderOptions, ReasoningConfig, RetryingModelService,
 };
-use agent_provider_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
+use agent_openai_compatible::{
+    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
 };
 use agent_types::ToolChoice;
 use thiserror::Error;
@@ -140,7 +140,7 @@ impl DemoModelResources {
                 BearerCredential::new(api_key),
                 model_name.clone(),
                 context_window_tokens,
-                Profile::deepseek(),
+                ProtocolAdapter::deepseek(),
                 TransportTimeouts::default(),
             )
             .map_err(|error| ResourceError::Provider(error.to_string()))?,

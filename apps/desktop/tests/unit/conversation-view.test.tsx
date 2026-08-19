@@ -4,6 +4,12 @@ import type { RuntimeEvent } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ConversationView } from "../../src/features/conversation/ConversationView";
+import { thumbnailAttachment } from "../../src/native-bridge/nativeResource";
+
+vi.mock("../../src/native-bridge/nativeResource", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/native-bridge/nativeResource")>()),
+  thumbnailAttachment: vi.fn(),
+}));
 
 afterEach(() => {
   cleanup();
@@ -48,6 +54,49 @@ describe("ConversationView scroll anchoring", () => {
     const attachment = screen.getByRole("button", { name: "参考图片.png" });
     const message = screen.getByText("请查看这张图片");
     expect(attachment.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("loads image thumbnails from the native bridge and exposes the shared preview action", async () => {
+    vi.mocked(thumbnailAttachment).mockResolvedValue("data:image/jpeg;base64,dGh1bWI=");
+    const store = conversationStore();
+    store.projection.applySessionSnapshot({
+      observed_sequence: 0,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        attachments: [{
+          attachment_id: "image-1",
+          session_id: "session-1",
+          original_name: "示意图.png",
+          media_type: "image/png",
+          size_bytes: 1024,
+          agent_readable_path: "/private/runtime/image-1.png",
+          state: "ready",
+          created_at_ms: 1,
+        }],
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 1,
+          items: [{
+            type: "user",
+            message_id: "message-with-image",
+            text: "解释图片",
+            attachment_ids: ["image-1"],
+            created_at_ms: 1,
+          }],
+          previous_cursor: null,
+          has_more: false,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    expect(await screen.findByRole("img", { name: "示意图.png" })).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+    expect(screen.getByRole("button", { name: "预览图片 示意图.png" })).toBeEnabled();
   });
 
   it("shows the completed turn finish time in the turn-level action bar", () => {

@@ -17,10 +17,11 @@ use crate::{
     ModelKey, PermissionDiagnostic, PermissionDocumentDraft, PermissionDocumentRevision,
     PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
     PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
-    PrioritizeQueuedInputResult, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
-    ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionSummary, SystemContextSnapshot, WorkspaceId, WorkspaceSummary,
+    PrioritizeQueuedInputResult, ReasoningEffortKey, RejectApprovalAndStopRunRequest,
+    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
+    RunSnapshot, RuntimeLifecycle, SearchConversationHistoryRequest,
+    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSummary,
+    SystemContextSnapshot, WorkspaceId, WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -41,12 +42,33 @@ pub struct GetConfigStatusResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListModelsRequest {}
 
+/// 随 Runtime 发版的模型目录中一组精确路由建议。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ModelCatalogEntrySnapshot {
+    pub provider: String,
+    pub provider_label: String,
+    pub protocol: String,
+    pub protocol_label: String,
+    pub model_ids: Vec<String>,
+}
+
+/// Desktop 可用于模型表单建议项的随包目录投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ModelCatalogSnapshot {
+    pub revision: String,
+    pub entries: Vec<ModelCatalogEntrySnapshot>,
+}
+
 /// 全部模型的脱敏投影。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListModelsResult {
     /// 按配置 key 确定性排序的模型投影。
     pub models: Vec<ModelConfiguration>,
+    /// 随包静态目录提供的协议、供应商和模型 ID 建议，不限制用户输入目录外值。
+    pub catalog: ModelCatalogSnapshot,
 }
 
 /// 查询一个合法 model key 的脱敏投影。
@@ -161,6 +183,15 @@ pub struct DeleteModelRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SetDefaultModelRequest {
     pub model_key: ModelKey,
+    pub expected_revision: String,
+}
+
+/// 设置文本主模型调用识图工具时使用的辅助视觉模型。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetAuxiliaryVisionModelRequest {
+    /// None 清除配置；Some 必须指向一条有效且支持图片输入的模型配置。
+    pub model_key: Option<ModelKey>,
     pub expected_revision: String,
 }
 
@@ -731,6 +762,19 @@ pub struct SetSessionModelResult {
     pub session: SessionSummary,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionReasoningEffortRequest {
+    pub session_id: SessionId,
+    pub effort: Option<ReasoningEffortKey>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionReasoningEffortResult {
+    pub session: SessionSummary,
+}
+
 /// 只更新 Session 当前展示和下次提交默认使用的 Agent 变体。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -952,6 +996,8 @@ pub enum RuntimeCommand {
     DeleteModel(DeleteModelRequest),
     /// 设置后续新会话使用的默认模型。
     SetDefaultModel(SetDefaultModelRequest),
+    /// 设置识图工具使用的辅助视觉模型。
+    SetAuxiliaryVisionModel(SetAuxiliaryVisionModelRequest),
     GetMemoryCapabilities(GetMemoryCapabilitiesRequest),
     GetPersona(GetPersonaRequest),
     SetPersona(SetPersonaRequest),
@@ -1021,6 +1067,7 @@ pub enum RuntimeCommand {
     SetMessageFeedback(SetMessageFeedbackRequest),
     /// 切换 Session 模型。
     SetSessionModel(SetSessionModelRequest),
+    SetSessionReasoningEffort(SetSessionReasoningEffortRequest),
     /// 切换 Session 当前 Agent 变体。
     SetSessionVariant(SetSessionVariantRequest),
     /// 切换 Session 当前审批模式。
@@ -1046,7 +1093,7 @@ pub enum RuntimeCommandResult {
     GetConversationPageAroundMessage(GetConversationPageAroundMessageResult),
     SearchConversationHistory(SearchConversationHistoryResult),
     GetConversationRecallWindow(GetConversationRecallWindowResult),
-    GetToolDetail(GetToolDetailResult),
+    GetToolDetail(Box<GetToolDetailResult>),
     PrioritizeQueuedInput(PrioritizeQueuedInputResult),
     InterruptRun(InterruptRunResult),
     ResumeQueuedInput(ResumeQueuedInputResult),
@@ -1063,6 +1110,7 @@ pub enum RuntimeCommandResult {
     UpdateModel(ConfigurationMutationResult),
     DeleteModel(ConfigurationMutationResult),
     SetDefaultModel(ConfigurationMutationResult),
+    SetAuxiliaryVisionModel(ConfigurationMutationResult),
     GetMemoryCapabilities(GetMemoryCapabilitiesResult),
     GetPersona(GetPersonaResult),
     SetPersona(SetPersonaResult),
@@ -1130,6 +1178,7 @@ pub enum RuntimeCommandResult {
     SetMessageFeedback(SetMessageFeedbackResult),
     /// Session 模型已切换。
     SetSessionModel(SetSessionModelResult),
+    SetSessionReasoningEffort(SetSessionReasoningEffortResult),
     /// Session 当前 Agent 变体已切换。
     SetSessionVariant(SetSessionVariantResult),
     /// Session 当前审批模式已切换。
@@ -1153,6 +1202,7 @@ mod tests {
             session_id: SessionId::new("session-1").expect("session id"),
             title: "Session 1".to_owned(),
             model_key: ModelKey::new("model-1").expect("model key"),
+            reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
             current_variant: AgentVariant::Build,
             approval_mode: ApprovalMode::Ask,
@@ -1183,6 +1233,7 @@ mod tests {
             status: crate::RunStatus::Accepted,
             variant: AgentVariant::Build,
             approval_mode: ApprovalMode::Ask,
+            reasoning_effort: None,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
@@ -1228,6 +1279,7 @@ mod tests {
             state: crate::ConfigurationState::Ready,
             schema_version: Some(1),
             default_model: Some(ModelKey::new("model-1").expect("model key")),
+            auxiliary_vision_model: None,
             issues: Vec::new(),
         }
     }
@@ -1244,6 +1296,7 @@ mod tests {
             max_output_tokens: Some(4_096),
             agent_max_output_tokens: None,
             effective_max_output_tokens: Some(4_096),
+            supports_image_input: false,
             api_key_configured: true,
             origin: crate::ModelConfigurationOrigin::ConfigurationFile,
             editable: true,
@@ -1377,6 +1430,13 @@ mod tests {
             (
                 RuntimeCommand::ReloadConfig(ReloadConfigRequest::default()),
                 "reload_config",
+            ),
+            (
+                RuntimeCommand::SetAuxiliaryVisionModel(SetAuxiliaryVisionModelRequest {
+                    model_key: Some(ModelKey::new("model-1").expect("model key")),
+                    expected_revision: "revision-1".to_owned(),
+                }),
+                "set_auxiliary_vision_model",
             ),
             (
                 RuntimeCommand::ReloadPermissions(ReloadPermissionsRequest {
@@ -1618,6 +1678,16 @@ mod tests {
             (
                 RuntimeCommandResult::ListModels(ListModelsResult {
                     models: vec![model_configuration()],
+                    catalog: ModelCatalogSnapshot {
+                        revision: "fixture".to_owned(),
+                        entries: vec![ModelCatalogEntrySnapshot {
+                            provider: "fixture".to_owned(),
+                            provider_label: "Fixture".to_owned(),
+                            protocol: "openai_chat_completions".to_owned(),
+                            protocol_label: "OpenAI Chat Completions".to_owned(),
+                            model_ids: vec!["fixture-model".to_owned()],
+                        }],
+                    },
                 }),
                 "list_models",
             ),
@@ -1632,6 +1702,13 @@ mod tests {
                     status: configuration_status(),
                 }),
                 "reload_config",
+            ),
+            (
+                RuntimeCommandResult::SetAuxiliaryVisionModel(ConfigurationMutationResult {
+                    status: configuration_status(),
+                    models: vec![model_configuration()],
+                }),
+                "set_auxiliary_vision_model",
             ),
             (
                 RuntimeCommandResult::ReloadPermissions(ReloadPermissionsResult {
@@ -1699,6 +1776,7 @@ mod tests {
                         session_id: session_id.clone(),
                         original_name: "reference.txt".to_owned(),
                         size_bytes: 9,
+                        media_type: Some("text/plain".to_owned()),
                         agent_readable_path: "/session/attachments/reference.txt".to_owned(),
                         state: crate::AttachmentState::Ready,
                         created_at_ms: 1,

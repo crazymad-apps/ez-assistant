@@ -74,6 +74,17 @@ impl AssistantRuntime {
             })
             .await?
             .run;
+        let session = self.session(&request.session_id)?;
+        {
+            let _mutation = session.mutation().await;
+            let mut state = session.lock_state()?;
+            state.queue_paused_by_user = true;
+            state.queue_revision = state.queue_revision.saturating_add(1);
+        }
+        self.publish(RuntimeEvent::QueueChanged {
+            session_id: request.session_id.clone(),
+            revision: session.lock_state()?.queue_revision,
+        });
         Ok(RejectApprovalAndStopRunResult {
             run,
             approvals: self.approval_queue(&request.session_id)?,

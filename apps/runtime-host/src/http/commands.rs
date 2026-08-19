@@ -159,7 +159,7 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::GetToolDetail(request) => (
-            RuntimeCommandResult::GetToolDetail(runtime.get_tool_detail(request).await?),
+            RuntimeCommandResult::GetToolDetail(Box::new(runtime.get_tool_detail(request).await?)),
             false,
         ),
         RuntimeCommand::PrioritizeQueuedInput(request) => (
@@ -212,6 +212,12 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetDefaultModel(request) => (
             RuntimeCommandResult::SetDefaultModel(runtime.set_default_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetAuxiliaryVisionModel(request) => (
+            RuntimeCommandResult::SetAuxiliaryVisionModel(
+                runtime.set_auxiliary_vision_model(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::GetMemoryCapabilities(request) => (
@@ -386,6 +392,12 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetSessionModel(request) => (
             RuntimeCommandResult::SetSessionModel(runtime.set_session_model(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSessionReasoningEffort(request) => (
+            RuntimeCommandResult::SetSessionReasoningEffort(
+                runtime.set_session_reasoning_effort(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::SetSessionVariant(request) => (

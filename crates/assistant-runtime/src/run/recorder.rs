@@ -172,6 +172,7 @@ mod tests {
                 title: "recorder fixture".to_owned(),
                 title_origin: assistant_protocol::SessionTitleOrigin::Generated,
                 model_key: ModelKey::new("fixture").expect("model key"),
+                reasoning_effort: None,
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
                 environment: SessionExecutionEnvironment {
                     workspace_id: None,
@@ -272,6 +273,7 @@ mod tests {
                         call_id,
                         status: ToolResultStatus::Success,
                         content: ToolResultContent::Text("done".to_owned()),
+                        metadata: None,
                     },
                 }],
             )

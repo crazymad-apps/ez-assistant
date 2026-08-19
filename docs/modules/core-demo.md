@@ -115,7 +115,7 @@ Provider，不提供并行的离线 CLI 模式。
 
 ## M7 Context 与真实 Provider
 
-- 普通 `serve` 使用 `OpenAiCompatibleService` 和 DeepSeek Profile；credential 只从进程环境或
+- 普通 `serve` 使用 `OpenAiCompatibleService` 和 DeepSeek ProtocolAdapter；credential 只从进程环境或
   仓库 `.env` 读取，不进入页面配置、Journal、普通日志或测试 fixture。自动测试改用私有离线
   构造入口，不读取 credential，也不访问网络。
 - 每个 Session Agent 冻结同一份 DeepSeek thinking、`reasoning_effort=high`、ToolChoice 和

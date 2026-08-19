@@ -160,6 +160,25 @@ describe("ComposerDock", () => {
     ));
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
   });
+
+  it("shows runtime-projected effort labels and image handling in the composer", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer({
+      composer_capabilities: {
+        reasoning_effort_options: [
+          { key: "low", label: "较少" },
+          { key: "max", label: "最大" },
+        ],
+        image_handling: "tool",
+      },
+    });
+    const set_effort = vi.spyOn(store, "setSessionReasoningEffort").mockResolvedValue(undefined);
+
+    expect(screen.getByRole("status", { name: "当前模型将通过辅助视觉模型理解图片" })).toHaveTextContent("工具识图");
+    await user.click(screen.getByRole("button", { name: "推理强度" }));
+    await user.click(screen.getByRole("option", { name: "最大" }));
+    expect(set_effort).toHaveBeenCalledWith("session-1", "max");
+  });
 });
 
 function renderComposer(overrides: Readonly<{
@@ -167,6 +186,7 @@ function renderComposer(overrides: Readonly<{
   approvals?: readonly ApprovalSnapshot[];
   child_tasks?: readonly ChildTaskTreeItemSnapshot[];
   read_only?: boolean;
+  composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
 }> = {}): RootStore {
   const store = new RootStore();
   store.connection.markConnected("instance-1", {
@@ -188,7 +208,7 @@ function renderComposer(overrides: Readonly<{
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
-    configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, default_model: "fixture", issues: [] },
+    configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, default_model: "fixture", auxiliary_vision_model: null, issues: [] },
     models: [
       model("fixture", "本地模型（7B）", true),
       model("alternate", "备用模型", false),
@@ -220,6 +240,7 @@ function model(model_key: string, display_name: string, is_default: boolean): Ap
     max_output_tokens: 4_096,
     agent_max_output_tokens: 4_096,
     effective_max_output_tokens: 4_096,
+    supports_image_input: false,
     api_key_configured: true,
     origin: "configuration_file",
     editable: true,
@@ -234,16 +255,24 @@ function sessionView(overrides: Readonly<{
   queue?: QueueSnapshot;
   approvals?: readonly ApprovalSnapshot[];
   child_tasks?: readonly ChildTaskTreeItemSnapshot[];
+  composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
 }> = {}): SessionViewSnapshot {
   return {
     session: sessionSummary(),
+    composer_capabilities: overrides.composer_capabilities ?? { reasoning_effort_options: [], image_handling: "unavailable" },
     active_run: null,
     queue: overrides.queue ?? { revision: 1, state: "automatic", items: [] },
     approvals: { revision: 1, items: [...(overrides.approvals ?? [])], resolving_approval_id: null },
     attachments: [],
     file_references: [],
     runs: [],
-    usage: { accumulated: null, previous_turn: null, context: null },
+    usage: {
+      accumulated: null,
+      previous_turn: null,
+      latest_cache_hit_basis_points: null,
+      overall_cache_hit_basis_points: null,
+      context: null,
+    },
     child_tasks: [...(overrides.child_tasks ?? [])],
     conversation: {
       owner: { type: "main_session", session_id: "session-1" },

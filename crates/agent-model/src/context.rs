@@ -15,6 +15,8 @@ pub struct ModelCallContext {
     pub cancellation: CancellationToken,
     /// 可选 trace/correlation 上下文。
     pub trace: Option<TraceContext>,
+    /// 本次调用已经准备完成的瞬时图片；不序列化、不持久化。
+    pub prepared_images: crate::PreparedModelImages,
 }
 
 impl ModelCallContext {
@@ -23,6 +25,7 @@ impl ModelCallContext {
         Self {
             cancellation,
             trace: None,
+            prepared_images: crate::PreparedModelImages::default(),
         }
     }
 

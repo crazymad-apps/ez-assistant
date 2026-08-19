@@ -161,6 +161,7 @@ pub(crate) fn model_failure_kind(error: &ModelError) -> ModelFailureKind {
         ModelError::ContextOverflow { .. } => ModelFailureKind::ContextOverflow,
         ModelError::Protocol(_) => ModelFailureKind::Protocol,
         ModelError::ToolArguments(_) => ModelFailureKind::ToolArguments,
+        ModelError::Resource(_) => ModelFailureKind::Resource,
         ModelError::Cancelled => ModelFailureKind::Cancelled,
     }
 }

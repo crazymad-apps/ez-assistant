@@ -78,8 +78,7 @@
 }
 
 .composer_actions {
-  display: grid;
-  grid-template-columns: auto auto auto minmax(8px, 1fr) auto minmax(0, auto) auto;
+  display: flex;
   align-items: center;
   gap: 6px;
   margin-top: 8px;
@@ -126,7 +125,16 @@
   svg { flex: 0 0 auto; }
 }
 
-.action_spacer { min-width: 0; }
+.action_spacer { min-width: 8px; flex: 1 1 auto; }
+
+.image_capability {
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: var(--ez-text-muted);
+  background: var(--ez-surface-subtle);
+  font-size: var(--ez-font-small);
+  white-space: nowrap;
+}
 
 .send_button {
   display: grid;
@@ -385,7 +393,7 @@
 
 @media (max-width: 720px) {
   .dock { width: calc(100% - 24px); }
-  .composer_actions { grid-template-columns: auto auto auto minmax(0, 1fr) auto auto; }
+  .image_capability { display: none; }
   .context_ring { display: none; }
   .model_selector { max-width: 120px; }
 }

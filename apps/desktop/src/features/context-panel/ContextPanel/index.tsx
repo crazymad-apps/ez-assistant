@@ -9,6 +9,7 @@ import { ContextRing, ContextSection } from "./ContextSection";
 import {
   childStatusLabel,
   formatApprovalMode,
+  formatBasisPoints,
   formatBytes,
   formatModelIdentity,
   formatNullableTokens,
@@ -117,11 +118,13 @@ export const ContextPanel = observer(function ContextPanel() {
               <div><dt>上一轮输入</dt><dd>{formatNullableTokens(session_view.usage.previous_turn.input_tokens)}</dd></div>
               <div><dt>上一轮输出</dt><dd>{formatNullableTokens(session_view.usage.previous_turn.output_tokens)}</dd></div>
               <div><dt>缓存命中</dt><dd>{formatNullableTokens(session_view.usage.previous_turn.cached_input_tokens)}</dd></div>
+              <div><dt>最新命中率</dt><dd>{formatBasisPoints(session_view.usage.latest_cache_hit_basis_points)}</dd></div>
             </dl>
           )}
           {session_view?.usage.accumulated && (
             <dl className={`${styles.definition_list} ${styles.usage_list}`}>
               <div><dt>会话 Token</dt><dd>{formatNullableTokens(session_view.usage.accumulated.total_tokens)}</dd></div>
+              <div><dt>综合命中率</dt><dd>{formatBasisPoints(session_view.usage.overall_cache_hit_basis_points)}</dd></div>
             </dl>
           )}
           {session && (

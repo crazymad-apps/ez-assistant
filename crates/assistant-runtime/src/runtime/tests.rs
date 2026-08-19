@@ -11,7 +11,8 @@ use std::{
 
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelCapabilities, ModelError, ModelRequest, ModelService,
-    ModelStreamFuture, ModelTransportErrorKind, ReasoningConfig, SystemPromptSnapshot,
+    ModelServiceBundle, ModelStreamFuture, ModelTransportErrorKind, ReasoningConfig,
+    SystemPromptSnapshot,
 };
 use agent_testkit::{ModelScript, OrderLog, ScriptedModelService, ScriptedTool, message_events};
 use agent_tools::{
@@ -357,8 +358,8 @@ impl ModelServiceFactory for StaticModelFactory {
     fn create_model(
         &self,
         _request: ModelServiceFactoryRequest<'_>,
-    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError> {
-        Ok(self.model.clone())
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        Ok(ModelServiceBundle::text_only(self.model.clone()))
     }
 }
 
@@ -384,7 +385,7 @@ impl ModelServiceFactory for RecordingModelFactory {
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
-    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError> {
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
         self.api_keys
             .lock()
             .expect("api key log")
@@ -393,6 +394,7 @@ impl ModelServiceFactory for RecordingModelFactory {
             .lock()
             .expect("model queue")
             .pop_front()
+            .map(ModelServiceBundle::text_only)
             .ok_or_else(|| ModelServiceFactoryError::new("fixture model queue is empty"))
     }
 }
@@ -403,7 +405,7 @@ impl ModelServiceFactory for FailingModelFactory {
     fn create_model(
         &self,
         _request: ModelServiceFactoryRequest<'_>,
-    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError> {
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
         Err(ModelServiceFactoryError::new("fixture model build failed"))
     }
 }
@@ -643,6 +645,7 @@ fn model_input(
 fn model_capabilities(has_tools: bool) -> ModelCapabilities {
     ModelCapabilities {
         reasoning: false,
+        image_input: false,
         tool_calls: has_tools,
         streaming: true,
     }

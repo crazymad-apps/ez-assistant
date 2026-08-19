@@ -55,7 +55,7 @@ pub enum ConfigurationIssueCode {
     InvalidLimit,
     /// Runtime 或 Agent 全局策略无效。
     InvalidPolicy,
-    /// Provider Profile 与请求参数组合不兼容。
+    /// 已选协议 Adapter 与请求参数组合不兼容。
     UnsupportedProfileCombination,
     /// 默认 model key 缺失或当前不可用。
     DefaultModelUnavailable,
@@ -87,6 +87,8 @@ pub struct ConfigurationStatus {
     pub schema_version: Option<u32>,
     /// 形式合法的默认 model key；仍可能暂时不可用。
     pub default_model: Option<ModelKey>,
+    /// 识图工具使用的辅助视觉模型；None 表示未配置。
+    pub auxiliary_vision_model: Option<ModelKey>,
     /// 不归属于单个合法 model key 的全局诊断。
     pub issues: Vec<ConfigurationIssue>,
 }
@@ -124,6 +126,8 @@ pub struct ModelConfiguration {
     pub agent_max_output_tokens: Option<u32>,
     /// 模型与 Agent 两个输出上限取最小值后的结果。
     pub effective_max_output_tokens: Option<u32>,
+    /// 静态目录、协议基线和用户 override 合并后是否支持原生图片输入。
+    pub supports_image_input: bool,
     /// 只代表 credential 已通过本地非空校验，不代表 Provider 已验证。
     pub api_key_configured: bool,
     /// 该条目来自哪个权威配置源。
@@ -157,6 +161,7 @@ mod tests {
             max_output_tokens: Some(8_192),
             agent_max_output_tokens: Some(4_096),
             effective_max_output_tokens: Some(4_096),
+            supports_image_input: false,
             api_key_configured: true,
             origin: ModelConfigurationOrigin::ConfigurationFile,
             editable: true,

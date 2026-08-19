@@ -103,6 +103,19 @@ pub(super) async fn upload_attachment(
     }
     drop(staging);
 
+    let media_type = match tokio::task::spawn_blocking({
+        let path = staging_path.clone();
+        move || crate::image::sniff_media_type(&path)
+    })
+    .await
+    {
+        Ok(Ok(value)) => Some(value),
+        _ => {
+            cleanup(&staging_path).await;
+            return upload_error(invalid_upload("uploaded file type could not be detected"));
+        }
+    };
+
     let result = state
         .runtime
         .finalize_attachment_upload(StagedAttachmentUpload {
@@ -111,10 +124,22 @@ pub(super) async fn upload_attachment(
             staging_path: staging_path.to_string_lossy().into_owned(),
             blob_hash: format!("{:x}", hasher.finalize()),
             size_bytes,
+            media_type,
         })
         .await;
     match result {
         Ok(mut result) => {
+            let thumbnail_source = PathBuf::from(&result.attachment.agent_readable_path);
+            if result
+                .attachment
+                .media_type
+                .as_deref()
+                .is_some_and(|value| value.starts_with("image/"))
+            {
+                tokio::task::spawn_blocking(move || {
+                    let _ = crate::image::ensure_thumbnail(&thumbnail_source);
+                });
+            }
             // Agent-readable storage paths stay inside Runtime/Host. The Desktop only needs the
             // stable Attachment identity and display metadata after a successful upload.
             result.attachment.agent_readable_path.clear();

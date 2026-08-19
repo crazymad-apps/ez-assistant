@@ -48,6 +48,28 @@ describe("ContextPanel", () => {
     expect(screen.getByText("Workspace 不是强沙盒。", { exact: false })).toBeVisible();
   });
 
+  it("shows latest and token-weighted session cache hit rates", () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: {
+        ...view,
+        usage: {
+          accumulated: { input_tokens: 400, output_tokens: 30, total_tokens: 430, cached_input_tokens: 170 },
+          previous_turn: { input_tokens: 300, output_tokens: 20, total_tokens: 320, cached_input_tokens: 150 },
+          latest_cache_hit_basis_points: 5_000,
+          overall_cache_hit_basis_points: 4_250,
+          context: null,
+        },
+      },
+    });
+    renderPanel(store);
+
+    expect(screen.getByText("最新命中率").nextElementSibling).toHaveTextContent("50.0%");
+    expect(screen.getByText("综合命中率").nextElementSibling).toHaveTextContent("42.5%");
+  });
+
   it("previews the frozen System Context as Markdown and can reveal its source text", async () => {
     const store = contextStore();
     const get_system_context = vi.spyOn(store, "getSystemContext").mockResolvedValue({
@@ -97,6 +119,8 @@ describe("ContextPanel", () => {
         usage: {
           accumulated: { input_tokens: null, output_tokens: null, total_tokens: null, cached_input_tokens: null },
           previous_turn: { input_tokens: null, output_tokens: null, total_tokens: null, cached_input_tokens: null },
+          latest_cache_hit_basis_points: null,
+          overall_cache_hit_basis_points: null,
           context: null,
         },
       },
@@ -186,7 +210,13 @@ function contextStore(): RootStore {
         approval_mode: "ask",
         tools: [],
       }],
-      usage: { accumulated: null, previous_turn: null, context: null },
+      usage: {
+        accumulated: null,
+        previous_turn: null,
+        latest_cache_hit_basis_points: null,
+        overall_cache_hit_basis_points: null,
+        context: null,
+      },
       child_tasks: [],
       conversation: {
         owner: { type: "main_session", session_id: "session-1" },

@@ -17,7 +17,7 @@ agent-context = { path = "../../crates/agent-context" }
 agent-core = { path = "../../crates/agent-core" }
 agent-model = { path = "../../crates/agent-model" }
 agent-memory = { path = "../../crates/agent-memory" }
-agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
+agent-openai-compatible = { path = "../../crates/agent-openai-compatible" }
 agent-sdk = { path = "../../crates/agent-sdk" }
 agent-tools = { path = "../../crates/agent-tools" }
 agent-tools-local = { path = "../../crates/agent-tools-local" }
@@ -31,6 +31,8 @@ clap.workspace = true
 dirs.workspace = true
 futures-core.workspace = true
 getrandom.workspace = true
+image.workspace = true
+infer.workspace = true
 libc.workspace = true
 rusqlite = { version = "0.40.1", features = ["bundled"], default-features = false }
 schemars = "1.2.1"

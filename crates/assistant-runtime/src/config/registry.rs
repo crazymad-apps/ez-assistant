@@ -6,7 +6,7 @@ use assistant_protocol::{ModelConfigurationInput, ModelKey};
 use tokio::sync::Mutex;
 
 use super::{
-    ConfigMutation, compile_runtime_config,
+    ConfigMutation, ModelCatalog, compile_runtime_config_with_catalog,
     domain::{ConfigCompilation, ConfigProjection, ResolvedConfig, ResolvedModelConfig},
     edit_config_document,
     source::{ConfigSourceLoad, ConfigSourceReplace, RuntimeConfigSource},
@@ -57,14 +57,16 @@ impl ConfigSnapshot {
 /// Runtime 的唯一配置状态所有者。
 pub(crate) struct ConfigRegistry {
     source: Arc<dyn RuntimeConfigSource>,
+    catalog: Arc<ModelCatalog>,
     snapshot: RwLock<Arc<ConfigSnapshot>>,
     reload_gate: Mutex<()>,
 }
 
 impl ConfigRegistry {
-    pub(crate) fn new(source: Arc<dyn RuntimeConfigSource>) -> Self {
+    pub(crate) fn new(source: Arc<dyn RuntimeConfigSource>, catalog: Arc<ModelCatalog>) -> Self {
         Self {
             source,
+            catalog,
             snapshot: RwLock::new(Arc::new(ConfigSnapshot::from_compilation(
                 ConfigCompilation::missing(),
                 None,
@@ -86,13 +88,18 @@ impl ConfigRegistry {
         self.source.display_path()
     }
 
+    pub(crate) fn catalog(&self) -> &ModelCatalog {
+        &self.catalog
+    }
+
     /// 串行读取并原子替换整个快照；失败结果不会回退到旧 credential。
     pub(crate) async fn reload(&self) -> RuntimeResult<Arc<ConfigSnapshot>> {
         let _gate = self.reload_gate.lock().await;
         let (compilation, revision) = match self.source.load().await {
             ConfigSourceLoad::Missing => (ConfigCompilation::missing(), None),
             ConfigSourceLoad::Document(document) => {
-                let compilation = compile_runtime_config(document.contents());
+                let compilation =
+                    compile_runtime_config_with_catalog(document.contents(), &self.catalog);
                 (compilation, Some(document.revision().to_owned()))
             }
             ConfigSourceLoad::Unavailable(failure) => (
@@ -132,16 +139,18 @@ impl ConfigRegistry {
             return Err(RuntimeError::ConfigurationConflict);
         }
 
-        let target_model_key = mutation.target_model_key().clone();
-        let requires_valid_target = mutation.requires_valid_target();
+        let target_model_key = mutation.target_model_key().cloned();
+        let requires_image_input = mutation.requires_image_input();
         let candidate = edit_config_document(current_contents, mutation)?;
-        let compilation = compile_runtime_config(&candidate);
-        let target_is_valid = compilation
-            .projection()
-            .models
-            .iter()
-            .any(|model| model.model_key.as_ref() == Some(&target_model_key) && model.is_valid);
-        if compilation.active().is_none() || (requires_valid_target && !target_is_valid) {
+        let compilation = compile_runtime_config_with_catalog(&candidate, &self.catalog);
+        let target_is_valid = target_model_key.as_ref().is_none_or(|target_model_key| {
+            compilation.projection().models.iter().any(|model| {
+                model.model_key.as_ref() == Some(target_model_key)
+                    && model.is_valid
+                    && (!requires_image_input || model.supports_image_input)
+            })
+        });
+        if compilation.active().is_none() || !target_is_valid {
             return Err(RuntimeError::InvalidRequest {
                 reason: "model configuration candidate is invalid",
             });
@@ -149,7 +158,8 @@ impl ConfigRegistry {
 
         match self.source.replace(expected_revision, candidate).await {
             ConfigSourceReplace::Applied(document) => {
-                let compilation = compile_runtime_config(document.contents());
+                let compilation =
+                    compile_runtime_config_with_catalog(document.contents(), &self.catalog);
                 if compilation.active().is_none() {
                     return Err(RuntimeError::ConfigurationPersistenceFailed);
                 }
@@ -180,7 +190,7 @@ impl ConfigRegistry {
             }
         };
         let exists = current.is_some_and(|document| {
-            compile_runtime_config(document)
+            compile_runtime_config_with_catalog(document, &self.catalog)
                 .projection()
                 .models
                 .iter()
@@ -201,7 +211,7 @@ impl ConfigRegistry {
             },
         )?;
         Ok(Arc::new(ConfigSnapshot::from_compilation(
-            compile_runtime_config(&candidate),
+            compile_runtime_config_with_catalog(&candidate, &self.catalog),
             None,
         )))
     }
@@ -210,7 +220,7 @@ impl ConfigRegistry {
         let (compilation, revision) = match load {
             ConfigSourceLoad::Missing => (ConfigCompilation::missing(), None),
             ConfigSourceLoad::Document(document) => (
-                compile_runtime_config(document.contents()),
+                compile_runtime_config_with_catalog(document.contents(), &self.catalog),
                 Some(document.revision().to_owned()),
             ),
             ConfigSourceLoad::Unavailable(failure) => (
@@ -239,7 +249,7 @@ impl ConfigRegistry {
     #[cfg(test)]
     pub(crate) fn replace_document_for_test(&self, document: &str) {
         let next = Arc::new(ConfigSnapshot::from_compilation(
-            compile_runtime_config(document),
+            compile_runtime_config_with_catalog(document, &self.catalog),
             Some("test-revision".to_owned()),
         ));
         *self.snapshot.write().expect("test registry lock") = next;

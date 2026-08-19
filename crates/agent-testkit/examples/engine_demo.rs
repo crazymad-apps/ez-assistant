@@ -65,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Arc::new(ScriptedModelService::new(
         ModelCapabilities {
             reasoning: true,
+            image_input: false,
             tool_calls: true,
             streaming: true,
         },

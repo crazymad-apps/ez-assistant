@@ -11,7 +11,7 @@ workspace = true
 agent-context = { path = "../../crates/agent-context" }
 agent-core = { path = "../../crates/agent-core" }
 agent-model = { path = "../../crates/agent-model" }
-agent-provider-openai-compatible = { path = "../../crates/agent-provider-openai-compatible" }
+agent-openai-compatible = { path = "../../crates/agent-openai-compatible" }
 agent-tools = { path = "../../crates/agent-tools" }
 agent-types = { path = "../../crates/agent-types" }
 dotenvy.workspace = true

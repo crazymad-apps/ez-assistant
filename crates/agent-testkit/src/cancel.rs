@@ -156,6 +156,7 @@ mod tests {
         ScriptedModelService::completing(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: false,
                 streaming: true,
             },

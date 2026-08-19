@@ -98,9 +98,14 @@ async fn candidate_connection_validation_uses_unsaved_form_values_without_persis
 }
 
 #[tokio::test]
-async fn deepseek_connection_validation_injects_only_its_required_profile_options() {
+async fn deepseek_connection_validation_injects_only_its_required_protocol_options() {
     let model = Arc::new(ScriptedModelService::completing(
-        model_capabilities(false),
+        ModelCapabilities {
+            reasoning: true,
+            image_input: false,
+            tool_calls: false,
+            streaming: true,
+        },
         8_192,
         assistant_text("validation-response", "anything"),
     ));
@@ -110,11 +115,13 @@ async fn deepseek_connection_validation_injects_only_its_required_profile_option
         ToolSetSnapshot::default(),
         32,
     );
-    runtime.config_registry.replace_document_for_test(
-        &TEST_CONFIG
-            .replace("provider = \"fixture\"", "provider = \"deepseek\"")
-            .replace("max_output_tokens = 4096", "max_output_tokens = 8"),
-    );
+    let deepseek_config = TEST_CONFIG
+        .replace("provider = \"fixture\"", "provider = \"deepseek\"")
+        .replace("max_output_tokens = 4096", "max_output_tokens = 8")
+        + "\n[models.fixture.capabilities.reasoning]\nenabled = true\n";
+    runtime
+        .config_registry
+        .replace_document_for_test(&deepseek_config);
 
     let result = runtime
         .validate_model_connection(configured_validation_request())
@@ -131,6 +138,78 @@ async fn deepseek_connection_validation_injects_only_its_required_profile_option
     assert_eq!(request.generation.top_p, None);
     assert_eq!(request.generation.max_output_tokens, Some(8));
     assert!(request.generation.stop.is_empty());
+}
+
+#[test]
+fn kimi_k3_protocol_options_do_not_send_the_removed_thinking_switch() {
+    let provider = ProviderId::new("moonshot").expect("provider id");
+    let capabilities = crate::ResolvedModelCapabilities {
+        image_input: true,
+        reasoning: Some(crate::ResolvedReasoningCapability {
+            efforts: Vec::new(),
+            default_effort: None,
+        }),
+        tool_calls: true,
+        streaming: true,
+    };
+
+    for model_id in ["kimi-k3", "k3"] {
+        let (reasoning, k3_options) = crate::runtime::model::protocol_request_options(
+            &provider,
+            crate::ModelProtocol::OpenAiChatCompletions,
+            model_id,
+            &capabilities,
+            None,
+        )
+        .expect("K3 protocol options");
+        assert_eq!(reasoning, Some(ReasoningConfig { effort: None }));
+        assert!(k3_options.is_empty());
+    }
+
+    let (_, k2_options) = crate::runtime::model::protocol_request_options(
+        &provider,
+        crate::ModelProtocol::OpenAiChatCompletions,
+        "kimi-k2.6",
+        &capabilities,
+        None,
+    )
+    .expect("K2 protocol options");
+    assert_eq!(
+        k2_options.get("moonshot"),
+        Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
+    );
+}
+
+#[test]
+fn qwen38_protocol_options_enable_and_preserve_thinking() {
+    let provider = ProviderId::new("dashscope").expect("provider id");
+    let capabilities = crate::ResolvedModelCapabilities {
+        image_input: true,
+        reasoning: Some(crate::ResolvedReasoningCapability {
+            efforts: Vec::new(),
+            default_effort: None,
+        }),
+        tool_calls: true,
+        streaming: true,
+    };
+
+    let (reasoning, options) = crate::runtime::model::protocol_request_options(
+        &provider,
+        crate::ModelProtocol::OpenAiChatCompletions,
+        "qwen3.8-max",
+        &capabilities,
+        None,
+    )
+    .expect("Qwen 3.8 protocol options");
+
+    assert_eq!(reasoning, Some(ReasoningConfig { effort: None }));
+    assert_eq!(
+        options.get("dashscope"),
+        Some(&serde_json::json!({
+            "enable_thinking": true,
+            "preserve_thinking": true
+        }))
+    );
 }
 
 #[tokio::test]

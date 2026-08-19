@@ -84,7 +84,7 @@ impl AssistantRuntime {
         Ok(PrioritizeQueuedInputResult { queue })
     }
 
-    /// 用户中断后的暂停队列中，只恢复指定输入并保持其他输入暂停。
+    /// 恢复整个队列；可选目标会在恢复前可靠置顶。
     pub async fn resume_queued_input(
         &self,
         request: ResumeQueuedInputRequest,
@@ -95,49 +95,64 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
-        let run = {
-            let mut state = session.lock_state()?;
+        let should_move = {
+            let state = session.lock_state()?;
             if state.queue_revision != request.expected_revision {
                 return Err(RuntimeError::QueueConflict);
             }
-            let position = state
-                .runnable_inputs
-                .iter()
-                .position(|input_id| input_id == &request.input_id)
-                .ok_or_else(|| RuntimeError::InputNotFound {
-                    session_id: request.session_id.clone(),
-                    input_id: request.input_id.clone(),
-                })?;
-            let input_id = state.runnable_inputs.remove(position).ok_or(
-                RuntimeError::InternalStateUnavailable {
-                    component: "queued input resume",
-                },
-            )?;
-            state.runnable_inputs.push_front(input_id.clone());
-            state.resume_required = true;
-            state.queue_paused_by_user = true;
-            state.retry_override_input = Some(input_id.clone());
-            state.queue_revision = state.queue_revision.saturating_add(1);
-            let run_id = state
-                .inputs
-                .get(&input_id)
-                .map(|input| input.latest_run_id.clone())
-                .ok_or(RuntimeError::InternalStateUnavailable {
-                    component: "queued input run projection",
-                })?;
-            state.runs.get(&run_id).map(RunRecord::snapshot).ok_or(
-                RuntimeError::InternalStateUnavailable {
-                    component: "queued input run projection",
-                },
-            )?
+            request
+                .input_id
+                .as_ref()
+                .map(|input_id| {
+                    state
+                        .runnable_inputs
+                        .iter()
+                        .position(|candidate| candidate == input_id)
+                        .ok_or_else(|| RuntimeError::InputNotFound {
+                            session_id: request.session_id.clone(),
+                            input_id: input_id.clone(),
+                        })
+                        .map(|position| position > 0)
+                })
+                .transpose()?
+                .unwrap_or(false)
         };
+        if should_move {
+            self.store
+                .prioritize_queued_input(QueuePriorityChange {
+                    session_id: request.session_id.clone(),
+                    input_id: request.input_id.clone().expect("move requires target"),
+                })
+                .await
+                .map_err(|source| RuntimeError::from_store("resume queued input", source))?;
+        }
+        {
+            let mut state = session.lock_state()?;
+            if should_move {
+                let target = request.input_id.as_ref().expect("move requires target");
+                let position = state
+                    .runnable_inputs
+                    .iter()
+                    .position(|candidate| candidate == target)
+                    .ok_or(RuntimeError::QueueConflict)?;
+                let input_id = state.runnable_inputs.remove(position).ok_or(
+                    RuntimeError::InternalStateUnavailable {
+                        component: "queued input resume",
+                    },
+                )?;
+                state.runnable_inputs.push_front(input_id);
+            }
+            state.resume_required = false;
+            state.queue_paused_by_user = false;
+            state.queue_revision = state.queue_revision.saturating_add(1);
+        }
         let queue = super::super::product::queue_snapshot(&session)?;
         self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
             session_id: request.session_id,
             revision: queue.revision,
         });
         self.wake_queue(session.clone())?;
-        Ok(ResumeQueuedInputResult { run, queue })
+        Ok(ResumeQueuedInputResult { queue })
     }
 
     /// 先持久化 Input 与首次 Run，再把它加入目标 Session 的执行队列。
@@ -217,6 +232,7 @@ impl AssistantRuntime {
             state
                 .runnable_inputs
                 .push_back(accepted.input.input_id.clone());
+            state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.inputs.insert(
                 accepted.input.input_id.clone(),
@@ -277,9 +293,6 @@ impl AssistantRuntime {
             .map_err(|source| RuntimeError::from_store("cancel queued input", source))?;
         let mut state = session.lock_state()?;
         state.runnable_inputs.retain(|id| id != &request.input_id);
-        if state.retry_override_input.as_ref() == Some(&request.input_id) {
-            state.retry_override_input = None;
-        }
         state
             .runs
             .retain(|_, run| run.input_id() != &request.input_id);
@@ -321,7 +334,6 @@ impl AssistantRuntime {
             let mut state = session.lock_state()?;
             state.resume_required = false;
             state.queue_paused_by_user = false;
-            state.retry_override_input = None;
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
         let revision = session.lock_state()?.queue_revision;
@@ -421,9 +433,6 @@ impl AssistantRuntime {
                 .unwrap_or(state.runnable_inputs.len());
             state.runnable_inputs.insert(position, input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
-            if state.resume_required {
-                state.retry_override_input = Some(input_id);
-            }
             snapshot
         };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {

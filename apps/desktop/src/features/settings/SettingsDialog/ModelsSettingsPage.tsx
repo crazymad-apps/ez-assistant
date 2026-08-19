@@ -9,6 +9,7 @@ import {
 import { Icon } from "../../../components/Icon";
 import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";
 import type {
+  ModelCatalogEntrySnapshot,
   ModelConfiguration,
   ModelConfigurationInput,
   ModelKey,
@@ -35,7 +36,7 @@ type ModelDraft = {
 const empty_draft: ModelDraft = {
   model_key: "",
   display_name: "",
-  protocol: "chat_completions",
+  protocol: "openai_chat_completions",
   provider: "openai",
   endpoint: "",
   model: "",
@@ -45,15 +46,6 @@ const empty_draft: ModelDraft = {
   set_default: false,
 };
 
-const protocol_options = [
-  { value: "chat_completions", label: "Chat Completions（OpenAI Compatible）" },
-] as const;
-
-const provider_options = [
-  { value: "deepseek", label: "DeepSeek" },
-  { value: "openai", label: "OpenAI Compatible" },
-] as const;
-
 export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Readonly<{
   onDirtyChange: (dirty: boolean) => void;
 }>) {
@@ -62,7 +54,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
   const [draft, setDraft] = useState<ModelDraft>(empty_draft);
   const [dirty, setDirty] = useState(false);
   const [show_secret, setShowSecret] = useState(false);
-  const [open_selector, setOpenSelector] = useState<"protocol" | "provider" | null>(null);
+  const [open_selector, setOpenSelector] = useState<"model" | "protocol" | "provider" | "vision" | null>(null);
   const [deleting, setDeleting] = useState<ModelConfiguration | null>(null);
   const [replacement_default, setReplacementDefault] = useState<ModelKey | "">("");
   const root_store = useRootStore();
@@ -86,7 +78,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
     setDraft({
       model_key: model.model_key,
       display_name: model.display_name,
-      protocol: model.protocol ?? "chat_completions",
+      protocol: model.protocol ?? "openai_chat_completions",
       provider: model.provider ?? "",
       endpoint: model.endpoint ?? "",
       model: model.model ?? "",
@@ -235,10 +227,39 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
     ));
   }
 
+  const auxiliary_vision_model = settings.status?.auxiliary_vision_model ?? "";
+  const configured_vision_model_is_available = !auxiliary_vision_model || settings.models.some((model) => (
+    model.model_key === auxiliary_vision_model
+    && model.is_valid
+    && model.supports_image_input
+  ));
+  const vision_model_options: readonly SelectionOption<string>[] = [
+    {
+      value: "",
+      label: "未配置",
+      description: "仅使用主模型的原生识图能力",
+    },
+    ...(configured_vision_model_is_available ? [] : [{
+      value: auxiliary_vision_model,
+      label: `当前配置（${auxiliary_vision_model}）`,
+      description: "该模型不可用或不支持图片输入，请重新选择",
+    }]),
+    ...settings.models
+      .filter((model) => model.model_key && model.is_valid && model.supports_image_input)
+      .map((model) => ({
+        value: model.model_key ?? "",
+        label: model.display_name,
+        description: `${model.provider ?? "未知供应商"} · ${model.model ?? model.model_key ?? "未知模型"}`,
+      })),
+  ];
+
   if (editing) {
     const is_new = editing === "new";
+    const catalog_entries = settings.model_catalog?.entries ?? [];
+    const protocol_options = catalogProtocolOptions(catalog_entries);
+    const provider_options = catalogProviderOptions(catalog_entries, draft.protocol);
+    const model_options = catalogModelOptions(catalog_entries, draft.protocol, draft.provider);
     const visible_protocol_options = includeCurrentOption(protocol_options, draft.protocol, "当前配置");
-    const visible_provider_options = includeCurrentOption(provider_options, draft.provider, "当前兼容配置");
     return (
       <section>
         <div className={styles.page_header}>
@@ -266,19 +287,35 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
             />
           </div>
           <div className={styles.form_field}>
-            供应商方言（Provider）
+            供应商（Provider）
             <SelectionPopover
-              aria_label="选择供应商方言"
+              aria_label="供应商（Provider）"
               content_width="content"
+              editable
               on_open_change={(open) => setOpenSelector(open ? "provider" : null)}
               on_select={(value) => update("provider", value)}
               open={open_selector === "provider"}
-              options={visible_provider_options}
+              options={provider_options}
+              placeholder="例如：deepseek"
               selected={draft.provider}
               trigger_variant="field"
             />
           </div>
-          <label className={styles.full_field}>模型 ID<input onChange={(event) => update("model", event.currentTarget.value)} placeholder="供应商接口使用的模型名，例如：deepseek-chat" value={draft.model} /></label>
+          <div className={`${styles.form_field} ${styles.full_field}`}>
+            模型 ID
+            <SelectionPopover
+              aria_label="模型 ID"
+              content_width="content"
+              editable
+              on_open_change={(open) => setOpenSelector(open ? "model" : null)}
+              on_select={(value) => update("model", value)}
+              open={open_selector === "model"}
+              options={model_options}
+              placeholder="供应商接口使用的模型名，例如：deepseek-v4-pro"
+              selected={draft.model}
+              trigger_variant="field"
+            />
+          </div>
           <label className={styles.full_field}>Endpoint<input onChange={(event) => update("endpoint", event.currentTarget.value)} placeholder="接口地址，例如：https://api.deepseek.com/v1" value={draft.endpoint} /></label>
           <label className={`${styles.full_field} ${styles.secret_field}`}>API Key<span><input autoComplete="new-password" onChange={(event) => update("api_key", event.currentTarget.value)} placeholder={is_new ? "输入 API Key" : "留空则保持现有凭据"} type={show_secret ? "text" : "password"} value={draft.api_key} /><button aria-label={show_secret ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowSecret((visible) => !visible)} type="button">{show_secret ? "隐藏" : "显示"}</button></span></label>
           <label>上下文窗口<input inputMode="numeric" onChange={(event) => update("context_window_tokens", event.currentTarget.value)} placeholder="模型支持的 Token 数，例如：128000" value={draft.context_window_tokens} /></label>
@@ -307,6 +344,26 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
       <div className={styles.page_header}>
         <h3>模型</h3>
         <button className={styles.primary_button} onClick={beginCreate} type="button"><Icon name="plus" size={14} />添加模型</button>
+      </div>
+      <div className={styles.vision_model_setting}>
+        <div className={styles.model_icon}><Icon name="bot" size={17} /></div>
+        <div className={styles.vision_model_summary}>
+          <strong>默认识图模型</strong>
+          <span>供不支持原生图片输入、但能够调用工具的主模型使用</span>
+        </div>
+        <div className={styles.vision_model_select}>
+          <SelectionPopover
+            aria_label="默认识图模型"
+            content_width="content"
+            disabled={settings.pending_action !== null}
+            on_open_change={(open) => setOpenSelector(open ? "vision" : null)}
+            on_select={(value) => void settings.setAuxiliaryVisionModel(value || null)}
+            open={open_selector === "vision"}
+            options={vision_model_options}
+            selected={auxiliary_vision_model}
+            trigger_variant="field"
+          />
+        </div>
       </div>
       <div className={styles.model_list}>
         {settings.models.map((model) => (
@@ -398,4 +455,50 @@ function includeCurrentOption<T extends string>(
     return options;
   }
   return [{ value: current, label: `${current_label}（${current}）` }, ...options];
+}
+
+function catalogProtocolOptions(
+  entries: readonly ModelCatalogEntrySnapshot[],
+): readonly SelectionOption<string>[] {
+  return uniqueOptions(entries.map((entry) => ({
+    value: entry.protocol,
+    label: entry.protocol_label,
+  })));
+}
+
+function catalogProviderOptions(
+  entries: readonly ModelCatalogEntrySnapshot[],
+  protocol: string,
+): readonly SelectionOption<string>[] {
+  return uniqueOptions(entries
+    .filter((entry) => entry.protocol === protocol)
+    .map((entry) => ({
+      value: entry.provider,
+      label: entry.provider_label,
+      description: entry.provider,
+    })));
+}
+
+function catalogModelOptions(
+  entries: readonly ModelCatalogEntrySnapshot[],
+  protocol: string,
+  provider: string,
+): readonly SelectionOption<string>[] {
+  return uniqueOptions(entries
+    .filter((entry) => entry.protocol === protocol && entry.provider === provider)
+    .flatMap((entry) => entry.model_ids.map((model_id) => ({
+      value: model_id,
+      label: model_id,
+    }))));
+}
+
+function uniqueOptions(
+  options: readonly SelectionOption<string>[],
+): readonly SelectionOption<string>[] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    if (seen.has(option.value)) return false;
+    seen.add(option.value);
+    return true;
+  });
 }

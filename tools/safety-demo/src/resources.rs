@@ -15,8 +15,8 @@ use agent_core::{
 use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
-use agent_provider_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
+use agent_openai_compatible::{
+    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
 };
 use agent_tools::{
     AbsolutePath, FsDeleteTool, FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool,
@@ -91,7 +91,7 @@ impl DemoResources {
             BearerCredential::new(api_key),
             model,
             context_window_tokens,
-            Profile::deepseek(),
+            ProtocolAdapter::deepseek(),
             TransportTimeouts::default(),
         )
         .map_err(|error| ResourceError::Provider(error.to_string()))?;

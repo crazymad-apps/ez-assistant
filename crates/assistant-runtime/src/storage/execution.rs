@@ -1,8 +1,8 @@
 use agent_core::ExchangeReceipt;
 use agent_types::{AssistantMessage, ConversationMessage, MessageId, ToolMessage, UserMessage};
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, IdempotencyKey, InputId, RunId, RunStatus, RuntimeErrorInfo,
-    SessionId, ToolCallId,
+    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ReasoningEffortKey, RunId, RunStatus,
+    RuntimeErrorInfo, SessionId, ToolCallId,
 };
 
 /// 队列执行器领取一次 Run 时提交的 User Message 与结构化关联。
@@ -14,6 +14,7 @@ pub struct UserMessageCommit {
     pub session_id: SessionId,
     /// queued 输入首次开始时为 Some；已提交输入的新 attempt 不重复追加消息。
     pub message: Option<UserMessage>,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     pub created_at_ms: i64,
 }
 
@@ -134,6 +135,7 @@ pub struct StoredRun {
     pub status: RunStatus,
     pub agent_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     pub cancel_requested: bool,
     pub error: Option<RuntimeErrorInfo>,
     pub message_ids: Vec<MessageId>,

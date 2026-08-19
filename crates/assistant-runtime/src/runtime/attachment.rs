@@ -20,6 +20,8 @@ pub struct StagedAttachmentUpload {
     /// 原始文件名与文件字节共同决定的 Blob 身份摘要。
     pub blob_hash: String,
     pub size_bytes: u64,
+    /// Host 按 staging 文件签名检测的实际 MIME。
+    pub media_type: Option<String>,
 }
 
 impl AssistantRuntime {
@@ -57,6 +59,7 @@ impl AssistantRuntime {
                 staging_path: upload.staging_path,
                 blob_hash: upload.blob_hash,
                 size_bytes: upload.size_bytes,
+                media_type: upload.media_type,
                 created_at_ms: super::now_ms()?,
             })
             .await
@@ -195,6 +198,7 @@ fn summary(stored: &StoredAttachment) -> AttachmentSummary {
         session_id: stored.session_id.clone(),
         original_name: stored.original_name.clone(),
         size_bytes: stored.size_bytes,
+        media_type: stored.media_type.clone(),
         agent_readable_path: stored.agent_readable_path.clone(),
         state: match stored.state {
             StoredAttachmentState::Ready => AttachmentState::Ready,

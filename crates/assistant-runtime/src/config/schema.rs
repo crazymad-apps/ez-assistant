@@ -74,6 +74,16 @@ pub(super) struct RawModelRetryConfig {
 pub(super) struct RawAgentConfig {
     #[serde(default)]
     pub(super) defaults: RawAgentDefaults,
+    /// 可选辅助视觉模型，只引用既有模型 key。
+    pub(super) vision: Option<RawVisionConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawVisionConfig {
+    pub(super) model_key: String,
+    pub(super) timeout_ms: u64,
+    pub(super) max_output_tokens: u32,
 }
 
 /// 每个新 Run 编译时使用的 Agent 默认值集合。
@@ -187,4 +197,6 @@ pub(super) struct RawModelConfig {
     pub(super) api_key: Option<String>,
     pub(super) context_window_tokens: Option<u64>,
     pub(super) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub(super) capabilities: super::catalog::CapabilityInput,
 }

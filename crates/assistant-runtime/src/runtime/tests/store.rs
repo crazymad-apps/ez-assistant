@@ -19,7 +19,8 @@ use crate::{
     StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredWorkspace, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    StoredSessionFork, StoredSessionUsage, StoredWorkspace, UserMessageCommit, VariantChange,
+    WorkspaceRemoval,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -234,6 +235,10 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.load_conversation(session_id)
     }
 
+    fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage> {
+        self.inner.get_session_usage(session_id)
+    }
+
     fn load_conversation_window(
         &self,
         request: ConversationWindowRequest,
@@ -287,6 +292,13 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn set_session_model(&self, change: ModelChange) -> StoreFuture<'_, ()> {
         self.inner.set_session_model(change)
+    }
+
+    fn set_session_reasoning_effort(
+        &self,
+        change: crate::ReasoningEffortChange,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.set_session_reasoning_effort(change)
     }
 
     fn set_session_variant(&self, change: VariantChange) -> StoreFuture<'_, ()> {

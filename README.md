@@ -13,7 +13,7 @@ apps/
 crates/
   agent-types/                     Provider-neutral 规范消息与工具值类型
   agent-model/                     单次模型 Turn、事件、错误与有限建立重试
-  agent-provider-openai-compatible/ OpenAI-compatible Codec、Transport 与服务 Adapter
+  agent-openai-compatible/ OpenAI-compatible Codec、Transport 与服务 Adapter
   agent-context/                   窗口判断、历史布局、校验与压缩策略
   agent-memory/                    Pinned Memory 与 RecallSource 契约
   agent-tools/                     工具 SPI、Registry/Dispatcher、能力契约与标准工具壳

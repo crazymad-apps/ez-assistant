@@ -225,8 +225,8 @@ testkit 类型。
 | `agent_core::{ExecutionSpec, AgentExecution::start, AgentEvent}` | 绕过 SDK 的低层 Core 装配与观察 | Core 受控终态和可丢普通事件 | 调用方自行冻结配置并组织控制面 |
 | `agent_tools::{Dispatcher, ResolvedToolBatch, ResolvedToolInvocation}` | resolve、授权事实和一次性执行载荷 | invalid item 形成 ToolResult；重复执行是合约错误 | batch 只读借给 Authorizer，执行载荷只能消费一次 |
 | `agent_tools::{SessionPathResolver, Fs*Tool, ShellExecTool, *Request/*Result}` | 标准工具壳、路径和能力 DTO | 构造、resolve 与能力错误保持分层 | 真实 I/O 由注入能力决定 |
-| `agent_provider_openai_compatible::{Profile, OpenAiCompatibleService, Transport, ProviderWireObserver}` | OpenAI-compatible 路由、Codec、HTTP/SSE 与 wire 观察 | 构造、Transport、协议和 Provider 错误分层 | Service/Transport 可共享；wire observer 不得改变结果 |
-| `agent_provider_openai_compatible::{Chat*, ChunkAssembler, SseParser, encode_request, decode_*}` | 自定义 Transport、fixture 和回放所需原生协议面 | 编解码错误不进入 Core 特判 | 单次 parser/assembler 由一个响应流拥有 |
+| `agent_openai_compatible::{Profile, OpenAiCompatibleService, Transport, ProviderWireObserver}` | OpenAI-compatible 路由、Codec、HTTP/SSE 与 wire 观察 | 构造、Transport、协议和 Provider 错误分层 | Service/Transport 可共享；wire observer 不得改变结果 |
+| `agent_openai_compatible::{Chat*, ChunkAssembler, SseParser, encode_request, decode_*}` | 自定义 Transport、fixture 和回放所需原生协议面 | 编解码错误不进入 Core 特判 | 单次 parser/assembler 由一个响应流拥有 |
 | `agent_tools_local::{LocalFileSystem, LocalShell, EnvironmentPolicy}` | 当前用户权限下的真实本地 Adapter | OS/File/Shell 错误映射到能力错误 | 可共享；Shell 进程生命周期由 Adapter 负责 |
 | `agent_context::{ContextLayout, RollingSummarySameModel, validate_replacement}` | Runtime 的布局、摘要候选和提交前校验 | 结构/策略/校验错误显式返回 | 不保存 Session 或 Checkpoint |
 | `agent_memory::{PinnedMemorySnapshot, CoordinatedMemoryRecall, Recall* DTO}` | Prompt 渲染与多 Source 协调 | 限额、配置、取消和部分失败显式返回 | 协调器并发调用 Source，不替上层持久化 |

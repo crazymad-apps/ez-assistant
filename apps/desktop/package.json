@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.15.0",
+  "version": "0.16.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,8 @@
     "test:e2e": "cargo build -p assistant-runtime-host && playwright test",
     "preview": "vite preview",
     "prepare:sidecar": "cargo build -p assistant-runtime-host --release && node scripts/prepare-sidecar.mjs",
+    "release:macos": "node scripts/release-macos.mjs",
+    "verify:macos-release": "node scripts/verify-macos-release.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {

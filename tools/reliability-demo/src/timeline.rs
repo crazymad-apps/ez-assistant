@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use agent_core::AgentEvent;
 use agent_model::{ModelAttemptEvent, ModelEvent};
-use agent_provider_openai_compatible::ProviderWireEvent;
+use agent_openai_compatible::ProviderWireEvent;
 
 use crate::trace::{
     DemoHostEvent, LoadedTrace, ModelCallEvent, NativeTracePayload, TraceCompleteness, TraceRecord,
@@ -26,10 +26,10 @@ pub(crate) fn render_timeline(trace: &LoadedTrace, full: bool) -> String {
     );
     let _ = writeln!(
         output,
-        "adapter={} adapter_version={} profile={} provider={} protocol={} model={} context_window={}",
+        "adapter={} adapter_version={} protocol_adapter={} provider={} protocol={} model={} context_window={}",
         trace.started.provider.adapter,
         trace.started.provider.adapter_version,
-        trace.started.provider.profile,
+        trace.started.provider.protocol_adapter,
         trace.started.provider.provider_id,
         trace.started.provider.protocol,
         trace.started.provider.model,
@@ -229,7 +229,7 @@ mod tests {
                 provider: ProviderMetadata {
                     adapter: "openai-compatible".into(),
                     adapter_version: 1,
-                    profile: "generic".into(),
+                    protocol_adapter: "generic".into(),
                     provider_id: "fixture".into(),
                     protocol: "openai.chat_completions".into(),
                     endpoint: "https://example.invalid/v1".into(),

@@ -4,12 +4,12 @@ use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use agent_core::ToolPolicy;
 use agent_memory::{MemoryRecall, PinnedMemoryStore, RecallReferenceReader};
-use agent_model::ModelService;
+use agent_model::ModelServiceBundle;
 use agent_tools::ToolSetSnapshot;
 use agent_types::ProviderId;
 use thiserror::Error;
 
-use crate::SessionExecutionEnvironment;
+use crate::{ModelProtocol, ResolvedModelCapabilities, SessionExecutionEnvironment};
 
 /// Host 异步创建单个子任务临时空间的结果 Future。
 pub type ChildTaskWorkspaceFuture<'a> = Pin<
@@ -61,21 +61,13 @@ pub trait ChildTaskWorkspaceFactory: Send + Sync {
     ) -> ChildTaskWorkspaceFuture<'a>;
 }
 
-/// Runtime 已根据 provider 推导出的内部 Codec 方言。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ModelCompatibilityProfile {
-    /// DeepSeek thinking-enabled Chat Completions 方言。
-    DeepSeek,
-    /// 没有额外供应商行为的标准 Chat Completions 方言。
-    Standard,
-}
-
 /// 交给具体 Provider 工厂的一次冻结模型构造输入。
 ///
 /// 本类型不实现 `Debug`，因为它短暂借用 API Key。工厂不得保存借用或输出 credential。
 pub struct ModelServiceFactoryRequest<'a> {
     pub provider: &'a ProviderId,
-    pub profile: ModelCompatibilityProfile,
+    pub protocol: ModelProtocol,
+    pub capabilities: &'a ResolvedModelCapabilities,
     pub endpoint: &'a str,
     pub model: &'a str,
     pub api_key: &'a str,
@@ -117,7 +109,7 @@ pub trait ModelServiceFactory: Send + Sync {
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
-    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError>;
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError>;
 }
 
 /// 一次 Run 冻结使用的工具定义与 Host 基础设施策略。
@@ -136,6 +128,8 @@ pub struct RunToolFactoryRequest<'a> {
     pub pinned_memory: Arc<dyn PinnedMemoryStore>,
     pub conversation_recall: Arc<dyn MemoryRecall>,
     pub conversation_recall_reader: Arc<dyn RecallReferenceReader>,
+    /// Runtime 已按主/辅助模型能力判定后的可选识图能力。
+    pub image_inspector: Option<agent_tools::SharedImageInspector>,
 }
 
 impl RunToolBundle {

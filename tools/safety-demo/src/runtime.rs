@@ -167,6 +167,7 @@ impl DemoRuntime {
         let model = Arc::new(agent_testkit::ScriptedModelService::new(
             agent_model::ModelCapabilities {
                 reasoning: true,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },
@@ -809,6 +810,7 @@ mod tests {
         let model = Arc::new(agent_testkit::ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: true,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },
@@ -966,6 +968,7 @@ mod tests {
         let model = Arc::new(agent_testkit::ScriptedModelService::new(
             agent_model::ModelCapabilities {
                 reasoning: true,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },
@@ -1084,6 +1087,7 @@ mod tests {
         let model = Arc::new(agent_testkit::ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: true,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },

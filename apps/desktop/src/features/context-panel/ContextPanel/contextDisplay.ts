@@ -4,6 +4,10 @@ export function formatNullableTokens(value: number | null): string {
   return value === null ? "未提供" : formatTokens(value);
 }
 
+export function formatBasisPoints(value: number | null): string {
+  return value === null ? "未提供" : `${(value / 100).toFixed(1)}%`;
+}
+
 export function formatTokens(value: number): string {
   return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K` : value.toLocaleString("zh-CN");
 }

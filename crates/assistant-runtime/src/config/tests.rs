@@ -1,4 +1,4 @@
-use super::domain::{ModelProfile, ModelSecret};
+use super::domain::ModelSecret;
 use super::*;
 use agent_core::{ActiveGuardrailMode, ExecutionBudget};
 use assistant_protocol::ModelKey;
@@ -19,6 +19,103 @@ context_window_tokens = 128000
 max_output_tokens = {max_output_tokens}
 "#
     )
+}
+
+fn model_catalog() -> ModelCatalog {
+    ModelCatalog::from_json(
+        r#"{
+            "schema_version": 1,
+            "catalog_revision": "fixture",
+            "models": [
+                {
+                    "provider": "deepseek",
+                    "protocol": "openai_chat_completions",
+                    "model_ids": ["fixture-reasoner"],
+                    "capabilities": {
+                        "reasoning": {
+                            "enabled": true,
+                            "default_effort": "max",
+                            "effort_map": {
+                                "high": {"label": "High", "wire_value": "high"},
+                                "max": {"label": "Max", "wire_value": "max"}
+                            }
+                        }
+                    }
+                },
+                {
+                    "provider": "dashscope",
+                    "protocol": "openai_chat_completions",
+                    "model_ids": ["qwen3.8-max"],
+                    "capabilities": {
+                        "image_input": true,
+                        "tool_calls": true,
+                        "streaming": true,
+                        "reasoning": {
+                            "enabled": true,
+                            "default_effort": "xhigh",
+                            "effort_map": {
+                                "low": {"label": "低", "wire_value": "low"},
+                                "medium": {"label": "中", "wire_value": "medium"},
+                                "xhigh": {"label": "超高", "wire_value": "xhigh"}
+                            }
+                        }
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("catalog")
+}
+
+#[test]
+fn catalog_match_and_complete_reasoning_override_follow_precedence() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"reasoner\"\n{}",
+        model_table("reasoner", "deepseek", 4096).replace("model-name", "fixture-reasoner")
+    );
+    let compilation = compile_runtime_config_with_catalog(&document, &model_catalog());
+    let model = compilation
+        .active()
+        .and_then(|active| active.model(&ModelKey::new("reasoner").expect("key")))
+        .expect("model");
+    let reasoning = model.capabilities().reasoning.as_ref().expect("reasoning");
+    assert_eq!(reasoning.default_effort, Some(ReasoningEffortKey::Max));
+    assert_eq!(reasoning.efforts.len(), 2);
+
+    let overridden = format!(
+        "{document}\n[models.reasoner.capabilities]\nimage_input = true\n\
+         [models.reasoner.capabilities.reasoning]\nenabled = false\n"
+    );
+    let compilation = compile_runtime_config_with_catalog(&overridden, &model_catalog());
+    let model = compilation
+        .active()
+        .and_then(|active| active.model(&ModelKey::new("reasoner").expect("key")))
+        .expect("overridden model");
+    assert!(model.capabilities().image_input);
+    assert!(!model.capabilities().reasoning_enabled());
+}
+
+#[test]
+fn invalid_override_effort_fails_only_target_model() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"reasoner\"\n{}\n\
+         [models.reasoner.capabilities.reasoning]\n\
+         enabled = true\n\
+         default_effort = \"max\"\n\
+         [models.reasoner.capabilities.reasoning.effort_map.high]\n\
+         label = \"High\"\n\
+         wire_value = \"high\"\n",
+        model_table("reasoner", "deepseek", 4096).replace("model-name", "fixture-reasoner")
+    );
+    let compilation = compile_runtime_config_with_catalog(&document, &model_catalog());
+    assert_eq!(compilation.state(), ConfigState::Degraded);
+    assert!(compilation.active().expect("active").models().is_empty());
+    assert!(compilation.projection().issues.iter().any(|issue| {
+        issue.code() == ConfigIssueCode::InvalidModel
+            && issue
+                .model_key()
+                .is_some_and(|key| key.as_str() == "reasoner")
+    }));
 }
 
 #[test]
@@ -64,10 +161,7 @@ max_tool_calls = 100
         .model(&ModelKey::new("deepseek-chat").expect("model key"))
         .expect("compiled model");
     assert_eq!(model.provider().as_str(), "deepseek");
-    assert_eq!(
-        ModelProfile::for_provider(model.provider()),
-        ModelProfile::DeepSeek
-    );
+    assert_eq!(model.protocol(), ModelProtocol::OpenAiChatCompletions);
     assert_eq!(model.context_window_tokens(), 128_000);
     assert_eq!(model.max_output_tokens(), 8_192);
     assert_eq!(model.generation().max_output_tokens, Some(4_096));
@@ -115,10 +209,7 @@ fn omitted_optional_tables_keep_defaults_and_no_hidden_limits() {
     );
     let model = active.models().values().next().expect("compiled model");
     assert_eq!(model.provider().as_str(), "302-ai");
-    assert_eq!(
-        ModelProfile::for_provider(model.provider()),
-        ModelProfile::Standard
-    );
+    assert_eq!(model.protocol(), ModelProtocol::OpenAiChatCompletions);
     assert_eq!(model.generation().max_output_tokens, Some(4_096));
 
     let delegation = active.delegation();
@@ -347,7 +438,7 @@ max_output_tokens = 10
 }
 
 #[test]
-fn profile_combination_only_invalidates_deepseek_models() {
+fn deepseek_thinking_rejects_sampling_parameters_without_invalidating_other_models() {
     let document = format!(
         r#"
 schema_version = 1
@@ -358,6 +449,9 @@ temperature = 0.7
 top_p = 0.9
 {}
 {}
+
+[models.deepseek.capabilities.reasoning]
+enabled = true
 "#,
         model_table("deepseek", "deepseek", 4096),
         model_table("standard", "acme", 4096)
@@ -378,6 +472,59 @@ top_p = 0.9
                 .model_key()
                 .is_some_and(|key| key.as_str() == "deepseek")
     }));
+}
+
+#[test]
+fn catalog_matched_qwen_reasoning_and_image_capabilities_compile_as_ready() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"qwen\"\n{}",
+        model_table("qwen", "dashscope", 4096).replace("model-name", "qwen3.8-max")
+    );
+
+    let compilation = compile_runtime_config_with_catalog(&document, &model_catalog());
+    assert_eq!(compilation.state(), ConfigState::Ready);
+    assert!(
+        !compilation
+            .issues()
+            .iter()
+            .any(|issue| { issue.code() == ConfigIssueCode::UnsupportedProfileCombination })
+    );
+    let model = compilation
+        .active()
+        .and_then(|active| active.model(&ModelKey::new("qwen").expect("key")))
+        .expect("Qwen model");
+    assert!(model.capabilities().image_input);
+    let reasoning = model.capabilities().reasoning.as_ref().expect("reasoning");
+    assert_eq!(reasoning.default_effort, Some(ReasoningEffortKey::XHigh));
+    assert_eq!(reasoning.efforts.len(), 3);
+}
+
+#[test]
+fn auxiliary_vision_projection_retains_selection_and_compiled_image_capability() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"qwen\"\n\
+         [agent.vision]\nmodel_key = \"qwen\"\ntimeout_ms = 60000\nmax_output_tokens = 4096\n{}",
+        model_table("qwen", "dashscope", 4096).replace("model-name", "qwen3.8-max")
+    );
+
+    let compilation = compile_runtime_config_with_catalog(&document, &model_catalog());
+    assert_eq!(compilation.state(), ConfigState::Ready);
+    assert_eq!(
+        compilation
+            .projection()
+            .auxiliary_vision_model
+            .as_ref()
+            .map(ModelKey::as_str),
+        Some("qwen")
+    );
+    assert!(compilation.projection().models[0].supports_image_input);
+    assert_eq!(
+        compilation
+            .active()
+            .and_then(ResolvedConfig::vision)
+            .map(|vision| vision.model_key.as_str()),
+        Some("qwen")
+    );
 }
 
 #[test]

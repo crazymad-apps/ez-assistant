@@ -1,9 +1,9 @@
-//! 两层 Replay 共用的私有脚本提取、Profile 重建与错误类型。
+//! 两层 Replay 共用的私有脚本提取、ProtocolAdapter 重建与错误类型。
 
 use std::collections::BTreeMap;
 
 use agent_model::{ModelCapabilities, ModelError, ModelEvent, ModelRequest};
-use agent_provider_openai_compatible::Profile;
+use agent_openai_compatible::ProtocolAdapter;
 use agent_types::ProviderId;
 use thiserror::Error;
 
@@ -21,8 +21,8 @@ pub(crate) enum ReplayError {
     IncompleteTrace,
     #[error("unsupported adapter `{adapter}` version {version}")]
     UnsupportedAdapter { adapter: String, version: u32 },
-    #[error("unsupported replay profile `{0}`")]
-    UnsupportedProfile(String),
+    #[error("unsupported replay protocol_adapter `{0}`")]
+    UnsupportedProtocolAdapter(String),
     #[error("invalid replay metadata: {0}")]
     InvalidMetadata(&'static str),
     #[error("corrupt replay script: {0}")]
@@ -150,7 +150,9 @@ pub(crate) fn ensure_complete(trace: &LoadedTrace) -> Result<(), ReplayError> {
     }
 }
 
-pub(crate) fn profile_from_metadata(metadata: &ProviderMetadata) -> Result<Profile, ReplayError> {
+pub(crate) fn adapter_from_metadata(
+    metadata: &ProviderMetadata,
+) -> Result<ProtocolAdapter, ReplayError> {
     if metadata.adapter != OPENAI_COMPATIBLE_ADAPTER
         || metadata.adapter_version != OPENAI_COMPATIBLE_ADAPTER_VERSION
     {
@@ -164,23 +166,24 @@ pub(crate) fn profile_from_metadata(metadata: &ProviderMetadata) -> Result<Profi
             "protocol does not match adapter",
         ));
     }
-    match metadata.profile.as_str() {
+    match metadata.protocol_adapter.as_str() {
         "generic" => {
             let provider = ProviderId::new(metadata.provider_id.clone())
                 .map_err(|_| ReplayError::InvalidMetadata("provider id is invalid"))?;
-            Ok(Profile::openai_compatible(provider))
+            Ok(ProtocolAdapter::openai_compatible(provider))
         }
-        "deepseek" if metadata.provider_id == "deepseek" => Ok(Profile::deepseek()),
+        "deepseek" if metadata.provider_id == "deepseek" => Ok(ProtocolAdapter::deepseek()),
         "deepseek" => Err(ReplayError::InvalidMetadata(
-            "DeepSeek profile requires the DeepSeek provider id",
+            "DeepSeek protocol_adapter requires the DeepSeek provider id",
         )),
-        other => Err(ReplayError::UnsupportedProfile(other.to_owned())),
+        other => Err(ReplayError::UnsupportedProtocolAdapter(other.to_owned())),
     }
 }
 
-pub(crate) fn capabilities_from_profile(profile: &Profile) -> ModelCapabilities {
+pub(crate) fn capabilities_from_adapter(protocol_adapter: &ProtocolAdapter) -> ModelCapabilities {
     ModelCapabilities {
-        reasoning: profile.reasoning_content_field.is_some(),
+        reasoning: protocol_adapter.supports_reasoning(),
+        image_input: false,
         tool_calls: true,
         streaming: true,
     }
@@ -231,7 +234,7 @@ pub(crate) mod test_support {
         ProviderMetadata {
             adapter: OPENAI_COMPATIBLE_ADAPTER.into(),
             adapter_version: OPENAI_COMPATIBLE_ADAPTER_VERSION,
-            profile: "generic".into(),
+            protocol_adapter: "generic".into(),
             provider_id: "fixture".into(),
             protocol: OPENAI_CHAT_COMPLETIONS_PROTOCOL.into(),
             endpoint: "https://example.invalid/v1".into(),

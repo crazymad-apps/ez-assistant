@@ -378,6 +378,7 @@ mod tests {
                 call_id: ToolCallId::new(format!("call_{id}")).expect("valid call id"),
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text(format!("result {id}")),
+                metadata: None,
             },
         }
     }

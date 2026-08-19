@@ -18,7 +18,10 @@ pub(super) enum AppendPurpose {
     /// 只追加规范消息，不改变 Input/Run 状态。
     Messages,
     /// 首次 User Message 已写入，提交 Input 并启动 Run。
-    UserMessage,
+    UserMessage {
+        #[serde(default)]
+        reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
+    },
     /// 完整工具批次已写入；清除对应的临时 pending 事实。
     ToolExchange { receipt_id: String },
     /// 最终消息已写入，结算 Run 终态。
@@ -77,9 +80,16 @@ pub(super) fn apply_purpose(
 ) -> StorageResult<()> {
     match (purpose, target) {
         (AppendPurpose::Messages, _) => Ok(()),
-        (AppendPurpose::UserMessage, ConversationStorageTarget::Session { session_id, run_id }) => {
-            apply_user_message_start(transaction, run_id, session_id, created_at_ms)
-        }
+        (
+            AppendPurpose::UserMessage { reasoning_effort },
+            ConversationStorageTarget::Session { session_id, run_id },
+        ) => apply_user_message_start(
+            transaction,
+            run_id,
+            session_id,
+            *reasoning_effort,
+            created_at_ms,
+        ),
         (
             AppendPurpose::ToolExchange { receipt_id },
             ConversationStorageTarget::Session { session_id, run_id },
@@ -228,6 +238,7 @@ fn apply_user_message_start(
     transaction: &Transaction<'_>,
     run_id: &RunId,
     session_id: &SessionId,
+    reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     created_at_ms: i64,
 ) -> StorageResult<()> {
     let input_updated = transaction
@@ -242,9 +253,14 @@ fn apply_user_message_start(
     let run_updated = transaction
         .execute(
             "UPDATE runs
-             SET status = 'running', started_at_ms = ?1
-             WHERE run_id = ?2 AND session_id = ?3 AND status = 'accepted'",
-            params![created_at_ms, run_id.as_str(), session_id.as_str()],
+             SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2
+             WHERE run_id = ?3 AND session_id = ?4 AND status = 'accepted'",
+            params![
+                created_at_ms,
+                reasoning_effort.map(super::mode::reasoning_effort_value),
+                run_id.as_str(),
+                session_id.as_str()
+            ],
         )
         .map_err(|source| internal_error("run could not be started", source))?;
     if input_updated != 1 || run_updated != 1 {

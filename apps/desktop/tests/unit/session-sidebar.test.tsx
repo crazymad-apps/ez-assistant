@@ -1,39 +1,19 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApplicationSnapshot,
-  ConversationHistoryHit,
   SessionSummary,
 } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
-import {
-  groupConversationHistoryHits,
-  SessionSidebar,
-} from "../../src/features/sessions/SessionSidebar";
+import { SessionSidebar } from "../../src/features/sessions/SessionSidebar";
 
 afterEach(cleanup);
 
 describe("SessionSidebar grouping", () => {
-  it("groups history hits by main and child conversations", () => {
-    const groups = groupConversationHistoryHits([
-      conversationHit("message-1"),
-      conversationHit("message-2"),
-      conversationHit("message-3", "child-1", "子任务"),
-    ]);
-
-    expect(groups).toHaveLength(2);
-    expect(groups[0]).toMatchObject({ title: "来源会话", parent_title: null });
-    expect(groups[0]?.hits).toHaveLength(2);
-    expect(groups[1]).toMatchObject({ title: "子任务", parent_title: "来源会话" });
-  });
-
-  it("shows partial search results and a retry action for failed searches", () => {
+  it("filters the current session list by title without a search scope", () => {
     const store = connectedStore();
-    store.navigation.selectSession("bound-session");
-    store.navigation.setSearchQuery("恢复");
-    store.conversation_search.setQuery("恢复");
-    store.conversation_search.applySearch([conversationHit("message-1")], null, true, true);
+    const history_search = vi.spyOn(store, "searchConversationHistory");
 
     render(
       <RootStoreProvider store={store}>
@@ -41,13 +21,17 @@ describe("SessionSidebar grouping", () => {
       </RootStoreProvider>,
     );
     fireEvent.click(screen.getByRole("button", { name: "搜索会话" }));
+    const search_input = screen.getByRole("searchbox", { name: "搜索会话名称" });
 
-    expect(screen.getByText("来源会话")).toBeInTheDocument();
-    expect(screen.getByText("部分历史暂不可用，已显示其余检索结果。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "选择历史检索范围" })).not.toBeInTheDocument();
+    fireEvent.change(search_input, { target: { value: "工作区" } });
+    expect(screen.getByRole("button", { name: /^工作区会话/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^未绑定会话/ })).not.toBeInTheDocument();
+    expect(screen.getByText("1 个结果")).toBeInTheDocument();
+    expect(history_search).not.toHaveBeenCalled();
 
-    act(() => store.conversation_search.failSearch("索引暂不可用"));
-    expect(screen.getByRole("alert")).toHaveTextContent("索引暂不可用");
-    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+    fireEvent.change(search_input, { target: { value: "消息正文里的词" } });
+    expect(screen.getByText("没有匹配的会话名称")).toBeInTheDocument();
   });
 
   it("lets the global new-session entry choose a workspace or an independent session", () => {
@@ -205,6 +189,7 @@ function applicationSnapshot(): ApplicationSnapshot {
       state: "ready",
       schema_version: 1,
       default_model: "fixture",
+      auxiliary_vision_model: null,
       issues: [],
     },
     models: [],
@@ -258,24 +243,5 @@ function sessionSummary(
     pending_approval_count: 0,
     active_child_count: 0,
     active_run_status: null,
-  };
-}
-
-function conversationHit(
-  message_id: string,
-  child_task_id?: string,
-  child_task_title?: string,
-): ConversationHistoryHit {
-  return {
-    owner: child_task_id
-      ? { type: "child_task", session_id: "source-session", child_task_id }
-      : { type: "main_session", session_id: "source-session" },
-    session_title: "来源会话",
-    child_task_title: child_task_title ?? null,
-    message_id,
-    created_at_ms: 1,
-    snippet: `命中 ${message_id}`,
-    match_kind: "message",
-    lifecycle: "active",
   };
 }

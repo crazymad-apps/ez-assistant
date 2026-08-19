@@ -31,6 +31,7 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
             staging_path: "/volatile/upload.part".to_owned(),
             blob_hash: "a".repeat(64),
             size_bytes: 42,
+            media_type: None,
         })
         .await
         .expect("finalize upload")
@@ -45,6 +46,7 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
             staging_path: "/volatile/duplicate.part".to_owned(),
             blob_hash: "a".repeat(64),
             size_bytes: 42,
+            media_type: None,
         })
         .await
         .expect("same content upload")
@@ -112,6 +114,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             staging_path: "/volatile/first.part".to_owned(),
             blob_hash: "b".repeat(64),
             size_bytes: 10,
+            media_type: None,
         })
         .await
         .expect("first attachment")
@@ -123,6 +126,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             staging_path: "/volatile/second.part".to_owned(),
             blob_hash: "c".repeat(64),
             size_bytes: 20,
+            media_type: None,
         })
         .await
         .expect("second attachment")
@@ -134,6 +138,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             staging_path: "/volatile/foreign.part".to_owned(),
             blob_hash: "d".repeat(64),
             size_bytes: 30,
+            media_type: None,
         })
         .await
         .expect("foreign attachment")

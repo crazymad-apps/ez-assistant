@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
     title               TEXT NOT NULL,
     model_key           TEXT NOT NULL,
+    reasoning_effort    TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max')),
     system_prompt_json  TEXT NOT NULL,
     current_variant     TEXT NOT NULL DEFAULT 'build'
                             CHECK (current_variant IN ('plan', 'build')),
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS attachment_blobs (
     blob_hash          TEXT PRIMARY KEY,
     size_bytes         INTEGER NOT NULL CHECK (size_bytes >= 0),
     relative_path      TEXT NOT NULL UNIQUE,
+    media_type         TEXT,
     created_at_ms      INTEGER NOT NULL
 );
 
@@ -133,6 +135,7 @@ CREATE TABLE IF NOT EXISTS runs (
     cancel_requested    INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
     approval_mode       TEXT NOT NULL DEFAULT 'ask'
                             CHECK (approval_mode IN ('ask', 'auto')),
+    reasoning_effort    TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max')),
     error_code          TEXT,
     error_message       TEXT,
     created_at_ms       INTEGER NOT NULL,
@@ -146,6 +149,47 @@ CREATE TABLE IF NOT EXISTS run_message_refs (
     message_id          TEXT NOT NULL,
     PRIMARY KEY (run_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS session_usage (
+    session_id                    TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    request_count                 INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+    input_tokens_sum              INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens_sum >= 0),
+    output_tokens_sum             INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens_sum >= 0),
+    total_tokens_sum              INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens_sum >= 0),
+    cached_input_tokens_sum       INTEGER NOT NULL DEFAULT 0 CHECK (cached_input_tokens_sum >= 0),
+    cached_request_count          INTEGER NOT NULL DEFAULT 0 CHECK (cached_request_count >= 0),
+    reasoning_tokens_sum          INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens_sum >= 0),
+    reasoning_request_count       INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_request_count >= 0),
+    latest_input_tokens           INTEGER,
+    latest_output_tokens          INTEGER,
+    latest_total_tokens           INTEGER,
+    latest_cached_input_tokens    INTEGER,
+    latest_reasoning_tokens       INTEGER,
+    backfilled                    INTEGER NOT NULL DEFAULT 0 CHECK (backfilled IN (0, 1)),
+    updated_at_ms                 INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS model_request_records (
+    session_id            TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    owner_kind            TEXT NOT NULL CHECK (owner_kind IN ('session', 'child_task')),
+    owner_id              TEXT NOT NULL,
+    request_id            TEXT NOT NULL,
+    run_id                TEXT,
+    request_kind          TEXT NOT NULL CHECK (
+                              request_kind IN ('agent_turn', 'context_summary', 'legacy_compacted')),
+    provider              TEXT,
+    model_id              TEXT,
+    input_tokens          INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens         INTEGER NOT NULL CHECK (output_tokens >= 0),
+    total_tokens          INTEGER NOT NULL CHECK (total_tokens >= 0),
+    cached_input_tokens   INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+    reasoning_tokens      INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+    completed_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (session_id, owner_kind, owner_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS model_request_records_session_time
+    ON model_request_records(session_id, completed_at_ms, request_id);
 
 CREATE TABLE IF NOT EXISTS child_tasks (
     child_task_id       TEXT PRIMARY KEY,
@@ -291,18 +335,20 @@ END;
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
-    "SELECT session_id, title, model_key, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
     "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
     "SELECT id, category, content, attributes_json, created_by_kind, created_by_session_id, revision, created_at_ms, updated_at_ms FROM pinned_memories LIMIT 0",
     "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
     "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
-    "SELECT blob_hash, size_bytes, relative_path, created_at_ms FROM attachment_blobs LIMIT 0",
+    "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
     "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant FROM inputs LIMIT 0",
-    "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
+    "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id FROM run_message_refs LIMIT 0",
+    "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
+    "SELECT session_id, owner_kind, owner_id, request_id, run_id, request_kind, provider, model_id, input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, completed_at_ms FROM model_request_records LIMIT 0",
     "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, final_message_id, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM child_tasks LIMIT 0",
     "SELECT receipt_id, child_task_id, session_id, assistant_json, results_json, state, created_at_ms FROM child_pending_tool_exchanges LIMIT 0",
     "SELECT receipt_id, call_id, started_at_ms FROM child_pending_tool_starts LIMIT 0",
@@ -323,6 +369,33 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     transaction.execute_batch(SCHEMA).map_err(|source| {
         internal_error("runtime database schema could not be initialized", source)
     })?;
+    ensure_column(
+        &transaction,
+        "attachment_blobs",
+        "media_type",
+        "ALTER TABLE attachment_blobs ADD COLUMN media_type TEXT",
+    )?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO session_usage (session_id, backfilled, updated_at_ms)
+             SELECT session_id, 0, updated_at_ms FROM sessions",
+            [],
+        )
+        .map_err(|source| {
+            internal_error("session usage migration could not be initialized", source)
+        })?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "reasoning_effort",
+        "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max'));",
+    )?;
+    ensure_column(
+        &transaction,
+        "runs",
+        "reasoning_effort",
+        "ALTER TABLE runs ADD COLUMN reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max'));",
+    )?;
     ensure_column(
         &transaction,
         "sessions",

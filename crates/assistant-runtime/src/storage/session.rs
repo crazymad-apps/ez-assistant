@@ -1,8 +1,8 @@
 use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, AttachmentId, MessageFeedback, ModelKey, SessionId,
-    SessionTitleOrigin,
+    AgentVariant, ApprovalMode, AttachmentId, MessageFeedback, ModelKey, ReasoningEffortKey,
+    SessionId, SessionTitleOrigin,
 };
 
 use crate::SessionExecutionEnvironment;
@@ -34,6 +34,7 @@ pub struct NewStoredSession {
     pub title: String,
     pub title_origin: SessionTitleOrigin,
     pub model_key: ModelKey,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
     pub current_variant: AgentVariant,
@@ -80,6 +81,7 @@ pub struct StoredSession {
     pub session_id: SessionId,
     pub title: String,
     pub model_key: ModelKey,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
     pub lifecycle: StoredSessionLifecycle,
@@ -94,6 +96,23 @@ pub struct StoredSession {
     pub is_pinned: bool,
     pub title_origin: SessionTitleOrigin,
     pub conversation_state: StoredConversationState,
+}
+
+/// Session 级模型请求用量滚动汇总。
+///
+/// 该投影只统计主 Session 已可靠提交的模型响应；子任务和识图辅助模型拥有独立调用语义，
+/// 不混入主会话右侧面板。`cached_request_count` 用于区分“缓存命中为 0”与“Provider 未报告”。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StoredSessionUsage {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cached_request_count: u64,
+    pub reasoning_tokens: u64,
+    pub reasoning_request_count: u64,
+    pub latest: Option<agent_types::TokenUsage>,
 }
 
 /// 原子切换 Session 归档状态。
@@ -141,6 +160,14 @@ pub struct MessageFeedbackChange {
 pub struct ModelChange {
     pub session_id: SessionId,
     pub model_key: ModelKey,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
+    pub changed_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReasoningEffortChange {
+    pub session_id: SessionId,
+    pub reasoning_effort: Option<ReasoningEffortKey>,
     pub changed_at_ms: i64,
 }
 

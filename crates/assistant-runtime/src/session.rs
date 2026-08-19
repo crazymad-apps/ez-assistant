@@ -8,8 +8,8 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, RunId, RunSnapshot, SessionId,
-    SessionLifecycle, SessionSummary, SessionTitleOrigin,
+    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, ReasoningEffortKey, RunId,
+    RunSnapshot, SessionId, SessionLifecycle, SessionSummary, SessionTitleOrigin,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
@@ -34,6 +34,7 @@ pub(crate) struct SessionState {
     pub(crate) is_pinned: bool,
     pub(crate) title_origin: SessionTitleOrigin,
     pub(crate) model_key: ModelKey,
+    pub(crate) reasoning_effort: Option<ReasoningEffortKey>,
     pub(crate) current_variant: AgentVariant,
     pub(crate) approval_mode: ApprovalMode,
     pub(crate) lifecycle: SessionLifecycle,
@@ -48,8 +49,6 @@ pub(crate) struct SessionState {
     pub(crate) queue_revision: u64,
     pub(crate) queue_paused_by_user: bool,
     pub(crate) resume_required: bool,
-    /// 重启后只允许显式重试的这一条输入越过暂停门禁；其余恢复队列仍等待 ResumeSession。
-    pub(crate) retry_override_input: Option<InputId>,
     pub(crate) is_queue_driver_running: bool,
     pub(crate) active_run: Option<ActiveRun>,
     pub(crate) is_faulted: bool,
@@ -97,6 +96,7 @@ impl SessionController {
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
                 model_key: stored.model_key,
+                reasoning_effort: stored.reasoning_effort,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
@@ -111,7 +111,6 @@ impl SessionController {
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required: false,
-                retry_override_input: None,
                 is_queue_driver_running: false,
                 active_run: None,
                 is_faulted: false,
@@ -169,6 +168,7 @@ impl SessionController {
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
                 model_key: stored.model_key,
+                reasoning_effort: stored.reasoning_effort,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
@@ -183,7 +183,6 @@ impl SessionController {
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required,
-                retry_override_input: None,
                 is_queue_driver_running: false,
                 active_run: None,
                 is_faulted: false,
@@ -199,6 +198,7 @@ impl SessionController {
             session_id: self.id.clone(),
             title: state.title.clone(),
             model_key: state.model_key.clone(),
+            reasoning_effort: state.reasoning_effort,
             lifecycle: state.lifecycle,
             current_variant: state.current_variant,
             approval_mode: state.approval_mode,
@@ -236,6 +236,10 @@ impl SessionController {
         }
         scopes.push(crate::PermissionFileScope::Session(self.id.clone()));
         scopes
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> RuntimeResult<Option<ReasoningEffortKey>> {
+        Ok(self.lock_state()?.reasoning_effort)
     }
 
     pub(crate) fn find_idempotent(

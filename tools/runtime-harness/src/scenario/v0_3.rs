@@ -979,6 +979,7 @@ fn tool_snapshot() -> Result<ToolSetSnapshot, HarnessError> {
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         reasoning: true,
+        image_input: false,
         tool_calls: true,
         streaming: true,
     }

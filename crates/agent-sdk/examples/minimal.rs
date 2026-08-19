@@ -44,6 +44,7 @@ async fn main() {
     let model = Arc::new(ScriptedModelService::completing(
         agent_model::ModelCapabilities {
             reasoning: false,
+            image_input: false,
             tool_calls: false,
             streaming: true,
         },

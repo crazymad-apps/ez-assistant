@@ -21,18 +21,23 @@ pub(crate) enum ConfigMutation {
     SetDefault {
         model_key: ModelKey,
     },
+    SetAuxiliaryVision {
+        model_key: Option<ModelKey>,
+    },
 }
 
 impl ConfigMutation {
-    pub(crate) fn target_model_key(&self) -> &ModelKey {
+    pub(crate) fn target_model_key(&self) -> Option<&ModelKey> {
         match self {
-            Self::Create { model, .. } | Self::Update { model, .. } => &model.model_key,
-            Self::Delete { model_key, .. } | Self::SetDefault { model_key } => model_key,
+            Self::Create { model, .. } | Self::Update { model, .. } => Some(&model.model_key),
+            Self::SetDefault { model_key } => Some(model_key),
+            Self::SetAuxiliaryVision { model_key } => model_key.as_ref(),
+            Self::Delete { .. } => None,
         }
     }
 
-    pub(crate) fn requires_valid_target(&self) -> bool {
-        !matches!(self, Self::Delete { .. })
+    pub(crate) fn requires_image_input(&self) -> bool {
+        matches!(self, Self::SetAuxiliaryVision { model_key: Some(_) })
     }
 }
 
@@ -118,9 +123,49 @@ pub(crate) fn edit_config_document(
             }
             document["default_model"] = value(model_key.as_str());
         }
+        ConfigMutation::SetAuxiliaryVision { model_key } => match model_key {
+            Some(model_key) => {
+                if !models_table(&mut document)?.contains_key(model_key.as_str()) {
+                    return Err(RuntimeError::ModelNotFound { model_key });
+                }
+                let vision = vision_table(&mut document)?;
+                vision["model_key"] = value(model_key.as_str());
+                if vision.get("timeout_ms").is_none() {
+                    vision["timeout_ms"] = value(60_000_i64);
+                }
+                if vision.get("max_output_tokens").is_none() {
+                    vision["max_output_tokens"] = value(4_096_i64);
+                }
+            }
+            None => {
+                let mut remove_empty_agent = false;
+                if let Some(agent) = document.get_mut("agent").and_then(Item::as_table_mut) {
+                    agent.remove("vision");
+                    remove_empty_agent = agent.is_empty();
+                }
+                if remove_empty_agent {
+                    document.remove("agent");
+                }
+            }
+        },
     }
 
     Ok(document.to_string())
+}
+
+fn vision_table(document: &mut DocumentMut) -> RuntimeResult<&mut Table> {
+    if document.get("agent").is_none() {
+        document["agent"] = Item::Table(Table::new());
+    }
+    let agent = document["agent"]
+        .as_table_mut()
+        .ok_or(RuntimeError::ConfigurationUnavailable)?;
+    if agent.get("vision").is_none() {
+        agent["vision"] = Item::Table(Table::new());
+    }
+    agent["vision"]
+        .as_table_mut()
+        .ok_or(RuntimeError::ConfigurationUnavailable)
 }
 
 fn models_table(document: &mut DocumentMut) -> RuntimeResult<&mut Table> {
@@ -147,7 +192,10 @@ fn apply_model_to_table(
     existing_secret: Option<&str>,
 ) -> RuntimeResult<()> {
     table["display_name"] = value(model.display_name);
-    table["protocol"] = value(model.protocol);
+    table["protocol"] = value(match model.protocol.as_str() {
+        "chat_completions" => "openai_chat_completions".to_owned(),
+        _ => model.protocol,
+    });
     table["provider"] = value(model.provider);
     table["endpoint"] = value(model.endpoint);
     table["model"] = value(model.model);
@@ -206,6 +254,7 @@ mod tests {
         assert!(edited.contains("# keep me"));
         assert!(edited.contains("[models.fixture]"));
         assert!(edited.contains("api_key = \"secret\""));
+        assert!(edited.contains("protocol = \"openai_chat_completions\""));
     }
 
     #[test]
@@ -280,5 +329,79 @@ max_output_tokens = 4096
             edited.find("display_name").expect("display name")
                 < edited.find("protocol").expect("protocol")
         );
+    }
+
+    #[test]
+    fn update_preserves_advanced_capability_override() {
+        let document = r#"schema_version = 1
+default_model = "fixture"
+
+[models.fixture]
+display_name = "Old"
+protocol = "chat_completions"
+provider = "fixture"
+endpoint = "https://api.example.test/v1"
+model = "fixture-model"
+api_key = "secret"
+context_window_tokens = 8192
+max_output_tokens = 4096
+
+[models.fixture.capabilities]
+image_input = true
+"#;
+        let edited = edit_config_document(
+            Some(document),
+            ConfigMutation::Update {
+                model: model(ModelCredentialChange::Unchanged),
+                set_default: false,
+            },
+        )
+        .expect("update");
+        assert!(edited.contains("[models.fixture.capabilities]"));
+        assert!(edited.contains("image_input = true"));
+        assert!(edited.contains("protocol = \"openai_chat_completions\""));
+    }
+
+    #[test]
+    fn sets_and_clears_auxiliary_vision_without_rewriting_agent_defaults() {
+        let document = r#"schema_version = 1
+default_model = "fixture"
+
+[agent.defaults.execution_limits]
+max_steps = 12
+
+[models.fixture]
+display_name = "Fixture"
+protocol = "openai_chat_completions"
+provider = "fixture"
+endpoint = "https://api.example.test/v1"
+model = "fixture-model"
+api_key = "secret"
+context_window_tokens = 8192
+max_output_tokens = 4096
+
+[models.fixture.capabilities]
+image_input = true
+"#;
+        let selected = edit_config_document(
+            Some(document),
+            ConfigMutation::SetAuxiliaryVision {
+                model_key: Some(ModelKey::new("fixture").expect("key")),
+            },
+        )
+        .expect("select vision model");
+        assert!(selected.contains("[agent.defaults.execution_limits]"));
+        assert!(selected.contains("[agent.vision]"));
+        assert!(selected.contains("model_key = \"fixture\""));
+        assert!(selected.contains("timeout_ms = 60000"));
+        assert!(selected.contains("max_output_tokens = 4096"));
+
+        let cleared = edit_config_document(
+            Some(&selected),
+            ConfigMutation::SetAuxiliaryVision { model_key: None },
+        )
+        .expect("clear vision model");
+        assert!(cleared.contains("[agent.defaults.execution_limits]"));
+        assert!(!cleared.contains("[agent.vision]"));
     }
 }

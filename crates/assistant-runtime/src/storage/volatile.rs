@@ -6,7 +6,8 @@ use std::{
 };
 
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId, UserPart,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
+    TokenUsage, UserPart,
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, InputId, MessageFeedback,
@@ -21,14 +22,14 @@ use super::{
     ConversationSearchScope, ConversationWindowRequest, MessageFeedbackChange, ModelChange,
     NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
+    SessionFork, SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
     StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
     StoredConversationWindow, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
-    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredWorkspace,
-    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkspaceRemoval,
+    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionUsage, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkspaceRemoval,
 };
 use crate::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
@@ -65,6 +66,8 @@ struct State {
     message_feedback: BTreeMap<(SessionId, ProtocolMessageId), MessageFeedback>,
     pending_tool_exchanges: BTreeMap<String, VolatilePendingExchange>,
     pending_child_tool_exchanges: BTreeMap<String, VolatileChildPendingExchange>,
+    session_usage: BTreeMap<SessionId, StoredSessionUsage>,
+    usage_request_ids: BTreeSet<(SessionId, String)>,
     next_queue_order: u64,
 }
 
@@ -284,6 +287,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 original_name: upload.original_name,
                 blob_hash: upload.blob_hash,
                 size_bytes: upload.size_bytes,
+                media_type: upload.media_type,
                 agent_readable_path,
                 state: StoredAttachmentState::Ready,
                 created_at_ms: upload.created_at_ms,
@@ -341,6 +345,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 status: RunStatus::Accepted,
                 agent_variant: input.agent_variant,
                 approval_mode: input.approval_mode,
+                reasoning_effort: None,
                 cancel_requested: false,
                 error: None,
                 message_ids: Vec::new(),
@@ -453,6 +458,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 status: RunStatus::Accepted,
                 agent_variant: source.agent_variant,
                 approval_mode: attempt.approval_mode,
+                reasoning_effort: None,
                 cancel_requested: false,
                 error: None,
                 message_ids: Vec::new(),
@@ -476,6 +482,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 title: session.title,
                 title_origin: session.title_origin,
                 model_key: session.model_key,
+                reasoning_effort: session.reasoning_effort,
                 system_prompt: session.system_prompt,
                 environment: session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
@@ -495,6 +502,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .sessions
                 .insert(stored.session_id.clone(), stored.clone());
+            state
+                .session_usage
+                .insert(stored.session_id.clone(), StoredSessionUsage::default());
             Ok(stored)
         })
     }
@@ -543,6 +553,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                     original_name: source.original_name.clone(),
                     blob_hash: source.blob_hash.clone(),
                     size_bytes: source.size_bytes,
+                    media_type: source.media_type.clone(),
                     agent_readable_path: readable_path,
                     state: source.state,
                     created_at_ms: fork.session.created_at_ms,
@@ -557,6 +568,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 title: fork.session.title,
                 title_origin: fork.session.title_origin,
                 model_key: fork.session.model_key,
+                reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
@@ -581,6 +593,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .sessions
                 .insert(stored.session_id.clone(), stored.clone());
+            state
+                .session_usage
+                .insert(stored.session_id.clone(), StoredSessionUsage::default());
             Ok(StoredSessionFork {
                 session: stored,
                 conversation,
@@ -681,6 +696,10 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .collect::<BTreeSet<_>>();
             state.sessions.remove(&deletion.session_id);
             state.conversations.remove(&deletion.session_id);
+            state.session_usage.remove(&deletion.session_id);
+            state
+                .usage_request_ids
+                .retain(|(session_id, _)| session_id != &deletion.session_id);
             state.inputs.retain(|id, _| !input_ids.contains(id));
             state.runs.retain(|id, _| !run_ids.contains(id));
             state.child_tasks.retain(|id, _| !child_ids.contains(id));
@@ -989,6 +1008,13 @@ impl RuntimeStore for VolatileRuntimeStore {
                         "replacement conversation is invalid",
                     )
                 })?;
+            let committed_main = match &replacement.target {
+                ContextReplacementTarget::Run { session_id, .. } => Some((
+                    session_id.clone(),
+                    replacement.conversation.messages.clone(),
+                )),
+                ContextReplacementTarget::ChildTask { .. } => None,
+            };
             let mut state = self.lock()?;
             match replacement.target {
                 ContextReplacementTarget::Run { session_id, run_id } => {
@@ -1061,6 +1087,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                     task.message_count = message_count;
                 }
             }
+            if let Some((session_id, messages)) = committed_main {
+                record_session_usage(&mut state, &session_id, &messages);
+            }
             Ok(())
         })
     }
@@ -1096,6 +1125,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             let run = state.runs.get_mut(&commit.run_id).expect("checked run");
             run.status = RunStatus::Running;
+            run.reasoning_effort = commit.reasoning_effort;
             run.started_at_ms = Some(commit.created_at_ms);
             if let Some(message) = message.as_ref() {
                 run.message_ids.push(message_id(message).clone());
@@ -1206,6 +1236,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .pending_tool_exchanges
                 .remove(completed.receipt.as_str());
+            record_session_usage(&mut state, &completed.session_id, &messages);
             Ok(())
         })
     }
@@ -1245,6 +1276,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get_mut(&settlement.session_id)
                 .expect("run session exists");
             session.updated_at_ms = settlement.finished_at_ms;
+            record_session_usage(&mut state, &settlement.session_id, &settlement.messages);
             Ok(())
         })
     }
@@ -1257,6 +1289,18 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get(&session_id)
                 .cloned()
                 .ok_or_else(|| conflict("session does not exist in runtime storage"))
+        })
+    }
+
+    fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            Ok(self
+                .lock()?
+                .session_usage
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default())
         })
     }
 
@@ -1594,6 +1638,22 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.model_key = change.model_key;
+            session.reasoning_effort = change.reasoning_effort;
+            Ok(())
+        })
+    }
+
+    fn set_session_reasoning_effort(&self, change: ReasoningEffortChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get_mut(&change.session_id)
+                .ok_or_else(|| conflict("session does not exist"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("session is archived"));
+            }
+            session.reasoning_effort = change.reasoning_effort;
             Ok(())
         })
     }
@@ -1700,6 +1760,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 status: RunStatus::Accepted,
                 agent_variant: rewrite.input.agent_variant,
                 approval_mode: rewrite.input.approval_mode,
+                reasoning_effort: None,
                 cancel_requested: false,
                 error: None,
                 message_ids: vec![new_message.id],
@@ -1883,6 +1944,52 @@ fn message_id(message: &ConversationMessage) -> &MessageId {
         ConversationMessage::Assistant(message) => &message.id,
         ConversationMessage::Tool(message) => &message.id,
     }
+}
+
+fn record_session_usage(
+    state: &mut State,
+    session_id: &SessionId,
+    messages: &[ConversationMessage],
+) {
+    let requests = messages.iter().filter_map(|message| match message {
+        ConversationMessage::Assistant(message) => message
+            .usage
+            .as_ref()
+            .map(|usage| (message.id.as_str().to_owned(), usage.clone())),
+        ConversationMessage::ContextSummary(message) => message
+            .usage
+            .as_ref()
+            .map(|usage| (message.id.as_str().to_owned(), usage.clone())),
+        _ => None,
+    });
+    for (request_id, usage) in requests {
+        if !state
+            .usage_request_ids
+            .insert((session_id.clone(), request_id))
+        {
+            continue;
+        }
+        accumulate_usage(
+            state.session_usage.entry(session_id.clone()).or_default(),
+            usage,
+        );
+    }
+}
+
+fn accumulate_usage(total: &mut StoredSessionUsage, usage: TokenUsage) {
+    total.request_count = total.request_count.saturating_add(1);
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+    if let Some(cached) = usage.cached_input_tokens {
+        total.cached_input_tokens = total.cached_input_tokens.saturating_add(cached);
+        total.cached_request_count = total.cached_request_count.saturating_add(1);
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        total.reasoning_tokens = total.reasoning_tokens.saturating_add(reasoning);
+        total.reasoning_request_count = total.reasoning_request_count.saturating_add(1);
+    }
+    total.latest = Some(usage);
 }
 
 fn ensure_idle(state: &State, session_id: &SessionId) -> Result<(), StoreError> {

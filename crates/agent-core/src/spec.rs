@@ -206,6 +206,7 @@ mod tests {
             model: Arc::new(NoopModel {
                 capabilities: ModelCapabilities {
                     reasoning: false,
+                    image_input: false,
                     tool_calls: true,
                     streaming: true,
                 },

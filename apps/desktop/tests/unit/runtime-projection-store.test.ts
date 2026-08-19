@@ -15,6 +15,7 @@ const application: ApplicationSnapshot = {
     state: "ready",
     schema_version: 1,
     default_model: "local",
+    auxiliary_vision_model: null,
     issues: [],
   },
   models: [],

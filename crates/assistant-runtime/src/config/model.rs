@@ -1,7 +1,7 @@
-//! 单模型配置的语义编译、Profile 组合和安全投影。
+//! 单模型配置的语义编译、ProtocolAdapter 组合和安全投影。
 //!
 //! 本模块是顶层 fail-closed 之后的隔离边界：每个 `models.<key>` 独立产生有效模型或诊断，
-//! 不会因为一个模型的未知字段、credential 或 Profile 冲突而丢弃其他模型。
+//! 不会因为一个模型的未知字段、credential 或 ProtocolAdapter 冲突而丢弃其他模型。
 
 use agent_model::GenerationConfig;
 use agent_types::ProviderId;
@@ -9,10 +9,11 @@ use assistant_protocol::ModelKey;
 use url::Url;
 
 use super::{
+    catalog::{ModelCatalog, compile_capabilities},
     compile::{classify_deserialization_error, global_issue},
     domain::{
-        ConfigIssue, ConfigIssueCode, ModelConfigProjection, ModelProfile, ModelProtocol,
-        ModelSecret, ResolvedModelConfig,
+        ConfigIssue, ConfigIssueCode, ModelConfigProjection, ModelProtocol, ModelSecret,
+        ResolvedModelConfig,
     },
     schema::RawModelConfig,
 };
@@ -29,13 +30,14 @@ pub(super) struct ModelCompileOutput {
 
 /// 独立编译一个 `models.<key>` 条目，并尽量一次收集全部可操作诊断。
 ///
-/// 函数不会联网，也不构造具体 Provider Adapter。Profile 只用于判断当前 schema 中已经确认的
+/// 函数不会联网，也不构造具体 Provider Adapter。ProtocolAdapter 只用于判断当前 schema 中已经确认的
 /// 参数组合；Adapter 会在真正构造 ModelService 时再次验证自己的协议约束。
 pub(super) fn compile_model(
     raw_key: String,
     value: toml::Value,
     raw_default_model: &str,
     agent_generation: &GenerationConfig,
+    catalog: &ModelCatalog,
 ) -> ModelCompileOutput {
     // 先建立安全投影，即便后续 typed serde 失败，也能返回不含 secret 的有限诊断信息。
     // 非法原始 key 不回显，避免任意 TOML table name 进入日志或协议。
@@ -65,9 +67,13 @@ pub(super) fn compile_model(
         }
     };
 
-    // protocol 决定 wire 契约；provider 保存实际供应商身份，并在 Runtime 内推导兼容 Profile。
+    // protocol 决定 wire 契约；provider 保存实际供应商身份，并在 Runtime 内推导兼容 ProtocolAdapter。
     let protocol = match raw.protocol.as_deref() {
-        Some("chat_completions") => Some(ModelProtocol::ChatCompletions),
+        Some(value) if ModelProtocol::parse_config(value).is_some() => {
+            let protocol = ModelProtocol::parse_config(value);
+            projection.protocol = protocol.map(|protocol| protocol.as_str().to_owned());
+            protocol
+        }
         Some(_) => {
             projection.issues.push(model_issue(
                 &key,
@@ -108,7 +114,6 @@ pub(super) fn compile_model(
             None
         }
     };
-    let profile = provider.as_ref().map(ModelProfile::for_provider);
 
     // endpoint 只有通过安全 URL 规则后才允许写回 projection；含 userinfo/query/fragment 的
     // 原始值可能携带 token，不能为了诊断方便而回显。
@@ -238,9 +243,35 @@ pub(super) fn compile_model(
         None => key.as_ref().map(ToString::to_string),
     };
 
-    // DeepSeek 在本 schema 中固定对应 thinking-enabled Profile。对不支持的全局采样参数必须
-    // 明确报组合错误，不能静默丢弃后继续发送不同于用户预期的请求。
-    if profile == Some(ModelProfile::DeepSeek)
+    let catalog_capabilities = provider
+        .as_ref()
+        .zip(protocol)
+        .zip(model.as_deref())
+        .map(|((provider, protocol), model)| catalog.resolve(provider, protocol, model));
+    let capabilities = catalog_capabilities.as_ref().and_then(|base| {
+        match compile_capabilities(&raw.capabilities, base) {
+            Ok(capabilities) => Some(capabilities),
+            Err(_) => {
+                projection.issues.push(model_issue(
+                    &key,
+                    ConfigIssueCode::InvalidModel,
+                    "model capability override is invalid",
+                ));
+                None
+            }
+        }
+    });
+    projection.supports_image_input = capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.image_input);
+
+    // DeepSeek thinking 只有在精确目录或用户 override 声明 reasoning 时启用。
+    if provider
+        .as_ref()
+        .is_some_and(|provider| provider.as_str() == "deepseek")
+        && capabilities
+            .as_ref()
+            .is_some_and(|value| value.reasoning_enabled())
         && (agent_generation.temperature.is_some() || agent_generation.top_p.is_some())
     {
         projection.issues.push(model_issue(
@@ -279,6 +310,7 @@ pub(super) fn compile_model(
         context_window_tokens,
         max_output_tokens,
         effective_max_output_tokens,
+        capabilities,
     );
     let resolved = match resolved_parts {
         (
@@ -292,6 +324,7 @@ pub(super) fn compile_model(
             Some(context_window_tokens),
             Some(max_output_tokens),
             Some(effective_max_output_tokens),
+            Some(capabilities),
         ) => {
             let mut generation = agent_generation.clone();
             generation.max_output_tokens = Some(effective_max_output_tokens);
@@ -306,6 +339,7 @@ pub(super) fn compile_model(
                 context_window_tokens,
                 max_output_tokens,
                 generation,
+                capabilities,
             })
         }
         _ => None,
@@ -362,6 +396,7 @@ fn projection_from_value(
         max_output_tokens,
         agent_max_output_tokens: agent_generation.max_output_tokens,
         effective_max_output_tokens: None,
+        supports_image_input: false,
         api_key_configured: string_value("api_key").is_some_and(|value| valid_api_key(&value)),
         is_valid: false,
         issues: Vec::new(),
@@ -389,7 +424,7 @@ fn valid_api_key(api_key: &str) -> bool {
     !api_key.is_empty() && api_key.trim() == api_key
 }
 
-/// Provider 是供应商身份，不是协议或 Profile 枚举；这里仅约束为可稳定比较和展示的 key。
+/// Provider 是供应商身份，不是协议或 ProtocolAdapter 枚举；这里仅约束为可稳定比较和展示的 key。
 fn validate_provider_id(provider: &str) -> bool {
     let bytes = provider.as_bytes();
     let Some(first) = bytes.first() else {

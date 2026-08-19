@@ -15,8 +15,8 @@ use agent_types::{
     MessageId, PartId, TextPart, UserMessage, UserPart,
 };
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, InputId, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo,
-    RuntimeEvent, SessionId, ToolActivitySnapshot,
+    AgentVariant, ApprovalMode, InputId, ReasoningEffortKey, RunId, RunSnapshot, RunStatus,
+    RuntimeErrorInfo, RuntimeEvent, SessionId, ToolActivitySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +34,7 @@ pub(crate) struct RunRecord {
     status: RunStatus,
     variant: AgentVariant,
     approval_mode: ApprovalMode,
+    reasoning_effort: Option<ReasoningEffortKey>,
     cancel_requested: bool,
     reasoning: String,
     text: String,
@@ -54,6 +55,7 @@ impl RunRecord {
             status: RunStatus::Accepted,
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
+            reasoning_effort: run.reasoning_effort,
             cancel_requested: false,
             reasoning: String::new(),
             text: String::new(),
@@ -74,6 +76,7 @@ impl RunRecord {
             status: run.status,
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
+            reasoning_effort: run.reasoning_effort,
             cancel_requested: run.cancel_requested,
             reasoning: String::new(),
             text: String::new(),
@@ -124,6 +127,7 @@ impl RunRecord {
             status: self.status,
             variant: self.variant,
             approval_mode: self.approval_mode,
+            reasoning_effort: self.reasoning_effort,
             cancel_requested: self.cancel_requested,
             reasoning: self.reasoning.clone(),
             text: self.text.clone(),
@@ -139,6 +143,11 @@ impl RunRecord {
         } else {
             false
         }
+    }
+
+    pub(crate) fn freeze_reasoning_effort(&mut self, effort: Option<ReasoningEffortKey>) {
+        debug_assert_eq!(self.status, RunStatus::Accepted);
+        self.reasoning_effort = effort;
     }
 
     pub(crate) fn mark_cancelling(&mut self) -> bool {

@@ -1,35 +1,89 @@
 //! 已编译 Runtime 模型配置到 OpenAI-compatible Adapter 的 Host 装配。
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use agent_model::ModelService;
-use agent_provider_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, Profile, TransportTimeouts,
+use agent_model::{ModelCapabilities, ModelServiceBundle, ReasoningEffort};
+use agent_openai_compatible::{
+    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, ReasoningReplayPolicy,
+    TransportTimeouts,
 };
 use assistant_runtime::{
-    ModelCompatibilityProfile, ModelServiceFactory, ModelServiceFactoryError,
-    ModelServiceFactoryRequest,
+    ModelProtocol, ModelServiceFactory, ModelServiceFactoryError, ModelServiceFactoryRequest,
+    ReasoningEffortKey, ReasoningEffortWireValue,
 };
 
-pub(super) struct HostModelServiceFactory;
+use crate::image::HostModelImagePreprocessor;
+
+pub(super) struct HostModelServiceFactory {
+    image_preprocessor: Arc<HostModelImagePreprocessor>,
+}
+
+impl HostModelServiceFactory {
+    pub(super) fn new(runtime_home: &Path) -> Self {
+        Self {
+            image_preprocessor: Arc::new(HostModelImagePreprocessor::new(runtime_home)),
+        }
+    }
+}
 
 impl ModelServiceFactory for HostModelServiceFactory {
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
-    ) -> Result<Arc<dyn ModelService>, ModelServiceFactoryError> {
-        let profile = match request.profile {
-            ModelCompatibilityProfile::DeepSeek => Profile::deepseek(),
-            ModelCompatibilityProfile::Standard => {
-                Profile::openai_compatible(request.provider.clone())
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        let mut adapter = match request.protocol {
+            ModelProtocol::OpenAiChatCompletions
+                if request.provider.as_str() == "deepseek"
+                    && request.capabilities.reasoning_enabled() =>
+            {
+                ProtocolAdapter::deepseek()
+            }
+            ModelProtocol::OpenAiChatCompletions => {
+                ProtocolAdapter::openai_compatible(request.provider.clone())
             }
         };
-        let service = OpenAiCompatibleService::new(
+        if let Some(reasoning) = request.capabilities.reasoning.as_ref() {
+            let values = reasoning
+                .efforts
+                .iter()
+                .map(|effort| {
+                    let key = match effort.key {
+                        ReasoningEffortKey::Low => ReasoningEffort::Low,
+                        ReasoningEffortKey::Medium => ReasoningEffort::Medium,
+                        ReasoningEffortKey::High => ReasoningEffort::High,
+                        ReasoningEffortKey::XHigh => ReasoningEffort::XHigh,
+                        ReasoningEffortKey::Max => ReasoningEffort::Max,
+                    };
+                    let value = match &effort.wire_value {
+                        ReasoningEffortWireValue::String(value) => {
+                            serde_json::Value::String(value.clone())
+                        }
+                        ReasoningEffortWireValue::PositiveInteger(value) => {
+                            serde_json::Value::from(*value)
+                        }
+                    };
+                    (key, value)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let effort_field = (!values.is_empty())
+                .then_some(reasoning_effort_field(request.provider, request.model));
+            adapter = adapter.with_reasoning(Some("reasoning_content"), effort_field, values);
+            if let Some(policy) = reasoning_replay_policy(request.provider, request.model) {
+                adapter = adapter.with_reasoning_replay(policy);
+            }
+        }
+        let service = OpenAiCompatibleService::new_with_capabilities(
             request.endpoint,
             BearerCredential::new(request.api_key.to_owned()),
             request.model,
             request.context_window_tokens,
-            profile,
+            adapter,
+            ModelCapabilities {
+                reasoning: request.capabilities.reasoning_enabled(),
+                image_input: request.capabilities.image_input,
+                tool_calls: request.capabilities.tool_calls,
+                streaming: request.capabilities.streaming,
+            },
             TransportTimeouts {
                 connect: request.connect_timeout,
                 request: request.request_timeout,
@@ -38,6 +92,162 @@ impl ModelServiceFactory for HostModelServiceFactory {
         .map_err(|source| {
             ModelServiceFactoryError::with_source("model service could not be created", source)
         })?;
-        Ok(Arc::new(service))
+        let service = Arc::new(service);
+        if request.capabilities.image_input {
+            Ok(ModelServiceBundle::with_image_preprocessor(
+                service,
+                self.image_preprocessor.clone(),
+            ))
+        } else {
+            Ok(ModelServiceBundle::text_only(service))
+        }
+    }
+}
+
+/// effort 字段属于具体服务方言与模型批次，不能只按 OpenAI-compatible 协议猜测。
+fn reasoning_effort_field(provider: &agent_types::ProviderId, model_id: &str) -> &'static str {
+    match (provider.as_str(), model_id) {
+        ("dashscope", "qwen3.8-max") => "reasoning_effort",
+        ("dashscope", _) => "thinking_budget",
+        _ => "reasoning_effort",
+    }
+}
+
+/// reasoning 历史回放属于具体模型批次的协议方言，不能由公共字段名推断。
+fn reasoning_replay_policy(
+    provider: &agent_types::ProviderId,
+    model_id: &str,
+) -> Option<ReasoningReplayPolicy> {
+    match (provider.as_str(), model_id) {
+        // Qwen 3.8 的 preserve_thinking 模式要求后续请求完整携带历史 reasoning_content。
+        ("dashscope", "qwen3.8-max") => Some(ReasoningReplayPolicy::PreserveAll),
+        // 公共 Kimi API 与 Kimi Code 使用不同 ID，但 K3 都要求保留历史 reasoning_content。
+        ("moonshot", "kimi-k3" | "k3") => Some(ReasoningReplayPolicy::PreserveAll),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_types::ProviderId;
+    use assistant_runtime::{ModelCatalog, ModelProtocol, ReasoningEffortKey};
+
+    fn resolved(
+        catalog: &ModelCatalog,
+        provider: &str,
+        model_id: &str,
+    ) -> assistant_runtime::ResolvedModelCapabilities {
+        catalog.resolve(
+            &ProviderId::new(provider).expect("provider id"),
+            ModelProtocol::OpenAiChatCompletions,
+            model_id,
+        )
+    }
+
+    #[test]
+    fn bundled_model_catalog_is_strictly_valid() {
+        ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
+            .expect("bundled model catalog");
+    }
+
+    #[test]
+    fn bundled_model_catalog_contains_only_the_latest_verified_batches() {
+        let catalog = ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
+            .expect("bundled model catalog");
+
+        assert_eq!(catalog.revision(), "2026-08-19");
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "dashscope"
+                && route.provider_label == "阿里云百炼（Qwen）"
+                && route.protocol_label == "Chat Completions（OpenAI Compatible）"
+                && route.model_ids == ["qwen3.8-max"]
+        }));
+
+        let openai = resolved(&catalog, "openai", "gpt-5.6");
+        assert!(openai.image_input);
+        assert_eq!(
+            openai
+                .reasoning
+                .expect("gpt-5.6 reasoning")
+                .efforts
+                .into_iter()
+                .map(|effort| effort.key)
+                .collect::<Vec<_>>(),
+            [
+                ReasoningEffortKey::Low,
+                ReasoningEffortKey::Medium,
+                ReasoningEffortKey::High,
+                ReasoningEffortKey::XHigh,
+                ReasoningEffortKey::Max,
+            ]
+        );
+
+        let qwen = resolved(&catalog, "dashscope", "qwen3.8-max");
+        assert!(qwen.image_input);
+        assert_eq!(
+            qwen.reasoning
+                .expect("qwen3.8-max reasoning")
+                .default_effort,
+            Some(ReasoningEffortKey::XHigh)
+        );
+
+        let kimi = resolved(&catalog, "moonshot", "kimi-k3");
+        assert!(kimi.image_input);
+        assert_eq!(
+            kimi.reasoning.expect("kimi-k3 reasoning").default_effort,
+            Some(ReasoningEffortKey::Max)
+        );
+
+        let kimi_code = resolved(&catalog, "moonshot", "k3");
+        assert!(kimi_code.image_input);
+        assert_eq!(
+            kimi_code.reasoning.expect("k3 reasoning").default_effort,
+            Some(ReasoningEffortKey::High)
+        );
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "moonshot"
+                && route.provider_label == "Moonshot（Kimi）"
+                && route.model_ids == ["k3"]
+        }));
+
+        assert!(resolved(&catalog, "zhipu", "glm-5v-turbo").image_input);
+        assert!(
+            resolved(&catalog, "deepseek", "deepseek-v4-pro")
+                .reasoning
+                .is_some()
+        );
+
+        // 旧批次不再由随包表猜测能力，未命中时回到协议保守基线。
+        let legacy = resolved(&catalog, "deepseek", "deepseek-chat");
+        assert!(!legacy.image_input);
+        assert!(legacy.reasoning.is_none());
+    }
+
+    #[test]
+    fn qwen38_uses_its_documented_string_effort_field() {
+        let dashscope = ProviderId::new("dashscope").expect("provider id");
+        let moonshot = ProviderId::new("moonshot").expect("provider id");
+        assert_eq!(
+            super::reasoning_effort_field(&dashscope, "qwen3.8-max"),
+            "reasoning_effort"
+        );
+        assert_eq!(
+            super::reasoning_effort_field(&dashscope, "future-budget-model"),
+            "thinking_budget"
+        );
+        assert_eq!(
+            super::reasoning_replay_policy(&dashscope, "qwen3.8-max"),
+            Some(agent_openai_compatible::ReasoningReplayPolicy::PreserveAll)
+        );
+        assert_eq!(
+            super::reasoning_replay_policy(&dashscope, "future-budget-model"),
+            None
+        );
+        for model_id in ["kimi-k3", "k3"] {
+            assert_eq!(
+                super::reasoning_replay_policy(&moonshot, model_id),
+                Some(agent_openai_compatible::ReasoningReplayPolicy::PreserveAll)
+            );
+        }
     }
 }

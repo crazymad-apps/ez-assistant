@@ -4,17 +4,23 @@ use std::{sync::Arc, time::Duration};
 
 use agent_core::{ExecutionBudget, ToolAuthorizer};
 use agent_model::{
-    ModelAttemptEvent, ModelAttemptObserver, ModelService, ModelStreamFuture, ProviderOptions,
-    ReasoningConfig, RetryingModelService, SystemPromptSnapshot,
+    ModelAttemptEvent, ModelAttemptObserver, ModelError, ModelImagePreparation,
+    ModelImagePreprocessor, ModelService, ModelStreamFuture, ProviderOptions, ReasoningConfig,
+    RetryingModelService, SystemPromptSnapshot,
 };
 use agent_sdk::{Agent, AgentBuilder};
+use agent_tools::{
+    ImageInspection, ImageInspectionFuture, ImageInspector, ImageInspectorError,
+    InspectImagesRequest,
+};
 use agent_types::ToolChoice;
 use assistant_protocol::{AgentVariant, ApprovalMode, ModelKey};
 
 use super::AssistantRuntime;
 use crate::{
-    ChildTaskWorkspaceFactory, ModelCompatibilityProfile, ModelServiceFactoryRequest,
-    RunToolFactory, RunToolFactoryErrorKind, RuntimeError, RuntimeResult, RuntimeStore,
+    ChildTaskWorkspaceFactory, ModelProtocol, ModelServiceFactoryRequest,
+    ResolvedModelCapabilities, RunToolFactory, RunToolFactoryErrorKind, RuntimeError,
+    RuntimeResult, RuntimeStore,
     config::{ConfigSnapshot, ResolvedModelConfig},
     context_compaction::RuntimeContextCompactor,
     delegation::{
@@ -30,11 +36,14 @@ use crate::{
 
 /// 一次配置快照编译出的模型调用边界。
 ///
-/// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、Profile、
+/// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、ProtocolAdapter、
 /// timeout 和 retry 产生不同解释；两者的请求内容仍分别构造。
 pub(super) struct CompiledModelService {
     pub(super) model: Arc<dyn ModelService>,
-    pub(super) profile: ModelCompatibilityProfile,
+    pub(super) provider: agent_types::ProviderId,
+    pub(super) protocol: ModelProtocol,
+    pub(super) model_id: String,
+    pub(super) capabilities: ResolvedModelCapabilities,
     pub(super) max_output_tokens: u32,
     pub(super) request_timeout: Duration,
 }
@@ -43,6 +52,216 @@ pub(super) struct CompiledModelService {
 struct ObservedModelService {
     inner: Arc<dyn ModelService>,
     observer: Arc<dyn ModelAttemptObserver>,
+}
+
+/// 在协议服务与有限重试之外一次性准备本次调用需要的全部图片。
+struct ImagePreparingModelService {
+    inner: Arc<dyn ModelService>,
+    preprocessor: Arc<dyn ModelImagePreprocessor>,
+}
+
+struct AuxiliaryVisionInspector {
+    model_key: String,
+    model: Arc<dyn ModelService>,
+    reasoning: Option<ReasoningConfig>,
+    provider_options: ProviderOptions,
+    timeout: Duration,
+    max_output_tokens: u32,
+}
+
+impl ImageInspector for AuxiliaryVisionInspector {
+    fn inspect<'a>(
+        &'a self,
+        input: InspectImagesRequest,
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> ImageInspectionFuture<'a> {
+        Box::pin(async move {
+            let started_at = std::time::Instant::now();
+            if cancellation.is_cancelled() {
+                return Err(ImageInspectorError::Cancelled);
+            }
+            let child = cancellation.child_token();
+            let mut prompt = format!("Inspection goal: {}", input.goal);
+            if let Some(background) = input.background {
+                prompt.push_str("\nOptional background: ");
+                prompt.push_str(&background);
+            }
+            prompt.push_str(
+                "\nReturn direct findings. Include relevant OCR, key observations, and uncertainties when applicable.",
+            );
+            let files = input
+                .image_paths
+                .into_iter()
+                .map(|readable_path| agent_types::FileReference {
+                    original_name: std::path::Path::new(&readable_path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("image")
+                        .to_owned(),
+                    readable_path,
+                })
+                .collect();
+            let request = agent_model::ModelRequest {
+                system: SystemPromptSnapshot::new(vec![
+                    "You are an image inspection model. Analyze only the supplied images and answer the stated goal without inventing missing context.".to_owned(),
+                ]),
+                conversation: agent_types::ConversationSnapshot::new(vec![
+                    agent_types::ConversationMessage::User(agent_types::UserMessage {
+                        id: agent_types::MessageId::new("auxiliary-vision-user")
+                            .expect("static message id"),
+                        parts: vec![
+                            agent_types::UserPart::Text(agent_types::TextPart {
+                                id: agent_types::PartId::new("auxiliary-vision-goal")
+                                    .expect("static part id"),
+                                text: prompt,
+                            }),
+                            agent_types::UserPart::FileReferences(
+                                agent_types::FileReferencesPart {
+                                    id: agent_types::PartId::new("auxiliary-vision-images")
+                                        .expect("static part id"),
+                                    files,
+                                },
+                            ),
+                        ],
+                    }),
+                ]),
+                tools: Vec::new(),
+                tool_choice: ToolChoice::None,
+                generation: agent_model::GenerationConfig {
+                    temperature: None,
+                    top_p: None,
+                    max_output_tokens: Some(self.max_output_tokens),
+                    stop: Vec::new(),
+                },
+                reasoning: self.reasoning.clone(),
+                provider_options: self.provider_options.clone(),
+            };
+            let consume = async {
+                let mut stream = self
+                    .model
+                    .stream(request, agent_model::ModelCallContext::new(child.clone()))
+                    .await
+                    .map_err(map_inspector_error)?;
+                use futures_util::StreamExt as _;
+                while let Some(event) = stream.next().await {
+                    match event {
+                        agent_model::ModelEvent::TurnFinished { message } => {
+                            let usage = message.usage.clone();
+                            let text = message
+                                .parts
+                                .into_iter()
+                                .filter_map(|part| match part {
+                                    agent_types::AssistantPart::Text(part) => Some(part.text),
+                                    _ => None,
+                                })
+                                .collect::<String>();
+                            if text.trim().is_empty() {
+                                return Err(ImageInspectorError::Failed);
+                            }
+                            return Ok(ImageInspection {
+                                text,
+                                model_key: self.model_key.clone(),
+                                elapsed_ms: u64::try_from(started_at.elapsed().as_millis())
+                                    .unwrap_or(u64::MAX),
+                                usage,
+                            });
+                        }
+                        agent_model::ModelEvent::TurnFailed { error } => {
+                            return Err(map_inspector_error(error));
+                        }
+                        _ => {}
+                    }
+                }
+                Err(ImageInspectorError::Failed)
+            };
+            tokio::select! {
+                () = cancellation.cancelled() => {
+                    child.cancel();
+                    Err(ImageInspectorError::Cancelled)
+                }
+                result = tokio::time::timeout(self.timeout, consume) => match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        child.cancel();
+                        Err(ImageInspectorError::Timeout)
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn map_inspector_error(error: ModelError) -> ImageInspectorError {
+    if matches!(error, ModelError::Cancelled) {
+        ImageInspectorError::Cancelled
+    } else {
+        ImageInspectorError::Failed
+    }
+}
+
+impl ModelService for ImagePreparingModelService {
+    fn capabilities(&self) -> &agent_model::ModelCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        self.inner.context_window_tokens()
+    }
+
+    fn stream(
+        &self,
+        request: agent_model::ModelRequest,
+        mut context: agent_model::ModelCallContext,
+    ) -> ModelStreamFuture<'_> {
+        Box::pin(async move {
+            if context.cancellation.is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+            if context.prepared_images.is_empty() {
+                let references = request
+                    .conversation
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        agent_types::ConversationMessage::User(message) => Some(&message.parts),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|part| match part {
+                        agent_types::UserPart::FileReferences(part) => Some(&part.files),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                let mut seen = std::collections::BTreeSet::new();
+                let mut image_count = 0_usize;
+                for reference in references {
+                    if !seen.insert(reference.readable_path.clone()) {
+                        continue;
+                    }
+                    match self
+                        .preprocessor
+                        .prepare(reference, &context.cancellation)
+                        .await?
+                    {
+                        ModelImagePreparation::Image(image) => {
+                            image_count += 1;
+                            if image_count > 10 {
+                                return Err(ModelError::Resource(
+                                    "a model request cannot contain more than 10 images".to_owned(),
+                                ));
+                            }
+                            context
+                                .prepared_images
+                                .insert(reference.readable_path.clone(), image);
+                        }
+                        ModelImagePreparation::NotImage => {}
+                    }
+                }
+            }
+            self.inner.stream(request, context).await
+        })
+    }
 }
 
 impl ModelService for ObservedModelService {
@@ -92,13 +311,24 @@ pub(super) struct CompiledRunAgent {
     agent: Agent,
     authorizer: Arc<dyn ToolAuthorizer>,
     compactor: Arc<RuntimeContextCompactor>,
+    reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
 }
 
 impl CompiledRunAgent {
     pub(super) fn into_parts(
         self,
-    ) -> (Agent, Arc<dyn ToolAuthorizer>, Arc<RuntimeContextCompactor>) {
-        (self.agent, self.authorizer, self.compactor)
+    ) -> (
+        Agent,
+        Arc<dyn ToolAuthorizer>,
+        Arc<RuntimeContextCompactor>,
+        Option<assistant_protocol::ReasoningEffortKey>,
+    ) {
+        (
+            self.agent,
+            self.authorizer,
+            self.compactor,
+            self.reasoning_effort,
+        )
     }
 }
 
@@ -152,7 +382,50 @@ pub(super) fn compile_run_agent(
         resources.model_factory,
         model_attempt_observer,
     )?;
-    let (reasoning, provider_options) = profile_request_options(compiled.profile)?;
+    let image_inspector: Option<agent_tools::SharedImageInspector> =
+        if !compiled.capabilities.image_input && compiled.capabilities.tool_calls {
+            active.vision().and_then(|vision| {
+                let auxiliary =
+                    compile_model_service(snapshot, &vision.model_key, resources.model_factory)
+                        .ok()?;
+                if !auxiliary.capabilities.image_input {
+                    return None;
+                }
+                let (reasoning, provider_options) = protocol_request_options(
+                    &auxiliary.provider,
+                    auxiliary.protocol,
+                    &auxiliary.model_id,
+                    &auxiliary.capabilities,
+                    None,
+                )
+                .ok()?;
+                Some(Arc::new(AuxiliaryVisionInspector {
+                    model_key: vision.model_key.as_str().to_owned(),
+                    model: auxiliary.model,
+                    reasoning,
+                    provider_options,
+                    timeout: vision.timeout,
+                    max_output_tokens: vision.max_output_tokens.min(auxiliary.max_output_tokens),
+                }) as agent_tools::SharedImageInspector)
+            })
+        } else {
+            None
+        };
+    let requested_effort = session.reasoning_effort()?;
+    let frozen_reasoning_effort = requested_effort.or_else(|| {
+        compiled
+            .capabilities
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.default_effort.map(protocol_effort_key))
+    });
+    let (reasoning, provider_options) = protocol_request_options(
+        &compiled.provider,
+        compiled.protocol,
+        &compiled.model_id,
+        &compiled.capabilities,
+        requested_effort,
+    )?;
     // Conversation Recall 同时具备检索和稳定引用续读能力，但两个 trait 保持独立，避免将
     // 有序续读语义强加给所有通用 Recall Source。
     let conversation_recall = Arc::new(crate::conversation_recall::RuntimeConversationRecall::new(
@@ -172,6 +445,7 @@ pub(super) fn compile_run_agent(
             )),
             conversation_recall: conversation_recall.clone(),
             conversation_recall_reader: conversation_recall,
+            image_inspector,
         })
         .map_err(|source| {
             if source.kind() == RunToolFactoryErrorKind::WorkingDirectoryUnavailable
@@ -319,6 +593,7 @@ pub(super) fn compile_run_agent(
         agent,
         authorizer,
         compactor: parent_compactor,
+        reasoning_effort: frozen_reasoning_effort,
     })
 }
 
@@ -341,11 +616,11 @@ fn compile_model_service_with_observer(
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let model_config = resolve_model(snapshot, model_key)?;
     let transport = active.transport();
-    let profile = model_config.compatibility_profile();
-    let base_model = model_factory
+    let bundle = model_factory
         .create_model(ModelServiceFactoryRequest {
             provider: model_config.provider(),
-            profile,
+            protocol: model_config.protocol(),
+            capabilities: model_config.capabilities(),
             endpoint: model_config.endpoint(),
             model: model_config.model(),
             api_key: model_config.api_key(),
@@ -354,6 +629,7 @@ fn compile_model_service_with_observer(
             request_timeout: transport.request_timeout(),
         })
         .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
+    let base_model = bundle.model;
     let model = match (active.retry_policy(), model_attempt_observer) {
         (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
             base_model,
@@ -369,33 +645,86 @@ fn compile_model_service_with_observer(
         }) as Arc<dyn ModelService>,
         (None, None) => base_model,
     };
+    let model = match bundle.image_preprocessor {
+        Some(preprocessor) if model_config.capabilities().image_input => {
+            Arc::new(ImagePreparingModelService {
+                inner: model,
+                preprocessor,
+            }) as Arc<dyn ModelService>
+        }
+        _ => model,
+    };
     Ok(CompiledModelService {
         model,
-        profile,
+        provider: model_config.provider().clone(),
+        protocol: model_config.protocol(),
+        model_id: model_config.model().to_owned(),
+        capabilities: model_config.capabilities().clone(),
         max_output_tokens: model_config.max_output_tokens(),
         request_timeout: transport.request_timeout(),
     })
 }
 
-/// 按 Profile 编译业务请求必需的 reasoning 和 Provider Options。
-pub(super) fn profile_request_options(
-    profile: ModelCompatibilityProfile,
+/// 按已编译 Route、Protocol 和 capability 编译业务请求所需的 reasoning 选项。
+pub(super) fn protocol_request_options(
+    provider: &agent_types::ProviderId,
+    protocol: ModelProtocol,
+    model_id: &str,
+    capabilities: &ResolvedModelCapabilities,
+    requested_effort: Option<assistant_protocol::ReasoningEffortKey>,
 ) -> RuntimeResult<(Option<ReasoningConfig>, ProviderOptions)> {
     let mut provider_options = ProviderOptions::new();
-    let reasoning = if profile == ModelCompatibilityProfile::DeepSeek {
-        provider_options
-            .insert(
-                "deepseek",
-                serde_json::json!({"thinking": {"type": "enabled"}}),
-            )
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "static DeepSeek provider options",
-            })?;
-        Some(ReasoningConfig { effort: None })
-    } else {
-        None
-    };
+    if protocol == ModelProtocol::OpenAiChatCompletions && capabilities.reasoning_enabled() {
+        let options = match provider.as_str() {
+            "deepseek" | "zhipu" => Some(serde_json::json!({"thinking": {"type": "enabled"}})),
+            // K3 始终思考且官方要求从 K2.x 迁移时移除 `thinking`；K2.x 才发送开关。
+            "moonshot" if !matches!(model_id, "kimi-k3" | "k3") => {
+                Some(serde_json::json!({"thinking": {"type": "enabled"}}))
+            }
+            "dashscope" if model_id == "qwen3.8-max" => {
+                Some(serde_json::json!({"enable_thinking": true, "preserve_thinking": true}))
+            }
+            "dashscope" => Some(serde_json::json!({"enable_thinking": true})),
+            _ => None,
+        };
+        if let Some(options) = options {
+            provider_options
+                .insert(provider.as_str(), options)
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "static reasoning provider options",
+                })?;
+        }
+    }
+    let effective = requested_effort.or_else(|| {
+        capabilities
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.default_effort.map(protocol_effort_key))
+    });
+    let reasoning = capabilities.reasoning_enabled().then(|| ReasoningConfig {
+        effort: effective.map(model_effort_key),
+    });
     Ok((reasoning, provider_options))
+}
+
+fn protocol_effort_key(value: crate::ReasoningEffortKey) -> assistant_protocol::ReasoningEffortKey {
+    match value {
+        crate::ReasoningEffortKey::Low => assistant_protocol::ReasoningEffortKey::Low,
+        crate::ReasoningEffortKey::Medium => assistant_protocol::ReasoningEffortKey::Medium,
+        crate::ReasoningEffortKey::High => assistant_protocol::ReasoningEffortKey::High,
+        crate::ReasoningEffortKey::XHigh => assistant_protocol::ReasoningEffortKey::XHigh,
+        crate::ReasoningEffortKey::Max => assistant_protocol::ReasoningEffortKey::Max,
+    }
+}
+
+fn model_effort_key(value: assistant_protocol::ReasoningEffortKey) -> agent_model::ReasoningEffort {
+    match value {
+        assistant_protocol::ReasoningEffortKey::Low => agent_model::ReasoningEffort::Low,
+        assistant_protocol::ReasoningEffortKey::Medium => agent_model::ReasoningEffort::Medium,
+        assistant_protocol::ReasoningEffortKey::High => agent_model::ReasoningEffort::High,
+        assistant_protocol::ReasoningEffortKey::XHigh => agent_model::ReasoningEffort::XHigh,
+        assistant_protocol::ReasoningEffortKey::Max => agent_model::ReasoningEffort::Max,
+    }
 }
 
 /// CreateSession 在同一配置快照中解析显式或默认 model key。

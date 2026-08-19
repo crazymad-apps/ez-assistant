@@ -455,6 +455,7 @@ mod tests {
                 call_id: id(call_id),
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text("ok".to_owned()),
+                metadata: None,
             },
         })
     }
@@ -517,6 +518,7 @@ mod tests {
                     call_id: id("call_1"),
                     status: ToolResultStatus::Success,
                     content: ToolResultContent::Text("2026-07-17".to_owned()),
+                    metadata: None,
                 },
             }),
         ]);

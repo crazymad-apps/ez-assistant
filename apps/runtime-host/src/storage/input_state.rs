@@ -124,6 +124,7 @@ impl StorageEngine {
             status: RunStatus::Accepted,
             agent_variant: input.agent_variant,
             approval_mode: input.approval_mode,
+            reasoning_effort: None,
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),

@@ -28,6 +28,7 @@ pub(super) struct ReplacementPlan {
     pub previous_generation: u64,
     pub new_generation: u64,
     pub message_count: u64,
+    pub changed_at_ms: i64,
 }
 
 pub(super) struct StagedAppend {
@@ -351,6 +352,17 @@ impl StorageEngine {
                     })?;
             }
         }
+        super::usage::record_usage_messages(
+            &transaction,
+            &recall_owner,
+            match &staged.target {
+                ConversationStorageTarget::Session { run_id, .. } => Some(run_id.as_str()),
+                ConversationStorageTarget::ChildTask { .. } => None,
+            },
+            &batch.messages,
+            staged.created_at_ms,
+            false,
+        )?;
         apply_purpose(
             &transaction,
             &staged.purpose,
@@ -403,6 +415,7 @@ impl StorageEngine {
         &mut self,
         session_id: SessionId,
         snapshot: ConversationSnapshot,
+        changed_at_ms: i64,
     ) -> StorageResult<ReplacementPlan> {
         // Round-trip through the same reader used after restart. This checks duplicate IDs, Tool
         // pairing and the exact bytes before a new generation can become authoritative.
@@ -433,13 +446,14 @@ impl StorageEngine {
                     source,
                 )
             })?,
+            changed_at_ms,
         })
     }
 
     pub(super) fn commit_replacement(&mut self, plan: &ReplacementPlan) -> StorageResult<()> {
         let session_directory = self.session_directory(&plan.session_id)?;
         let new_path = body_path(&session_directory, plan.new_generation);
-        conversation::read(&new_path)?;
+        let replacement = conversation::read(&new_path)?;
 
         let transaction = self
             .connection
@@ -470,6 +484,16 @@ impl StorageEngine {
                 "conversation generation changed before replacement commit",
             ));
         }
+        super::usage::record_usage_messages(
+            &transaction,
+            &ConversationOwner::MainSession {
+                session_id: plan.session_id.clone(),
+            },
+            None,
+            &replacement.messages,
+            plan.changed_at_ms,
+            false,
+        )?;
         transaction.commit().map_err(|source| {
             internal_error(
                 "conversation generation switch could not be committed",

@@ -4,4 +4,5 @@
 //! 能力实现由 Runtime 或其他上层宿主注入标准工具壳并注册进 Registry。
 
 pub mod fs;
+pub mod image;
 pub mod shell;

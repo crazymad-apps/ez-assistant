@@ -7,7 +7,7 @@ use std::{
 };
 
 use agent_model::{ModelAttemptEvent, ModelCallContext, ModelEvent, ModelService, TraceContext};
-use agent_provider_openai_compatible::{
+use agent_openai_compatible::{
     BearerCredential, OpenAiCompatibleService, ProviderWireEvent, RecordedWireRequest, Transport,
     TransportError, TransportFuture, TransportRequest, TransportResponse,
 };
@@ -15,7 +15,7 @@ use futures_util::{StreamExt, stream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    replay::{RecordedModelOutcome, ReplayError, profile_from_metadata, recorded_model_calls},
+    replay::{RecordedModelOutcome, ReplayError, adapter_from_metadata, recorded_model_calls},
     trace::{LoadedTrace, NativeTracePayload},
 };
 
@@ -216,7 +216,7 @@ pub(crate) async fn run_wire_replay(trace: &LoadedTrace) -> Result<usize, Replay
     cases.sort_by_key(|case| case.first_sequence);
 
     let replay_transport = Arc::new(ReplayTransport::new(exchanges));
-    let profile = profile_from_metadata(&trace.started.provider)?;
+    let protocol_adapter = adapter_from_metadata(&trace.started.provider)?;
     // credential 只用于 Service 的既有构造契约；安全请求比较会永久删除该 header，
     // ReplayTransport 是唯一 Transport，因此这里没有网络客户端或真实认证数据。
     let service = OpenAiCompatibleService::with_transport(
@@ -224,7 +224,7 @@ pub(crate) async fn run_wire_replay(trace: &LoadedTrace) -> Result<usize, Replay
         BearerCredential::new("replay-placeholder"),
         trace.started.provider.model.clone(),
         trace.started.provider.context_window_tokens,
-        profile,
+        protocol_adapter,
         replay_transport.clone(),
     )
     .map_err(|error| ReplayError::Service(error.to_string()))?;
@@ -244,6 +244,7 @@ pub(crate) async fn run_wire_replay(trace: &LoadedTrace) -> Result<usize, Replay
                 ModelCallContext {
                     cancellation: CancellationToken::new(),
                     trace: Some(trace_context),
+                    prepared_images: Default::default(),
                 },
             )
             .await;
@@ -439,7 +440,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use agent_model::{ModelError, ModelRetryReason, ModelTransportErrorKind};
-    use agent_provider_openai_compatible::{Profile, encode_request};
+    use agent_openai_compatible::{ProtocolAdapter, encode_request};
     use agent_types::ProviderId;
 
     use super::*;
@@ -458,8 +459,9 @@ mod tests {
 
     fn recorded_request() -> RecordedWireRequest {
         let metadata = metadata();
-        let profile = Profile::openai_compatible(ProviderId::new("fixture").unwrap());
-        let encoded = encode_request(&request(), &profile, &metadata.model).unwrap();
+        let protocol_adapter =
+            ProtocolAdapter::openai_compatible(ProviderId::new("fixture").unwrap());
+        let encoded = encode_request(&request(), &protocol_adapter, &metadata.model).unwrap();
         RecordedWireRequest {
             method: "POST".into(),
             url: format!("{}/chat/completions", metadata.endpoint),
@@ -742,7 +744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wire_replay_reports_request_adapter_profile_and_script_mismatch() {
+    async fn wire_replay_reports_request_protocol_adapter_and_script_mismatch() {
         let body = format!("{FRAME_HELLO}{FRAME_WORLD}{FRAME_FINISH}{FRAME_DONE}");
         let mut request_mismatch = with_wire_events(
             model_trace(RecordedModelOutcome::Established, text_events()),
@@ -769,11 +771,11 @@ mod tests {
             Err(ReplayError::UnsupportedAdapter { .. })
         ));
 
-        let mut profile = request_mismatch;
-        profile.started.provider.profile = "unknown".into();
+        let mut protocol_adapter = request_mismatch;
+        protocol_adapter.started.provider.protocol_adapter = "unknown".into();
         assert!(matches!(
-            run_wire_replay(&profile).await,
-            Err(ReplayError::UnsupportedProfile(_))
+            run_wire_replay(&protocol_adapter).await,
+            Err(ReplayError::UnsupportedProtocolAdapter(_))
         ));
 
         let corrupt = with_wire_events(
@@ -803,7 +805,7 @@ mod tests {
             BearerCredential::new("placeholder"),
             trace.started.provider.model.clone(),
             trace.started.provider.context_window_tokens,
-            profile_from_metadata(&trace.started.provider).unwrap(),
+            adapter_from_metadata(&trace.started.provider).unwrap(),
             transport.clone(),
         )
         .unwrap();
@@ -815,6 +817,7 @@ mod tests {
                 ModelCallContext {
                     cancellation,
                     trace: Some(TraceContext::new(CORRELATION)),
+                    prepared_images: Default::default(),
                 },
             )
             .await

@@ -440,6 +440,7 @@ impl StorageEngine {
                         "status": "completed",
                         "result": result,
                     })),
+                    metadata: None,
                 },
             });
         }
@@ -740,6 +741,7 @@ fn recovered_unknown_result(
                 }
                 .to_owned(),
             ),
+            metadata: None,
         },
     })
 }
@@ -771,6 +773,7 @@ fn delegation_error_result(
                     }
                 }
             })),
+            metadata: None,
         },
     }
 }

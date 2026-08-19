@@ -35,6 +35,8 @@ pub struct StoredAttachment {
     /// 由原始文件名和文件字节共同计算的 Blob 身份摘要。
     pub blob_hash: String,
     pub size_bytes: u64,
+    /// Host 按文件签名检测的实际 MIME；旧 Blob 可以为空。
+    pub media_type: Option<String>,
     pub agent_readable_path: String,
     pub state: StoredAttachmentState,
     pub created_at_ms: i64,
@@ -50,6 +52,7 @@ pub struct NewAttachmentUpload {
     /// 由原始文件名和文件字节共同计算的 Blob 身份摘要。
     pub blob_hash: String,
     pub size_bytes: u64,
+    pub media_type: Option<String>,
     pub created_at_ms: i64,
 }
 

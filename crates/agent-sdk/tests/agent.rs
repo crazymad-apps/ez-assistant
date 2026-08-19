@@ -28,6 +28,7 @@ const CONTEXT_WINDOW_TOKENS: u64 = 16_384;
 
 fn capabilities(reasoning: bool, tool_calls: bool) -> ModelCapabilities {
     ModelCapabilities {
+        image_input: false,
         reasoning,
         tool_calls,
         streaming: true,

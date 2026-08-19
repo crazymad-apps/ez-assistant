@@ -11,7 +11,7 @@ use std::{
 };
 
 use agent_model::{ModelAttemptEvent, ModelAttemptObserver, TraceContext};
-use agent_provider_openai_compatible::{ProviderWireEvent, ProviderWireObserver};
+use agent_openai_compatible::{ProviderWireEvent, ProviderWireObserver};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -636,9 +636,7 @@ mod tests {
         GenerationConfig, ModelAttemptEvent, ModelError, ModelRequest, ModelTransportErrorKind,
         ProviderOptions, SystemPromptSnapshot, TraceContext,
     };
-    use agent_provider_openai_compatible::{
-        ProviderWireEvent, RecordedWireRequest, TransportError,
-    };
+    use agent_openai_compatible::{ProviderWireEvent, RecordedWireRequest, TransportError};
     use agent_types::{ConversationSnapshot, ToolChoice};
     use tempfile::TempDir;
 
@@ -649,7 +647,7 @@ mod tests {
         ProviderMetadata {
             adapter: "openai-compatible".into(),
             adapter_version: 1,
-            profile: "generic".into(),
+            protocol_adapter: "generic".into(),
             provider_id: "fixture".into(),
             protocol: "openai.chat_completions".into(),
             endpoint: "https://example.invalid/v1".into(),

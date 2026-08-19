@@ -62,9 +62,73 @@ pub(super) async fn preview_attachment(
     preview_path(
         Path::new(&attachment.agent_readable_path),
         &attachment.original_name,
+        attachment.media_type.as_deref(),
         headers,
     )
     .await
+}
+
+/// 返回与原 Blob 相邻的固定 JPEG 缩略图；缺失时从原图按需恢复。
+pub(super) async fn thumbnail_attachment(
+    State(state): State<HttpState>,
+    RoutePath((session_id, attachment_id)): RoutePath<(String, String)>,
+) -> Response {
+    let session_id = match SessionId::new(session_id) {
+        Ok(value) => value,
+        Err(_) => return resource_error(invalid_request("session id is invalid")),
+    };
+    let attachment_id = match AttachmentId::new(attachment_id) {
+        Ok(value) => value,
+        Err(_) => return resource_error(invalid_request("attachment id is invalid")),
+    };
+    let attachment = match state.runtime.get_attachment(GetAttachmentRequest {
+        session_id,
+        attachment_id,
+    }) {
+        Ok(result) => result.attachment,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
+    if attachment.state != AttachmentState::Ready {
+        return resource_error(RuntimeErrorInfo::new(
+            RuntimeErrorCode::AttachmentUnavailable,
+            "attachment is unavailable",
+        ));
+    }
+    let source = std::path::PathBuf::from(attachment.agent_readable_path);
+    let generated = tokio::task::spawn_blocking(move || crate::image::ensure_thumbnail(&source));
+    let path = match generated.await {
+        Ok(Ok(path)) => path,
+        Ok(Err(crate::image::ImageResourceError::Unsupported)) => {
+            return resource_error(RuntimeErrorInfo::new(
+                RuntimeErrorCode::ResourceNotPreviewable,
+                "attachment is not a supported image",
+            ));
+        }
+        _ => {
+            return resource_error(RuntimeErrorInfo::new(
+                RuntimeErrorCode::AttachmentUnavailable,
+                "thumbnail is unavailable",
+            ));
+        }
+    };
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return resource_error(RuntimeErrorInfo::new(
+                RuntimeErrorCode::AttachmentUnavailable,
+                "thumbnail is unavailable",
+            ));
+        }
+    };
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    response
 }
 
 pub(super) async fn preview_tool_file(
@@ -85,7 +149,13 @@ pub(super) async fn preview_tool_file(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
-    preview_path(Path::new(&resource.path), &resource.display_name, headers).await
+    preview_path(
+        Path::new(&resource.path),
+        &resource.display_name,
+        None,
+        headers,
+    )
+    .await
 }
 
 pub(super) async fn resolve_tool_file_native_path(
@@ -129,8 +199,16 @@ fn tool_resource_request(
     ))
 }
 
-async fn preview_path(path: &Path, name: &str, headers: HeaderMap) -> Response {
-    let media_type = match preview_media_type(name) {
+async fn preview_path(
+    path: &Path,
+    name: &str,
+    actual_media_type: Option<&str>,
+    headers: HeaderMap,
+) -> Response {
+    let media_type = match actual_media_type
+        .and_then(previewable_media_type)
+        .or_else(|| preview_media_type(name))
+    {
         Some(value) => value,
         None => {
             return resource_error(RuntimeErrorInfo::new(
@@ -230,6 +308,18 @@ async fn preview_path(path: &Path, name: &str, headers: HeaderMap) -> Response {
         }
     }
     response
+}
+
+fn previewable_media_type(value: &str) -> Option<&'static str> {
+    match value {
+        "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "text/plain" => Some("text/plain; charset=utf-8"),
+        "application/json" => Some("application/json; charset=utf-8"),
+        _ => None,
+    }
 }
 
 async fn resolve_regular_file(path: &Path) -> Result<std::path::PathBuf, RuntimeErrorInfo> {

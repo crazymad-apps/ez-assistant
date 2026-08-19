@@ -17,13 +17,13 @@ use assistant_runtime::{
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionFileLoad,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionStoreFuture,
     PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
-    QueuePriorityChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
-    SessionFork, SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
+    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkspaceRemoval,
+    StoredSessionFork, StoredSessionUsage, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -163,6 +163,10 @@ enum Command {
         session_id: SessionId,
         reply: oneshot::Sender<Result<agent_types::ConversationSnapshot, StoreError>>,
     },
+    GetSessionUsage {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<StoredSessionUsage, StoreError>>,
+    },
     LoadConversationWindow {
         request: ConversationWindowRequest,
         reply: oneshot::Sender<Result<StoredConversationWindow, StoreError>>,
@@ -201,6 +205,10 @@ enum Command {
     },
     SetSessionModel {
         change: ModelChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetSessionReasoningEffort {
+        change: ReasoningEffortChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     SetSessionVariant {
@@ -700,6 +708,16 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::GetSessionUsage { session_id, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
     fn load_conversation_window(
         &self,
         request: ConversationWindowRequest,
@@ -801,6 +819,15 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SetSessionModel { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_session_reasoning_effort(&self, change: ReasoningEffortChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSessionReasoningEffort { change, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -985,6 +1012,9 @@ fn run_worker(
             Command::LoadConversation { session_id, reply } => {
                 let _ = reply.send(engine.load_conversation(&session_id));
             }
+            Command::GetSessionUsage { session_id, reply } => {
+                let _ = reply.send(engine.get_session_usage(&session_id));
+            }
             Command::LoadConversationWindow { request, reply } => {
                 let _ = reply.send(engine.load_conversation_window(request));
             }
@@ -1014,6 +1044,9 @@ fn run_worker(
             }
             Command::SetSessionModel { change, reply } => {
                 let _ = reply.send(engine.set_session_model(change));
+            }
+            Command::SetSessionReasoningEffort { change, reply } => {
+                let _ = reply.send(engine.set_session_reasoning_effort(change));
             }
             Command::SetSessionVariant { change, reply } => {
                 let _ = reply.send(engine.set_session_variant(change));

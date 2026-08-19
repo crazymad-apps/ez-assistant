@@ -1,7 +1,7 @@
 import type { AgentVariant, ApprovalMode } from "../../../generated/assistant-protocol";
 import type { SelectionOption } from "../../../components/SelectionPopover";
 
-export type PickerName = "model" | "variant" | "approval" | null;
+export type PickerName = "model" | "variant" | "approval" | "effort" | null;
 
 export const VARIANT_OPTIONS: readonly SelectionOption<AgentVariant>[] = [
   { value: "build", label: "Build 模式", description: "允许在授权范围内修改与执行" },

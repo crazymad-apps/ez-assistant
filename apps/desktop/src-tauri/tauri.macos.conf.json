@@ -21,6 +21,10 @@
     ]
   },
   "bundle": {
-    "icon": ["icons/macos/icon.icns"]
+    "icon": ["icons/macos/icon.icns"],
+    "macOS": {
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist"
+    }
   }
 }

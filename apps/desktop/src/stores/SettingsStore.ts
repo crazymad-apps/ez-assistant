@@ -4,6 +4,7 @@ import type {
   ConnectionValidationFailure,
   ModelConfiguration,
   ModelConfigurationInput,
+  ModelCatalogSnapshot,
   ModelKey,
   PermissionDocumentDraft,
   PermissionDocumentRevision,
@@ -33,6 +34,7 @@ export class SettingsStore {
   pending_action: string | null = null;
   status: ConfigurationStatus | null = null;
   models: readonly ModelConfiguration[] = [];
+  model_catalog: ModelCatalogSnapshot | null = null;
   error_message: string | null = null;
   notice_message: string | null = null;
   configuration_conflict = false;
@@ -47,6 +49,7 @@ export class SettingsStore {
       pending_action: observable,
       status: observableRef,
       models: observableRef,
+      model_catalog: observableRef,
       error_message: observable,
       notice_message: observable,
       configuration_conflict: observable,
@@ -64,6 +67,7 @@ export class SettingsStore {
       updateModel: action,
       deleteModel: action,
       setDefaultModel: action,
+      setAuxiliaryVisionModel: action,
       validateConfigured: action,
       validateCandidate: action,
       clearMessages: action,
@@ -126,6 +130,7 @@ export class SettingsStore {
       runInAction(() => {
         this.status = status.payload.status;
         this.models = models.payload.models;
+        this.model_catalog = models.payload.catalog;
         this.configuration_conflict = false;
       });
     } catch (error: unknown) {
@@ -147,6 +152,7 @@ export class SettingsStore {
       const models = await client.command({ type: "list_models", payload: {} });
       this.status = result.payload.status;
       this.models = models.payload.models;
+      this.model_catalog = models.payload.catalog;
       this.notice_message = "配置已重新加载。";
       await this.dependencies.refresh_application();
     });
@@ -285,6 +291,24 @@ export class SettingsStore {
       });
       this.applyMutation(result.payload);
       this.notice_message = "默认模型已更新。";
+      await this.dependencies.refresh_application();
+    });
+  }
+
+  async setAuxiliaryVisionModel(model_key: ModelKey | null): Promise<boolean> {
+    const client = this.requireClient();
+    const revision = this.status?.revision;
+    if (!client || !revision) {
+      this.error_message = "请先重新加载配置。";
+      return false;
+    }
+    return this.runAction("vision-model", async () => {
+      const result = await client.command({
+        type: "set_auxiliary_vision_model",
+        payload: { model_key, expected_revision: revision },
+      });
+      this.applyMutation(result.payload);
+      this.notice_message = model_key ? "默认识图模型已更新。" : "默认识图模型已清除。";
       await this.dependencies.refresh_application();
     });
   }

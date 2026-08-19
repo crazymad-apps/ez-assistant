@@ -5,15 +5,15 @@ use std::fs;
 use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, MessageFeedbackChange, ModelChange,
-    RewriteResult, SessionPinnedChange, SessionTitleChange, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, VariantChange,
+    ReasoningEffortChange, RewriteResult, SessionPinnedChange, SessionTitleChange, StoredInput,
+    StoredInputState, StoredMessageFeedback, StoredRun, VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
     StorageEngine, StorageResult, body_path, child_task_directory, child_tasks_directory, conflict,
     conversation, database_write_error, internal_error, invalid_data,
-    mode::{agent_variant_value, approval_mode_value},
+    mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     recovery::ReplacementPlan,
     sync_directory, to_i64,
 };
@@ -158,18 +158,32 @@ impl StorageEngine {
         let changed = self
             .connection
             .execute(
-                "UPDATE sessions SET model_key = ?1
-                 WHERE session_id = ?2 AND lifecycle = 'active'
-                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?2 AND state = 'queued')
-                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?2 AND status IN ('accepted', 'running', 'cancelling'))
-                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?2)",
-                params![change.model_key.as_str(), change.session_id.as_str()],
+                "UPDATE sessions SET model_key = ?1, reasoning_effort = ?2
+                 WHERE session_id = ?3 AND lifecycle = 'active'
+                   AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
+                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
+                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?3)",
+                params![change.model_key.as_str(), change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str()],
             )
             .map_err(|source| {
                 database_write_error("session model could not be changed", source)
             })?;
         if changed != 1 {
             return Err(conflict("session model cannot be changed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_session_reasoning_effort(
+        &mut self,
+        change: ReasoningEffortChange,
+    ) -> StorageResult<()> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET reasoning_effort = ?1 WHERE session_id = ?2 AND lifecycle = 'active'",
+            params![change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str()],
+        ).map_err(|source| database_write_error("session reasoning effort could not be changed", source))?;
+        if changed != 1 {
+            return Err(conflict("session reasoning effort cannot be changed"));
         }
         Ok(())
     }
@@ -232,8 +246,11 @@ impl StorageEngine {
             .map_err(|source| internal_error("rewrite target could not be queried", source))?
             .ok_or_else(|| conflict("target user message does not belong to an input"))?;
 
-        let plan =
-            self.begin_replacement(rewrite.session_id.clone(), rewrite.conversation.clone())?;
+        let plan = self.begin_replacement(
+            rewrite.session_id.clone(),
+            rewrite.conversation.clone(),
+            rewrite.changed_at_ms,
+        )?;
         match self.commit_rewrite(&plan, &rewrite, target_order, &new_message.id) {
             Ok(result) => Ok(result),
             Err(error) => {
@@ -365,6 +382,7 @@ impl StorageEngine {
             status: assistant_protocol::RunStatus::Accepted,
             agent_variant: rewrite.input.agent_variant,
             approval_mode: rewrite.input.approval_mode,
+            reasoning_effort: None,
             cancel_requested: false,
             error: None,
             message_ids: vec![new_message_id.clone()],

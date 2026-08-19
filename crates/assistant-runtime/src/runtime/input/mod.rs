@@ -48,7 +48,8 @@ impl AssistantRuntime {
         let should_spawn = {
             let mut state = session.lock_state()?;
             if state.is_faulted
-                || (state.resume_required && state.retry_override_input.is_none())
+                || state.queue_paused_by_user
+                || state.resume_required
                 || state.is_queue_driver_running
                 || state.runnable_inputs.is_empty()
             {
@@ -154,7 +155,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 state.is_queue_driver_running = false;
                 return;
             };
-            if state.resume_required && state.retry_override_input.as_ref() != Some(&input_id) {
+            if state.queue_paused_by_user || state.resume_required {
                 state.is_queue_driver_running = false;
                 return;
             }
@@ -200,7 +201,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             )
         }) {
             Ok(compiled) => {
-                let (agent, authorizer, compactor) = compiled.into_parts();
+                let (agent, authorizer, compactor, reasoning_effort) = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     next.1.stored.queued_message.clone()
                 } else {
@@ -228,6 +229,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         run_id: next.2.run_id.clone(),
                         session_id: session.id().clone(),
                         message: message.clone(),
+                        reasoning_effort,
                         created_at_ms: started_at,
                     })
                     .await
@@ -243,9 +245,6 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     };
                     state.runnable_inputs.pop_front();
                     state.queue_revision = state.queue_revision.saturating_add(1);
-                    if state.retry_override_input.as_ref() == Some(&next.0) {
-                        state.retry_override_input = None;
-                    }
                     if let Some(message) = message {
                         if state
                             .journal
@@ -278,6 +277,11 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         run_id: next.2.run_id.clone(),
                         cancellation: cancellation.clone(),
                     });
+                    state
+                        .runs
+                        .get_mut(&next.2.run_id)
+                        .expect("run exists")
+                        .freeze_reasoning_effort(reasoning_effort);
                     let conversation = state
                         .journal
                         .as_ref()
@@ -495,9 +499,6 @@ async fn fail_before_start(
         if state.runnable_inputs.front() == failed_input_id.as_ref() {
             state.runnable_inputs.pop_front();
             state.queue_revision = state.queue_revision.saturating_add(1);
-        }
-        if state.retry_override_input == failed_input_id {
-            state.retry_override_input = None;
         }
         if let Some(run) = state.runs.get_mut(run_id) {
             run.fail_before_start(error.clone(), finished_at);

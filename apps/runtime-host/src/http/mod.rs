@@ -29,7 +29,7 @@ use self::{
     events::stream_events,
     resources::{
         export_session_markdown, preview_attachment, preview_tool_file,
-        resolve_tool_file_native_path,
+        resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
 
@@ -75,6 +75,10 @@ pub(crate) fn router(state: HttpState) -> Router {
         .route(
             "/sessions/{session_id}/attachments/{attachment_id}/preview",
             get(preview_attachment),
+        )
+        .route(
+            "/sessions/{session_id}/attachments/{attachment_id}/thumbnail",
+            get(thumbnail_attachment),
         )
         .route(
             "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview",

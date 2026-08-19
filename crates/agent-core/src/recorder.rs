@@ -132,6 +132,7 @@ mod tests {
                 call_id: ToolCallId::new("call_1").expect("valid call id"),
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text("2026-07-27".to_owned()),
+                metadata: None,
             },
         }
     }

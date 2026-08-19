@@ -14,7 +14,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use super::{
     StorageEngine, StorageResult, attachment_io, body_path, conflict, conversation,
     database_write_error, internal_error, invalid_data,
-    mode::{agent_variant_value, approval_mode_value},
+    mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     session_resources::remove_created_session_directories,
     sync_directory, to_i64,
 };
@@ -76,6 +76,7 @@ impl StorageEngine {
                     original_name: source.original_name.clone(),
                     blob_hash: source.blob_hash.clone(),
                     size_bytes: source.size_bytes,
+                    media_type: source.media_type.clone(),
                     agent_readable_path: readable_path,
                     state: source.state,
                     created_at_ms: fork.session.created_at_ms,
@@ -122,14 +123,15 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, system_prompt_json, current_variant,
+                        session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, ?7, ?8, ?8, NULL, 0, ?9)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', 1, ?8, ?9, ?9, NULL, 0, ?10)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
                         fork.session.model_key.as_str(),
+                        fork.session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
                         agent_variant_value(fork.session.current_variant),
                         approval_mode_value(fork.session.approval_mode),
@@ -145,6 +147,15 @@ impl StorageEngine {
                     database_write_error("fork session could not be created", source)
                 })?;
             Self::insert_session_resources(&transaction, &fork.session)?;
+            transaction
+                .execute(
+                    "INSERT INTO session_usage (session_id, backfilled, updated_at_ms)
+                     VALUES (?1, 1, ?2)",
+                    params![fork.session.session_id.as_str(), fork.session.created_at_ms],
+                )
+                .map_err(|source| {
+                    database_write_error("fork session usage could not be initialized", source)
+                })?;
             for attachment in &attachments {
                 transaction
                     .execute(
@@ -185,6 +196,7 @@ impl StorageEngine {
                 session_id: fork.session.session_id,
                 title: fork.session.title,
                 model_key: fork.session.model_key,
+                reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,

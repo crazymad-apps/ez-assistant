@@ -20,6 +20,7 @@ pub(crate) fn project_status(
         state: state(projection.state),
         schema_version: projection.schema_version,
         default_model: projection.default_model.clone(),
+        auxiliary_vision_model: projection.auxiliary_vision_model.clone(),
         issues: projection
             .issues
             .iter()
@@ -56,6 +57,7 @@ fn model(projection: &ModelConfigProjection) -> ModelConfiguration {
         max_output_tokens: projection.max_output_tokens,
         agent_max_output_tokens: projection.agent_max_output_tokens,
         effective_max_output_tokens: projection.effective_max_output_tokens,
+        supports_image_input: projection.supports_image_input,
         api_key_configured: projection.api_key_configured,
         origin: ModelConfigurationOrigin::ConfigurationFile,
         editable: projection.model_key.is_some(),

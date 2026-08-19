@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsDialog } from "../../src/features/settings/SettingsDialog";
 import type {
   MemoryCapabilities,
+  ModelCatalogSnapshot,
   ModelConfiguration,
   PersonaSnapshot,
   PinnedMemoryCollectionSnapshot,
@@ -32,6 +33,25 @@ describe("SettingsDialog model management", () => {
     expect(screen.getByLabelText("显示名称")).toHaveValue("primary");
   });
 
+  it("selects the default auxiliary vision model from compiled image-capable models", async () => {
+    const store = settingsStore();
+    const text_model = model("text-only", true);
+    const vision_model = model("vision", false);
+    vision_model.supports_image_input = true;
+    store.settings.models = [text_model, vision_model];
+    const set_vision = vi.spyOn(store.settings, "setAuxiliaryVisionModel").mockResolvedValue(true);
+    renderDialog(store);
+
+    const trigger = screen.getByRole("button", { name: "默认识图模型" });
+    expect(trigger).toHaveTextContent("未配置");
+    fireEvent.click(trigger);
+    const listbox = screen.getByRole("listbox", { name: "默认识图模型" });
+    expect(within(listbox).queryByRole("option", { name: /text-only/ })).not.toBeInTheDocument();
+    fireEvent.click(within(listbox).getByRole("option", { name: /vision/ }));
+
+    await waitFor(() => expect(set_vision).toHaveBeenCalledWith("vision"));
+  });
+
   it("submits a new model through the shared Runtime candidate shape", async () => {
     const store = settingsStore();
     const create = vi.spyOn(store.settings, "createModel").mockResolvedValue(true);
@@ -44,24 +64,28 @@ describe("SettingsDialog model management", () => {
       "Chat Completions（OpenAI Compatible）",
     ]);
     fireEvent.click(protocol);
-    const provider = screen.getByRole("button", { name: "选择供应商方言" });
+    const provider = screen.getByRole("combobox", { name: "供应商（Provider）" });
     fireEvent.click(provider);
-    expect(within(screen.getByRole("listbox", { name: "选择供应商方言" })).getAllByRole("option").map((option) => option.textContent)).toEqual([
-      "DeepSeek",
-      "OpenAI Compatible",
+    expect(within(screen.getByRole("listbox", { name: "供应商（Provider）" })).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "DeepSeekdeepseek",
+      "智谱 GLMzhipu",
+      "阿里云百炼（Qwen）dashscope",
+      "OpenAIopenai",
+      "Moonshot（Kimi）moonshot",
     ]);
-    fireEvent.click(within(screen.getByRole("listbox", { name: "选择供应商方言" })).getByRole("option", { name: "DeepSeek" }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: "供应商（Provider）" })).getByRole("option", { name: /DeepSeek/ }));
+    expect(provider).toHaveValue("deepseek");
     expect(screen.getByLabelText("模型 Key")).toHaveAttribute(
       "placeholder",
       "应用内唯一标识，例如：deepseek-v4-pro",
     );
-    expect(screen.getByLabelText("模型 ID")).toHaveAttribute(
+    expect(screen.getByRole("combobox", { name: "模型 ID" })).toHaveAttribute(
       "placeholder",
-      "供应商接口使用的模型名，例如：deepseek-chat",
+      "供应商接口使用的模型名，例如：deepseek-v4-pro",
     );
     fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "Fixture Pro" } });
     fireEvent.change(screen.getByLabelText("模型 Key"), { target: { value: "fixture-pro" } });
-    fireEvent.change(screen.getByLabelText("模型 ID"), { target: { value: "fixture-pro-model" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型 ID" }), { target: { value: "fixture-pro-model" } });
     fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: "https://api.example.test/v1" } });
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "form-secret" } });
     fireEvent.click(screen.getByLabelText("设为默认模型"));
@@ -69,7 +93,7 @@ describe("SettingsDialog model management", () => {
 
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
       model_key: "fixture-pro",
-      protocol: "chat_completions",
+      protocol: "openai_chat_completions",
       provider: "deepseek",
       credential: { mode: "replace", value: "form-secret" },
     }), true));
@@ -84,7 +108,7 @@ describe("SettingsDialog model management", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
     fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "Qwen Max" } });
     fireEvent.change(screen.getByLabelText("模型 Key"), { target: { value: "qwen3.8-max" } });
-    fireEvent.change(screen.getByLabelText("模型 ID"), { target: { value: "qwen3.8-max" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型 ID" }), { target: { value: "qwen3.8-max" } });
     fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: "https://api.example.test/v1" } });
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "form-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -169,16 +193,41 @@ function settingsStore(): RootStore {
     state: "ready",
     schema_version: 1,
     default_model: "primary",
+    auxiliary_vision_model: null,
     issues: [],
   };
+  store.settings.model_catalog = modelCatalog();
   return store;
+}
+
+function modelCatalog(): ModelCatalogSnapshot {
+  return {
+    revision: "fixture",
+    entries: [
+      catalogEntry("deepseek", "DeepSeek", ["deepseek-v4-flash", "deepseek-v4-pro"]),
+      catalogEntry("zhipu", "智谱 GLM", ["glm-5.2", "glm-5v-turbo"]),
+      catalogEntry("dashscope", "阿里云百炼（Qwen）", ["qwen3.8-max"]),
+      catalogEntry("openai", "OpenAI", ["gpt-5.6"]),
+      catalogEntry("moonshot", "Moonshot（Kimi）", ["kimi-k3"]),
+    ],
+  };
+}
+
+function catalogEntry(provider: string, provider_label: string, model_ids: string[]) {
+  return {
+    provider,
+    provider_label,
+    protocol: "openai_chat_completions",
+    protocol_label: "Chat Completions（OpenAI Compatible）",
+    model_ids,
+  };
 }
 
 function model(model_key: string, is_default: boolean): ModelConfiguration {
   return {
     model_key,
     display_name: model_key,
-    protocol: "chat_completions",
+    protocol: "openai_chat_completions",
     provider: "fixture",
     endpoint: "https://api.example.test/v1",
     model: `${model_key}-model`,
@@ -186,6 +235,7 @@ function model(model_key: string, is_default: boolean): ModelConfiguration {
     max_output_tokens: 4_096,
     agent_max_output_tokens: 4_096,
     effective_max_output_tokens: 4_096,
+    supports_image_input: false,
     api_key_configured: true,
     origin: "configuration_file",
     editable: true,

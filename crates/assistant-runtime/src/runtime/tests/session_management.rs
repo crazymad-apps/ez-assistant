@@ -638,6 +638,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             staging_path: "/volatile/old.part".to_owned(),
             blob_hash: "e".repeat(64),
             size_bytes: 10,
+            media_type: None,
         })
         .await
         .expect("old attachment")
@@ -649,6 +650,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             staging_path: "/volatile/replacement.part".to_owned(),
             blob_hash: "f".repeat(64),
             size_bytes: 20,
+            media_type: None,
         })
         .await
         .expect("replacement attachment")

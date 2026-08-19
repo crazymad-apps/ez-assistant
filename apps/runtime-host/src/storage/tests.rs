@@ -14,8 +14,8 @@ use agent_model::SystemPromptSnapshot;
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
     FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ProtocolId, ProviderId, ReasoningPart, TextPart, ToolCall, ToolCallId, ToolMessage, ToolName,
-    ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
+    ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolMessage,
+    ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, IdempotencyKey, InputId,
@@ -71,6 +71,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         title: format!("Session {value}"),
         title_origin: assistant_protocol::SessionTitleOrigin::Generated,
         model_key: ModelKey::new("fixture-model").expect("model key"),
+        reasoning_effort: None,
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
         environment: SessionExecutionEnvironment {
             workspace_id: None,
@@ -214,6 +215,142 @@ fn assistant_message(value: &str, text: &str) -> ConversationMessage {
     })
 }
 
+fn assistant_message_with_usage(
+    value: &str,
+    input_tokens: u64,
+    cached_input_tokens: Option<u64>,
+) -> ConversationMessage {
+    let mut message = assistant_message(value, value);
+    let ConversationMessage::Assistant(message) = &mut message else {
+        unreachable!("assistant fixture")
+    };
+    message.usage = Some(TokenUsage {
+        input_tokens,
+        output_tokens: 10,
+        total_tokens: input_tokens + 10,
+        cached_input_tokens,
+        reasoning_tokens: Some(4),
+    });
+    ConversationMessage::Assistant(message.clone())
+}
+
+#[test]
+fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source = session_id("s-usage-source");
+    let sessions_directory = engine.sessions_directory.clone();
+    seed_session_and_run(&mut engine, source.as_str(), "r-usage");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "usage-one".to_owned(),
+            session_id: source.clone(),
+            run_id: run_id("r-usage"),
+            messages: vec![assistant_message_with_usage("usage-a", 100, Some(60))],
+            created_at_ms: 2_000,
+        })
+        .expect("append first usage");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "usage-two".to_owned(),
+            session_id: source.clone(),
+            run_id: run_id("r-usage"),
+            messages: vec![assistant_message_with_usage("usage-b", 300, Some(240))],
+            created_at_ms: 3_000,
+        })
+        .expect("append second usage");
+
+    let usage = engine.get_session_usage(&source).expect("source usage");
+    assert_eq!(usage.request_count, 2);
+    assert_eq!(usage.input_tokens, 400);
+    assert_eq!(usage.cached_input_tokens, 300);
+    assert_eq!(usage.cached_request_count, 2);
+    assert_eq!(usage.latest.expect("latest usage").input_tokens, 300);
+    assert_eq!(
+        engine
+            .connection
+            .query_row("SELECT COUNT(*) FROM model_request_records", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("request facts"),
+        2
+    );
+
+    let forked_id = session_id("s-usage-fork");
+    let source_conversation = engine
+        .load_conversation(&source)
+        .expect("source conversation");
+    engine
+        .fork_session(SessionFork {
+            source_session_id: source,
+            source_generation: 1,
+            session: new_session(forked_id.as_str(), &sessions_directory),
+            conversation: source_conversation,
+            attachments: Vec::new(),
+        })
+        .expect("fork session");
+    assert_eq!(
+        engine.get_session_usage(&forked_id).expect("fork usage"),
+        assistant_runtime::StoredSessionUsage::default()
+    );
+}
+
+#[test]
+fn pending_legacy_usage_is_backfilled_once_from_the_authoritative_conversation() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-usage-backfill");
+    seed_session_and_run(&mut engine, session.as_str(), "r-usage-backfill");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "usage-backfill-append".to_owned(),
+            session_id: session.clone(),
+            run_id: run_id("r-usage-backfill"),
+            messages: vec![assistant_message_with_usage(
+                "usage-backfill-message",
+                200,
+                Some(150),
+            )],
+            created_at_ms: 2_000,
+        })
+        .expect("append usage");
+    engine
+        .connection
+        .execute("DELETE FROM model_request_records", [])
+        .expect("simulate pre-ledger database");
+    engine
+        .connection
+        .execute(
+            "UPDATE session_usage SET request_count = 0, input_tokens_sum = 0,
+                output_tokens_sum = 0, total_tokens_sum = 0, cached_input_tokens_sum = 0,
+                cached_request_count = 0, reasoning_tokens_sum = 0,
+                reasoning_request_count = 0, latest_input_tokens = NULL,
+                latest_output_tokens = NULL, latest_total_tokens = NULL,
+                latest_cached_input_tokens = NULL, latest_reasoning_tokens = NULL,
+                backfilled = 0",
+            [],
+        )
+        .expect("mark legacy usage pending");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().expect("backfill legacy usage");
+    let first = reopened
+        .get_session_usage(&session)
+        .expect("backfilled usage");
+    assert_eq!(first.request_count, 1);
+    assert_eq!(first.input_tokens, 200);
+    assert_eq!(first.cached_input_tokens, 150);
+    drop(reopened);
+
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().expect("second recovery");
+    assert_eq!(
+        reopened.get_session_usage(&session).expect("stable usage"),
+        first
+    );
+}
+
 fn tool_exchange() -> Vec<ConversationMessage> {
     let call_id = ToolCallId::new("call-1").expect("tool call id");
     vec![
@@ -250,6 +387,7 @@ fn tool_exchange() -> Vec<ConversationMessage> {
                 call_id,
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text("hello".to_owned()),
+                metadata: None,
             },
         }),
     ]
@@ -614,6 +752,7 @@ fn commit_completed_turn(
             run_id: run_id.clone(),
             session_id: session.clone(),
             message: Some(message),
+            reasoning_effort: None,
             created_at_ms: accepted_at_ms + 1,
         })
         .expect("commit fixture user message");
@@ -721,6 +860,7 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
             staging_path: staging.to_string_lossy().into_owned(),
             blob_hash: blob_hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_000,
         })
         .expect("upload source attachment");
@@ -1088,6 +1228,7 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
             staging_path: staging.to_string_lossy().into_owned(),
             blob_hash: attachment_hash,
             size_bytes: attachment_bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_102,
         })
         .expect("upload legacy attachment");
@@ -2180,6 +2321,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
             run_id: run_id("run-files"),
             session_id: session.clone(),
             message: Some(message.clone()),
+            reasoning_effort: None,
             created_at_ms: 2_001,
         })
         .expect("commit user message");
@@ -2773,7 +2915,9 @@ fn startup_finishes_staged_run_start_before_marking_it_interrupted() {
                 messages: vec![user_message("user-r-start", "hello")],
                 created_at_ms: 2_000,
             },
-            AppendPurpose::UserMessage,
+            AppendPurpose::UserMessage {
+                reasoning_effort: None,
+            },
         )
         .expect("stage run start");
     drop(engine);
@@ -2933,7 +3077,7 @@ fn generation_switch_keeps_old_authority_until_sqlite_commit() {
         .expect("append original");
     let replacement = ConversationSnapshot::new(vec![user_message("message-new", "replacement")]);
     let plan = engine
-        .begin_replacement(session_id("s-rewrite"), replacement.clone())
+        .begin_replacement(session_id("s-rewrite"), replacement.clone(), 2)
         .expect("write replacement generation");
     drop(engine);
 
@@ -2970,7 +3114,7 @@ fn committed_generation_replaces_message_count_and_removes_old_body() {
         .expect("append original");
     let replacement = ConversationSnapshot::new(vec![user_message("message-only", "replacement")]);
     let plan = engine
-        .begin_replacement(session_id("s-commit"), replacement.clone())
+        .begin_replacement(session_id("s-commit"), replacement.clone(), 2)
         .expect("begin replacement");
     let old_path = body_path(
         &engine
@@ -3160,6 +3304,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 run_id: run_id(run),
                 session_id: session.clone(),
                 message: Some(user_message),
+                reasoning_effort: None,
                 created_at_ms: at + 1,
             })
             .expect("commit user");
@@ -3268,6 +3413,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         engine.set_session_model(ModelChange {
             session_id: session.clone(),
             model_key: ModelKey::new("other-model").expect("model key"),
+            reasoning_effort: None,
             changed_at_ms: 2_001,
         }),
         Err(error) if error.kind() == StoreErrorKind::Conflict
@@ -3283,6 +3429,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         .set_session_model(ModelChange {
             session_id: session.clone(),
             model_key: ModelKey::new("other-model").expect("model key"),
+            reasoning_effort: None,
             changed_at_ms: 2_003,
         })
         .expect("model change");
@@ -3368,6 +3515,7 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             staging_path: first_staging.to_string_lossy().into_owned(),
             blob_hash: hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_000,
         })
         .expect("upload attachment");
@@ -3396,6 +3544,7 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             staging_path: duplicate_staging.to_string_lossy().into_owned(),
             blob_hash: hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_001,
         })
         .expect("idempotent retry");
@@ -3415,6 +3564,7 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             staging_path: different_staging.to_string_lossy().into_owned(),
             blob_hash: different_hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_002,
         })
         .expect("upload same bytes under another name");
@@ -3437,6 +3587,7 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             staging_path: reused_staging.to_string_lossy().into_owned(),
             blob_hash: hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_003,
         })
         .expect("reuse attachment blob");
@@ -3522,6 +3673,7 @@ fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
             staging_path: staging.to_string_lossy().into_owned(),
             blob_hash: hash.clone(),
             size_bytes: bytes.len() as u64,
+            media_type: None,
             created_at_ms: 2_000,
         })
         .expect("upload attachment");
@@ -3628,6 +3780,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
                 call_id,
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::Text("tool-result-token".to_owned()),
+                metadata: None,
             },
         }),
     ];
@@ -3818,7 +3971,7 @@ fn recall_index_filters_old_generations_and_cascades_session_deletion() {
     let replacement =
         ConversationSnapshot::new(vec![user_message("recall-new", "current-generation-token")]);
     let plan = engine
-        .begin_replacement(session_id("s-recall-generation"), replacement)
+        .begin_replacement(session_id("s-recall-generation"), replacement, 2)
         .expect("begin replacement");
     engine
         .commit_replacement(&plan)

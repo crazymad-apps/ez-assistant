@@ -64,7 +64,7 @@ pub struct ModelRequest {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 /// 与 Provider 无关的 generation 配置。
 ///
-/// 某个字段是否生效由 Adapter 依据能力 Profile 决定；模型层不做数值范围校验。
+/// 某个字段是否生效由协议 Adapter 依据已编译能力决定；模型层不做数值范围校验。
 pub struct GenerationConfig {
     /// 采样温度。
     pub temperature: Option<f32>,
@@ -83,13 +83,27 @@ pub struct ReasoningConfig {
     pub effort: Option<ReasoningEffort>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// reasoning 强度档位。
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::XHigh => 3,
+            Self::Max => 4,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

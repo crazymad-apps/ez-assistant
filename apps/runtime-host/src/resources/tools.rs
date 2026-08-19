@@ -15,8 +15,8 @@ use std::{
 use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
     AbsolutePath, FileAuthorizationFacts, FileOperation, FsDeleteTool, FsEditTool, FsFindTool,
-    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ListPinnedMemoriesTool, PinMemoryTool,
-    ReadFileToolConfig, RecallMemoryTool, RecallMemoryToolConfig, ResolvedToolBatch,
+    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, InspectImagesTool, ListPinnedMemoriesTool,
+    PinMemoryTool, ReadFileToolConfig, RecallMemoryTool, RecallMemoryToolConfig, ResolvedToolBatch,
     ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver, ShellExecTool,
     ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
@@ -177,6 +177,15 @@ impl LocalToolResources {
             )
             .with_reference_reader(request.conversation_recall_reader),
         )?;
+        if let Some(inspector) = request.image_inspector {
+            register(
+                &mut registry,
+                InspectImagesTool::new(
+                    inspector,
+                    Path::new(&request.environment.session_attachment_directory).to_path_buf(),
+                ),
+            )?;
+        }
         // 校验当前 Session 冻结附件目录的类型边界。Authorizer 持有
         // Runtime Home 下的 sessions root，因此同样保护其他 Session 附件。
         AbsolutePath::new(&request.environment.session_attachment_directory).map_err(|source| {
@@ -354,7 +363,7 @@ mod tests {
     use agent_model::{
         GenerationConfig, ModelCapabilities, ModelRequest, ProviderOptions, SystemPromptSnapshot,
     };
-    use agent_provider_openai_compatible::{Profile, encode_request};
+    use agent_openai_compatible::{ProtocolAdapter, encode_request};
     use agent_sdk::{AgentBuilder, ContextWindowEvaluator, ExecutionInput, ExecutionOutcome};
     use agent_testkit::{
         FakePinnedMemoryStore, ModelScript, ScriptedMemoryRecall, ScriptedModelService,
@@ -390,6 +399,7 @@ mod tests {
                 pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
                 conversation_recall: conversation_recall.clone(),
                 conversation_recall_reader: conversation_recall,
+                image_inspector: None,
             })
             .expect("tool bundle")
     }
@@ -610,7 +620,7 @@ mod tests {
 
         // 用真实 Host Bundle 审计，而不是只验证 recall_memory 的手写样例。以后标准
         // 工具新增方言敏感 Schema 时，这里会在请求编码阶段给出具体工具名。
-        let encoded = encode_request(&request, &Profile::deepseek(), "deepseek-chat")
+        let encoded = encode_request(&request, &ProtocolAdapter::deepseek(), "deepseek-chat")
             .expect("every registered host tool must encode for DeepSeek");
         assert_eq!(
             encoded.tools.as_ref().map(Vec::len),
@@ -665,6 +675,7 @@ mod tests {
         let model = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },

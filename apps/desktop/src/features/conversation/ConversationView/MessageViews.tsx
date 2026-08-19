@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AssistantMessageSnapshot,
   AttachmentSummary,
@@ -8,6 +8,7 @@ import type {
   UserMessageSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { thumbnailAttachment } from "../../../native-bridge/nativeResource";
 import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import { ChildTaskTree } from "./ChildTaskTree";
 import {
@@ -26,11 +27,20 @@ export function UserMessage(props: Readonly<{
   attachments: readonly AttachmentSummary[];
   on_attachment_click: (attachment: AttachmentSummary) => void;
 }>) {
+  const images = props.attachments.filter((attachment) => attachment.media_type?.startsWith("image/"));
+  const files = props.attachments.filter((attachment) => !attachment.media_type?.startsWith("image/"));
   return (
     <article className={styles.user_message} data-message-id={props.message.message_id}>
-      {props.attachments.length > 0 && (
+      {images.length > 0 && (
+        <div aria-label="消息图片" className={styles.user_images}>
+          {images.map((attachment) => (
+            <MessageImage attachment={attachment} key={attachment.attachment_id} on_click={() => props.on_attachment_click(attachment)} />
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
         <div className={styles.user_attachments}>
-          {props.attachments.map((attachment) => (
+          {files.map((attachment) => (
             <button
               disabled={attachment.state !== "ready"}
               key={attachment.attachment_id}
@@ -46,6 +56,22 @@ export function UserMessage(props: Readonly<{
       <div className={styles.user_bubble}>{props.message.text}</div>
       <time>{formatTime(props.message.created_at_ms)}</time>
     </article>
+  );
+}
+
+function MessageImage(props: Readonly<{ attachment: AttachmentSummary; on_click: () => void }>) {
+  const [source, setSource] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void thumbnailAttachment(props.attachment.session_id, props.attachment.attachment_id)
+      .then((value) => { if (active) setSource(value); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [props.attachment.attachment_id, props.attachment.session_id]);
+  return (
+    <button aria-label={`预览图片 ${props.attachment.original_name}`} disabled={props.attachment.state !== "ready"} onClick={props.on_click} type="button">
+      {source ? <img alt={props.attachment.original_name} src={source} /> : <span><Icon name="paperclip" size={18} /></span>}
+    </button>
   );
 }
 

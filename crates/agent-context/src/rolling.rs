@@ -349,18 +349,17 @@ fn add_usage(total: &mut Option<agent_types::TokenUsage>, usage: Option<&agent_t
     let Some(usage) = usage else {
         return;
     };
-    let target = total.get_or_insert_with(agent_types::TokenUsage::default);
+    let Some(target) = total.as_mut() else {
+        *total = Some(usage.clone());
+        return;
+    };
     target.input_tokens = target.input_tokens.saturating_add(usage.input_tokens);
     target.output_tokens = target.output_tokens.saturating_add(usage.output_tokens);
     target.total_tokens = target.total_tokens.saturating_add(usage.total_tokens);
-    if let Some(value) = usage.cached_input_tokens {
-        target.cached_input_tokens = Some(
-            target
-                .cached_input_tokens
-                .unwrap_or_default()
-                .saturating_add(value),
-        );
-    }
+    target.cached_input_tokens = target
+        .cached_input_tokens
+        .zip(usage.cached_input_tokens)
+        .map(|(current, value)| current.saturating_add(value));
     if let Some(value) = usage.reasoning_tokens {
         target.reasoning_tokens = Some(
             target
@@ -517,6 +516,21 @@ mod tests {
             finish_reason,
             usage: Some(usage(42)),
         }
+    }
+
+    #[test]
+    fn compacted_cache_usage_remains_unknown_when_any_request_omits_it() {
+        let mut total = None;
+        let known = usage(40);
+        let mut unknown = usage(60);
+        unknown.cached_input_tokens = None;
+
+        add_usage(&mut total, Some(&known));
+        add_usage(&mut total, Some(&unknown));
+
+        let total = total.expect("usage total");
+        assert_eq!(total.input_tokens, 80);
+        assert_eq!(total.cached_input_tokens, None);
     }
 
     fn message_events(message: &AssistantMessage) -> Vec<ModelEvent> {
@@ -733,6 +747,7 @@ mod tests {
                     call_id: call_1,
                     status: ToolResultStatus::Success,
                     content: ToolResultContent::Text("one".to_owned()),
+                    metadata: None,
                 },
             }),
             ConversationMessage::Assistant(AssistantMessage {
@@ -752,6 +767,7 @@ mod tests {
                     call_id: call_2,
                     status: ToolResultStatus::Success,
                     content: ToolResultContent::Text("two".to_owned()),
+                    metadata: None,
                 },
             }),
             assistant("assistant_2", Some(usage(70))),
@@ -839,6 +855,7 @@ mod tests {
                     call_id,
                     status: ToolResultStatus::Success,
                     content: ToolResultContent::Text("result".to_owned()),
+                    metadata: None,
                 },
             }),
         ]);

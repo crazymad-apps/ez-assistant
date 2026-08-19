@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -69,8 +69,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-provider-openai-compatible"
-version = "0.15.0"
+name = "agent-openai-compatible"
+version = "0.16.0"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -248,7 +248,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "assistant-protocol"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -288,13 +288,13 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-memory",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-sdk",
  "agent-testkit",
  "agent-tools",
@@ -309,6 +309,8 @@ dependencies = [
  "dirs",
  "futures-core",
  "getrandom 0.4.3",
+ "image",
+ "infer",
  "libc",
  "reqwest",
  "rusqlite",
@@ -914,6 +916,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,13 +958,13 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-memory",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-sdk",
  "agent-testkit",
  "agent-tools",
@@ -1156,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1456,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
@@ -1831,6 +1839,16 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -2297,9 +2315,24 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png 0.18.1",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -2658,13 +2691,13 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-memory",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-testkit",
  "agent-tools",
  "agent-types",
@@ -3390,6 +3423,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3579,12 +3618,12 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-testkit",
  "agent-tools",
  "agent-types",
@@ -3681,12 +3720,12 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-testkit",
  "agent-tools",
  "agent-types",
@@ -3833,12 +3872,12 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "agent-context",
  "agent-core",
  "agent-model",
- "agent-provider-openai-compatible",
+ "agent-openai-compatible",
  "agent-testkit",
  "agent-tools",
  "agent-tools-local",
@@ -5628,6 +5667,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6381,6 +6426,21 @@ name = "zmij"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd2f034a4bebf216c9e4b7083603e024cf930873fd67830cfb083c9fa33129d9"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]
 
 [[package]]
 name = "zvariant"

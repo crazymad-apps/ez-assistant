@@ -4,6 +4,7 @@
 //! 注入的能力实现；本地、远程或测试实现都可以实现同一能力契约。
 
 pub mod fs;
+pub mod inspect_images;
 pub mod pinned_memory;
 pub mod recall_memory;
 pub mod shell;

@@ -997,6 +997,7 @@ mod tests {
         let model = Arc::new(ScriptedModelService::new(
             ModelCapabilities {
                 reasoning: true,
+                image_input: false,
                 tool_calls: true,
                 streaming: true,
             },

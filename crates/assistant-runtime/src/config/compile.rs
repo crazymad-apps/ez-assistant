@@ -15,6 +15,7 @@ use agent_model::{GenerationConfig, ModelRetryPolicy, ModelRetryReason};
 use assistant_protocol::ModelKey;
 
 use super::{
+    catalog::ModelCatalog,
     domain::{
         ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
         ResolvedConfig, RuntimeModelTransportConfig,
@@ -35,6 +36,14 @@ const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 /// active 快照；逐模型错误则保留有效模型和安全诊断。整个过程是纯函数，不读取文件、
 /// 不修改 Runtime registry，也不向错误中附带原始 TOML。
 pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
+    compile_runtime_config_with_catalog(document, &ModelCatalog::empty())
+}
+
+/// 使用已校验的随包目录编译 config.toml；目录本身不由该纯函数读取或写回。
+pub fn compile_runtime_config_with_catalog(
+    document: &str,
+    catalog: &ModelCatalog,
+) -> ConfigCompilation {
     // 先用无业务类型的 Value 检查语法和重复 key。若直接进入 serde 结构，语法错误和
     // 顶层类型错误会混在一起，也更容易误把包含源码片段的底层错误向上透出。
     if toml::from_str::<toml::Value>(document).is_err() {
@@ -77,6 +86,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
         &raw.agent.defaults.execution_limits,
         &raw.agent.defaults.guardrails,
         &raw.agent.defaults.delegation,
+        raw.agent.vision.as_ref(),
     ) {
         Ok(global) => global,
         Err(issues) => {
@@ -87,6 +97,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
                     state: ConfigState::Invalid,
                     schema_version: Some(raw.schema_version),
                     default_model: ModelKey::new(raw.default_model).ok(),
+                    auxiliary_vision_model: None,
                     delegation: None,
                     models: Vec::new(),
                     issues,
@@ -112,7 +123,13 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
     let mut valid_models = BTreeMap::new();
     let mut model_projections = Vec::with_capacity(raw.models.len());
     for (raw_key, value) in raw.models {
-        let output = compile_model(raw_key, value, &raw.default_model, &global.generation);
+        let output = compile_model(
+            raw_key,
+            value,
+            &raw.default_model,
+            &global.generation,
+            catalog,
+        );
         all_issues.extend(output.projection.issues.iter().cloned());
         if let Some(model) = output.resolved {
             valid_models.insert(model.key().clone(), model);
@@ -132,7 +149,23 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
         });
     }
 
-    // 能走到这里说明全局配置已形成快照。是否存在模型级诊断只决定 Ready/Degraded。
+    let auxiliary_vision_model = global
+        .vision
+        .as_ref()
+        .map(|vision| vision.model_key.clone());
+    let vision = global.vision.filter(|vision| {
+        let valid = valid_models
+            .get(&vision.model_key)
+            .is_some_and(|model| model.capabilities().image_input);
+        if !valid {
+            all_issues.push(ConfigIssue {
+                code: ConfigIssueCode::InvalidModel,
+                model_key: None,
+                message: "auxiliary vision model is unavailable or lacks image input",
+            });
+        }
+        valid
+    });
     let state = if all_issues.is_empty() {
         ConfigState::Ready
     } else {
@@ -146,6 +179,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
         budget: global.budget,
         guardrails: global.guardrails,
         delegation: global.delegation,
+        vision,
         models: valid_models,
     };
     ConfigCompilation {
@@ -155,6 +189,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
             state,
             schema_version: Some(raw.schema_version),
             default_model,
+            auxiliary_vision_model,
             delegation: Some(global.delegation),
             models: model_projections,
             issues: all_issues,
@@ -178,11 +213,12 @@ struct CompiledGlobalConfig {
     guardrails: GuardrailConfig,
     /// 单层子任务委派的显式产品上限。
     delegation: super::domain::DelegationConfig,
+    vision: Option<super::domain::VisionConfig>,
 }
 
 /// 校验 Runtime/Agent 全局字段并直接映射到已有领域类型。
 ///
-/// 这里不读取 Provider Profile，也不处理 tool choice/reasoning；这些是 Run 业务编译职责，
+/// 这里不读取 Provider ProtocolAdapter，也不处理 tool choice/reasoning；这些是 Run 业务编译职责，
 /// 不是用户静态配置维度。
 fn compile_global(
     runtime: &RawRuntimeConfig,
@@ -190,6 +226,7 @@ fn compile_global(
     limits: &RawExecutionLimits,
     guardrails: &RawGuardrailConfig,
     delegation: &RawDelegationConfig,
+    vision: Option<&super::schema::RawVisionConfig>,
 ) -> Result<CompiledGlobalConfig, Vec<ConfigIssue>> {
     let mut issues = Vec::new();
     // request timeout 同时约束等待响应建立；必须覆盖 connect timeout，避免连接阶段
@@ -252,6 +289,29 @@ fn compile_global(
         ));
     }
 
+    let vision = match vision {
+        Some(vision)
+            if vision.timeout_ms > 0
+                && vision.max_output_tokens > 0
+                && ModelKey::new(vision.model_key.clone()).is_ok() =>
+        {
+            Some(super::domain::VisionConfig {
+                model_key: ModelKey::new(vision.model_key.clone())
+                    .expect("vision model key was validated"),
+                timeout: Duration::from_millis(vision.timeout_ms),
+                max_output_tokens: vision.max_output_tokens,
+            })
+        }
+        Some(_) => {
+            issues.push(global_issue(
+                ConfigIssueCode::InvalidLimit,
+                "auxiliary vision configuration is invalid",
+            ));
+            None
+        }
+        None => None,
+    };
+
     let retry_policy = match runtime.model_retry.as_ref() {
         Some(retry) => compile_retry_policy(retry, &mut issues),
         None => None,
@@ -293,6 +353,7 @@ fn compile_global(
             max_output_tokens: NonZeroU32::new(delegation.max_output_tokens)
                 .expect("delegation output limit was validated"),
         },
+        vision,
     })
 }
 
@@ -413,6 +474,7 @@ fn invalid_compilation(
             state: ConfigState::Invalid,
             schema_version,
             default_model,
+            auxiliary_vision_model: None,
             delegation: None,
             models: Vec::new(),
             issues: vec![issue],

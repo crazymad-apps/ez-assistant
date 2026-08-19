@@ -116,6 +116,38 @@
   span { overflow: hidden; font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 }
 
+.user_images {
+  display: flex;
+  max-width: min(74%, 620px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  button {
+    width: 80px;
+    height: 80px;
+    flex: 0 0 80px;
+    overflow: hidden;
+    padding: 0;
+    border: 1px solid var(--ez-border);
+    border-radius: 10px;
+    background: var(--ez-surface-subtle);
+  }
+
+  button:hover:not(:disabled) { border-color: var(--ez-border-strong); }
+  img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  span { display: grid; height: 100%; place-items: center; color: var(--ez-text-muted); }
+}
+
+@media (max-width: 620px) {
+  .user_images button {
+    width: 72px;
+    height: 72px;
+    flex-basis: 72px;
+  }
+}
+
 .assistant_message { min-width: 0; max-width: 100%; margin: 0 0 25px; }
 .turn_with_tasks { min-width: 0; }
 .assistant_segments { display: grid; min-width: 0; max-width: 100%; gap: 12px; }

@@ -28,6 +28,7 @@ mod session_management;
 mod session_resources;
 mod session_transfer;
 mod tool_exchange;
+mod usage;
 mod worker;
 mod workspace;
 

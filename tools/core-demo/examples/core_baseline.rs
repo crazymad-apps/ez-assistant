@@ -123,6 +123,7 @@ impl RepeatingModel {
         Self {
             capabilities: ModelCapabilities {
                 reasoning: false,
+                image_input: false,
                 tool_calls: false,
                 streaming: true,
             },
@@ -246,6 +247,7 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
                     call_id,
                     status: ToolResultStatus::Success,
                     content: ToolResultContent::Json(json!({"index": index})),
+                    metadata: None,
                 },
             }));
             messages.push(ConversationMessage::Assistant(AssistantMessage {
