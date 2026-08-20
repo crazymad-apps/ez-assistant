@@ -118,6 +118,7 @@ impl StorageEngine {
             recall_index_available,
         };
         engine.recover_session_deletions()?;
+        engine.repair_workspace_resources()?;
         engine.repair_session_resources()?;
         engine.recover_attachments()?;
         Ok(engine)
@@ -130,6 +131,8 @@ impl StorageEngine {
         // parent delegate result 必须在 child 工具交换和 child 终态修复之后重建。
         unavailable.extend(self.recover_pending_tool_exchanges()?);
         self.unavailable_sessions = unavailable;
+        let tool_image_diagnostics = self.recover_tool_images()?;
+        self.unavailable_sessions.extend(tool_image_diagnostics);
         self.interrupt_nonterminal_runs()?;
         self.backfill_session_usage()?;
         Ok(RecoveredRuntime {

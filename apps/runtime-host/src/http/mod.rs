@@ -28,8 +28,8 @@ use self::{
     commands::handle_command,
     events::stream_events,
     resources::{
-        export_session_markdown, preview_attachment, preview_tool_file,
-        resolve_tool_file_native_path, thumbnail_attachment,
+        export_session_markdown, preview_attachment, preview_child_tool_file, preview_tool_file,
+        resolve_child_tool_file_native_path, resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
 
@@ -87,6 +87,14 @@ pub(crate) fn router(state: HttpState) -> Router {
         .route(
             "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/native-path",
             get(resolve_tool_file_native_path),
+        )
+        .route(
+            "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/preview",
+            get(preview_child_tool_file),
+        )
+        .route(
+            "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/native-path",
+            get(resolve_child_tool_file_native_path),
         )
         .route(
             "/sessions/{session_id}/export.md",

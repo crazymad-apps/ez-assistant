@@ -13,7 +13,7 @@ use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, TransportTimeouts,
 };
 use agent_tools::{
     ListPinnedMemoriesTool, PinMemoryTool, RecallMemoryTool, RecallMemoryToolConfig, ToolRegistry,
@@ -71,12 +71,12 @@ pub(crate) async fn build_chat_resources(
     config: ChatConfig,
 ) -> Result<ChatResources, DemoError> {
     let memory = build_memory_resources(data_dir).await?;
-    let model = OpenAiCompatibleService::new(
+    let model = OpenAiChatCompletionsService::new(
         config.base_url,
         BearerCredential::new(config.api_key),
         config.model,
         config.context_window_tokens,
-        ProtocolAdapter::deepseek(),
+        ChatProtocolAdapter::deepseek(),
         TransportTimeouts::default(),
     )
     .map_err(|error| DemoError::Provider(error.to_string()))?;

@@ -16,6 +16,61 @@ use super::{
 use crate::config_source::prepare_private_directory;
 
 impl StorageEngine {
+    /// Runtime Home 整体移动后，重建只由 Workspace ID 决定的 Host 私有目录。
+    /// 用户工作目录是外部资源，不参与重定位。
+    pub(super) fn repair_workspace_resources(&mut self) -> StorageResult<()> {
+        let rows = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT workspace_id, agent_directory FROM workspaces ORDER BY workspace_id",
+                )
+                .map_err(|source| {
+                    internal_error("workspace resources could not be queried", source)
+                })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| {
+                    internal_error("workspace resources could not be read", source)
+                })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|source| {
+                internal_error("workspace resource row could not be read", source)
+            })?
+        };
+        for (workspace_id, stored_agent_directory) in rows {
+            let workspace_id = WorkspaceId::new(workspace_id)
+                .map_err(|_| invalid_data("stored workspace id is invalid"))?;
+            super::filesystem::validate_workspace_component(&workspace_id)?;
+            let expected = self
+                .workspaces_directory
+                .join(workspace_id.as_str())
+                .join("agent");
+            let expected_text = expected
+                .to_str()
+                .ok_or_else(|| invalid_data("workspace agent directory is not valid UTF-8"))?;
+            if stored_agent_directory == expected_text {
+                continue;
+            }
+            if !is_moved_workspace_agent_directory(
+                Path::new(&stored_agent_directory),
+                workspace_id.as_str(),
+            ) {
+                return Err(invalid_data("stored workspace agent directory is invalid"));
+            }
+            self.connection
+                .execute(
+                    "UPDATE workspaces SET agent_directory = ?1 WHERE workspace_id = ?2",
+                    params![expected_text, workspace_id.as_str()],
+                )
+                .map_err(|source| {
+                    database_write_error("workspace resource path could not be rebased", source)
+                })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn register_workspace(
         &mut self,
         registration: NewWorkspaceRegistration,
@@ -255,6 +310,29 @@ impl StorageEngine {
             internal_error("workspace agent directory could not be prepared", source)
         })
     }
+}
+
+fn is_moved_workspace_agent_directory(path: &Path, workspace_id: &str) -> bool {
+    path.is_absolute()
+        && path.file_name().and_then(|value| value.to_str()) == Some("agent")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some(workspace_id)
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("workspaces")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("data")
 }
 
 type WorkspaceRow = (String, String, String, String, i64, i64, Option<i64>);

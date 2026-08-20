@@ -1,11 +1,12 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::collections::BTreeSet;
 
 use agent_types::{ToolName, ToolResultContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    InspectImagesRequest, Tool, ToolContext, ToolError, ToolExecuteFuture, ToolResolution,
+    FileBatchAuthorizationFacts, FileOperation, InspectImagesRequest, SessionPathResolver, Tool,
+    ToolContext, ToolError, ToolExecuteFuture, ToolResolution, standard::fs::resolve_path,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -36,14 +37,14 @@ pub struct InspectImagesOutput {
 
 pub struct InspectImagesTool {
     inspector: crate::SharedImageInspector,
-    attachment_root: PathBuf,
+    resolver: SessionPathResolver,
 }
 
 impl InspectImagesTool {
-    pub fn new(inspector: crate::SharedImageInspector, attachment_root: PathBuf) -> Self {
+    pub fn new(inspector: crate::SharedImageInspector, resolver: SessionPathResolver) -> Self {
         Self {
             inspector,
-            attachment_root,
+            resolver,
         }
     }
 }
@@ -58,7 +59,8 @@ impl Tool for InspectImagesTool {
     }
 
     fn description(&self) -> String {
-        "Inspect one or more attached images for a specific goal. Use only image paths listed in the conversation; background is optional context.".to_owned()
+        "Inspect one or more local images for a specific goal. Paths may be absolute or relative to the session working directory; background is optional context."
+            .to_owned()
     }
 
     fn resolve(
@@ -74,29 +76,41 @@ impl Tool for InspectImagesTool {
             ));
         }
         let mut seen = BTreeSet::new();
-        for path in &input.image_paths {
-            let path = PathBuf::from(path);
-            let valid = path
-                .strip_prefix(&self.attachment_root)
-                .ok()
-                .is_some_and(|relative| {
-                    let components = relative.components().collect::<Vec<_>>();
-                    components.len() == 2
-                        && components
-                            .iter()
-                            .all(|component| matches!(component, std::path::Component::Normal(_)))
-                });
-            if !valid || !seen.insert(path) {
+        let mut paths = Vec::with_capacity(input.image_paths.len());
+        for path in input.image_paths {
+            let path = resolve_path(&self.resolver, &path)?;
+            if !seen.insert(path.clone()) {
                 return Err(ToolError::invalid_input(
-                    "image_paths must be unique current-session attachment paths",
+                    "image_paths must resolve to unique paths",
                 ));
             }
+            paths.push(path);
         }
-        Ok(ToolResolution::general(ResolvedInspectImagesInput {
-            image_paths: input.image_paths,
+        let resolved = ResolvedInspectImagesInput {
+            image_paths: paths.iter().map(|path| path.as_str().to_owned()).collect(),
             goal: input.goal,
             background: input.background.filter(|value| !value.trim().is_empty()),
-        }))
+        };
+        let mut semantic_arguments = serde_json::to_value(&resolved)
+            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        let serde_json::Value::Object(arguments) = &mut semantic_arguments else {
+            return Err(ToolError::invalid_input(
+                "resolved inspect_images input must serialize as an object",
+            ));
+        };
+        arguments.insert(
+            "operation".to_owned(),
+            serde_json::to_value(FileOperation::Read)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?,
+        );
+        Ok(ToolResolution::with_facts(
+            resolved,
+            FileBatchAuthorizationFacts {
+                operation: FileOperation::Read,
+                paths,
+            },
+            semantic_arguments,
+        ))
     }
 
     fn execute<'a>(
@@ -135,7 +149,7 @@ impl Tool for InspectImagesTool {
     }
 
     fn encode_output(output: Self::Output) -> Result<ToolResultContent, String> {
-        Ok(ToolResultContent::Text(output.text))
+        Ok(ToolResultContent::text(output.text))
     }
 }
 
@@ -143,8 +157,13 @@ impl Tool for InspectImagesTool {
 mod tests {
     use std::sync::Arc;
 
+    use agent_types::{ToolCall, ToolCallId};
+
     use super::*;
-    use crate::{ImageInspection, ImageInspectionFuture, ImageInspector, ImageInspectorError};
+    use crate::{
+        AbsolutePath, Dispatcher, ImageInspection, ImageInspectionFuture, ImageInspector,
+        ImageInspectorError, ResolvedBatchItemRef, ToolRegistry,
+    };
 
     struct FixtureInspector;
 
@@ -168,7 +187,7 @@ mod tests {
     fn tool() -> InspectImagesTool {
         InspectImagesTool::new(
             Arc::new(FixtureInspector),
-            PathBuf::from("/sessions/s-1/attachments"),
+            SessionPathResolver::new(AbsolutePath::new("/workspace").expect("workspace")),
         )
     }
 
@@ -191,19 +210,59 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_escape_duplicate_and_blank_goal() {
+    fn resolve_accepts_workspace_absolute_and_relative_paths_with_batch_read_facts() {
         let valid = || InspectImagesInput {
-            image_paths: vec!["/sessions/s-1/attachments/a/image.png".to_owned()],
+            image_paths: vec!["chart.png".to_owned(), "/tmp/reference.png".to_owned()],
             goal: "read the chart".to_owned(),
             background: None,
         };
-        assert!(tool().resolve(valid()).is_ok());
-        let mut escape = valid();
-        escape.image_paths[0] = "/sessions/s-1/attachments/a/../secret.png".to_owned();
-        assert!(tool().resolve(escape).is_err());
+        let resolution = tool().resolve(valid()).expect("resolve paths");
+        let resolved = resolution.into_input();
+        assert_eq!(
+            resolved.image_paths,
+            vec!["/workspace/chart.png", "/tmp/reference.png"]
+        );
+
         let mut blank = valid();
         blank.goal = "  ".to_owned();
         assert!(tool().resolve(blank).is_err());
+
+        let duplicate = InspectImagesInput {
+            image_paths: vec!["chart.png".to_owned(), "/workspace/./chart.png".to_owned()],
+            goal: "compare".to_owned(),
+            background: None,
+        };
+        assert!(tool().resolve(duplicate).is_err());
+
+        let mut registry = ToolRegistry::new();
+        registry.register(tool()).expect("register");
+        let tools = registry.snapshot();
+        let batch = Dispatcher::resolve_batch(
+            &tools,
+            &[ToolCall {
+                id: ToolCallId::new("call-inspect").expect("call id"),
+                name: ToolName::new("inspect_images").expect("tool name"),
+                arguments: serde_json::json!({
+                    "image_paths": ["chart.png", "/tmp/reference.png"],
+                    "goal": "compare"
+                }),
+            }],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = batch.get(0).expect("invocation") else {
+            panic!("inspect_images should resolve")
+        };
+        let facts = invocation
+            .facts::<FileBatchAuthorizationFacts>()
+            .expect("batch file facts");
+        assert_eq!(facts.operation, FileOperation::Read);
+        assert_eq!(
+            facts
+                .paths
+                .iter()
+                .map(AbsolutePath::as_str)
+                .collect::<Vec<_>>(),
+            vec!["/workspace/chart.png", "/tmp/reference.png"]
+        );
     }
 
     #[test]
@@ -220,7 +279,7 @@ mod tests {
         );
         assert_eq!(
             InspectImagesTool::encode_output(output).expect("output"),
-            ToolResultContent::Text("finding".to_owned())
+            ToolResultContent::text("finding".to_owned())
         );
     }
 

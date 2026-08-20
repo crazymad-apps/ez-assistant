@@ -74,7 +74,7 @@ subject: ToolApprovalSubject,
  */
 available_decisions: Array<ApprovalDecision>,
 /**
- * 持久允许将写入的精确匹配语义预览。
+ * 持久允许将写入的精确匹配语义预览；不支持持久授权的多路径调用仅作展示。
  */
 exact_rule_preview: ToolApprovalSubject,
 /**
@@ -1641,7 +1641,7 @@ stderr: string, };
  */
 export type ToolActivityStatus = "proposed" | "running" | "completed" | "failed";
 
-export type ToolApprovalSubject = { "type": "general", tool_name: string, } | { "type": "delegation", tool_name: string, title: string, task_summary: string, } | { "type": "file", tool_name: string, operation: string, path: string, } | { "type": "shell", tool_name: string, command: string, working_directory: string, timeout_ms: number, process_mode: string, };
+export type ToolApprovalSubject = { "type": "general", tool_name: string, } | { "type": "delegation", tool_name: string, title: string, task_summary: string, } | { "type": "file", tool_name: string, operation: string, path: string, } | { "type": "files", tool_name: string, operation: string, paths: Array<string>, } | { "type": "shell", tool_name: string, command: string, working_directory: string, timeout_ms: number, process_mode: string, };
 
 /**
  * 应用层工具调用的不透明标识。
@@ -1686,7 +1686,7 @@ export type ToolFileReference = { resource_ref_id: ResourceRefId, origin: ToolFi
 /**
  * 工具结果中可引用的文件。
  */
-export type ToolFileResourceOrigin = "workspace_file" | "session_private_file";
+export type ToolFileResourceOrigin = "workspace_file" | "session_private_file" | "session_tool_image";
 
 export type ToolFileResourceState = "available" | "unavailable";
 

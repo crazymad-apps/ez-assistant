@@ -16,12 +16,14 @@ mod tool;
 pub use conversation::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
     ConversationSnapshot, ConversationValidationError, FileReference, FileReferencesPart,
-    OpaqueProviderState, ProviderStateError, ReasoningPart, SystemMessage, TextPart, ToolCall,
-    ToolMessage, UserMessage, UserPart,
+    MAX_PROVIDER_STATE_ITEM_BYTES, MAX_PROVIDER_STATE_TURN_BYTES, OpaqueProviderState,
+    ProviderStateError, ReasoningPart, SystemMessage, TextPart, ToolCall, ToolMessage, UserMessage,
+    UserPart,
 };
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
 pub use model::{FinishReason, ModelIdentity, TokenUsage};
 pub use tool::{
-    ToolChoice, ToolDefinition, ToolExecutionMetadata, ToolName, ToolNameError, ToolResult,
-    ToolResultContent, ToolResultStatus,
+    ToolChoice, ToolDefinition, ToolExecutionMetadata, ToolImageReference, ToolImageReferenceError,
+    ToolName, ToolNameError, ToolResult, ToolResultContent, ToolResultContentError, ToolResultPart,
+    ToolResultStatus,
 };

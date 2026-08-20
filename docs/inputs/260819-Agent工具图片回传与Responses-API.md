@@ -1,9 +1,15 @@
 # Agent 工具图片回传与 Responses API
 
 - 记录日期：2026-08-19
-- 状态：已纳入版本
+- 状态：已吸收（保留历史输入）
 - 来源：用户会话确认；OpenCode、Hermes Agent 与 OpenAI Responses API 实现调研
-- 目标版本：`v0.17.0`（待启动）
+- 目标版本：`v0.17.0`（已完成）
+
+> 范围吸收：最终设计结论见 [`v0.17.0 功能设计`](../versions/v0.17.0/功能设计.md)。
+> 本版本已收窄为以 `read_image` 验证工具图片回流，不集成浏览器、CDP、Playwright
+> 或 computer-use 具体操作工具；工具图片、三条识图路径、Responses 首版、本地权威状态、
+> ProviderState 压缩和 Provider 启用边界均已确认。下文保留原始调研过程，其中的开放问题
+> 和候选方案若与功能设计不同，以功能设计为准。
 
 ## 原始内容
 
@@ -18,7 +24,7 @@ OpenAI-compatible Chat Completions，也不要求其他 Provider 统一迁移到
 
 上述内容不进入 `v0.16.0`，避免扩大当前图片附件、reasoning、队列修复和 macOS 签名版本的复杂度。
 
-## 已确认边界
+## 原始候选边界（已由功能设计收口）
 
 ### 1. 工具图片产物是协议无关能力
 
@@ -55,7 +61,7 @@ OpenAI-compatible Chat Completions，也不要求其他 Provider 统一迁移到
 - 静态模型目录只为官方或实测确认支持 Responses 的 `(provider, protocol, model_id)` 组合登记能力；
   Chat-only 代理和通用 OpenAI-compatible Endpoint 不自动升级。
 
-## 下个版本设计时需要核查
+## 原始核查清单（已完成收口）
 
 1. `ToolResultContent` 如何表达有序文本、JSON 与文件产物，同时保持旧持久化数据兼容。
 2. 浏览器截图、computer-use 截图和普通工具文件输出是否共用一个 Artifact/File Reference 契约。

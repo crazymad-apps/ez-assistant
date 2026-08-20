@@ -230,19 +230,21 @@ impl PermissionCoordinator {
         self.registry.snapshot_cohort(scopes)
     }
 
-    /// 将交互审批生成的 exact Allow 可靠写入单一 Session/Workspace 权限文件。
-    /// 文件 CAS 和 Registry 替换全部成功后才返回。
-    pub(crate) async fn append_allow_rule(
+    /// 将交互审批产生的一条或多条 exact Allow 作为一次 CAS 变更可靠写入。
+    pub(crate) async fn append_allow_rules(
         &self,
         scope: PermissionFileScope,
-        rule: super::PermissionRule,
-    ) -> RuntimeResult<String> {
+        rules: Vec<super::PermissionRule>,
+    ) -> RuntimeResult<Vec<String>> {
+        if rules.is_empty() {
+            return Err(RuntimeError::PermissionPersistenceFailed);
+        }
         let _gate = self.mutation_gate.lock().await;
         // 首次 CAS 冲突通常来自用户恰好保存了文件：重新读取、合并后只重试一次。
         // 持续冲突交还客户端处理，避免在用户编辑期间无限抢写。
         for attempt in 0..2 {
             match self
-                .append_allow_rule_once(scope.clone(), rule.clone())
+                .append_allow_rules_once(scope.clone(), rules.clone())
                 .await
             {
                 Err(RuntimeError::PermissionFileConflict) if attempt == 0 => continue,
@@ -252,11 +254,11 @@ impl PermissionCoordinator {
         unreachable!("two-attempt permission update loop always returns")
     }
 
-    async fn append_allow_rule_once(
+    async fn append_allow_rules_once(
         &self,
         scope: PermissionFileScope,
-        rule: super::PermissionRule,
-    ) -> RuntimeResult<String> {
+        rules: Vec<super::PermissionRule>,
+    ) -> RuntimeResult<Vec<String>> {
         // 每次 attempt 都从磁盘重新读取，而不是使用 Registry 快照作为写入基线。
         // Registry 可能是旧的运行视图，不能拿它覆盖用户刚刚手动编辑的 JSON。
         let load = self
@@ -271,14 +273,19 @@ impl PermissionCoordinator {
         };
         let mut document = document.as_ref().clone();
         let previous_rule_count = document.rules.len();
-        let rule_id = document
-            .append_rule(rule)
-            .map_err(|_| RuntimeError::PermissionFileInvalid)?;
+        let rule_ids = rules
+            .into_iter()
+            .map(|rule| {
+                document
+                    .append_rule(rule)
+                    .map_err(|_| RuntimeError::PermissionFileInvalid)
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
         // 相同精确规则已存在时直接复用；不做无意义 CAS，也不重排用户文件。
         if document.rules.len() == previous_rule_count {
             // 当前磁盘文件可能由用户刚刚编辑，仍需让 Registry 看见这份最新有效内容。
             self.registry.replace_cohort(vec![compiled])?;
-            return Ok(rule_id);
+            return Ok(rule_ids);
         }
         let content = document
             .render()
@@ -302,7 +309,7 @@ impl PermissionCoordinator {
             },
         );
         self.registry.replace_cohort(vec![next])?;
-        Ok(rule_id)
+        Ok(rule_ids)
     }
 
     #[cfg(test)]

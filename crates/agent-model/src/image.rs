@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc};
 
-use agent_types::FileReference;
+use agent_types::{FileReference, ToolImageReference};
 use tokio_util::sync::CancellationToken;
 
 use crate::{ModelError, ModelService};
@@ -22,17 +22,51 @@ impl fmt::Debug for PreparedModelImage {
     }
 }
 
-/// 一次请求中按稳定文件引用索引的瞬时图片资源。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelImageResource {
+    FileReference(FileReference),
+    /// 已由上层工具授权、只在当前调用中使用的本地图片路径。
+    ///
+    /// 该资源不进入规范 Conversation；Host 只能在调用方已经完成文件授权后准备它。
+    LocalFile {
+        path: String,
+    },
+    ToolImage {
+        directory: String,
+        reference: ToolImageReference,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PreparedModelImageKey {
+    FileReference(String),
+    ToolImage(String),
+}
+
+/// 一次请求中按资源来源与稳定引用索引的瞬时图片资源。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PreparedModelImages(BTreeMap<String, PreparedModelImage>);
+pub struct PreparedModelImages(BTreeMap<PreparedModelImageKey, PreparedModelImage>);
 
 impl PreparedModelImages {
-    pub fn insert(&mut self, readable_path: String, image: PreparedModelImage) {
-        self.0.insert(readable_path, image);
+    pub fn insert_file_reference(&mut self, readable_path: String, image: PreparedModelImage) {
+        self.0
+            .insert(PreparedModelImageKey::FileReference(readable_path), image);
     }
 
-    pub fn get(&self, readable_path: &str) -> Option<&PreparedModelImage> {
-        self.0.get(readable_path)
+    pub fn get_file_reference(&self, readable_path: &str) -> Option<&PreparedModelImage> {
+        self.0.get(&PreparedModelImageKey::FileReference(
+            readable_path.to_owned(),
+        ))
+    }
+
+    pub fn insert_tool_image(&mut self, relative_path: String, image: PreparedModelImage) {
+        self.0
+            .insert(PreparedModelImageKey::ToolImage(relative_path), image);
+    }
+
+    pub fn get_tool_image(&self, relative_path: &str) -> Option<&PreparedModelImage> {
+        self.0
+            .get(&PreparedModelImageKey::ToolImage(relative_path.to_owned()))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -57,7 +91,7 @@ pub type ModelImagePreparationFuture<'a> =
 pub trait ModelImagePreprocessor: Send + Sync {
     fn prepare<'a>(
         &'a self,
-        reference: &'a FileReference,
+        resource: &'a ModelImageResource,
         cancellation: &'a CancellationToken,
     ) -> ModelImagePreparationFuture<'a>;
 }
@@ -84,5 +118,29 @@ impl ModelServiceBundle {
             model,
             image_preprocessor: Some(image_preprocessor),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(byte: u8) -> PreparedModelImage {
+        PreparedModelImage {
+            media_type: "image/png".to_owned(),
+            bytes: Arc::from([byte]),
+        }
+    }
+
+    #[test]
+    fn attachment_and_tool_image_keys_use_separate_namespaces() {
+        let key = format!("{}.png", "a".repeat(64));
+        let mut images = PreparedModelImages::default();
+        images.insert_file_reference(key.clone(), image(1));
+        images.insert_tool_image(key.clone(), image(2));
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(images.get_file_reference(&key), Some(&image(1)));
+        assert_eq!(images.get_tool_image(&key), Some(&image(2)));
     }
 }

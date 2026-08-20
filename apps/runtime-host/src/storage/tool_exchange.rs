@@ -435,7 +435,7 @@ impl StorageEngine {
                 result: ToolResult {
                     call_id: call.id.clone(),
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Json(serde_json::json!({
+                    content: ToolResultContent::json(serde_json::json!({
                         "task_id": child_task_id.as_str(),
                         "status": "completed",
                         "result": result,
@@ -733,7 +733,7 @@ fn recovered_unknown_result(
         result: ToolResult {
             call_id: call.id.clone(),
             status: ToolResultStatus::Error,
-            content: ToolResultContent::Text(
+            content: ToolResultContent::text(
                 if started {
                     UNKNOWN_OUTCOME_TEXT
                 } else {
@@ -763,7 +763,7 @@ fn delegation_error_result(
         result: ToolResult {
             call_id: call.id.clone(),
             status: ToolResultStatus::Error,
-            content: ToolResultContent::Json(serde_json::json!({
+            content: ToolResultContent::json(serde_json::json!({
                 "error": {
                     "message": "child task did not complete",
                     "details": {

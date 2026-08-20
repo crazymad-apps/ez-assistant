@@ -36,7 +36,7 @@ async fn tool_failure_feeds_error_result_and_continues() {
         panic!("second delta must be the tool result, got {deltas:?}");
     };
     assert_eq!(message.result.status, ToolResultStatus::Error);
-    let ToolResultContent::Text(content) = &message.result.content else {
+    let Some(content) = message.result.content.as_single_text() else {
         panic!("error result must carry model-readable text");
     };
     assert!(content.contains("boom"), "unexpected content: {content}");

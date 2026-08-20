@@ -610,7 +610,7 @@ fn error_result(call_id: &ToolCallId, message: String) -> ToolResult {
     ToolResult {
         call_id: call_id.clone(),
         status: ToolResultStatus::Error,
-        content: ToolResultContent::Text(message),
+        content: ToolResultContent::text(message),
         metadata: None,
     }
 }

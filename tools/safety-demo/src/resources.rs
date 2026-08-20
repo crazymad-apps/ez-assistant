@@ -16,7 +16,7 @@ use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, TransportTimeouts,
 };
 use agent_tools::{
     AbsolutePath, FsDeleteTool, FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool,
@@ -86,12 +86,12 @@ impl DemoResources {
                 "DEEPSEEK_CONTEXT_WINDOW_TOKENS must be greater than zero".to_owned(),
             ));
         }
-        let service = OpenAiCompatibleService::new(
+        let service = OpenAiChatCompletionsService::new(
             base_url,
             BearerCredential::new(api_key),
             model,
             context_window_tokens,
-            ProtocolAdapter::deepseek(),
+            ChatProtocolAdapter::deepseek(),
             TransportTimeouts::default(),
         )
         .map_err(|error| ResourceError::Provider(error.to_string()))?;

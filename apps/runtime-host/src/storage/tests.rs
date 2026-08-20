@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     hint::black_box,
     io::Write,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::Path,
     time::Instant,
 };
@@ -14,8 +14,9 @@ use agent_model::SystemPromptSnapshot;
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
     FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolMessage,
-    ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
+    ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId,
+    ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
+    ToolResultStatus, UserMessage, UserPart,
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, IdempotencyKey, InputId,
@@ -79,6 +80,10 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
             workspace_private_directory: None,
             session_attachment_directory: session_directory
                 .join("attachments")
+                .to_string_lossy()
+                .into_owned(),
+            session_tool_image_directory: session_directory
+                .join("tool-images")
                 .to_string_lossy()
                 .into_owned(),
             session_private_directory: private_directory.to_string_lossy().into_owned(),
@@ -287,6 +292,7 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
             session: new_session(forked_id.as_str(), &sessions_directory),
             conversation: source_conversation,
             attachments: Vec::new(),
+            tool_images: Vec::new(),
         })
         .expect("fork session");
     assert_eq!(
@@ -386,11 +392,427 @@ fn tool_exchange() -> Vec<ConversationMessage> {
             result: ToolResult {
                 call_id,
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("hello".to_owned()),
+                content: ToolResultContent::text("hello".to_owned()),
                 metadata: None,
             },
         }),
     ]
+}
+
+fn tool_image_exchange(reference: ToolImageReference) -> ConversationSnapshot {
+    let call_id = ToolCallId::new("call-image").expect("tool call id");
+    ConversationSnapshot::new(vec![
+        user_message("user-image", "inspect the image"),
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new("assistant-image").expect("message id"),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider id"),
+                "fixture-model",
+            ),
+            parts: vec![AssistantPart::ToolCall(ToolCall {
+                id: call_id.clone(),
+                name: ToolName::new("read_image").expect("tool name"),
+                arguments: serde_json::json!({"path": "/outside/source.png"}),
+            })],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        }),
+        ConversationMessage::Tool(ToolMessage {
+            id: MessageId::new("tool-image").expect("message id"),
+            result: ToolResult {
+                call_id,
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::parts(vec![ToolResultPart::image(reference)])
+                    .expect("image content"),
+                metadata: None,
+            },
+        }),
+    ])
+}
+
+fn png_bytes(root: &Path, name: &str, color: [u8; 3]) -> Vec<u8> {
+    let path = root.join(name);
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb(color)))
+        .save(&path)
+        .expect("save png");
+    fs::read(path).expect("read png")
+}
+
+#[test]
+fn fork_copies_tool_images_without_cross_session_links() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source_id = session_id("s-tool-image-source");
+    let forked_id = session_id("s-tool-image-fork");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(source_id.as_str(), &sessions_directory))
+        .expect("create source session");
+    let source_directory = engine
+        .session_directory(&source_id)
+        .expect("source session")
+        .join("tool-images");
+    let reference = crate::image::store_tool_image_bytes(
+        &source_directory,
+        &png_bytes(root.path(), "fork-source.png", [1, 2, 3]),
+    )
+    .expect("store source image");
+    let conversation = tool_image_exchange(reference.clone());
+
+    engine
+        .fork_session(SessionFork {
+            source_session_id: source_id.clone(),
+            source_generation: 1,
+            session: new_session(forked_id.as_str(), &sessions_directory),
+            conversation,
+            attachments: Vec::new(),
+            tool_images: vec![reference.clone()],
+        })
+        .expect("fork session with image");
+
+    let source = source_directory.join(reference.relative_path());
+    let forked = engine
+        .session_directory(&forked_id)
+        .expect("forked session")
+        .join("tool-images")
+        .join(reference.relative_path());
+    assert_eq!(
+        fs::read(&source).expect("source bytes"),
+        fs::read(&forked).expect("fork bytes")
+    );
+    assert_ne!(
+        fs::metadata(&source).expect("source metadata").ino(),
+        fs::metadata(&forked).expect("fork metadata").ino()
+    );
+
+    let impact = engine
+        .inspect_session_deletion(&source_id)
+        .expect("source deletion impact");
+    engine
+        .delete_session(SessionDeletion {
+            session_id: source_id,
+            operation_id: "delete-tool-image-source".to_owned(),
+            expected_impact: impact,
+        })
+        .expect("delete source session");
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read(&forked).expect("fork image after source deletion"),
+        png_bytes(root.path(), "fork-expected.png", [1, 2, 3])
+    );
+}
+
+#[test]
+fn failed_tool_image_fork_rolls_back_target_session_directory() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let source_id = session_id("s-tool-image-broken-source");
+    let forked_id = session_id("s-tool-image-broken-fork");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(source_id.as_str(), &sessions_directory))
+        .expect("create source session");
+    let source_directory = engine
+        .session_directory(&source_id)
+        .expect("source session")
+        .join("tool-images");
+    let reference = crate::image::store_tool_image_bytes(
+        &source_directory,
+        &png_bytes(root.path(), "broken-fork-source.png", [4, 5, 6]),
+    )
+    .expect("store source image");
+    let source = source_directory.join(reference.relative_path());
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).expect("make source writable");
+    fs::write(&source, b"corrupt").expect("corrupt source image");
+
+    let result = engine.fork_session(SessionFork {
+        source_session_id: source_id,
+        source_generation: 1,
+        session: new_session(forked_id.as_str(), &sessions_directory),
+        conversation: tool_image_exchange(reference.clone()),
+        attachments: Vec::new(),
+        tool_images: vec![reference],
+    });
+
+    assert!(result.is_err());
+    assert!(!engine.sessions_directory.join(forked_id.as_str()).exists());
+    assert!(engine.inspect_session_deletion(&forked_id).is_err());
+}
+
+#[test]
+fn startup_tool_image_scan_removes_parts_and_orphans_but_preserves_references() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session_id = session_id("s-tool-image-recovery");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session_id.as_str(), &sessions_directory))
+        .expect("create session");
+    let session_directory = engine.session_directory(&session_id).expect("session");
+    let image_directory = session_directory.join("tool-images");
+    let retained = crate::image::store_tool_image_bytes(
+        &image_directory,
+        &png_bytes(root.path(), "retained.png", [10, 20, 30]),
+    )
+    .expect("retained image");
+    let orphan = crate::image::store_tool_image_bytes(
+        &image_directory,
+        &png_bytes(root.path(), "orphan.png", [40, 50, 60]),
+    )
+    .expect("orphan image");
+    fs::write(image_directory.join(".crash.part"), b"partial").expect("part file");
+    let conversation = tool_image_exchange(retained.clone());
+    let payload = conversation::encode_messages(&conversation.messages).expect("conversation");
+    fs::write(body_path(&session_directory, 1), payload).expect("write conversation");
+
+    assert!(
+        engine
+            .recover_tool_images()
+            .expect("recover images")
+            .is_empty()
+    );
+    assert!(image_directory.join(retained.relative_path()).is_file());
+    assert!(!image_directory.join(orphan.relative_path()).exists());
+    assert!(!image_directory.join(".crash.part").exists());
+}
+
+#[test]
+fn startup_tool_image_scan_is_conservative_when_conversation_is_unreadable() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session_id = session_id("s-tool-image-conservative");
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session_id.as_str(), &sessions_directory))
+        .expect("create session");
+    let session_directory = engine.session_directory(&session_id).expect("session");
+    let image_directory = session_directory.join("tool-images");
+    let stable = crate::image::store_tool_image_bytes(
+        &image_directory,
+        &png_bytes(root.path(), "stable.png", [70, 80, 90]),
+    )
+    .expect("stable image");
+    fs::write(body_path(&session_directory, 1), b"not-jsonl").expect("break conversation");
+
+    let diagnostics = engine.recover_tool_images().expect("recover images");
+    assert!(diagnostics.contains(session_id.as_str()));
+    assert!(image_directory.join(stable.relative_path()).is_file());
+}
+
+#[test]
+fn copied_runtime_home_rebases_session_resources_and_preserves_tool_images() {
+    let source_root = TempDir::new().expect("source Runtime Home");
+    let mut source = open_engine(&source_root);
+    let session_id = session_id("s-tool-image-migrated");
+    let sessions_directory = source.sessions_directory.clone();
+    let stored = source
+        .create_session(new_session(session_id.as_str(), &sessions_directory))
+        .expect("create source session");
+    let source_image_directory = Path::new(&stored.environment.session_tool_image_directory);
+    let reference = crate::image::store_tool_image_bytes(
+        source_image_directory,
+        &png_bytes(source_root.path(), "migrated.png", [12, 34, 56]),
+    )
+    .expect("store source tool image");
+    let conversation = tool_image_exchange(reference.clone());
+    fs::write(
+        body_path(
+            &source
+                .session_directory(&session_id)
+                .expect("source session directory"),
+            1,
+        ),
+        conversation::encode_messages(&conversation.messages).expect("encode conversation"),
+    )
+    .expect("write source conversation");
+    source
+        .connection
+        .execute(
+            "UPDATE sessions SET message_count = ?1 WHERE session_id = ?2",
+            params![
+                i64::try_from(conversation.messages.len()).expect("message count"),
+                session_id.as_str()
+            ],
+        )
+        .expect("update source message count");
+    drop(source);
+
+    let target_root = TempDir::new().expect("target Runtime Home");
+    let target_data = target_root.path().join(DATA_DIRECTORY);
+    fs::create_dir_all(&target_data).expect("create target data directory");
+    fs::copy(
+        source_root.path().join(DATA_DIRECTORY).join(DATABASE_FILE),
+        target_data.join(DATABASE_FILE),
+    )
+    .expect("copy Runtime database");
+    copy_directory(
+        &source_root
+            .path()
+            .join(DATA_DIRECTORY)
+            .join(SESSIONS_DIRECTORY),
+        &target_data.join(SESSIONS_DIRECTORY),
+    );
+    fs::remove_dir_all(source_root.path()).expect("remove old Runtime Home");
+
+    let mut migrated = open_engine(&target_root);
+    let recovered = migrated.load_runtime().expect("load migrated Runtime");
+    let session = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .expect("migrated session");
+    let target_session = target_data
+        .join(SESSIONS_DIRECTORY)
+        .join(session_id.as_str());
+    assert_eq!(
+        session.environment.session_private_directory,
+        target_session.join("private").to_string_lossy()
+    );
+    assert_eq!(
+        session.environment.session_attachment_directory,
+        target_session.join("attachments").to_string_lossy()
+    );
+    assert_eq!(
+        session.environment.session_tool_image_directory,
+        target_session.join("tool-images").to_string_lossy()
+    );
+    assert_eq!(
+        migrated
+            .load_conversation(&session_id)
+            .expect("migrated conversation"),
+        conversation
+    );
+    assert_eq!(
+        fs::read(
+            target_session
+                .join("tool-images")
+                .join(reference.relative_path())
+        )
+        .expect("migrated tool image"),
+        png_bytes(target_root.path(), "expected-migrated.png", [12, 34, 56])
+    );
+    let permission = PermissionDocument::parse(
+        &fs::read(target_session.join("private/permissions.json"))
+            .expect("migrated permission document"),
+    )
+    .expect("valid migrated permission document");
+    assert!(permission.rules.iter().all(|rule| {
+        !matches!(
+            &rule.matcher,
+            assistant_runtime::PermissionMatcher::File(matcher)
+                if matcher.path.contains(source_root.path().to_string_lossy().as_ref())
+        )
+    }));
+    assert_default_session_permissions(session);
+    drop(migrated);
+
+    let mut reopened = open_engine(&target_root);
+    assert_eq!(
+        reopened
+            .load_runtime()
+            .expect("repeat migrated Runtime recovery")
+            .sessions
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn copied_runtime_home_rebases_workspace_private_resources_only() {
+    let source_root = TempDir::new().expect("source Runtime Home");
+    let user_workspace = TempDir::new().expect("external user workspace");
+    let mut source = open_engine(&source_root);
+    let workspace_id = workspace_id("w-runtime-migrated");
+    let workspace = source
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id.clone(),
+            requested_directory: user_workspace.path().to_string_lossy().into_owned(),
+            changed_at_ms: 1_000,
+        })
+        .expect("register source workspace");
+    let expected_user_workspace = workspace.user_directory.clone();
+    let session_id = session_id("s-workspace-migrated");
+    let mut session = new_session(session_id.as_str(), &source.sessions_directory);
+    session.environment.workspace_id = Some(workspace_id.clone());
+    session.environment.working_directory = workspace.user_directory.clone();
+    session.environment.workspace_private_directory = Some(workspace.agent_directory);
+    source
+        .create_session(session)
+        .expect("create workspace-bound session");
+    drop(source);
+
+    let target_root = TempDir::new().expect("target Runtime Home");
+    copy_runtime_database_and_sessions(source_root.path(), target_root.path());
+    fs::remove_dir_all(source_root.path()).expect("remove old Runtime Home");
+
+    let mut migrated = open_engine(&target_root);
+    let recovered = migrated.load_runtime().expect("load migrated Runtime");
+    let migrated_workspace = recovered
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == workspace_id)
+        .expect("migrated workspace");
+    let expected_agent = target_root
+        .path()
+        .join("data/workspaces")
+        .join(workspace_id.as_str())
+        .join("agent");
+    assert_eq!(
+        migrated_workspace.agent_directory,
+        expected_agent.to_string_lossy()
+    );
+    assert_eq!(migrated_workspace.user_directory, expected_user_workspace);
+    assert!(expected_agent.join("permissions.json").is_file());
+
+    let migrated_session = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .expect("migrated workspace session");
+    assert_eq!(
+        migrated_session.environment.working_directory,
+        expected_user_workspace
+    );
+    assert_eq!(
+        migrated_session
+            .environment
+            .workspace_private_directory
+            .as_deref(),
+        expected_agent.to_str()
+    );
+    assert!(
+        migrated_session
+            .environment
+            .session_private_directory
+            .starts_with(target_root.path().to_string_lossy().as_ref())
+    );
+}
+
+fn copy_runtime_database_and_sessions(source: &Path, target: &Path) {
+    let target_data = target.join(DATA_DIRECTORY);
+    fs::create_dir_all(&target_data).expect("create target data directory");
+    fs::copy(
+        source.join(DATA_DIRECTORY).join(DATABASE_FILE),
+        target_data.join(DATABASE_FILE),
+    )
+    .expect("copy Runtime database");
+    copy_directory(
+        &source.join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY),
+        &target_data.join(SESSIONS_DIRECTORY),
+    );
+}
+
+fn copy_directory(source: &Path, target: &Path) {
+    fs::create_dir_all(target).expect("create copied directory");
+    for entry in fs::read_dir(source).expect("read copied directory") {
+        let entry = entry.expect("read copied entry");
+        let destination = target.join(entry.file_name());
+        if entry.file_type().expect("copied entry type").is_dir() {
+            copy_directory(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), destination).expect("copy file");
+        }
+    }
 }
 
 #[test]
@@ -800,6 +1222,7 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
             session: new_session(forked_id.as_str(), &sessions_directory),
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
+            tool_images: Vec::new(),
         })
         .expect("fork session");
     assert_eq!(forked.session.session_id, forked_id);
@@ -889,6 +1312,7 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
                 source_attachment_id: source_attachment.attachment_id.clone(),
                 attachment_id: forked_attachment_id.clone(),
             }],
+            tool_images: Vec::new(),
         })
         .expect("fork attachment session");
 
@@ -1251,6 +1675,7 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
             session: new_session(forked_id.as_str(), &sessions_directory),
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
+            tool_images: Vec::new(),
         })
         .expect("fork legacy session");
     engine
@@ -1656,7 +2081,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     };
     assert_eq!(
         result.result.content,
-        ToolResultContent::Text("runtime restarted; tool execution outcome is unknown".to_owned())
+        ToolResultContent::text("runtime restarted; tool execution outcome is unknown".to_owned())
     );
     assert!(
         reopened
@@ -2554,7 +2979,7 @@ fn startup_repairs_unstarted_tool_as_not_executed() {
     assert_eq!(result.result.status, ToolResultStatus::Error);
     assert_eq!(
         result.result.content,
-        ToolResultContent::Text("runtime restarted before tool execution started".to_owned())
+        ToolResultContent::text("runtime restarted before tool execution started".to_owned())
     );
 }
 
@@ -2638,7 +3063,7 @@ fn startup_repairs_begun_tool_exchange_with_unknown_results_without_reexecution(
     assert_eq!(result.result.status, ToolResultStatus::Error);
     assert_eq!(
         result.result.content,
-        ToolResultContent::Text("runtime restarted; tool execution outcome is unknown".to_owned())
+        ToolResultContent::text("runtime restarted; tool execution outcome is unknown".to_owned())
     );
     assert_eq!(
         reopened
@@ -2735,7 +3160,7 @@ fn startup_rebuilds_parent_delegate_result_from_completed_child() {
         panic!("delegate recovery must append one tool result");
     };
     assert_eq!(tool.result.status, ToolResultStatus::Success);
-    let ToolResultContent::Json(content) = &tool.result.content else {
+    let Some(content) = tool.result.content.as_single_json() else {
         panic!("completed child result must remain structured");
     };
     assert_eq!(content["task_id"], child_id.as_str());
@@ -2805,7 +3230,7 @@ fn startup_interrupts_running_child_before_rebuilding_parent_result() {
     let ConversationMessage::Tool(tool) = &conversation.messages[1] else {
         panic!("delegate recovery must append one tool result");
     };
-    let ToolResultContent::Json(content) = &tool.result.content else {
+    let Some(content) = tool.result.content.as_single_json() else {
         panic!("interrupted child result must remain structured");
     };
     assert_eq!(content["error"]["details"]["task_id"], child_id.as_str());
@@ -3779,7 +4204,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
             result: ToolResult {
                 call_id,
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("tool-result-token".to_owned()),
+                content: ToolResultContent::text("tool-result-token".to_owned()),
                 metadata: None,
             },
         }),

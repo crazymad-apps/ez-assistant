@@ -25,7 +25,7 @@ use crate::order::LogEntry;
 /// 脚本化的工具行为。
 #[derive(Clone, Debug)]
 enum ToolBehavior {
-    /// 立即成功，输出序列化后进入 `ToolResultContent::Json`。
+    /// 立即成功，输出序列化后进入单一 JSON Tool Result Part。
     Succeed(Value),
     /// 立即以执行错误失败（`ToolError::Execution`，转为错误 `ToolResult`）。
     Fail(String),
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Success);
         assert_eq!(
             result.content,
-            ToolResultContent::Json(json!({"date": "2026-07-27"}))
+            ToolResultContent::json(json!({"date": "2026-07-27"}))
         );
         assert_eq!(
             log.entries(),
@@ -305,7 +305,7 @@ mod tests {
         let tool = ScriptedTool::failing("explode", "boom", log);
         let result = dispatch(tool, &call("explode")).await;
         assert_eq!(result.status, ToolResultStatus::Error);
-        let ToolResultContent::Text(message) = result.content else {
+        let Some(message) = result.content.as_single_text() else {
             panic!("error result must carry model-readable text");
         };
         assert!(message.contains("boom"));

@@ -16,9 +16,10 @@ use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
     AbsolutePath, FileAuthorizationFacts, FileOperation, FsDeleteTool, FsEditTool, FsFindTool,
     FsListTool, FsReadTool, FsSearchTool, FsWriteTool, InspectImagesTool, ListPinnedMemoriesTool,
-    PinMemoryTool, ReadFileToolConfig, RecallMemoryTool, RecallMemoryToolConfig, ResolvedToolBatch,
-    ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver, ShellExecTool,
-    ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool, UpdatePinnedMemoryTool,
+    PinMemoryTool, ReadFileToolConfig, ReadImageTool, RecallMemoryTool, RecallMemoryToolConfig,
+    ResolvedToolBatch, ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver,
+    ShellExecTool, ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool,
+    UpdatePinnedMemoryTool,
 };
 use agent_tools_local::{
     EnvironmentPolicy, LocalFileSystem, LocalFileSystemConfig, LocalShell, LocalShellConfig,
@@ -114,6 +115,17 @@ impl LocalToolResources {
             &mut registry,
             FsReadTool::new(self.filesystem.clone(), resolver.clone(), self.read_config),
         )?;
+        if request.read_image_enabled {
+            register(
+                &mut registry,
+                ReadImageTool::new(
+                    Arc::new(crate::image::SessionImageMaterializer::new(
+                        Path::new(&request.environment.session_tool_image_directory).to_path_buf(),
+                    )),
+                    resolver.clone(),
+                ),
+            )?;
+        }
         register(
             &mut registry,
             FsListTool::new(self.filesystem.clone(), resolver.clone()),
@@ -148,7 +160,7 @@ impl LocalToolResources {
         )?;
         register(
             &mut registry,
-            ShellExecTool::new(self.shell.clone(), resolver, self.shell_config),
+            ShellExecTool::new(self.shell.clone(), resolver.clone(), self.shell_config),
         )?;
         let limits = pinned_memory_limits();
         register(
@@ -180,21 +192,24 @@ impl LocalToolResources {
         if let Some(inspector) = request.image_inspector {
             register(
                 &mut registry,
-                InspectImagesTool::new(
-                    inspector,
-                    Path::new(&request.environment.session_attachment_directory).to_path_buf(),
-                ),
+                InspectImagesTool::new(inspector, resolver.clone()),
             )?;
         }
-        // 校验当前 Session 冻结附件目录的类型边界。Authorizer 持有
-        // Runtime Home 下的 sessions root，因此同样保护其他 Session 附件。
+        // 校验当前 Session 冻结资源目录的类型边界。Authorizer 持有 Runtime Home
+        // 下的 sessions root，因此同样保护其他 Session 的受管资源。
         AbsolutePath::new(&request.environment.session_attachment_directory).map_err(|source| {
+            RunToolFactoryError::with_source(RunToolFactoryErrorKind::InvalidConfiguration, source)
+        })?;
+        AbsolutePath::new(&request.environment.session_tool_image_directory).map_err(|source| {
             RunToolFactoryError::with_source(RunToolFactoryErrorKind::InvalidConfiguration, source)
         })?;
         Ok(RunToolBundle::new(
             registry.snapshot(),
             vec![
                 Arc::new(AttachmentMutationPolicy {
+                    sessions_root: sessions_root.clone(),
+                }),
+                Arc::new(ToolImageMutationPolicy {
                     sessions_root: sessions_root.clone(),
                 }),
                 Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
@@ -267,6 +282,46 @@ impl AttachmentMutationPolicy {
         matches!(
             components.next(),
             Some(std::path::Component::Normal(name)) if name == "attachments"
+        )
+    }
+}
+
+struct ToolImageMutationPolicy {
+    sessions_root: AbsolutePath,
+}
+
+impl ToolPolicy for ToolImageMutationPolicy {
+    fn evaluate(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        _batch: &ResolvedToolBatch,
+    ) -> PolicyEvaluation {
+        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
+            if is_mutation(facts.operation) && self.is_session_tool_image_path(&facts.path) {
+                PolicyEvaluation::Decide(ToolAuthorization::Deny {
+                    reason: "session tool images cannot be written, edited, or deleted by structured file tools".to_owned(),
+                })
+            } else {
+                PolicyEvaluation::Continue
+            }
+        } else {
+            PolicyEvaluation::Continue
+        }
+    }
+}
+
+impl ToolImageMutationPolicy {
+    fn is_session_tool_image_path(&self, path: &AbsolutePath) -> bool {
+        let Ok(relative) = path.as_path().strip_prefix(self.sessions_root.as_path()) else {
+            return false;
+        };
+        let mut components = relative.components();
+        let Some(std::path::Component::Normal(_session_id)) = components.next() else {
+            return false;
+        };
+        matches!(
+            components.next(),
+            Some(std::path::Component::Normal(name)) if name == "tool-images"
         )
     }
 }
@@ -363,7 +418,7 @@ mod tests {
     use agent_model::{
         GenerationConfig, ModelCapabilities, ModelRequest, ProviderOptions, SystemPromptSnapshot,
     };
-    use agent_openai_compatible::{ProtocolAdapter, encode_request};
+    use agent_openai_compatible::{ChatProtocolAdapter, encode_request};
     use agent_sdk::{AgentBuilder, ContextWindowEvaluator, ExecutionInput, ExecutionOutcome};
     use agent_testkit::{
         FakePinnedMemoryStore, ModelScript, ScriptedMemoryRecall, ScriptedModelService,
@@ -373,7 +428,7 @@ mod tests {
     use agent_types::{
         AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
         FileReferencesPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
-        ToolCall, ToolCallId, ToolChoice, ToolName, ToolResultContent, UserMessage, UserPart,
+        ToolCall, ToolCallId, ToolChoice, ToolName, UserMessage, UserPart,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -384,6 +439,14 @@ mod tests {
     fn compile_bundle(
         factory: &HostRunToolFactory,
         environment: &SessionExecutionEnvironment,
+    ) -> RunToolBundle {
+        compile_bundle_with_read_image(factory, environment, false)
+    }
+
+    fn compile_bundle_with_read_image(
+        factory: &HostRunToolFactory,
+        environment: &SessionExecutionEnvironment,
+        read_image_enabled: bool,
     ) -> RunToolBundle {
         let session_id = assistant_protocol::SessionId::new("session-test").expect("session id");
         let conversation_recall = Arc::new(ScriptedMemoryRecall::new(Ok(MemoryRecallResponse {
@@ -400,21 +463,89 @@ mod tests {
                 conversation_recall: conversation_recall.clone(),
                 conversation_recall_reader: conversation_recall,
                 image_inspector: None,
+                read_image_enabled,
             })
             .expect("tool bundle")
+    }
+
+    #[tokio::test]
+    async fn image_capable_bundle_materializes_read_image_into_session_storage() {
+        let root = TempDir::new().expect("tempdir");
+        std::fs::create_dir(root.path().join("work")).expect("workdir");
+        let source = root.path().join("work/chart.png");
+        image::DynamicImage::new_rgb8(12, 8)
+            .save(&source)
+            .expect("source image");
+        let environment = environment(&root, "work");
+        let factory = HostRunToolFactory::new(root.path()).expect("factory");
+        let (tools, policies) =
+            compile_bundle_with_read_image(&factory, &environment, true).into_parts();
+        assert_eq!(tools.definitions()[1].name.as_str(), "read_image");
+        let authorizer = test_authorizer(policies);
+        let mut batch = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "read_image",
+                json!({"path": source.to_string_lossy()}),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = batch.get(0).expect("read image") else {
+            panic!("read_image resolves")
+        };
+        assert_eq!(
+            authorizer.authorize(invocation, &batch).await,
+            ToolAuthorization::Allow
+        );
+        let result = Dispatcher::execute(&mut batch, 0, ToolContext::default())
+            .expect("dispatch")
+            .await;
+        assert_eq!(result.status, agent_types::ToolResultStatus::Success);
+        let [agent_types::ToolResultPart::Image { image }] = result.content.as_parts() else {
+            panic!("read_image returns one image part")
+        };
+        assert!(
+            std::path::Path::new(&environment.session_tool_image_directory)
+                .join(image.relative_path())
+                .is_file()
+        );
+        assert_eq!(image.media_type(), "image/png");
+
+        let mut cancelled = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "read_image",
+                json!({"path": source.to_string_lossy()}),
+            )],
+        );
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled_result = Dispatcher::execute(
+            &mut cancelled,
+            0,
+            ToolContext::new(cancellation, Arc::new(|_| {})),
+        )
+        .expect("dispatch cancelled")
+        .await;
+        assert_eq!(
+            cancelled_result.status,
+            agent_types::ToolResultStatus::Error
+        );
     }
 
     fn environment(root: &TempDir, workdir: &str) -> SessionExecutionEnvironment {
         let session = root.path().join("data/sessions/session-test");
         let attachments = session.join("attachments");
+        let tool_images = session.join("tool-images");
         let private = session.join("private");
         std::fs::create_dir_all(&attachments).expect("attachments");
+        std::fs::create_dir_all(&tool_images).expect("tool images");
         std::fs::create_dir_all(&private).expect("private");
         SessionExecutionEnvironment {
             workspace_id: None,
             working_directory: root.path().join(workdir).to_string_lossy().into_owned(),
             workspace_private_directory: None,
             session_attachment_directory: attachments.to_string_lossy().into_owned(),
+            session_tool_image_directory: tool_images.to_string_lossy().into_owned(),
             session_private_directory: private.to_string_lossy().into_owned(),
         }
     }
@@ -478,7 +609,7 @@ mod tests {
         let result = Dispatcher::execute(&mut read_batch, 0, ToolContext::default())
             .expect("dispatch")
             .await;
-        let ToolResultContent::Json(value) = result.content else {
+        let Some(value) = result.content.as_single_json() else {
             panic!("read result is json");
         };
         assert!(value.to_string().contains("stable-token-42"));
@@ -620,7 +751,7 @@ mod tests {
 
         // 用真实 Host Bundle 审计，而不是只验证 recall_memory 的手写样例。以后标准
         // 工具新增方言敏感 Schema 时，这里会在请求编码阶段给出具体工具名。
-        let encoded = encode_request(&request, &ProtocolAdapter::deepseek(), "deepseek-chat")
+        let encoded = encode_request(&request, &ChatProtocolAdapter::deepseek(), "deepseek-chat")
             .expect("every registered host tool must encode for DeepSeek");
         assert_eq!(
             encoded.tools.as_ref().map(Vec::len),
@@ -677,6 +808,8 @@ mod tests {
                 reasoning: false,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             8_192,

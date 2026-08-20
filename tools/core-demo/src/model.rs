@@ -43,6 +43,8 @@ impl DeterministicModel {
                 reasoning: true,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             next_message: AtomicU64::new(0),

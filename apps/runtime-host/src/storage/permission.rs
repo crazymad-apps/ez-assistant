@@ -83,62 +83,67 @@ impl StorageEngine {
         expected_revision: &PermissionFileRevision,
         content: &[u8],
     ) -> StorageResult<PermissionFileRevision> {
-        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PERMISSION_FILE_BYTES {
-            return Err(StoreError::new(
-                StoreErrorKind::InvalidInput,
-                "permission file is too large",
-            ));
-        }
         let path = self.permission_file_path(scope)?;
-        // 第一次 CAS 检查快速拒绝以旧 revision 发起的写入。
-        let current = load_path(&path)?.revision;
-        if &current != expected_revision {
-            return Err(StoreError::new(
-                StoreErrorKind::Conflict,
-                "permission file revision changed",
-            ));
+        replace_path(&path, expected_revision, content)
+    }
+
+    pub(super) fn rebase_session_permission_file(
+        &self,
+        path: &Path,
+        old_private: &Path,
+        new_private: &Path,
+        old_attachment: &Path,
+        new_attachment: &Path,
+    ) -> StorageResult<()> {
+        let loaded = load_path(path)?;
+        let Some(content) = loaded.content else {
+            return Ok(());
+        };
+        let Ok(mut document) = PermissionDocument::parse(&content) else {
+            // 权限文件允许用户直接编辑。无效文档仍由既有诊断链处理，迁移不能覆盖它。
+            return Ok(());
+        };
+        let mut changed = false;
+        for rule in &mut document.rules {
+            let PermissionMatcher::File(matcher) = &mut rule.matcher else {
+                continue;
+            };
+            let current = Path::new(&matcher.path);
+            let rebased = current
+                .strip_prefix(old_private)
+                .ok()
+                .map(|suffix| rebase_path(new_private, suffix))
+                .or_else(|| {
+                    current
+                        .strip_prefix(old_attachment)
+                        .ok()
+                        .map(|suffix| rebase_path(new_attachment, suffix))
+                });
+            let Some(rebased) = rebased else {
+                continue;
+            };
+            matcher.path = rebased
+                .to_str()
+                .ok_or_else(|| {
+                    StoreError::new(
+                        StoreErrorKind::InvalidData,
+                        "rebased permission path is not valid UTF-8",
+                    )
+                })?
+                .to_owned();
+            changed = true;
         }
-        let parent = path.parent().ok_or_else(|| {
-            StoreError::new(
+        if !changed {
+            return Ok(());
+        }
+        let rendered = document.render().map_err(|source| {
+            StoreError::with_source(
                 StoreErrorKind::InvalidData,
-                "permission file parent is invalid",
+                "rebased permission document could not be encoded",
+                source,
             )
         })?;
-        prepare_private_directory(parent).map_err(|source| {
-            internal_error("permission file directory could not be prepared", source)
-        })?;
-
-        // 临时文件与目标位于同一目录，后续 rename 才能保持同一文件系统内的原子替换语义。
-        let (temporary, mut file) = create_temporary_file(parent)?;
-        let write_result = (|| -> StorageResult<()> {
-            file.write_all(content).map_err(|source| {
-                internal_error("permission temporary file could not be written", source)
-            })?;
-            file.sync_all().map_err(|source| {
-                internal_error(
-                    "permission temporary file could not be synchronized",
-                    source,
-                )
-            })?;
-            // 文件 I/O 期间用户仍可能保存新内容，所以 rename 前必须再做一次 CAS；
-            // 只做入口检查会静默覆盖这段竞态窗口中的外部修改。
-            if &load_path(&path)?.revision != expected_revision {
-                return Err(StoreError::new(
-                    StoreErrorKind::Conflict,
-                    "permission file revision changed",
-                ));
-            }
-            fs::rename(&temporary, &path).map_err(|source| {
-                internal_error("permission file could not be replaced", source)
-            })?;
-            // rename 持久化的是目录项变化；同步父目录后，成功返回才代表替换已进入耐久边界。
-            sync_directory(parent)
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        write_result?;
-        Ok(revision(content))
+        replace_path(path, &loaded.revision, &rendered).map(|_| ())
     }
 
     fn permission_file_path(&self, scope: &PermissionFileScope) -> StorageResult<PathBuf> {
@@ -154,6 +159,75 @@ impl StorageEngine {
             }
         }
     }
+}
+
+fn rebase_path(root: &Path, suffix: &Path) -> PathBuf {
+    if suffix.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(suffix)
+    }
+}
+
+fn replace_path(
+    path: &Path,
+    expected_revision: &PermissionFileRevision,
+    content: &[u8],
+) -> StorageResult<PermissionFileRevision> {
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PERMISSION_FILE_BYTES {
+        return Err(StoreError::new(
+            StoreErrorKind::InvalidInput,
+            "permission file is too large",
+        ));
+    }
+    // 第一次 CAS 检查快速拒绝以旧 revision 发起的写入。
+    let current = load_path(path)?.revision;
+    if &current != expected_revision {
+        return Err(StoreError::new(
+            StoreErrorKind::Conflict,
+            "permission file revision changed",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        StoreError::new(
+            StoreErrorKind::InvalidData,
+            "permission file parent is invalid",
+        )
+    })?;
+    prepare_private_directory(parent).map_err(|source| {
+        internal_error("permission file directory could not be prepared", source)
+    })?;
+
+    // 临时文件与目标位于同一目录，后续 rename 才能保持同一文件系统内的原子替换语义。
+    let (temporary, mut file) = create_temporary_file(parent)?;
+    let write_result = (|| -> StorageResult<()> {
+        file.write_all(content).map_err(|source| {
+            internal_error("permission temporary file could not be written", source)
+        })?;
+        file.sync_all().map_err(|source| {
+            internal_error(
+                "permission temporary file could not be synchronized",
+                source,
+            )
+        })?;
+        // 文件 I/O 期间用户仍可能保存新内容，所以 rename 前必须再做一次 CAS；
+        // 只做入口检查会静默覆盖这段竞态窗口中的外部修改。
+        if &load_path(path)?.revision != expected_revision {
+            return Err(StoreError::new(
+                StoreErrorKind::Conflict,
+                "permission file revision changed",
+            ));
+        }
+        fs::rename(&temporary, path)
+            .map_err(|source| internal_error("permission file could not be replaced", source))?;
+        // rename 持久化的是目录项变化；同步父目录后，成功返回才代表替换已进入耐久边界。
+        sync_directory(parent)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result?;
+    Ok(revision(content))
 }
 
 fn default_workspace_permission_document(workspace_path: &str) -> StorageResult<Vec<u8>> {

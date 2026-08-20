@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   AttachmentId,
+  ConversationOwner,
   MessageId,
   ResourceRefId,
   SessionId,
@@ -104,39 +105,42 @@ export async function revealAttachmentInDirectory(
 }
 
 export async function previewToolFile(
-  session_id: SessionId,
+  owner: ConversationOwner,
   message_id: MessageId,
   resource_ref_id: ResourceRefId,
 ): Promise<AttachmentPreview> {
   ensureDesktopBridge();
   return invoke<AttachmentPreview>("preview_tool_file", {
-    sessionId: session_id,
+    sessionId: owner.session_id,
+    childTaskId: owner.type === "child_task" ? owner.child_task_id : null,
     messageId: message_id,
     resourceRefId: resource_ref_id,
   }).catch(normalizeResourceFailure);
 }
 
 export async function openToolFileInSystem(
-  session_id: SessionId,
+  owner: ConversationOwner,
   message_id: MessageId,
   resource_ref_id: ResourceRefId,
 ): Promise<void> {
   ensureDesktopBridge();
   await invoke("open_tool_file_in_system", {
-    sessionId: session_id,
+    sessionId: owner.session_id,
+    childTaskId: owner.type === "child_task" ? owner.child_task_id : null,
     messageId: message_id,
     resourceRefId: resource_ref_id,
   }).catch(normalizeResourceFailure);
 }
 
 export async function revealToolFileInDirectory(
-  session_id: SessionId,
+  owner: ConversationOwner,
   message_id: MessageId,
   resource_ref_id: ResourceRefId,
 ): Promise<void> {
   ensureDesktopBridge();
   await invoke("reveal_tool_file_in_directory", {
-    sessionId: session_id,
+    sessionId: owner.session_id,
+    childTaskId: owner.type === "child_task" ? owner.child_task_id : null,
     messageId: message_id,
     resourceRefId: resource_ref_id,
   }).catch(normalizeResourceFailure);

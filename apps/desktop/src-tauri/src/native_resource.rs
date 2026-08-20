@@ -11,8 +11,8 @@ use std::{
 };
 
 use assistant_protocol::{
-    AttachmentId, AttachmentState, GetAttachmentRequest, MessageId, ResourceRefId, RuntimeCommand,
-    RuntimeCommandResult, RuntimeErrorInfo, SessionId, UploadAttachmentResult,
+    AttachmentId, AttachmentState, ChildTaskId, GetAttachmentRequest, MessageId, ResourceRefId,
+    RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, SessionId, UploadAttachmentResult,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::multipart::{Form, Part};
@@ -396,6 +396,7 @@ pub(crate) async fn preview_tool_file(
     bridge: State<'_, NativeResourceBridge>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     session_id: String,
+    child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<AttachmentPreview, NativeResourceError> {
@@ -409,17 +410,13 @@ pub(crate) async fn preview_tool_file(
         .bootstrap()
         .await
         .map_err(|_| runtime_unavailable())?;
-    let url = runtime_resource_url(
+    let url = tool_resource_url(
         &bootstrap.base_url,
-        &[
-            "sessions",
-            session_id.as_str(),
-            "messages",
-            message_id.as_str(),
-            "resources",
-            resource_ref_id.as_str(),
-            "preview",
-        ],
+        &session_id,
+        child_task_id.as_deref(),
+        &message_id,
+        &resource_ref_id,
+        "preview",
     )?;
     let response = bridge
         .http
@@ -551,6 +548,7 @@ pub(crate) async fn open_tool_file_in_system(
     bridge: State<'_, NativeResourceBridge>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     session_id: String,
+    child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<(), NativeResourceError> {
@@ -564,6 +562,7 @@ pub(crate) async fn open_tool_file_in_system(
         &bridge,
         &coordinator,
         &session_id,
+        child_task_id.as_deref(),
         &message_id,
         &resource_ref_id,
     )
@@ -584,6 +583,7 @@ pub(crate) async fn reveal_tool_file_in_directory(
     bridge: State<'_, NativeResourceBridge>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     session_id: String,
+    child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<(), NativeResourceError> {
@@ -597,6 +597,7 @@ pub(crate) async fn reveal_tool_file_in_directory(
         &bridge,
         &coordinator,
         &session_id,
+        child_task_id.as_deref(),
         &message_id,
         &resource_ref_id,
     )
@@ -613,6 +614,7 @@ async fn get_tool_file_native_path(
     bridge: &NativeResourceBridge,
     coordinator: &RuntimeBootstrapCoordinator,
     session_id: &SessionId,
+    child_task_id: Option<&str>,
     message_id: &MessageId,
     resource_ref_id: &ResourceRefId,
 ) -> Result<NativeResourcePath, NativeResourceError> {
@@ -620,17 +622,13 @@ async fn get_tool_file_native_path(
         .bootstrap()
         .await
         .map_err(|_| runtime_unavailable())?;
-    let url = runtime_resource_url(
+    let url = tool_resource_url(
         &bootstrap.base_url,
-        &[
-            "sessions",
-            session_id.as_str(),
-            "messages",
-            message_id.as_str(),
-            "resources",
-            resource_ref_id.as_str(),
-            "native-path",
-        ],
+        session_id,
+        child_task_id,
+        message_id,
+        resource_ref_id,
+        "native-path",
     )?;
     let response = bridge
         .http
@@ -912,6 +910,46 @@ fn runtime_resource_url(
     Ok(url)
 }
 
+fn tool_resource_url(
+    base_url: &str,
+    session_id: &SessionId,
+    child_task_id: Option<&str>,
+    message_id: &MessageId,
+    resource_ref_id: &ResourceRefId,
+    operation: &str,
+) -> Result<reqwest::Url, NativeResourceError> {
+    if let Some(child_task_id) = child_task_id {
+        let child_task_id = ChildTaskId::new(child_task_id.to_owned())
+            .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "子任务标识无效。"))?;
+        return runtime_resource_url(
+            base_url,
+            &[
+                "sessions",
+                session_id.as_str(),
+                "child-tasks",
+                child_task_id.as_str(),
+                "messages",
+                message_id.as_str(),
+                "resources",
+                resource_ref_id.as_str(),
+                operation,
+            ],
+        );
+    }
+    runtime_resource_url(
+        base_url,
+        &[
+            "sessions",
+            session_id.as_str(),
+            "messages",
+            message_id.as_str(),
+            "resources",
+            resource_ref_id.as_str(),
+            operation,
+        ],
+    )
+}
+
 fn runtime_unavailable() -> NativeResourceError {
     error(
         NativeResourceErrorCode::RuntimeUnavailable,
@@ -938,6 +976,40 @@ mod tests {
     fn export_name_never_contains_path_components() {
         assert_eq!(export_file_name("a/b:c"), "a_b_c.md");
         assert_eq!(export_file_name("  "), "会话.md");
+    }
+
+    #[test]
+    fn tool_resource_url_keeps_main_and_child_owner_namespaces_distinct() {
+        let session_id = SessionId::new("session-1").expect("session id");
+        let message_id = MessageId::new("message-1").expect("message id");
+        let resource_ref_id = ResourceRefId::new("resource-1").expect("resource id");
+        let main = tool_resource_url(
+            "http://127.0.0.1:1234",
+            &session_id,
+            None,
+            &message_id,
+            &resource_ref_id,
+            "preview",
+        )
+        .expect("main url");
+        let child = tool_resource_url(
+            "http://127.0.0.1:1234",
+            &session_id,
+            Some("child-1"),
+            &message_id,
+            &resource_ref_id,
+            "preview",
+        )
+        .expect("child url");
+
+        assert_eq!(
+            main.path(),
+            "/sessions/session-1/messages/message-1/resources/resource-1/preview"
+        );
+        assert_eq!(
+            child.path(),
+            "/sessions/session-1/child-tasks/child-1/messages/message-1/resources/resource-1/preview"
+        );
     }
 
     #[test]

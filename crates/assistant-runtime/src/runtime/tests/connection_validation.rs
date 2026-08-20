@@ -104,6 +104,8 @@ async fn deepseek_connection_validation_injects_only_its_required_protocol_optio
             reasoning: true,
             image_input: false,
             tool_calls: false,
+            multimodal_tool_result: false,
+            tool_choice: agent_model::ToolChoiceCapabilities::default(),
             streaming: true,
         },
         8_192,
@@ -150,6 +152,8 @@ fn kimi_k3_protocol_options_do_not_send_the_removed_thinking_switch() {
             default_effort: None,
         }),
         tool_calls: true,
+        tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+        tool_choice: agent_model::ToolChoiceCapabilities::all(),
         streaming: true,
     };
 
@@ -190,6 +194,8 @@ fn qwen38_protocol_options_enable_and_preserve_thinking() {
             default_effort: None,
         }),
         tool_calls: true,
+        tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+        tool_choice: agent_model::ToolChoiceCapabilities::all(),
         streaming: true,
     };
 

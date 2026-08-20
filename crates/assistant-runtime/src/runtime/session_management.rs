@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
+use agent_types::{ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart};
 use assistant_protocol::{
     ArchiveSessionRequest, ArchiveSessionResult, DeleteConfirmationToken, DeleteSessionRequest,
     DeleteSessionResult, ForkSessionRequest, ForkSessionResult, ListRunsRequest, ListRunsResult,
@@ -155,6 +155,25 @@ impl AssistantRuntime {
                 attachment_id,
             });
         }
+        let tool_images = conversation
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let ConversationMessage::Tool(message) = message else {
+                    return None;
+                };
+                Some(message.result.content.as_parts())
+            })
+            .flatten()
+            .filter_map(|part| {
+                let ToolResultPart::Image { image } = part else {
+                    return None;
+                };
+                Some(image.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let created_at_ms = now_ms()?;
         let stored = self
             .store
@@ -175,6 +194,7 @@ impl AssistantRuntime {
                 },
                 conversation,
                 attachments,
+                tool_images,
             })
             .await
             .map_err(|source| RuntimeError::from_store("fork session", source))?;
@@ -974,6 +994,8 @@ mod effort_tests {
                 default_effort: None,
             }),
             tool_calls: true,
+            tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+            tool_choice: agent_model::ToolChoiceCapabilities::all(),
             streaming: true,
         }
     }

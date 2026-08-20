@@ -369,6 +369,12 @@ pub enum ToolApprovalSubject {
         operation: String,
         path: String,
     },
+    /// 一次工具调用中已分别解析的多条结构化文件路径。
+    Files {
+        tool_name: String,
+        operation: String,
+        paths: Vec<String>,
+    },
     /// 已解析完整命令和工作目录的 Shell 操作。
     Shell {
         tool_name: String,
@@ -401,7 +407,7 @@ pub struct ApprovalSnapshot {
     pub subject: ToolApprovalSubject,
     /// 服务端按当前作用域计算出的合法决定。
     pub available_decisions: Vec<ApprovalDecision>,
-    /// 持久允许将写入的精确匹配语义预览。
+    /// 持久允许将写入的精确匹配语义预览；不支持持久授权的多路径调用仅作展示。
     pub exact_rule_preview: ToolApprovalSubject,
     /// 当前是否仍可直接取得决策权。
     pub status: ApprovalStatus,
@@ -767,6 +773,28 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ToolApprovalSubject>(value)
                 .expect("deserialize delegation subject"),
+            subject
+        );
+    }
+
+    #[test]
+    fn multi_file_approval_subject_preserves_each_resolved_path() {
+        let subject = ToolApprovalSubject::Files {
+            tool_name: "inspect_images".to_owned(),
+            operation: "read".to_owned(),
+            paths: vec!["/workspace/a.png".to_owned(), "/tmp/b.png".to_owned()],
+        };
+
+        let value = serde_json::to_value(&subject).expect("serialize multi-file subject");
+        assert_eq!(value["type"], "files");
+        assert_eq!(value["operation"], "read");
+        assert_eq!(
+            value["paths"],
+            serde_json::json!(["/workspace/a.png", "/tmp/b.png"])
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolApprovalSubject>(value)
+                .expect("deserialize multi-file subject"),
             subject
         );
     }

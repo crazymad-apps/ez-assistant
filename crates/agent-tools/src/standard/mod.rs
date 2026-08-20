@@ -6,6 +6,7 @@
 pub mod fs;
 pub mod inspect_images;
 pub mod pinned_memory;
+pub mod read_image;
 pub mod recall_memory;
 pub mod shell;
 

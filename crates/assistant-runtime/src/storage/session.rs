@@ -1,5 +1,5 @@
 use agent_model::SystemPromptSnapshot;
-use agent_types::ConversationSnapshot;
+use agent_types::{ConversationSnapshot, ToolImageReference};
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, MessageFeedback, ModelKey, ReasoningEffortKey,
     SessionId, SessionTitleOrigin,
@@ -57,6 +57,7 @@ pub struct SessionFork {
     pub session: NewStoredSession,
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<ForkedAttachmentReference>,
+    pub tool_images: Vec<ToolImageReference>,
 }
 
 /// Store 完成路径重写和跨介质提交后的 Fork 结果。

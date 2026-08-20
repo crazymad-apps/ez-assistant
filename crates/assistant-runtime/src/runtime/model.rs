@@ -5,8 +5,8 @@ use std::{sync::Arc, time::Duration};
 use agent_core::{ExecutionBudget, ToolAuthorizer};
 use agent_model::{
     ModelAttemptEvent, ModelAttemptObserver, ModelError, ModelImagePreparation,
-    ModelImagePreprocessor, ModelService, ModelStreamFuture, ProviderOptions, ReasoningConfig,
-    RetryingModelService, SystemPromptSnapshot,
+    ModelImagePreprocessor, ModelImageResource, ModelService, ModelStreamFuture, ProviderOptions,
+    ReasoningConfig, RetryingModelService, SystemPromptSnapshot,
 };
 use agent_sdk::{Agent, AgentBuilder};
 use agent_tools::{
@@ -36,7 +36,7 @@ use crate::{
 
 /// 一次配置快照编译出的模型调用边界。
 ///
-/// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、ProtocolAdapter、
+/// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、协议 Adapter、
 /// timeout 和 retry 产生不同解释；两者的请求内容仍分别构造。
 pub(super) struct CompiledModelService {
     pub(super) model: Arc<dyn ModelService>,
@@ -46,6 +46,7 @@ pub(super) struct CompiledModelService {
     pub(super) capabilities: ResolvedModelCapabilities,
     pub(super) max_output_tokens: u32,
     pub(super) request_timeout: Duration,
+    pub(super) image_preprocessor: Option<Arc<dyn ModelImagePreprocessor>>,
 }
 
 /// 未启用重试时只补充 attempt 观察，不改变下层取消、超时或建流语义。
@@ -58,11 +59,13 @@ struct ObservedModelService {
 struct ImagePreparingModelService {
     inner: Arc<dyn ModelService>,
     preprocessor: Arc<dyn ModelImagePreprocessor>,
+    tool_image_directory: String,
 }
 
 struct AuxiliaryVisionInspector {
     model_key: String,
     model: Arc<dyn ModelService>,
+    image_preprocessor: Arc<dyn ModelImagePreprocessor>,
     reasoning: Option<ReasoningConfig>,
     provider_options: ProviderOptions,
     timeout: Duration,
@@ -81,6 +84,21 @@ impl ImageInspector for AuxiliaryVisionInspector {
                 return Err(ImageInspectorError::Cancelled);
             }
             let child = cancellation.child_token();
+            let mut prepared_images = agent_model::PreparedModelImages::default();
+            for path in &input.image_paths {
+                let resource = ModelImageResource::LocalFile { path: path.clone() };
+                match self
+                    .image_preprocessor
+                    .prepare(&resource, &child)
+                    .await
+                    .map_err(map_inspector_error)?
+                {
+                    ModelImagePreparation::Image(image) => {
+                        prepared_images.insert_file_reference(path.clone(), image);
+                    }
+                    ModelImagePreparation::NotImage => return Err(ImageInspectorError::Failed),
+                }
+            }
             let mut prompt = format!("Inspection goal: {}", input.goal);
             if let Some(background) = input.background {
                 prompt.push_str("\nOptional background: ");
@@ -137,9 +155,11 @@ impl ImageInspector for AuxiliaryVisionInspector {
                 provider_options: self.provider_options.clone(),
             };
             let consume = async {
+                let mut context = agent_model::ModelCallContext::new(child.clone());
+                context.prepared_images = prepared_images;
                 let mut stream = self
                     .model
-                    .stream(request, agent_model::ModelCallContext::new(child.clone()))
+                    .stream(request, context)
                     .await
                     .map_err(map_inspector_error)?;
                 use futures_util::StreamExt as _;
@@ -218,30 +238,60 @@ impl ModelService for ImagePreparingModelService {
                 return Err(ModelError::Cancelled);
             }
             if context.prepared_images.is_empty() {
-                let references = request
-                    .conversation
-                    .messages
-                    .iter()
-                    .filter_map(|message| match message {
-                        agent_types::ConversationMessage::User(message) => Some(&message.parts),
-                        _ => None,
-                    })
-                    .flatten()
-                    .filter_map(|part| match part {
-                        agent_types::UserPart::FileReferences(part) => Some(&part.files),
-                        _ => None,
-                    })
-                    .flatten()
-                    .collect::<Vec<_>>();
-                let mut seen = std::collections::BTreeSet::new();
+                let mut resources = Vec::new();
+                for message in &request.conversation.messages {
+                    match message {
+                        agent_types::ConversationMessage::User(message) => {
+                            for part in &message.parts {
+                                if let agent_types::UserPart::FileReferences(part) = part {
+                                    resources.extend(
+                                        part.files
+                                            .iter()
+                                            .cloned()
+                                            .map(ModelImageResource::FileReference),
+                                    );
+                                }
+                            }
+                        }
+                        agent_types::ConversationMessage::Tool(message) => {
+                            for part in message.result.content.as_parts() {
+                                if let agent_types::ToolResultPart::Image { image } = part {
+                                    resources.push(ModelImageResource::ToolImage {
+                                        directory: self.tool_image_directory.clone(),
+                                        reference: image.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut seen = std::collections::BTreeMap::new();
                 let mut image_count = 0_usize;
-                for reference in references {
-                    if !seen.insert(reference.readable_path.clone()) {
+                for resource in resources {
+                    let key = match &resource {
+                        ModelImageResource::FileReference(reference) => {
+                            (0_u8, reference.readable_path.clone())
+                        }
+                        ModelImageResource::LocalFile { path } => (2_u8, path.clone()),
+                        ModelImageResource::ToolImage { reference, .. } => {
+                            (1_u8, reference.relative_path().to_owned())
+                        }
+                    };
+                    if let Some(is_image) = seen.get(&key) {
+                        if *is_image {
+                            image_count += 1;
+                        }
+                        if image_count > 10 {
+                            return Err(ModelError::Resource(
+                                "a model request cannot contain more than 10 images".to_owned(),
+                            ));
+                        }
                         continue;
                     }
                     match self
                         .preprocessor
-                        .prepare(reference, &context.cancellation)
+                        .prepare(&resource, &context.cancellation)
                         .await?
                     {
                         ModelImagePreparation::Image(image) => {
@@ -251,11 +301,22 @@ impl ModelService for ImagePreparingModelService {
                                     "a model request cannot contain more than 10 images".to_owned(),
                                 ));
                             }
-                            context
-                                .prepared_images
-                                .insert(reference.readable_path.clone(), image);
+                            match resource {
+                                ModelImageResource::FileReference(reference) => context
+                                    .prepared_images
+                                    .insert_file_reference(reference.readable_path, image),
+                                ModelImageResource::LocalFile { path } => {
+                                    context.prepared_images.insert_file_reference(path, image)
+                                }
+                                ModelImageResource::ToolImage { reference, .. } => context
+                                    .prepared_images
+                                    .insert_tool_image(reference.relative_path().to_owned(), image),
+                            }
+                            seen.insert(key, true);
                         }
-                        ModelImagePreparation::NotImage => {}
+                        ModelImagePreparation::NotImage => {
+                            seen.insert(key, false);
+                        }
                     }
                 }
             }
@@ -376,7 +437,7 @@ pub(super) fn compile_run_agent(
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let model_key = session.model_key()?;
     let model_config = resolve_model(snapshot, &model_key)?;
-    let compiled = compile_model_service_with_observer(
+    let mut compiled = compile_model_service_with_observer(
         snapshot,
         &model_key,
         resources.model_factory,
@@ -385,12 +446,14 @@ pub(super) fn compile_run_agent(
     let image_inspector: Option<agent_tools::SharedImageInspector> =
         if !compiled.capabilities.image_input && compiled.capabilities.tool_calls {
             active.vision().and_then(|vision| {
-                let auxiliary =
+                let mut auxiliary =
                     compile_model_service(snapshot, &vision.model_key, resources.model_factory)
                         .ok()?;
                 if !auxiliary.capabilities.image_input {
                     return None;
                 }
+                let image_preprocessor = auxiliary.image_preprocessor.clone()?;
+                bind_image_preparation(&mut auxiliary, session.environment());
                 let (reasoning, provider_options) = protocol_request_options(
                     &auxiliary.provider,
                     auxiliary.protocol,
@@ -402,6 +465,7 @@ pub(super) fn compile_run_agent(
                 Some(Arc::new(AuxiliaryVisionInspector {
                     model_key: vision.model_key.as_str().to_owned(),
                     model: auxiliary.model,
+                    image_preprocessor,
                     reasoning,
                     provider_options,
                     timeout: vision.timeout,
@@ -411,6 +475,7 @@ pub(super) fn compile_run_agent(
         } else {
             None
         };
+    bind_image_preparation(&mut compiled, session.environment());
     let requested_effort = session.reasoning_effort()?;
     let frozen_reasoning_effort = requested_effort.or_else(|| {
         compiled
@@ -446,6 +511,10 @@ pub(super) fn compile_run_agent(
             conversation_recall: conversation_recall.clone(),
             conversation_recall_reader: conversation_recall,
             image_inspector,
+            read_image_enabled: compiled.capabilities.image_input
+                && compiled.capabilities.tool_calls
+                && compiled.capabilities.tool_image_projection
+                    != agent_model::ToolImageProjection::Unsupported,
         })
         .map_err(|source| {
             if source.kind() == RunToolFactoryErrorKind::WorkingDirectoryUnavailable
@@ -630,6 +699,7 @@ fn compile_model_service_with_observer(
         })
         .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
     let base_model = bundle.model;
+    let image_preprocessor = bundle.image_preprocessor;
     let model = match (active.retry_policy(), model_attempt_observer) {
         (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
             base_model,
@@ -645,15 +715,6 @@ fn compile_model_service_with_observer(
         }) as Arc<dyn ModelService>,
         (None, None) => base_model,
     };
-    let model = match bundle.image_preprocessor {
-        Some(preprocessor) if model_config.capabilities().image_input => {
-            Arc::new(ImagePreparingModelService {
-                inner: model,
-                preprocessor,
-            }) as Arc<dyn ModelService>
-        }
-        _ => model,
-    };
     Ok(CompiledModelService {
         model,
         provider: model_config.provider().clone(),
@@ -662,7 +723,25 @@ fn compile_model_service_with_observer(
         capabilities: model_config.capabilities().clone(),
         max_output_tokens: model_config.max_output_tokens(),
         request_timeout: transport.request_timeout(),
+        image_preprocessor,
     })
+}
+
+fn bind_image_preparation(
+    compiled: &mut CompiledModelService,
+    environment: &crate::SessionExecutionEnvironment,
+) {
+    let Some(preprocessor) = compiled.image_preprocessor.take() else {
+        return;
+    };
+    if !compiled.capabilities.image_input {
+        return;
+    }
+    compiled.model = Arc::new(ImagePreparingModelService {
+        inner: compiled.model.clone(),
+        preprocessor,
+        tool_image_directory: environment.session_tool_image_directory.clone(),
+    });
 }
 
 /// 按已编译 Route、Protocol 和 capability 编译业务请求所需的 reasoning 选项。

@@ -2,10 +2,10 @@
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use agent_model::{ModelCapabilities, ModelServiceBundle, ReasoningEffort};
+use agent_model::{ModelCapabilities, ModelService, ModelServiceBundle, ReasoningEffort};
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, ReasoningReplayPolicy,
-    TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, FunctionOutputShape, OpenAiChatCompletionsService,
+    OpenAiResponsesService, ReasoningReplayPolicy, ResponsesProtocolAdapter, TransportTimeouts,
 };
 use assistant_runtime::{
     ModelProtocol, ModelServiceFactory, ModelServiceFactoryError, ModelServiceFactoryRequest,
@@ -31,68 +31,80 @@ impl ModelServiceFactory for HostModelServiceFactory {
         &self,
         request: ModelServiceFactoryRequest<'_>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
-        let mut adapter = match request.protocol {
-            ModelProtocol::OpenAiChatCompletions
-                if request.provider.as_str() == "deepseek"
-                    && request.capabilities.reasoning_enabled() =>
-            {
-                ProtocolAdapter::deepseek()
-            }
+        let capabilities = ModelCapabilities {
+            reasoning: request.capabilities.reasoning_enabled(),
+            image_input: request.capabilities.image_input,
+            tool_calls: request.capabilities.tool_calls,
+            multimodal_tool_result: request.capabilities.tool_image_projection
+                != agent_model::ToolImageProjection::Unsupported,
+            tool_choice: request.capabilities.tool_choice,
+            streaming: request.capabilities.streaming,
+        };
+        let timeouts = TransportTimeouts {
+            connect: request.connect_timeout,
+            request: request.request_timeout,
+        };
+        let effort_values = compile_effort_values(request.capabilities);
+        let service: Arc<dyn ModelService> = match request.protocol {
             ModelProtocol::OpenAiChatCompletions => {
-                ProtocolAdapter::openai_compatible(request.provider.clone())
+                let mut adapter = if request.provider.as_str() == "deepseek"
+                    && request.capabilities.reasoning_enabled()
+                {
+                    ChatProtocolAdapter::deepseek()
+                } else {
+                    ChatProtocolAdapter::openai_compatible(request.provider.clone())
+                };
+                if request.capabilities.reasoning.is_some() {
+                    let effort_field = (!effort_values.is_empty())
+                        .then_some(reasoning_effort_field(request.provider, request.model));
+                    adapter = adapter.with_reasoning(
+                        Some("reasoning_content"),
+                        effort_field,
+                        effort_values,
+                    );
+                    if let Some(policy) = reasoning_replay_policy(request.provider, request.model) {
+                        adapter = adapter.with_reasoning_replay(policy);
+                    }
+                }
+                adapter =
+                    adapter.with_tool_image_projection(request.capabilities.tool_image_projection);
+                Arc::new(
+                    OpenAiChatCompletionsService::new_with_capabilities(
+                        request.endpoint,
+                        BearerCredential::new(request.api_key.to_owned()),
+                        request.model,
+                        request.context_window_tokens,
+                        adapter,
+                        capabilities,
+                        timeouts,
+                    )
+                    .map_err(model_service_error)?,
+                )
+            }
+            ModelProtocol::OpenAiResponses => {
+                let mut adapter = responses_adapter(request.provider, request.model)
+                    .with_reasoning_efforts(effort_values)
+                    .with_tool_choice(request.capabilities.tool_choice)
+                    .with_tool_image_projection(request.capabilities.tool_image_projection);
+                if request.capabilities.tool_image_projection
+                    == agent_model::ToolImageProjection::NativeFunctionOutput
+                {
+                    adapter = adapter.with_function_output_shape(FunctionOutputShape::ContentParts);
+                }
+                Arc::new(
+                    OpenAiResponsesService::new_with_capabilities(
+                        request.endpoint,
+                        BearerCredential::new(request.api_key.to_owned()),
+                        request.model,
+                        request.context_window_tokens,
+                        adapter,
+                        capabilities,
+                        timeouts,
+                    )
+                    .map_err(model_service_error)?,
+                )
             }
         };
-        if let Some(reasoning) = request.capabilities.reasoning.as_ref() {
-            let values = reasoning
-                .efforts
-                .iter()
-                .map(|effort| {
-                    let key = match effort.key {
-                        ReasoningEffortKey::Low => ReasoningEffort::Low,
-                        ReasoningEffortKey::Medium => ReasoningEffort::Medium,
-                        ReasoningEffortKey::High => ReasoningEffort::High,
-                        ReasoningEffortKey::XHigh => ReasoningEffort::XHigh,
-                        ReasoningEffortKey::Max => ReasoningEffort::Max,
-                    };
-                    let value = match &effort.wire_value {
-                        ReasoningEffortWireValue::String(value) => {
-                            serde_json::Value::String(value.clone())
-                        }
-                        ReasoningEffortWireValue::PositiveInteger(value) => {
-                            serde_json::Value::from(*value)
-                        }
-                    };
-                    (key, value)
-                })
-                .collect::<BTreeMap<_, _>>();
-            let effort_field = (!values.is_empty())
-                .then_some(reasoning_effort_field(request.provider, request.model));
-            adapter = adapter.with_reasoning(Some("reasoning_content"), effort_field, values);
-            if let Some(policy) = reasoning_replay_policy(request.provider, request.model) {
-                adapter = adapter.with_reasoning_replay(policy);
-            }
-        }
-        let service = OpenAiCompatibleService::new_with_capabilities(
-            request.endpoint,
-            BearerCredential::new(request.api_key.to_owned()),
-            request.model,
-            request.context_window_tokens,
-            adapter,
-            ModelCapabilities {
-                reasoning: request.capabilities.reasoning_enabled(),
-                image_input: request.capabilities.image_input,
-                tool_calls: request.capabilities.tool_calls,
-                streaming: request.capabilities.streaming,
-            },
-            TransportTimeouts {
-                connect: request.connect_timeout,
-                request: request.request_timeout,
-            },
-        )
-        .map_err(|source| {
-            ModelServiceFactoryError::with_source("model service could not be created", source)
-        })?;
-        let service = Arc::new(service);
         if request.capabilities.image_input {
             Ok(ModelServiceBundle::with_image_preprocessor(
                 service,
@@ -102,6 +114,51 @@ impl ModelServiceFactory for HostModelServiceFactory {
             Ok(ModelServiceBundle::text_only(service))
         }
     }
+}
+
+fn responses_adapter(
+    provider: &agent_types::ProviderId,
+    model_id: &str,
+) -> ResponsesProtocolAdapter {
+    match (provider.as_str(), model_id) {
+        ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro") => {
+            ResponsesProtocolAdapter::deepseek()
+        }
+        ("dashscope", "qwen3.8-max") => ResponsesProtocolAdapter::qwen(),
+        ("moonshot", "k3") => ResponsesProtocolAdapter::kimi(),
+        ("openai", _) => ResponsesProtocolAdapter::openai(),
+        _ => ResponsesProtocolAdapter::openai_compatible(provider.clone()),
+    }
+}
+
+fn compile_effort_values(
+    capabilities: &assistant_runtime::ResolvedModelCapabilities,
+) -> BTreeMap<ReasoningEffort, serde_json::Value> {
+    capabilities
+        .reasoning
+        .iter()
+        .flat_map(|reasoning| &reasoning.efforts)
+        .map(|effort| {
+            let key = match effort.key {
+                ReasoningEffortKey::Low => ReasoningEffort::Low,
+                ReasoningEffortKey::Medium => ReasoningEffort::Medium,
+                ReasoningEffortKey::High => ReasoningEffort::High,
+                ReasoningEffortKey::XHigh => ReasoningEffort::XHigh,
+                ReasoningEffortKey::Max => ReasoningEffort::Max,
+            };
+            let value = match &effort.wire_value {
+                ReasoningEffortWireValue::String(value) => serde_json::Value::String(value.clone()),
+                ReasoningEffortWireValue::PositiveInteger(value) => serde_json::Value::from(*value),
+            };
+            (key, value)
+        })
+        .collect()
+}
+
+fn model_service_error(
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> ModelServiceFactoryError {
+    ModelServiceFactoryError::with_source("model service could not be created", source)
 }
 
 /// effort 字段属于具体服务方言与模型批次，不能只按 OpenAI-compatible 协议猜测。
@@ -137,9 +194,23 @@ mod tests {
         provider: &str,
         model_id: &str,
     ) -> assistant_runtime::ResolvedModelCapabilities {
+        resolved_protocol(
+            catalog,
+            provider,
+            ModelProtocol::OpenAiChatCompletions,
+            model_id,
+        )
+    }
+
+    fn resolved_protocol(
+        catalog: &ModelCatalog,
+        provider: &str,
+        protocol: ModelProtocol,
+        model_id: &str,
+    ) -> assistant_runtime::ResolvedModelCapabilities {
         catalog.resolve(
             &ProviderId::new(provider).expect("provider id"),
-            ModelProtocol::OpenAiChatCompletions,
+            protocol,
             model_id,
         )
     }
@@ -155,16 +226,35 @@ mod tests {
         let catalog = ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
             .expect("bundled model catalog");
 
-        assert_eq!(catalog.revision(), "2026-08-19");
+        assert_eq!(catalog.revision(), "2026-08-20-m4");
         assert!(catalog.routes().iter().any(|route| {
             route.provider.as_str() == "dashscope"
                 && route.provider_label == "阿里云百炼（Qwen）"
                 && route.protocol_label == "Chat Completions（OpenAI Compatible）"
                 && route.model_ids == ["qwen3.8-max"]
         }));
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "deepseek"
+                && route.protocol == ModelProtocol::OpenAiResponses
+                && route.model_ids == ["deepseek-v4-flash", "deepseek-v4-pro"]
+        }));
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "dashscope"
+                && route.protocol == ModelProtocol::OpenAiResponses
+                && route.model_ids == ["qwen3.8-max"]
+        }));
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "moonshot"
+                && route.protocol == ModelProtocol::OpenAiResponses
+                && route.model_ids == ["k3"]
+        }));
 
         let openai = resolved(&catalog, "openai", "gpt-5.6");
         assert!(openai.image_input);
+        assert_eq!(
+            openai.tool_image_projection,
+            agent_model::ToolImageProjection::Unsupported
+        );
         assert_eq!(
             openai
                 .reasoning
@@ -185,6 +275,10 @@ mod tests {
         let qwen = resolved(&catalog, "dashscope", "qwen3.8-max");
         assert!(qwen.image_input);
         assert_eq!(
+            qwen.tool_image_projection,
+            agent_model::ToolImageProjection::AggregatedUserInput
+        );
+        assert_eq!(
             qwen.reasoning
                 .expect("qwen3.8-max reasoning")
                 .default_effort,
@@ -194,12 +288,20 @@ mod tests {
         let kimi = resolved(&catalog, "moonshot", "kimi-k3");
         assert!(kimi.image_input);
         assert_eq!(
+            kimi.tool_image_projection,
+            agent_model::ToolImageProjection::AggregatedUserInput
+        );
+        assert_eq!(
             kimi.reasoning.expect("kimi-k3 reasoning").default_effort,
             Some(ReasoningEffortKey::Max)
         );
 
         let kimi_code = resolved(&catalog, "moonshot", "k3");
         assert!(kimi_code.image_input);
+        assert_eq!(
+            kimi_code.tool_image_projection,
+            agent_model::ToolImageProjection::AggregatedUserInput
+        );
         assert_eq!(
             kimi_code.reasoning.expect("k3 reasoning").default_effort,
             Some(ReasoningEffortKey::High)
@@ -216,11 +318,46 @@ mod tests {
                 .reasoning
                 .is_some()
         );
+        assert_eq!(
+            resolved(&catalog, "deepseek", "deepseek-v4-pro").tool_image_projection,
+            agent_model::ToolImageProjection::Unsupported
+        );
 
         // 旧批次不再由随包表猜测能力，未命中时回到协议保守基线。
         let legacy = resolved(&catalog, "deepseek", "deepseek-chat");
         assert!(!legacy.image_input);
         assert!(legacy.reasoning.is_none());
+
+        let deepseek_responses = resolved_protocol(
+            &catalog,
+            "deepseek",
+            ModelProtocol::OpenAiResponses,
+            "deepseek-v4-pro",
+        );
+        assert!(deepseek_responses.reasoning_enabled());
+        assert!(!deepseek_responses.image_input);
+        let qwen_responses = resolved_protocol(
+            &catalog,
+            "dashscope",
+            ModelProtocol::OpenAiResponses,
+            "qwen3.8-max",
+        );
+        assert!(qwen_responses.image_input);
+        assert_eq!(
+            qwen_responses.tool_image_projection,
+            agent_model::ToolImageProjection::AggregatedUserInput
+        );
+        let kimi_responses =
+            resolved_protocol(&catalog, "moonshot", ModelProtocol::OpenAiResponses, "k3");
+        assert!(kimi_responses.image_input);
+        assert_eq!(
+            kimi_responses.tool_image_projection,
+            agent_model::ToolImageProjection::NativeFunctionOutput
+        );
+        assert_eq!(
+            resolved_protocol(&catalog, "zhipu", ModelProtocol::OpenAiResponses, "glm-5.2",),
+            assistant_runtime::ResolvedModelCapabilities::conservative_openai_responses()
+        );
     }
 
     #[test]

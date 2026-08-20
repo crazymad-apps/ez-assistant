@@ -25,7 +25,7 @@ use agent_model::{
     GenerationConfig, ModelService, ProviderOptions, ReasoningConfig, SystemPromptSnapshot,
 };
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, TransportTimeouts,
 };
 use agent_tools::{ToolRegistry, ToolSetSnapshot};
 use agent_types::ToolChoice;
@@ -223,12 +223,12 @@ async fn run_chat(
     });
     let config = load_chat_config()?;
     let endpoint = sanitized_url(&config.base_url);
-    let service = OpenAiCompatibleService::new(
+    let service = OpenAiChatCompletionsService::new(
         config.base_url,
         BearerCredential::new(config.api_key),
         config.model.clone(),
         config.context_window_tokens,
-        ProtocolAdapter::deepseek(),
+        ChatProtocolAdapter::deepseek(),
         TransportTimeouts::default(),
     )
     .map_err(|error| HarnessError::Provider(error.to_string()))?;

@@ -9,7 +9,7 @@ use agent_tools::{
     FileAuthorizationFacts, GeneralAuthorizationFacts, ResolvedToolInvocation,
     ShellAuthorizationFacts, ShellProcessMode,
 };
-use agent_types::{ToolCallId, ToolResult, ToolResultContent, ToolResultStatus};
+use agent_types::{ToolCallId, ToolResult, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 
 /// 审计中允许展示的 resolved 调用事实，不保存文件内容或 Shell 输出。
@@ -256,52 +256,42 @@ impl DemoAudit {
 }
 
 fn shell_exit_code(result: &ToolResult) -> Option<i32> {
-    match &result.content {
-        ToolResultContent::Json(value) => value
-            .get("exit_code")
-            .and_then(serde_json::Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok()),
-        ToolResultContent::Text(_) => None,
-    }
+    result
+        .content
+        .as_single_json()?
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn classify_error(result: &ToolResult) -> String {
-    match &result.content {
-        ToolResultContent::Json(value)
-            if value
-                .pointer("/error/details/type")
-                .and_then(serde_json::Value::as_str)
-                == Some("timeout") =>
-        {
-            "timeout".to_owned()
-        }
-        ToolResultContent::Text(text) if text.starts_with("invalid tool input:") => {
-            "invalid_input".to_owned()
-        }
-        ToolResultContent::Text(text)
-            if text.contains("interrupted") || text.contains("operation cancelled") =>
-        {
+    if result
+        .content
+        .as_single_json()
+        .and_then(|value| value.pointer("/error/details/type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("timeout")
+    {
+        return "timeout".to_owned();
+    }
+    match result.content.as_single_text() {
+        Some(text) if text.starts_with("invalid tool input:") => "invalid_input".to_owned(),
+        Some(text) if text.contains("interrupted") || text.contains("operation cancelled") => {
             "cancelled".to_owned()
         }
-        ToolResultContent::Text(text) if text.contains("path not found:") => {
-            "file_not_found".to_owned()
-        }
-        ToolResultContent::Text(text) if text.contains("unsupported text encoding:") => {
+        Some(text) if text.contains("path not found:") => "file_not_found".to_owned(),
+        Some(text) if text.contains("unsupported text encoding:") => {
             "unsupported_encoding".to_owned()
         }
-        ToolResultContent::Text(text) if text.contains("unsupported file type:") => {
-            "unsupported_file_type".to_owned()
-        }
-        ToolResultContent::Text(text) if text.contains("file is too large:") => {
-            "file_too_large".to_owned()
-        }
-        ToolResultContent::Text(text) if text.contains("file changed while editing:") => {
+        Some(text) if text.contains("unsupported file type:") => "unsupported_file_type".to_owned(),
+        Some(text) if text.contains("file is too large:") => "file_too_large".to_owned(),
+        Some(text) if text.contains("file changed while editing:") => {
             "concurrent_modification".to_owned()
         }
-        ToolResultContent::Text(text) if text.contains("search backend unavailable:") => {
+        Some(text) if text.contains("search backend unavailable:") => {
             "search_backend_unavailable".to_owned()
         }
-        ToolResultContent::Text(text) if text.contains("io error:") => "io".to_owned(),
+        Some(text) if text.contains("io error:") => "io".to_owned(),
         _ => "tool_error".to_owned(),
     }
 }

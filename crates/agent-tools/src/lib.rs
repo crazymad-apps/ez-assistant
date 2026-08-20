@@ -22,15 +22,16 @@ mod tool;
 pub use capability::{
     fs::{
         DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult,
-        FileAuthorizationFacts, FileEntry, FileEntryKind, FileOperation, FileSystemTool,
-        FileToolContext, FileToolError, FsFuture, ListDirectoryRequest, ListDirectoryResult,
-        ReadFileRequest, ReadFileResult, SearchFilesRequest, SearchFilesResult, SearchKind,
-        SearchMatch, SearchTruncationReason, WriteFileRequest, WriteFileResult, exact_replace,
-        paginate_with_line_numbers,
+        FileAuthorizationFacts, FileBatchAuthorizationFacts, FileEntry, FileEntryKind,
+        FileOperation, FileSystemTool, FileToolContext, FileToolError, FsFuture,
+        ListDirectoryRequest, ListDirectoryResult, ReadFileRequest, ReadFileResult,
+        SearchFilesRequest, SearchFilesResult, SearchKind, SearchMatch, SearchTruncationReason,
+        WriteFileRequest, WriteFileResult, exact_replace, paginate_with_line_numbers,
     },
     image::{
         ImageInspection, ImageInspectionFuture, ImageInspector, ImageInspectorError,
-        InspectImagesRequest, SharedImageInspector,
+        ImageMaterializationFuture, ImageMaterializer, ImageMaterializerError,
+        InspectImagesRequest, ReadImageRequest, SharedImageInspector, SharedImageMaterializer,
     },
     shell::{
         ShellAuthorizationFacts, ShellFuture, ShellOutcome, ShellOutputChannel, ShellOutputChunk,
@@ -59,6 +60,7 @@ pub use standard::{
         PinnedMemoryToolEntry, ResolvedUpdatePinnedMemoryInput, UnpinMemoryInput, UnpinMemoryTool,
         UpdatePinnedMemoryInput, UpdatePinnedMemoryTool,
     },
+    read_image::{ReadImageInput, ReadImageTool},
     recall_memory::{
         RecallMemoryInput, RecallMemoryTool, RecallMemoryToolConfig, ResolvedRecallMemoryInput,
     },

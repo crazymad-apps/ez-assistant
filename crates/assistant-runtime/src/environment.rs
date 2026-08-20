@@ -17,6 +17,8 @@ pub struct SessionExecutionEnvironment {
     pub workspace_private_directory: Option<String>,
     /// Session 范围、持久保存上传附件的静态目录。
     pub session_attachment_directory: String,
+    /// Session 范围、由 Runtime 管理的稳定工具图片目录。
+    pub session_tool_image_directory: String,
     /// Session 范围、供 Agent 保存会话私有文件的持久目录。
     pub session_private_directory: String,
 }

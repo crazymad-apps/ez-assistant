@@ -31,6 +31,12 @@ fn capabilities(reasoning: bool, tool_calls: bool) -> ModelCapabilities {
         image_input: false,
         reasoning,
         tool_calls,
+        multimodal_tool_result: false,
+        tool_choice: if tool_calls {
+            agent_model::ToolChoiceCapabilities::all()
+        } else {
+            agent_model::ToolChoiceCapabilities::default()
+        },
         streaming: true,
     }
 }
@@ -193,6 +199,28 @@ fn builder_reports_each_cross_field_error_without_model_call() {
         AgentBuildError::RequiredToolChoiceWithoutTools
     );
     assert!(required.take_requests().is_empty());
+
+    let mut auto_only_capabilities = capabilities(false, true);
+    auto_only_capabilities.tool_choice = agent_model::ToolChoiceCapabilities::auto_only();
+    let auto_only = Arc::new(ScriptedModelService::new(
+        auto_only_capabilities,
+        CONTEXT_WINDOW_TOKENS,
+        [],
+    ));
+    assert_eq!(
+        expect_build_error(
+            AgentBuilder::new(auto_only.clone(), prompt(), evaluator())
+                .tools(tool_snapshot("lookup", OrderLog::new()))
+                .model_request(ModelRequestConfig {
+                    tool_choice: ToolChoice::Required,
+                    ..ModelRequestConfig::default()
+                })
+                .build(),
+            "required must be supported by the exact route",
+        ),
+        AgentBuildError::ToolChoiceUnsupported
+    );
+    assert!(auto_only.take_requests().is_empty());
 
     let named = Arc::new(ScriptedModelService::new(
         capabilities(false, true),

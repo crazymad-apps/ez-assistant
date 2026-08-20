@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use agent_memory::{MemoryPropertyValue, MemoryRecallResponse};
 use agent_types::{
-    AssistantPart, ConversationMessage, ConversationSnapshot, ToolResultContent, ToolResultStatus,
-    UserPart,
+    AssistantPart, ConversationMessage, ConversationSnapshot, ToolImageReference, ToolResultPart,
+    ToolResultStatus, UserPart,
 };
 use assistant_protocol::{
     ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,
@@ -69,6 +69,9 @@ struct MessageRunProjection {
 pub struct ResolvedToolFileResource {
     pub path: String,
     pub display_name: String,
+    pub media_type: Option<String>,
+    pub origin: ToolFileResourceOrigin,
+    pub tool_image: Option<ToolImageReference>,
 }
 
 impl AssistantRuntime {
@@ -927,21 +930,18 @@ impl AssistantRuntime {
             | ConversationOwner::ChildTask { session_id, .. } => session_id,
         };
         let session = self.session(session_id)?;
-        let (snapshot, working_directory) = match owner {
+        let (snapshot, environment) = match owner {
             ConversationOwner::MainSession { .. } => {
                 session
                     .ensure_conversation_loaded(self.store.as_ref())
                     .await?;
-                (
-                    session.conversation_snapshot()?,
-                    session.environment().working_directory.clone(),
-                )
+                (session.conversation_snapshot()?, session.environment())
             }
-            ConversationOwner::ChildTask { .. } => {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "child task file resources are no longer available",
-                });
-            }
+            ConversationOwner::ChildTask { child_task_id, .. } => (
+                self.child_task_conversation_snapshot(session_id, child_task_id)
+                    .await?,
+                session.environment(),
+            ),
         };
         let assistant = snapshot.messages.iter().find_map(|message| match message {
             ConversationMessage::Assistant(message)
@@ -951,39 +951,74 @@ impl AssistantRuntime {
             }
             _ => None,
         });
-        let Some((call, path)) = assistant.and_then(|message| {
-            message.parts.iter().find_map(|part| match part {
-                AssistantPart::ToolCall(call)
-                    if tool_resource_ref_id(&call.id).as_ref() == Some(resource_ref_id) =>
-                {
-                    file_input_path(call.name.as_str(), &call.arguments).map(|path| (call, path))
-                }
-                _ => None,
-            })
-        }) else {
+        let Some(assistant) = assistant else {
             return Err(RuntimeError::InvalidRequest {
                 reason: "tool file resource was not found",
             });
         };
-        let completed = snapshot.messages.iter().any(|message| match message {
-            ConversationMessage::Tool(tool) => {
-                tool.result.call_id.as_str() == call.id.as_str()
-                    && tool.result.status == ToolResultStatus::Success
-            }
-            _ => false,
-        });
-        if !completed {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "tool file resource is not available",
+        for part in &assistant.parts {
+            let AssistantPart::ToolCall(call) = part else {
+                continue;
+            };
+            let result = snapshot.messages.iter().find_map(|message| match message {
+                ConversationMessage::Tool(tool) => {
+                    (tool.result.call_id.as_str() == call.id.as_str()).then_some(&tool.result)
+                }
+                _ => None,
             });
+            let Some(result) = result.filter(|result| result.status == ToolResultStatus::Success)
+            else {
+                continue;
+            };
+            if tool_resource_ref_id(&call.id).as_ref() == Some(resource_ref_id) {
+                if call.name.as_str() == "read_image"
+                    || matches!(owner, ConversationOwner::ChildTask { .. })
+                {
+                    continue;
+                }
+                let path = file_input_path(call.name.as_str(), &call.arguments).ok_or(
+                    RuntimeError::InvalidRequest {
+                        reason: "tool file resource was not found",
+                    },
+                )?;
+                let path = resolve_recorded_path(&environment.working_directory, path);
+                let display_name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or("file")
+                    .to_owned();
+                return Ok(ResolvedToolFileResource {
+                    media_type: preview_media_type(&display_name).map(str::to_owned),
+                    path,
+                    display_name,
+                    origin: ToolFileResourceOrigin::WorkspaceFile,
+                    tool_image: None,
+                });
+            }
+            for (part_index, part) in result.content.as_parts().iter().enumerate() {
+                let ToolResultPart::Image { image } = part else {
+                    continue;
+                };
+                if tool_image_resource_ref_id(&call.id, part_index).as_ref()
+                    != Some(resource_ref_id)
+                {
+                    continue;
+                }
+                return Ok(ResolvedToolFileResource {
+                    path: std::path::Path::new(&environment.session_tool_image_directory)
+                        .join(image.relative_path())
+                        .to_string_lossy()
+                        .into_owned(),
+                    display_name: image.relative_path().to_owned(),
+                    media_type: Some(image.media_type().to_owned()),
+                    origin: ToolFileResourceOrigin::SessionToolImage,
+                    tool_image: Some(image.clone()),
+                });
+            }
         }
-        let path = resolve_recorded_path(&working_directory, path);
-        let display_name = std::path::Path::new(&path)
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("file")
-            .to_owned();
-        Ok(ResolvedToolFileResource { path, display_name })
+        Err(RuntimeError::InvalidRequest {
+            reason: "tool file resource was not found",
+        })
     }
 
     pub(super) fn approval_queue(
@@ -1296,7 +1331,7 @@ fn project_tool_detail(
     call_id: &ToolCallId,
     run_id: Option<RunId>,
 ) -> RuntimeResult<ToolDetailSnapshot> {
-    let resources_available = matches!(owner, ConversationOwner::MainSession { .. });
+    let workspace_resources_available = matches!(owner, ConversationOwner::MainSession { .. });
     let assistant = snapshot.messages.iter().find_map(|message| match message {
         ConversationMessage::Assistant(message) if message.id.as_str() == message_id.as_str() => {
             Some(message)
@@ -1321,7 +1356,7 @@ fn project_tool_detail(
     });
     let summary = result.map(tool_result_summary);
     let input = project_tool_input(call.name.as_str(), &call.arguments);
-    let files = project_tool_files(&call.id, &input, result, resources_available)?;
+    let files = project_tool_files(&call.id, &input, result, workspace_resources_available)?;
     let (request_json, request_truncated) = formatted_json(&call.arguments);
     let (result_json, result_truncated) =
         result
@@ -1381,11 +1416,16 @@ fn project_conversation_file_references(
                 true,
             )?;
             let call_id = protocol_tool_call_id(call.id.as_str())?;
-            references.extend(files.into_iter().map(|file| ConversationFileReference {
-                message_id: message_id.clone(),
-                call_id: call_id.clone(),
-                file,
-            }));
+            references.extend(
+                files
+                    .into_iter()
+                    .filter(|file| file.origin != ToolFileResourceOrigin::SessionToolImage)
+                    .map(|file| ConversationFileReference {
+                        message_id: message_id.clone(),
+                        call_id: call_id.clone(),
+                        file,
+                    }),
+            );
         }
     }
     Ok(references)
@@ -1395,39 +1435,70 @@ fn project_tool_files(
     call_id: &agent_types::ToolCallId,
     input: &ToolInputSnapshot,
     result: Option<&agent_types::ToolResult>,
-    resources_available: bool,
+    workspace_resources_available: bool,
 ) -> RuntimeResult<Vec<ToolFileReference>> {
-    let (ToolInputSnapshot::File { path, .. }, Some(result)) = (input, result) else {
+    let Some(result) = result else {
         return Ok(Vec::new());
     };
     if result.status != ToolResultStatus::Success {
         return Ok(Vec::new());
     }
-    Ok(vec![ToolFileReference {
-        resource_ref_id: tool_resource_ref_id(call_id).ok_or(
-            RuntimeError::InternalStateUnavailable {
-                component: "tool resource reference",
+    let mut files = Vec::new();
+    if let ToolInputSnapshot::File { operation, path } = input
+        && operation != "read_image"
+    {
+        files.push(ToolFileReference {
+            resource_ref_id: tool_resource_ref_id(call_id).ok_or(
+                RuntimeError::InternalStateUnavailable {
+                    component: "tool resource reference",
+                },
+            )?,
+            origin: ToolFileResourceOrigin::WorkspaceFile,
+            display_name: std::path::Path::new(path)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(path)
+                .to_owned(),
+            display_path: safe_display_path(path),
+            size_bytes: None,
+            media_type: preview_media_type(path).map(str::to_owned),
+            state: if workspace_resources_available {
+                ToolFileResourceState::Available
+            } else {
+                ToolFileResourceState::Unavailable
             },
-        )?,
-        origin: ToolFileResourceOrigin::WorkspaceFile,
-        display_name: std::path::Path::new(path)
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or(path)
-            .to_owned(),
-        display_path: safe_display_path(path),
-        size_bytes: None,
-        media_type: preview_media_type(path).map(str::to_owned),
-        state: if resources_available {
-            ToolFileResourceState::Available
-        } else {
-            ToolFileResourceState::Unavailable
-        },
-    }])
+        });
+    }
+    for (part_index, part) in result.content.as_parts().iter().enumerate() {
+        let ToolResultPart::Image { image } = part else {
+            continue;
+        };
+        files.push(ToolFileReference {
+            resource_ref_id: tool_image_resource_ref_id(call_id, part_index).ok_or(
+                RuntimeError::InternalStateUnavailable {
+                    component: "tool image resource reference",
+                },
+            )?,
+            origin: ToolFileResourceOrigin::SessionToolImage,
+            display_name: image.relative_path().to_owned(),
+            display_path: None,
+            size_bytes: None,
+            media_type: Some(image.media_type().to_owned()),
+            state: ToolFileResourceState::Available,
+        });
+    }
+    Ok(files)
 }
 
 fn tool_resource_ref_id(call_id: &agent_types::ToolCallId) -> Option<ResourceRefId> {
     ResourceRefId::new(format!("tool-{}", call_id.as_str())).ok()
+}
+
+fn tool_image_resource_ref_id(
+    call_id: &agent_types::ToolCallId,
+    part_index: usize,
+) -> Option<ResourceRefId> {
+    ResourceRefId::new(format!("tool-image-{}-{part_index}", call_id.as_str())).ok()
 }
 
 fn file_input_path<'a>(_name: &str, arguments: &'a serde_json::Value) -> Option<&'a str> {
@@ -1768,18 +1839,29 @@ fn tool_status(result: Option<&agent_types::ToolResult>) -> ToolActivityStatus {
 }
 
 fn tool_result_summary(result: &agent_types::ToolResult) -> String {
-    let text = match &result.content {
-        ToolResultContent::Text(text) => text.clone(),
-        ToolResultContent::Json(value) => value.to_string(),
-    };
+    let text = result
+        .content
+        .as_parts()
+        .iter()
+        .map(|part| match part {
+            agent_types::ToolResultPart::Text { text } => text.clone(),
+            agent_types::ToolResultPart::Json { value } => value.to_string(),
+            agent_types::ToolResultPart::Image { image } => {
+                format!("[image: {}]", image.relative_path())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     truncate_chars(&text, TOOL_SUMMARY_CHARS)
 }
 
 fn tool_result_json(result: &agent_types::ToolResult) -> Option<serde_json::Value> {
-    match &result.content {
-        ToolResultContent::Json(value) => Some(value.clone()),
-        ToolResultContent::Text(text) => serde_json::from_str(text).ok(),
-    }
+    result.content.as_single_json().cloned().or_else(|| {
+        result
+            .content
+            .as_single_text()
+            .and_then(|text| serde_json::from_str(text).ok())
+    })
 }
 
 fn formatted_json(value: &serde_json::Value) -> (String, bool) {
@@ -1856,5 +1938,102 @@ fn item_message_id(item: &ConversationItem) -> &MessageId {
     match item {
         ConversationItem::User(message) => &message.message_id,
         ConversationItem::Assistant(message) => &message.message_id,
+    }
+}
+
+#[cfg(test)]
+mod tool_image_projection_tests {
+    use agent_types::{
+        AssistantMessage, FinishReason, ModelIdentity, ProviderId, ToolCall, ToolMessage, ToolName,
+        ToolResult, ToolResultContent,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    fn image_exchange() -> (
+        ConversationSnapshot,
+        agent_types::MessageId,
+        agent_types::ToolCallId,
+    ) {
+        let assistant_id = agent_types::MessageId::new("assistant-image").expect("assistant id");
+        let call_id = agent_types::ToolCallId::new("read-image-call").expect("call id");
+        let image = ToolImageReference::new(format!("{}.png", "a".repeat(64)), "image/png")
+            .expect("image reference");
+        let assistant = AssistantMessage {
+            id: assistant_id.clone(),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider"),
+                "fixture-model",
+            ),
+            parts: vec![AssistantPart::ToolCall(ToolCall {
+                id: call_id.clone(),
+                name: ToolName::new("read_image").expect("tool name"),
+                arguments: json!({"path": "/outside/source.png"}),
+            })],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        };
+        let tool = ToolMessage {
+            id: agent_types::MessageId::new("tool-image-result").expect("tool message id"),
+            result: ToolResult {
+                call_id: call_id.clone(),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::parts(vec![
+                    ToolResultPart::text("copied"),
+                    ToolResultPart::image(image),
+                ])
+                .expect("tool result content"),
+                metadata: None,
+            },
+        };
+        (
+            ConversationSnapshot::new(vec![
+                ConversationMessage::Assistant(assistant),
+                ConversationMessage::Tool(tool),
+            ]),
+            assistant_id,
+            call_id,
+        )
+    }
+
+    #[test]
+    fn read_image_projects_only_the_persisted_image_part() {
+        let (snapshot, assistant_id, call_id) = image_exchange();
+        let detail = project_tool_detail(
+            &snapshot,
+            ConversationOwner::ChildTask {
+                session_id: SessionId::new("session-image").expect("session id"),
+                child_task_id: assistant_protocol::ChildTaskId::new("child-image")
+                    .expect("child id"),
+            },
+            &MessageId::new(assistant_id.as_str()).expect("protocol message id"),
+            &ToolCallId::new(call_id.as_str()).expect("protocol call id"),
+            None,
+        )
+        .expect("tool detail");
+
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(
+            detail.files[0].resource_ref_id.as_str(),
+            "tool-image-read-image-call-1"
+        );
+        assert_eq!(
+            detail.files[0].origin,
+            ToolFileResourceOrigin::SessionToolImage
+        );
+        assert_eq!(detail.files[0].display_path, None);
+        assert_eq!(detail.files[0].media_type.as_deref(), Some("image/png"));
+        assert_eq!(detail.files[0].state, ToolFileResourceState::Available);
+    }
+
+    #[test]
+    fn tool_images_never_enter_conversation_file_references() {
+        let (snapshot, _, _) = image_exchange();
+        assert!(
+            project_conversation_file_references(&snapshot)
+                .expect("conversation file projection")
+                .is_empty()
+        );
     }
 }

@@ -36,6 +36,8 @@
 - Core、Harness 和未来 Runtime 不得在本 crate 外重复窗口比例、历史切分或 replacement
   校验逻辑。
 - usage 缺失时返回明确判断结果，不在业务代码中回退到裸算或隐藏 TokenEstimator。
+- 窗口判断在最新 Provider `total_tokens` 上额外计入当前 Conversation 中 ProviderState payload 的
+  保守字节预算；该预算用于避免本地不透明续传包绕过窗口限制，不把 payload 当 reasoning 正文。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。
 - `RollingSummarySameModel` 只调用一次 `CompactionInput` 中的当前 ModelService；
   请求原样保留正常 Agent 的完整冻结 System Prompt，并由 Strategy 内部在
@@ -53,7 +55,9 @@
 - Runtime continuation 使用 `partition_for_continuation`：普通阈值压缩保留最近完整 User Turn；
   Provider overflow 可压缩当前已经形成完整 Tool Exchange 的活动 Turn。若 replacement 会以
   Assistant 继续执行，必须追加持久化的 Injected User continuation 锚点，维持规范 Turn 布局。
-- Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界。
+- Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界；但历史中
+  出现 ProviderState 本身不构成永久 protected tail，完整旧 User Turn 可进入压缩 head，摘要替代后
+  其 opaque state 自然离开活动上下文。
 - 所有比例和策略配置在构造期校验；运行时错误使用稳定错误类型，不泄露 prompt、
   credential 或完整响应正文。
 - 不引入 Passthrough Strategy；预算内请求由 Core 直接构造既有 `ModelRequest`。

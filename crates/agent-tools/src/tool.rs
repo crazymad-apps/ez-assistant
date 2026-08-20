@@ -245,7 +245,7 @@ pub trait Tool: Send + Sync + 'static {
     type Input: DeserializeOwned + JsonSchema;
     /// 无副作用 resolve 后得到、由 `execute` 一次性消费的输入类型。
     type ResolvedInput: Serialize + Send + 'static;
-    /// 执行输出类型，最终序列化进入 [`ToolResultContent::Json`]。
+    /// 执行输出类型，最终序列化进入单一 JSON [`ToolResultContent`] Part。
     type Output: Serialize;
 
     /// 模型可见的工具名。
@@ -278,7 +278,7 @@ pub trait Tool: Send + Sync + 'static {
     /// 把成功输出编码为模型可见内容；普通工具默认使用 JSON。
     fn encode_output(output: Self::Output) -> Result<ToolResultContent, String> {
         serde_json::to_value(output)
-            .map(ToolResultContent::Json)
+            .map(ToolResultContent::json)
             .map_err(|error| error.to_string())
     }
 
@@ -423,7 +423,7 @@ pub(crate) fn text_error_result_for_id(
     ToolResult {
         call_id,
         status: ToolResultStatus::Error,
-        content: ToolResultContent::Text(message),
+        content: ToolResultContent::text(message),
         metadata: None,
     }
 }
@@ -443,7 +443,7 @@ fn tool_error_result(call_id: &agent_types::ToolCallId, error: ToolError) -> Too
         } => ToolResult {
             call_id: call_id.clone(),
             status: ToolResultStatus::Error,
-            content: ToolResultContent::Json(json!({
+            content: ToolResultContent::json(json!({
                 "error": {
                     "message": message,
                     "details": details,
@@ -527,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             result.content,
-            ToolResultContent::Json(json!({
+            ToolResultContent::json(json!({
                 "error": {
                     "message": "timed out",
                     "details": {"type": "timeout", "truncated": false},

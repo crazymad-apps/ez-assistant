@@ -5,13 +5,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use agent_model::{ToolChoiceCapabilities, ToolImageProjection};
 use agent_types::ProviderId;
 use serde::Deserialize;
 use thiserror::Error;
 
 use super::domain::ModelProtocol;
 
-const SUPPORTED_CATALOG_SCHEMA_VERSION: u32 = 1;
+const SUPPORTED_CATALOG_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 /// 产品稳定的 reasoning effort key；显示文本与线上值均不参与跨模型排序。
@@ -74,6 +75,8 @@ pub struct ResolvedModelCapabilities {
     pub image_input: bool,
     pub reasoning: Option<ResolvedReasoningCapability>,
     pub tool_calls: bool,
+    pub tool_image_projection: ToolImageProjection,
+    pub tool_choice: ToolChoiceCapabilities,
     pub streaming: bool,
 }
 
@@ -84,7 +87,28 @@ impl ResolvedModelCapabilities {
             image_input: false,
             reasoning: None,
             tool_calls: true,
+            tool_image_projection: ToolImageProjection::Unsupported,
+            tool_choice: ToolChoiceCapabilities::auto_only(),
             streaming: true,
+        }
+    }
+
+    /// 未命中精确 Responses 路由时的保守能力基线。
+    pub fn conservative_openai_responses() -> Self {
+        Self {
+            image_input: false,
+            reasoning: None,
+            tool_calls: true,
+            tool_image_projection: ToolImageProjection::Unsupported,
+            tool_choice: ToolChoiceCapabilities::auto_only(),
+            streaming: true,
+        }
+    }
+
+    fn conservative(protocol: ModelProtocol) -> Self {
+        match protocol {
+            ModelProtocol::OpenAiChatCompletions => Self::conservative_openai_chat_completions(),
+            ModelProtocol::OpenAiResponses => Self::conservative_openai_responses(),
         }
     }
 
@@ -163,7 +187,7 @@ impl ModelCatalog {
             }
             let capabilities = compile_capabilities(
                 &entry.capabilities,
-                &ResolvedModelCapabilities::conservative_openai_chat_completions(),
+                &ResolvedModelCapabilities::conservative(protocol),
             )
             .map_err(|_| ModelCatalogError::InvalidCapabilities)?;
             let mut aliases = BTreeSet::new();
@@ -213,7 +237,7 @@ impl ModelCatalog {
         self.entries
             .get(&(provider.clone(), protocol, model_id.to_owned()))
             .cloned()
-            .unwrap_or_else(ResolvedModelCapabilities::conservative_openai_chat_completions)
+            .unwrap_or_else(|| ResolvedModelCapabilities::conservative(protocol))
     }
 }
 
@@ -252,6 +276,8 @@ pub(super) struct CapabilityInput {
     pub(super) image_input: Option<bool>,
     pub(super) reasoning: Option<ReasoningInput>,
     pub(super) tool_calls: Option<bool>,
+    pub(super) tool_image_projection: Option<ToolImageProjection>,
+    pub(super) tool_choice: Option<ToolChoiceCapabilities>,
     pub(super) streaming: Option<bool>,
 }
 
@@ -290,12 +316,29 @@ pub(super) fn compile_capabilities(
         Some(reasoning) => compile_reasoning(reasoning)?,
         None => base.reasoning.clone(),
     };
-    Ok(ResolvedModelCapabilities {
+    let compiled = ResolvedModelCapabilities {
         image_input: input.image_input.unwrap_or(base.image_input),
         reasoning,
         tool_calls: input.tool_calls.unwrap_or(base.tool_calls),
+        tool_image_projection: input
+            .tool_image_projection
+            .unwrap_or(base.tool_image_projection),
+        tool_choice: input.tool_choice.unwrap_or(base.tool_choice),
         streaming: input.streaming.unwrap_or(base.streaming),
-    })
+    };
+    if compiled.tool_image_projection != ToolImageProjection::Unsupported
+        && (!compiled.image_input || !compiled.tool_calls)
+    {
+        return Err(CapabilityValidationError);
+    }
+    let tool_choice = compiled.tool_choice;
+    if (compiled.tool_calls && !tool_choice.auto)
+        || (!compiled.tool_calls
+            && (tool_choice.auto || tool_choice.none || tool_choice.required || tool_choice.named))
+    {
+        return Err(CapabilityValidationError);
+    }
+    Ok(compiled)
 }
 
 fn compile_reasoning(
@@ -382,7 +425,7 @@ mod tests {
     fn catalog(capabilities: &str) -> String {
         format!(
             r#"{{
-                "schema_version": 1,
+                "schema_version": 2,
                 "catalog_revision": "fixture",
                 "models": [{{
                     "provider": "fixture",
@@ -480,6 +523,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_schema_and_incoherent_tool_image_capabilities() {
+        let legacy = catalog("{}").replace("\"schema_version\": 2", "\"schema_version\": 1");
+        assert!(matches!(
+            ModelCatalog::from_json(&legacy),
+            Err(ModelCatalogError::UnsupportedSchemaVersion)
+        ));
+        assert!(matches!(
+            ModelCatalog::from_json(&catalog(
+                r#"{"tool_image_projection":"aggregated_user_input"}"#
+            )),
+            Err(ModelCatalogError::InvalidCapabilities)
+        ));
+        assert!(matches!(
+            ModelCatalog::from_json(&catalog(r#"{"tool_choice":{"auto":false}}"#)),
+            Err(ModelCatalogError::InvalidCapabilities)
+        ));
+    }
+
+    #[test]
     fn unknown_model_uses_conservative_protocol_baseline() {
         let catalog = ModelCatalog::from_json(&catalog("{}")).expect("catalog");
         let capabilities = catalog.resolve(
@@ -491,5 +553,15 @@ mod tests {
         assert!(!capabilities.reasoning_enabled());
         assert!(capabilities.tool_calls);
         assert!(capabilities.streaming);
+
+        let responses = catalog.resolve(
+            &ProviderId::new("fixture").expect("provider"),
+            ModelProtocol::OpenAiResponses,
+            "new-model",
+        );
+        assert_eq!(
+            responses,
+            ResolvedModelCapabilities::conservative_openai_responses()
+        );
     }
 }

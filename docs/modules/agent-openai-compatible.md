@@ -2,28 +2,44 @@
 
 ## 模块定位
 
-`crates/agent-openai-compatible` 将规范模型契约适配到 OpenAI Chat Completions compatible HTTP/SSE 协议。修改前必须阅读 [`Agent 系统技术架构`](agent-system.md)、[`agent-model`](agent-model.md) 和 [`Rust 编程规范`](../specs/Rust编程规范.md)。
+`crates/agent-openai-compatible` 承载 OpenAI-compatible 协议族的模型 Adapter。当前分别实现
+OpenAI Chat Completions compatible 与 Responses API HTTP/SSE；两个协议拥有独立的原生 Schema、
+Codec、流状态机和 Service，不能通过单次请求失败后互相回退。修改前必须阅读
+[`Agent 系统技术架构`](agent-system.md)、
+[`agent-model`](agent-model.md) 和 [`Rust 编程规范`](../specs/Rust编程规范.md)。
+
+## 目录与依赖边界
+
+- `src/chat/` 只承载 Chat Completions 的 `ChatProtocolAdapter`、原生 Schema、Codec、
+  流式组装和 `OpenAiChatCompletionsService`。
+- `src/responses/` 只承载 Responses 的 `ResponsesProtocolAdapter`、原生 Schema、Codec、
+  item 流式组装和 `OpenAiResponsesService`；不得复用 Chat message/choice/delta 枚举模拟 Responses。
+- `src/shared/` 只承载已有稳定复用价值的 credential、endpoint、HTTP Transport、SSE parser
+  和工具 Schema 降级器，以及已形成双协议调用方的图片 Data URL helper；依赖方向固定为
+  `chat/responses -> shared`，shared 不依赖任一协议 Schema 或状态机。
+- Chat/Responses fixture 分别位于 `fixtures/chat/`、`fixtures/responses/`，测试位于协议或共享
+  基础设施各自的 `tests/` 目录。
 
 ## 核心约束
 
-- OpenAI-compatible 原生 schema、Protocol Adapter、Codec、Transport 和 Decoder 都封装在本 crate；
+- OpenAI-compatible 原生 schema、协议 Adapter、Codec、Transport 和 Decoder 都封装在本 crate；
   服务 Route 与 capability 事实由 Runtime 编译后注入。
 - Adapter 只依赖 `agent-model`/`agent-types`，禁止依赖 `agent-core`、Runtime 和 Tauri。
 - credential 通过构造依赖注入，不进入请求 DTO、事件、Debug 和错误文本。
 - base URL 不接受 userinfo、query 或 fragment；当前认证只通过 credential 注入
   Authorization header，安全 wire 快照在构造时永久排除认证 header。
-- `OpenAiCompatibleService::new` 与 `with_transport` 都是可失败构造，统一返回
-  `OpenAiCompatibleServiceError`；无效 URL 错误不得回显可能包含 credential 的原始 URL。
-- Provider 差异通过显式 ProtocolAdapter 表达，不在 Core 中按名称分支。
+- `OpenAiChatCompletionsService::new` 与 `with_transport` 都是可失败构造，统一返回
+  `OpenAiChatCompletionsServiceError`；无效 URL 错误不得回显可能包含 credential 的原始 URL。
+- Chat Provider 差异通过显式 `ChatProtocolAdapter` 表达，不在 Core 中按名称分支。
 - DeepSeek thinking 工具调用必须维持可回放的 `reasoning_content`、`tool_calls` 和
   `tool_call_id`。
-- `ProtocolAdapter::deepseek()` 明确表示 thinking-enabled 形态；经 `provider_options` 关闭
-  thinking 不属于该 ProtocolAdapter 的支持范围，不能一边关闭 thinking 一边沿用其 reasoning
+- `ChatProtocolAdapter::deepseek()` 明确表示 thinking-enabled 形态；经 `provider_options` 关闭
+  thinking 不属于该 Chat 方言的支持范围，不能一边关闭 thinking 一边沿用其 reasoning
   必填校验。
 - DeepSeek 偶发返回不带 `reasoning_content` 的合法 Tool Call 时，解码器保留
-  该 Tool Call，不伪造规范 `ReasoningPart`；后续回放由 DeepSeek ProtocolAdapter 的编码器
+  该 Tool Call，不伪造规范 `ReasoningPart`；后续回放由 DeepSeek Chat 方言编码器
   补入仅用于 wire 的 reasoning 占位字段。该兼容逻辑不得进入 Core、UI 或
-  Journal，也不得应用到不接受 `reasoning_content` 的其他 ProtocolAdapter。
+  Journal，也不得应用到不接受 `reasoning_content` 的其他 Chat 方言。
 - Context Summary 编码为带固定派生说明的 system message。
 - User Message 的 `Text`、`Injected` 和 `FileReferences` 按规范 Part 顺序编码为
   原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
@@ -32,7 +48,14 @@
   不改变既有线上 JSON 和 system message 顺序。
 - 请求编码前复用 `ConversationSnapshot` 的严格 Tool Call/Result 双向校验，不在
   Adapter 内维护第二套配对算法。
-- Service 构造时显式接收模型上下文窗口；请求设置输出上限时，直接根据 ProtocolAdapter 的
+- Chat 编码器读取统一的有序 Tool Result Parts：纯 Text/JSON 结果继续确定性编码为字符串。
+  `AggregatedUserInput` 路径必须按 Assistant Tool Call 顺序先输出完整整批 tool messages，Image
+  Part 在字符串中留下带 `call_id + part_index` 的版本化占位；随后至多追加一条 wire-only user
+  image envelope，并按 Tool Call、Part 顺序排列“标签文本 → 图片”。不得逐结果穿插 user message。
+- wire-only 图片 envelope 只由当前规范 Tool Result 确定性重建，不分配 MessageId，也不能回写
+  Conversation、Journal、Recall、事件或产品消息计数。投影为 `Unsupported`、图片未准备或资源
+  不匹配时必须在建流前失败，不能静默丢图或动态改走另一投影。
+- Service 构造时显式接收模型上下文窗口；请求设置输出上限时，直接根据 `ChatProtocolAdapter` 的
   `max_output_tokens_field` 编码或返回配置错误。
 - Context Overflow 只根据可审阅 fixture 中确认的结构化 `error.code` /
   `error.type` 精确映射；当前 allowlist 为 `context_length_exceeded`，禁止通过
@@ -46,12 +69,30 @@
 - Provider wire 观察位于 Transport 装饰器：记录编码后安全请求、允许的响应头、原始 chunks、
   EOF 和 TransportError，同时原样转发请求、分块、取消与错误。观察器不得写文件或改变结果。
 - wire body/chunk 在内存中保持原始 bytes，serde 使用 Base64 紧凑表示；相同规范请求与相同
-  ProtocolAdapter 的编码必须确定性产生相同 request bytes。
+  `ChatProtocolAdapter` 的编码必须确定性产生相同 request bytes。
 - 默认测试完全离线；真实 API 只能作为显式忽略的 smoke test。
-- 对外只暴露字段私有的 `ProtocolAdapter` 具名构造，不允许 Runtime 用字段字面量拼接方言；
+- 对外只暴露字段私有的 `ChatProtocolAdapter` 具名构造，不允许 Runtime 用字段字面量拼接方言；
   reasoning 历史使用 `Drop`、`ToolCallsOnly`、`PreserveAll` 策略表达，不再使用模糊布尔开关。
-- `OpenAiCompatibleService::new_with_capabilities` 接收 Runtime 唯一编译的能力事实；协议 Adapter
+- `OpenAiChatCompletionsService::new_with_capabilities` 接收 Runtime 唯一编译的能力事实；协议 Adapter
   仍独立校验 wire 约束，不能根据一次响应反推或修改模型能力。
+- `OpenAiResponsesService` 首版固定请求 `/responses`、`store: false`、`stream: true`，每次从本地
+  规范 Conversation 编码完整历史；不发送 `previous_response_id`、远端 `conversation`、后台模式
+  或其他服务端会话状态。
+- Responses 的 `instructions`、用户/助手文本、图片输入、Context Summary、function call/output、
+  reasoning、refusal、usage 和终态均由独立 item 状态机映射。并行 function call 按
+  `output_index` 稳定完成；未知 item、缺失终态、坏参数、终态后额外数据和身份冲突均 fail-closed。
+- Responses 原生 `function_call_output` 是否可携带 content parts 由显式 `FunctionOutputShape`
+  方言事实决定；String-only 路由使用已验证的批次聚合图片输入，不在运行期试错或切换投影。
+- Responses 精确具名方言包括 DeepSeek Flash/Pro、DashScope Qwen `qwen3.8-max` 和 Moonshot
+  Kimi `k3`；未知兼容端点仍使用保守通用方言。Qwen 工具图片固定使用批次聚合 User Image，
+  Kimi 固定使用原生 content-parts function output，DeepSeek 不启用图片；不得运行期试错切换。
+- DeepSeek/OpenAI 类非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
+  `ReasoningPart`。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
+  完全相容的状态；相容 payload 损坏或与规范 reasoning 矛盾时 fail-closed，路由不相容时跳过
+  opaque item 并从规范 part 重建。Qwen/Kimi 的 `encrypted_content: null` 不生成空状态。
+- Responses 流状态机同时接受专用 reasoning 事件和 DeepSeek 使用的通用
+  `response.content_part.added/done` reasoning 边界。OpenAI-compatible 工具 Schema 降级对无字段
+  object 显式输出 `properties: {}`，满足 DashScope 的 Responses 校验而不改变规范 ToolDefinition。
 
 ## 验证
 

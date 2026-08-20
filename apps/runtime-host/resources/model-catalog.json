@@ -1,12 +1,29 @@
 {
-  "schema_version": 1,
-  "catalog_revision": "2026-08-19",
+  "schema_version": 2,
+  "catalog_revision": "2026-08-20-m4",
   "models": [
     {
       "provider": "deepseek",
       "provider_label": "DeepSeek",
       "protocol": "openai_chat_completions",
       "protocol_label": "Chat Completions（OpenAI Compatible）",
+      "model_ids": ["deepseek-v4-flash", "deepseek-v4-pro"],
+      "capabilities": {
+        "reasoning": {
+          "enabled": true,
+          "default_effort": "high",
+          "effort_map": {
+            "high": { "label": "High", "wire_value": "high" },
+            "max": { "label": "Max", "wire_value": "max" }
+          }
+        }
+      }
+    },
+    {
+      "provider": "deepseek",
+      "provider_label": "DeepSeek",
+      "protocol": "openai_responses",
+      "protocol_label": "Responses API（OpenAI Compatible）",
       "model_ids": ["deepseek-v4-flash", "deepseek-v4-pro"],
       "capabilities": {
         "reasoning": {
@@ -55,6 +72,27 @@
       "model_ids": ["qwen3.8-max"],
       "capabilities": {
         "image_input": true,
+        "tool_image_projection": "aggregated_user_input",
+        "reasoning": {
+          "enabled": true,
+          "default_effort": "xhigh",
+          "effort_map": {
+            "low": { "label": "Low", "wire_value": "low" },
+            "medium": { "label": "Medium", "wire_value": "medium" },
+            "xhigh": { "label": "XHigh", "wire_value": "xhigh" }
+          }
+        }
+      }
+    },
+    {
+      "provider": "dashscope",
+      "provider_label": "阿里云百炼（Qwen）",
+      "protocol": "openai_responses",
+      "protocol_label": "Responses API（OpenAI Compatible）",
+      "model_ids": ["qwen3.8-max"],
+      "capabilities": {
+        "image_input": true,
+        "tool_image_projection": "aggregated_user_input",
         "reasoning": {
           "enabled": true,
           "default_effort": "xhigh",
@@ -95,9 +133,30 @@
       "model_ids": ["kimi-k3"],
       "capabilities": {
         "image_input": true,
+        "tool_image_projection": "aggregated_user_input",
         "reasoning": {
           "enabled": true,
           "default_effort": "max",
+          "effort_map": {
+            "low": { "label": "Low", "wire_value": "low" },
+            "high": { "label": "High", "wire_value": "high" },
+            "max": { "label": "Max", "wire_value": "max" }
+          }
+        }
+      }
+    },
+    {
+      "provider": "moonshot",
+      "provider_label": "Moonshot（Kimi Code）",
+      "protocol": "openai_responses",
+      "protocol_label": "Responses API（OpenAI Compatible）",
+      "model_ids": ["k3"],
+      "capabilities": {
+        "image_input": true,
+        "tool_image_projection": "native_function_output",
+        "reasoning": {
+          "enabled": true,
+          "default_effort": "high",
           "effort_map": {
             "low": { "label": "Low", "wire_value": "low" },
             "high": { "label": "High", "wire_value": "high" },
@@ -114,6 +173,7 @@
       "model_ids": ["k3"],
       "capabilities": {
         "image_input": true,
+        "tool_image_projection": "aggregated_user_input",
         "reasoning": {
           "enabled": true,
           "default_effort": "high",

@@ -269,6 +269,52 @@ Worker 池。
 - Host 模型工厂只消费 Runtime 已编译的 provider、protocol、capabilities 和 Route 连接信息，
   不持有第二份目录或模型选择状态。
 
+## v0.17.0 会话 Tool Image 存储基础
+
+- Host 从 Session ID 唯一构造 `data/sessions/<session-id>/tool-images/`，并在创建、Fork 和
+  启动恢复时与 `attachments/`、`private/` 一并准备；不为该可推导路径新增 SQLite 列。
+- Host 图片模块保存通过签名嗅探、实际 MIME、静态性、完整解码、像素、边长、宽高比和
+  64 MiB 字节上限校验的原图字节。稳定文件名为 `<sha256>.<规范扩展名>`，同目录随机
+  `.part` 经刷新后以不覆盖提交发布，目标已存在时必须重验普通文件、哈希、MIME 和解码限制。
+- 相同 Session 的相同字节串行或并发物化只保留一个稳定文件；稳定文件设为只读只是防误操作，
+  不是 OS 沙箱。结构化文件工具对任意 Session 的 `tool-images/` 执行 Write/Edit/Delete 必须
+  fail-closed，Shell 仍保持当前用户权限边界。
+- 启动恢复在 staged append 与 pending exchange 修复后扫描图片：删除普通 `.part`；从当前主、
+  child Conversation generation 标记引用；仅当全部 Conversation 可读时删除合法未引用稳定文件。
+  Conversation 不可读时保守保留稳定文件；非法名称、非普通文件、损坏文件或缺失引用将 Session
+  标记为资源异常，不自动覆盖或猜测修复。
+- Fork 在目标 Session 内复制并重新校验字节，不创建跨 Session hard link、symlink、全局缓存或
+  引用计数；复制失败不得提交半完成的新 Session。Session 删除自然回收本 Session 全部图片。
+- M2 的 `SessionImageMaterializer` 组合 `agent-tools-local` 有界二进制读取与 Host 图片校验/存储，
+  每个 Run 只绑定当前 Session 的 `tool-images/` 根。`read_image` 是否注册完全服从 Runtime 已编译
+  的精确路由能力；Host 不按 Provider/model 名称再次猜测。
+- Tool Image 模型预处理每次重新验证 Session 根形状、单层引用、普通文件、哈希、实际 MIME 和
+  解码限制，再生成请求期有界 JPEG；请求期转换不写入 `tool-images/`，也不制造第二份稳定图片。
+- `inspect_images` 的本地路径在 Runtime 完成统一文件 Read 授权后进入 Host 公共图片预处理；
+  Host 支持相对路径解析后的绝对普通文件，不再要求它属于附件 Registry。结果只进入当次辅助
+  `ModelCallContext`，不得复制到 `attachments/` 或 `tool-images/`，也不得产生产品资源投影。
+- 随包模型目录 schema v2 首批只为 DashScope `qwen3.8-max` 与 Moonshot `kimi-k3`/`k3` 的 Chat
+  路由启用 `AggregatedUserInput`。DeepSeek、GLM 和未真实回证的 OpenAI Chat 路由保持
+  `Unsupported`，即使其附件图片输入能力为真也不注册 `read_image`。
+- Host 模型工厂对 `openai_chat_completions` 与 `openai_responses` 做穷尽式协议分派，分别构造
+  `OpenAiChatCompletionsService` 和 `OpenAiResponsesService`；不能先请求一个协议再失败回退另一个。
+  Responses 使用同一条已校验 Route 的 `/responses`，credential、Transport、超时和 wire observer
+  继续复用共享基础设施。
+- 随包目录对 Responses 只启用已真实验证的精确路由：DeepSeek Flash/Pro（reasoning、无图片）、
+  DashScope Qwen `qwen3.8-max`（聚合工具图片）和 Moonshot Kimi `k3`（原生 function output
+  图片）。GLM 保持未启用，OpenAI 官方方言只供 fixture 和用户显式配置，未进入默认目录。
+- Host 只按精确 provider/protocol/model 构造具名 Responses Adapter；route fingerprint 在已校验
+  endpoint 与 model 上确定性计算。切换 endpoint、provider、protocol 或 model 不得把旧 opaque
+  payload 发往新路由，也不得根据 Provider 一次成功/失败修改目录能力。
+- Tool Image 预览路由同时编码 Session owner 和可选 child task ID，再由 Runtime 回查可靠引用；
+  WebView 提交的 message/resource ID 不能直接转换为任意路径。
+- 每次预览重新验证单层文件名、普通文件、内容哈希、实际 MIME 与公共解码限制，并只在内存生成
+  最长边 320 的 JPEG。不得在 `tool-images/` 写 `.thumbnail.jpg` 或其他派生文件。
+- Session Tool Image 不提供 native-path 路由能力；系统打开和目录揭示继续只适用于普通工具文件。
+- Runtime Home 整体移动后，Host 启动恢复只重定位可严格验证为旧 Session/Workspace 固定布局的
+  Runtime 私有绝对目录，并同步迁移有效 Session 权限文件中位于旧 `private/`、`attachments/`
+  根下的 File matcher；用户 Workspace 目录不变，非法或无法归属的路径不得猜测修复。
+
 ## 验证
 
 ```bash

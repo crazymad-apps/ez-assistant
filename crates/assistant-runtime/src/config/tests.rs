@@ -24,7 +24,7 @@ max_output_tokens = {max_output_tokens}
 fn model_catalog() -> ModelCatalog {
     ModelCatalog::from_json(
         r#"{
-            "schema_version": 1,
+            "schema_version": 2,
             "catalog_revision": "fixture",
             "models": [
                 {
@@ -48,6 +48,7 @@ fn model_catalog() -> ModelCatalog {
                     "model_ids": ["qwen3.8-max"],
                     "capabilities": {
                         "image_input": true,
+                        "tool_image_projection": "aggregated_user_input",
                         "tool_calls": true,
                         "streaming": true,
                         "reasoning": {
@@ -219,6 +220,41 @@ fn omitted_optional_tables_keep_defaults_and_no_hidden_limits() {
     assert_eq!(delegation.max_steps().get(), 40);
     assert_eq!(delegation.max_tool_calls().get(), 100);
     assert_eq!(delegation.max_output_tokens().get(), 16_384);
+}
+
+#[test]
+fn responses_protocol_requires_its_unique_config_value_and_uses_conservative_capabilities() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"responses\"\n{}",
+        model_table("responses", "fixture", 4096).replace(
+            "protocol = \"chat_completions\"",
+            "protocol = \"openai_responses\""
+        )
+    );
+    let compilation = compile_runtime_config(&document);
+    assert_eq!(compilation.state(), ConfigState::Ready);
+    let model = compilation
+        .active()
+        .and_then(|active| active.model(&ModelKey::new("responses").expect("key")))
+        .expect("Responses model");
+    assert_eq!(model.protocol(), ModelProtocol::OpenAiResponses);
+    assert!(!model.capabilities().image_input);
+    assert!(model.capabilities().tool_calls);
+    assert_eq!(
+        model.capabilities().tool_choice,
+        agent_model::ToolChoiceCapabilities::auto_only()
+    );
+
+    let alias = document.replace("openai_responses", "responses");
+    let rejected = compile_runtime_config(&alias);
+    assert_eq!(rejected.state(), ConfigState::Degraded);
+    assert!(
+        rejected
+            .projection()
+            .issues
+            .iter()
+            .any(|issue| { issue.code() == ConfigIssueCode::UnsupportedProtocol })
+    );
 }
 
 #[test]

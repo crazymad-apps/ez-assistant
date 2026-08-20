@@ -1,7 +1,7 @@
-//! 单模型配置的语义编译、ProtocolAdapter 组合和安全投影。
+//! 单模型配置的语义编译、协议 Adapter 组合和安全投影。
 //!
 //! 本模块是顶层 fail-closed 之后的隔离边界：每个 `models.<key>` 独立产生有效模型或诊断，
-//! 不会因为一个模型的未知字段、credential 或 ProtocolAdapter 冲突而丢弃其他模型。
+//! 不会因为一个模型的未知字段、credential 或协议 Adapter 冲突而丢弃其他模型。
 
 use agent_model::GenerationConfig;
 use agent_types::ProviderId;
@@ -30,7 +30,7 @@ pub(super) struct ModelCompileOutput {
 
 /// 独立编译一个 `models.<key>` 条目，并尽量一次收集全部可操作诊断。
 ///
-/// 函数不会联网，也不构造具体 Provider Adapter。ProtocolAdapter 只用于判断当前 schema 中已经确认的
+/// 函数不会联网，也不构造具体 Provider Adapter。协议 Adapter 只用于判断当前 schema 中已经确认的
 /// 参数组合；Adapter 会在真正构造 ModelService 时再次验证自己的协议约束。
 pub(super) fn compile_model(
     raw_key: String,
@@ -67,7 +67,7 @@ pub(super) fn compile_model(
         }
     };
 
-    // protocol 决定 wire 契约；provider 保存实际供应商身份，并在 Runtime 内推导兼容 ProtocolAdapter。
+    // protocol 决定 wire 契约；provider 保存实际供应商身份，并在 Runtime 内推导兼容协议 Adapter。
     let protocol = match raw.protocol.as_deref() {
         Some(value) if ModelProtocol::parse_config(value).is_some() => {
             let protocol = ModelProtocol::parse_config(value);
@@ -424,7 +424,7 @@ fn valid_api_key(api_key: &str) -> bool {
     !api_key.is_empty() && api_key.trim() == api_key
 }
 
-/// Provider 是供应商身份，不是协议或 ProtocolAdapter 枚举；这里仅约束为可稳定比较和展示的 key。
+/// Provider 是供应商身份，不是协议或 Adapter 枚举；这里仅约束为可稳定比较和展示的 key。
 fn validate_provider_id(provider: &str) -> bool {
     let bytes = provider.as_bytes();
     let Some(first) = bytes.first() else {

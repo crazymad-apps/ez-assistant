@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(pin.status, ToolResultStatus::Success);
         assert_eq!(
             pin.content,
-            ToolResultContent::Json(json!({
+            ToolResultContent::json(json!({
                 "id": "pinned_1",
                 "category": "preference",
                 "content": "Use dark mode"
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(list.status, ToolResultStatus::Success);
         assert_eq!(
             list.content,
-            ToolResultContent::Json(json!([{
+            ToolResultContent::json(json!([{
                 "id": "pinned_1",
                 "category": "preference",
                 "content": "Use light mode"
@@ -710,7 +710,10 @@ mod tests {
         );
         assert_eq!(missing.status, ToolResultStatus::Error);
         assert!(
-            matches!(missing.content, ToolResultContent::Text(message) if message.contains("not found"))
+            missing
+                .content
+                .as_single_text()
+                .is_some_and(|message| message.contains("not found"))
         );
 
         let mut registry = ToolRegistry::new();
@@ -732,7 +735,10 @@ mod tests {
         );
         assert_eq!(capacity.status, ToolResultStatus::Error);
         assert!(
-            matches!(capacity.content, ToolResultContent::Text(message) if message.contains("capacity exceeded"))
+            capacity
+                .content
+                .as_single_text()
+                .is_some_and(|message| message.contains("capacity exceeded"))
         );
 
         let store = Arc::new(ProbeStore::new(vec![]));
@@ -750,7 +756,10 @@ mod tests {
         );
         assert_eq!(cancelled.status, ToolResultStatus::Error);
         assert!(
-            matches!(cancelled.content, ToolResultContent::Text(message) if message.contains("cancelled"))
+            cancelled
+                .content
+                .as_single_text()
+                .is_some_and(|message| message.contains("cancelled"))
         );
     }
 
@@ -828,7 +837,7 @@ mod tests {
         assert_eq!(updated.status, ToolResultStatus::Success);
         assert_eq!(
             updated.content,
-            ToolResultContent::Json(json!({
+            ToolResultContent::json(json!({
                 "id": "pinned_1",
                 "category": "preference",
                 "content": "Use light mode"

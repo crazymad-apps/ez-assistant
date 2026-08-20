@@ -8,8 +8,8 @@ use std::{
 
 use agent_model::{ModelAttemptEvent, ModelCallContext, ModelEvent, ModelService, TraceContext};
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProviderWireEvent, RecordedWireRequest, Transport,
-    TransportError, TransportFuture, TransportRequest, TransportResponse,
+    BearerCredential, OpenAiChatCompletionsService, ProviderWireEvent, RecordedWireRequest,
+    Transport, TransportError, TransportFuture, TransportRequest, TransportResponse,
 };
 use futures_util::{StreamExt, stream};
 use tokio_util::sync::CancellationToken;
@@ -219,7 +219,7 @@ pub(crate) async fn run_wire_replay(trace: &LoadedTrace) -> Result<usize, Replay
     let protocol_adapter = adapter_from_metadata(&trace.started.provider)?;
     // credential 只用于 Service 的既有构造契约；安全请求比较会永久删除该 header，
     // ReplayTransport 是唯一 Transport，因此这里没有网络客户端或真实认证数据。
-    let service = OpenAiCompatibleService::with_transport(
+    let service = OpenAiChatCompletionsService::with_transport(
         trace.started.provider.endpoint.clone(),
         BearerCredential::new("replay-placeholder"),
         trace.started.provider.model.clone(),
@@ -440,7 +440,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use agent_model::{ModelError, ModelRetryReason, ModelTransportErrorKind};
-    use agent_openai_compatible::{ProtocolAdapter, encode_request};
+    use agent_openai_compatible::{ChatProtocolAdapter, encode_request};
     use agent_types::ProviderId;
 
     use super::*;
@@ -460,7 +460,7 @@ mod tests {
     fn recorded_request() -> RecordedWireRequest {
         let metadata = metadata();
         let protocol_adapter =
-            ProtocolAdapter::openai_compatible(ProviderId::new("fixture").unwrap());
+            ChatProtocolAdapter::openai_compatible(ProviderId::new("fixture").unwrap());
         let encoded = encode_request(&request(), &protocol_adapter, &metadata.model).unwrap();
         RecordedWireRequest {
             method: "POST".into(),
@@ -800,7 +800,7 @@ mod tests {
         );
         let exchanges = wire_exchanges(&trace).unwrap();
         let transport = Arc::new(ReplayTransport::new(exchanges));
-        let service = OpenAiCompatibleService::with_transport(
+        let service = OpenAiChatCompletionsService::with_transport(
             trace.started.provider.endpoint.clone(),
             BearerCredential::new("placeholder"),
             trace.started.provider.model.clone(),

@@ -665,7 +665,7 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
     );
     assert_eq!(
         tool_results[1].content,
-        ToolResultContent::Json(
+        ToolResultContent::json(
             serde_json::to_value(recall_response).expect("serialize recall response")
         )
     );

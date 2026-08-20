@@ -107,6 +107,17 @@ impl AgentBuilder {
             }
             ToolChoice::Auto | ToolChoice::None | ToolChoice::Required | ToolChoice::Named(_) => {}
         }
+        let supported = match &self.model_request.tool_choice {
+            ToolChoice::Auto if self.tools.is_empty() => true,
+            ToolChoice::Auto => capabilities.tool_choice.auto,
+            ToolChoice::None if self.tools.is_empty() => true,
+            ToolChoice::None => capabilities.tool_choice.none,
+            ToolChoice::Required => capabilities.tool_choice.required,
+            ToolChoice::Named(_) => capabilities.tool_choice.named,
+        };
+        if !supported {
+            return Err(AgentBuildError::ToolChoiceUnsupported);
+        }
 
         if self.model_request.reasoning.is_some() && !capabilities.reasoning {
             return Err(AgentBuildError::ReasoningUnsupported);

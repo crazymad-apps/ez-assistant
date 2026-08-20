@@ -73,6 +73,16 @@
   生命周期；敏感环境变量默认不传给子进程；超时、输出上限、取消、输出收敛与进程树
   清理由实现侧负责。`detached` 只是 fire-and-forget 交接，不代表服务健康或受 Session
   托管。
+- `read_image(path)` 是严格单路径标准工具：resolve 只做 Session 路径词法解析并生成普通
+  `FileAuthorizationFacts { operation: Read }`，执行委托 `ImageMaterializer`，成功结果固定为
+  单一 Image Part。它显式标记 `ParallelEligible`，不读取文件、不解释 Session 目录，也不调用
+  `ImageInspector`。
+- `ImageMaterializer` 只返回规范 `ToolImageReference` 或稳定错误分类；真实二进制读取、图片
+  解码、哈希和 Session 内存储由 Host/基础设施组合，不能下沉进本 crate。
+- `inspect_images(image_paths, goal, background?)` 与 `read_image` 共用 `SessionPathResolver`
+  和文件 Read 权限语义，不得把输入收窄为附件专用路径。多图 resolve 生成保持顺序的
+  `FileBatchAuthorizationFacts`，每条路径均为词法归一化后的 `AbsolutePath`；工具壳仍不读取
+  图片，执行只委托 `ImageInspector`，成功结果仍是普通 Text Tool Result。
 
 ## 文件与 Shell 能力契约
 

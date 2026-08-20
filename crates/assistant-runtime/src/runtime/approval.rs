@@ -4,6 +4,7 @@
 //! CAS 写入和内存 Registry 更新，之后才能唤醒 Core；否则工具可能已经执行，而规则尚未
 //! 成为可恢复事实。
 
+use agent_tools::FileBatchAuthorizationFacts;
 use assistant_protocol::{
     ApprovalDecision, ApprovalId, ApprovalStatus, DecideApprovalRequest, DecideApprovalResult,
     ListPendingApprovalsRequest, ListPendingApprovalsResult, RejectApprovalAndStopRunRequest,
@@ -13,7 +14,7 @@ use assistant_protocol::{
 use super::AssistantRuntime;
 use crate::{
     PermissionEffect, PermissionFileScope, PermissionRule, RuntimeError, RuntimeResult,
-    permission::{is_exact_allow_rule, matches_rule, rule_for_approval},
+    permission::{file_matcher_matches, is_exact_allow_rule, matches_rule, rules_for_approval},
 };
 
 /// HTTP 请求被中断或任务 panic 时，把未完成的 `Resolving` 恢复为可重试状态。
@@ -163,15 +164,15 @@ impl AssistantRuntime {
             )),
             ApprovalDecision::AllowOnce | ApprovalDecision::Deny => None,
         };
-        let mut persisted_rule = None;
+        let mut persisted_rules = Vec::new();
         if let Some(scope) = persistent_scope.as_ref() {
-            // 不提前唤醒 Core：append_allow_rule 同时保证磁盘事实和运行时快照就绪。
+            // 不提前唤醒 Core：append_allow_rules 同时保证磁盘事实和运行时快照就绪。
             // 若这里失败，ResolutionGuard 会把审批恢复为 Pending，工具保持未执行。
-            let result = match rule_for_approval(&snapshot) {
-                Ok(rule) => {
-                    persisted_rule = Some(rule.clone());
+            let result = match rules_for_approval(&snapshot) {
+                Ok(rules) => {
+                    persisted_rules.clone_from(&rules);
                     self.permission_coordinator
-                        .append_allow_rule(scope.clone(), rule)
+                        .append_allow_rules(scope.clone(), rules)
                         .await
                 }
                 Err(error) => Err(error),
@@ -192,8 +193,8 @@ impl AssistantRuntime {
             approval_id: request.approval_id.clone(),
             decision: request.decision,
         });
-        if let (Some(scope), Some(rule)) = (persistent_scope, persisted_rule) {
-            self.drain_exact_rule_approvals(&scope, &[rule]);
+        if let Some(scope) = persistent_scope {
+            self.drain_exact_rule_approvals(&scope, &persisted_rules);
         }
         Ok(DecideApprovalResult {
             approval_id: request.approval_id,
@@ -221,9 +222,11 @@ impl AssistantRuntime {
                     break;
                 };
                 if approval.status != ApprovalStatus::Pending
-                    || !exact_rules
-                        .iter()
-                        .any(|rule| matches_rule(rule, approval.variant, &invocation))
+                    || !candidate_rules_cover_invocation(
+                        &exact_rules,
+                        approval.variant,
+                        &invocation,
+                    )
                     || !self.current_rules_allow_without_ask(
                         &session_id,
                         approval.variant,
@@ -309,6 +312,32 @@ impl AssistantRuntime {
             return false;
         };
         let mut allow = false;
+        if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+            let mut path_allow = vec![false; facts.paths.len()];
+            for load in loads {
+                let Some(document) = &load.document else {
+                    return false;
+                };
+                for rule in &document.rules {
+                    if !rule.variants.contains(&variant) {
+                        continue;
+                    }
+                    let crate::PermissionMatcher::File(matcher) = &rule.matcher else {
+                        continue;
+                    };
+                    for (index, path) in facts.paths.iter().enumerate() {
+                        if !file_matcher_matches(matcher, facts.operation, path) {
+                            continue;
+                        }
+                        match rule.effect {
+                            PermissionEffect::Deny | PermissionEffect::Ask => return false,
+                            PermissionEffect::Allow => path_allow[index] = true,
+                        }
+                    }
+                }
+            }
+            return path_allow.into_iter().all(|allowed| allowed);
+        }
         for load in loads {
             let Some(document) = &load.document else {
                 return false;
@@ -325,4 +354,23 @@ impl AssistantRuntime {
         }
         allow
     }
+}
+
+fn candidate_rules_cover_invocation(
+    rules: &[&PermissionRule],
+    variant: assistant_protocol::AgentVariant,
+    invocation: &agent_tools::ResolvedToolInvocation,
+) -> bool {
+    if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+        return facts.paths.iter().all(|path| {
+            rules.iter().any(|rule| {
+                rule.variants.contains(&variant)
+                    && matches!(&rule.matcher, crate::PermissionMatcher::File(matcher)
+                        if file_matcher_matches(matcher, facts.operation, path))
+            })
+        });
+    }
+    rules
+        .iter()
+        .any(|rule| matches_rule(rule, variant, invocation))
 }

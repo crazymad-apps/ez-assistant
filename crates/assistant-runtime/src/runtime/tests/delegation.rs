@@ -936,7 +936,7 @@ async fn cancelling_one_child_does_not_cancel_its_sibling_or_parent() {
         })
         .next()
         .expect("cancelled delegate result");
-    let agent_types::ToolResultContent::Json(content) = &cancelled_result.content else {
+    let Some(content) = cancelled_result.content.as_single_json() else {
         panic!("cancelled delegate result must preserve structured details");
     };
     assert_eq!(content["error"]["details"]["code"], "cancelled");

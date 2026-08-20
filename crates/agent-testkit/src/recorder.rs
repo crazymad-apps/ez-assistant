@@ -222,7 +222,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new("call_1").expect("valid call id"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         }
@@ -266,7 +266,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new("call_2").expect("valid call id"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("also ok".to_owned()),
+                content: ToolResultContent::text("also ok".to_owned()),
                 metadata: None,
             },
         };

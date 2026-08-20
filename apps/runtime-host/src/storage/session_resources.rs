@@ -1,13 +1,16 @@
 //! Session 冻结目录关系、旧数据补建与新 Session 环境校验。
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use assistant_protocol::{SessionId, WorkspaceId};
 use assistant_runtime::{
     NewStoredSession, SessionExecutionEnvironment, StoreError, StoreErrorKind,
     StoredWorkspaceLifecycle,
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{StorageEngine, StorageResult, internal_error, invalid_data};
 use crate::config_source::prepare_private_directory;
@@ -15,6 +18,7 @@ use crate::config_source::prepare_private_directory;
 pub(super) struct PreparedSessionDirectories {
     pub session_directory: std::path::PathBuf,
     pub attachment_directory: std::path::PathBuf,
+    pub tool_image_directory: std::path::PathBuf,
     pub private_directory: std::path::PathBuf,
     pub permission_file_created: bool,
 }
@@ -63,7 +67,118 @@ impl StorageEngine {
                     super::database_write_error("session resources could not be repaired", source)
                 })?;
         }
+        self.rebase_moved_session_resources()?;
         self.recover_session_resource_directories()
+    }
+
+    fn rebase_moved_session_resources(&mut self) -> StorageResult<()> {
+        let rows = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT session_id, workspace_id, working_directory,
+                            attachment_directory, private_directory
+                     FROM session_resources ORDER BY session_id",
+                )
+                .map_err(|source| {
+                    internal_error("session resources could not be queried", source)
+                })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|source| internal_error("session resources could not be read", source))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|source| {
+                internal_error("session resource row could not be read", source)
+            })?
+        };
+        let mut rebases = Vec::new();
+        for (session_id, workspace_id, working, attachment, private) in rows {
+            let session_id = SessionId::new(session_id)
+                .map_err(|_| invalid_data("stored session id is invalid"))?;
+            let session_directory = self.session_directory(&session_id)?;
+            let expected_attachment = session_directory.join("attachments");
+            let expected_private = session_directory.join("private");
+            let expected_attachment_text = path_text(&expected_attachment)?;
+            let expected_private_text = path_text(&expected_private)?;
+            if attachment == expected_attachment_text && private == expected_private_text {
+                continue;
+            }
+            let old_attachment = PathBuf::from(&attachment);
+            let old_private = PathBuf::from(&private);
+            if !is_moved_session_directory_pair(&old_attachment, &old_private, session_id.as_str())
+            {
+                return Err(invalid_data("stored session directory is invalid"));
+            }
+            let new_working = if workspace_id.is_none() {
+                if working != private {
+                    return Err(invalid_data(
+                        "stored unbound session environment is invalid",
+                    ));
+                }
+                expected_private_text.clone()
+            } else {
+                working
+            };
+            self.prepare_session_directories(&session_id)?;
+            self.rebase_session_permission_file(
+                &expected_private.join("permissions.json"),
+                &old_private,
+                &expected_private,
+                &old_attachment,
+                &expected_attachment,
+            )?;
+            rebases.push(SessionResourceRebase {
+                session_id,
+                working_directory: new_working,
+                attachment_directory: expected_attachment_text,
+                private_directory: expected_private_text,
+            });
+        }
+        if rebases.is_empty() {
+            return Ok(());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                super::database_write_error(
+                    "session resource rebase transaction could not begin",
+                    source,
+                )
+            })?;
+        for rebase in rebases {
+            transaction
+                .execute(
+                    "UPDATE session_resources
+                     SET working_directory = ?1, attachment_directory = ?2, private_directory = ?3
+                     WHERE session_id = ?4",
+                    params![
+                        rebase.working_directory,
+                        rebase.attachment_directory,
+                        rebase.private_directory,
+                        rebase.session_id.as_str(),
+                    ],
+                )
+                .map_err(|source| {
+                    super::database_write_error(
+                        "session resource paths could not be rebased",
+                        source,
+                    )
+                })?;
+        }
+        transaction.commit().map_err(|source| {
+            super::database_write_error(
+                "session resource rebase transaction could not commit",
+                source,
+            )
+        })
     }
 
     pub(super) fn prepare_new_session_directories(
@@ -171,6 +286,9 @@ impl StorageEngine {
             working_directory: row.1,
             workspace_private_directory,
             session_attachment_directory: row.4,
+            session_tool_image_directory: path_text(
+                &self.session_directory(session_id)?.join("tool-images"),
+            )?,
             session_private_directory: row.5,
         };
         self.validate_stored_session_environment(session_id, &environment)?;
@@ -243,6 +361,8 @@ impl StorageEngine {
             let environment = self.load_session_environment(&session_id)?;
             let paths = self.prepare_session_directories(&session_id)?;
             if path_text(&paths.attachment_directory)? != environment.session_attachment_directory
+                || path_text(&paths.tool_image_directory)?
+                    != environment.session_tool_image_directory
                 || path_text(&paths.private_directory)? != environment.session_private_directory
             {
                 return Err(invalid_data("stored session directory is invalid"));
@@ -259,8 +379,10 @@ impl StorageEngine {
     ) -> StorageResult<()> {
         let session_directory = self.session_directory(session_id)?;
         let expected_attachment = session_directory.join("attachments");
+        let expected_tool_image = session_directory.join("tool-images");
         let expected_private = session_directory.join("private");
         if path_text(&expected_attachment)? != environment.session_attachment_directory
+            || path_text(&expected_tool_image)? != environment.session_tool_image_directory
             || path_text(&expected_private)? != environment.session_private_directory
             || !Path::new(&environment.working_directory).is_absolute()
             || environment
@@ -279,6 +401,7 @@ impl StorageEngine {
     ) -> StorageResult<PreparedSessionDirectories> {
         let session_directory = self.session_directory(session_id)?;
         let attachment_directory = session_directory.join("attachments");
+        let tool_image_directory = session_directory.join("tool-images");
         let private_directory = session_directory.join("private");
         prepare_private_directory(&session_directory).map_err(|source| {
             internal_error("session data directory could not be prepared", source)
@@ -286,16 +409,56 @@ impl StorageEngine {
         prepare_private_directory(&attachment_directory).map_err(|source| {
             internal_error("session attachment directory could not be prepared", source)
         })?;
+        prepare_private_directory(&tool_image_directory).map_err(|source| {
+            internal_error("session tool image directory could not be prepared", source)
+        })?;
         prepare_private_directory(&private_directory).map_err(|source| {
             internal_error("session private directory could not be prepared", source)
         })?;
         Ok(PreparedSessionDirectories {
             session_directory,
             attachment_directory,
+            tool_image_directory,
             private_directory,
             permission_file_created: false,
         })
     }
+}
+
+struct SessionResourceRebase {
+    session_id: SessionId,
+    working_directory: String,
+    attachment_directory: String,
+    private_directory: String,
+}
+
+fn is_moved_session_directory_pair(attachment: &Path, private: &Path, session_id: &str) -> bool {
+    if !attachment.is_absolute()
+        || !private.is_absolute()
+        || attachment.file_name().and_then(|value| value.to_str()) != Some("attachments")
+        || private.file_name().and_then(|value| value.to_str()) != Some("private")
+        || attachment.parent() != private.parent()
+    {
+        return false;
+    }
+    let Some(session_directory) = attachment.parent() else {
+        return false;
+    };
+    session_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        == Some(session_id)
+        && session_directory
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("sessions")
+        && session_directory
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("data")
 }
 
 pub(super) fn remove_created_session_directories(paths: &PreparedSessionDirectories) {
@@ -303,6 +466,7 @@ pub(super) fn remove_created_session_directories(paths: &PreparedSessionDirector
         let _ = fs::remove_file(paths.private_directory.join("permissions.json"));
     }
     let _ = fs::remove_dir(&paths.attachment_directory);
+    let _ = fs::remove_dir(&paths.tool_image_directory);
     let _ = fs::remove_dir(&paths.private_directory);
     let _ = fs::remove_dir(&paths.session_directory);
 }

@@ -42,7 +42,7 @@ export type ToolDetailView = Pick<
   | "files"
   | "output_truncated"
   | "historical_fields_missing"
-> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id" | "image_inspection">>
+> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id" | "call_id" | "image_inspection">>
   & Readonly<{ source?: "reliable" | "live" }>;
 
 export function ToolDetailDialog({
@@ -58,7 +58,13 @@ export function ToolDetailDialog({
   const [file_error, setFileError] = useState<string | null>(null);
   const [file_preview_fallback, setFilePreviewFallback] = useState<"unsupported" | "too_large" | null>(null);
   const [file_loading, setFileLoading] = useState(false);
-  const session_id = detail?.owner?.session_id;
+  const [unavailable_file_refs, setUnavailableFileRefs] = useState<ReadonlySet<string>>(new Set());
+  const owner = detail?.owner;
+
+  useEffect(() => {
+    setSelectedFile(null);
+    setUnavailableFileRefs(new Set());
+  }, [detail?.call_id, detail?.message_id]);
 
   useEffect(() => {
     if (!detail || !initial_file_ref_id) {
@@ -68,7 +74,7 @@ export function ToolDetailDialog({
   }, [detail, initial_file_ref_id]);
 
   useEffect(() => {
-    if (!selected_file || !session_id || !detail?.message_id || selected_file.state !== "available") {
+    if (!selected_file || !owner || !detail?.message_id || selected_file.state !== "available") {
       setFilePreview(null);
       return;
     }
@@ -77,8 +83,18 @@ export function ToolDetailDialog({
     setFileError(null);
     setFilePreviewFallback(null);
     setFileLoading(true);
-    void previewToolFile(session_id, detail.message_id, selected_file.resource_ref_id)
-      .then((value) => active && setFilePreview(value))
+    void previewToolFile(owner, detail.message_id, selected_file.resource_ref_id)
+      .then((value) => {
+        if (!active) {
+          return;
+        }
+        setFilePreview(value);
+        setUnavailableFileRefs((current) => {
+          const next = new Set(current);
+          next.delete(selected_file.resource_ref_id);
+          return next;
+        });
+      })
       .catch((reason: unknown) => {
         if (!active) {
           return;
@@ -89,31 +105,32 @@ export function ToolDetailDialog({
           setFilePreviewFallback("too_large");
         } else {
           setFileError(reason instanceof Error ? reason.message : "无法预览文件。");
+          setUnavailableFileRefs((current) => new Set(current).add(selected_file.resource_ref_id));
         }
       })
       .finally(() => active && setFileLoading(false));
     return () => { active = false; };
-  }, [detail?.message_id, selected_file, session_id]);
+  }, [detail?.message_id, owner, selected_file]);
 
   async function openSelectedFile() {
-    if (!selected_file || !session_id || !detail?.message_id) {
+    if (!selected_file || !owner || !detail?.message_id) {
       return;
     }
     setFileError(null);
     try {
-      await openToolFileInSystem(session_id, detail.message_id, selected_file.resource_ref_id);
+      await openToolFileInSystem(owner, detail.message_id, selected_file.resource_ref_id);
     } catch (reason: unknown) {
       setFileError(reason instanceof Error ? reason.message : "无法打开文件。");
     }
   }
 
   async function revealSelectedFile() {
-    if (!selected_file || !session_id || !detail?.message_id) {
+    if (!selected_file || !owner || !detail?.message_id) {
       return;
     }
     setFileError(null);
     try {
-      await revealToolFileInDirectory(session_id, detail.message_id, selected_file.resource_ref_id);
+      await revealToolFileInDirectory(owner, detail.message_id, selected_file.resource_ref_id);
     } catch (reason: unknown) {
       setFileError(reason instanceof Error ? reason.message : "无法在目录中显示文件。");
     }
@@ -184,12 +201,16 @@ export function ToolDetailDialog({
                     {detail.files.map((file) => (
                       <li key={file.resource_ref_id}>
                         <button
-                          disabled={file.state !== "available"}
+                          disabled={file.state !== "available" || unavailable_file_refs.has(file.resource_ref_id)}
                           onClick={() => setSelectedFile(file)}
                           type="button"
                         >
                           <span>{file.display_name}</span>
-                          <small>{file.state === "available" ? "预览" : "不可用"}</small>
+                          <small>
+                            {file.state === "available" && !unavailable_file_refs.has(file.resource_ref_id)
+                              ? "预览"
+                              : "不可用"}
+                          </small>
                         </button>
                         {file.display_path && <code>{file.display_path}</code>}
                       </li>
@@ -201,13 +222,15 @@ export function ToolDetailDialog({
                 <DetailSection title="文件预览">
                   <div className={styles.file_preview_header}>
                     <strong>{selected_file.display_name}</strong>
-                    <div>
-                      {selected_file.display_path && (
-                        <button onClick={() => void copyDisplayPath()} type="button">复制路径</button>
-                      )}
-                      <button onClick={() => void revealSelectedFile()} type="button">在目录中打开</button>
-                      <button onClick={() => void openSelectedFile()} type="button">系统打开</button>
-                    </div>
+                    {selected_file.origin !== "session_tool_image" && (
+                      <div>
+                        {selected_file.display_path && (
+                          <button onClick={() => void copyDisplayPath()} type="button">复制路径</button>
+                        )}
+                        <button onClick={() => void revealSelectedFile()} type="button">在目录中打开</button>
+                        <button onClick={() => void openSelectedFile()} type="button">系统打开</button>
+                      </div>
+                    )}
                   </div>
                   {file_loading && <p className={styles.muted}>正在读取文件预览…</p>}
                   {file_error && <p className={styles.error}>{file_error}</p>}

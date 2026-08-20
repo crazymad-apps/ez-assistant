@@ -1,7 +1,7 @@
 //! 基于 Provider usage 的上下文窗口判断。
 
 use agent_model::ModelService;
-use agent_types::{ConversationMessage, ConversationSnapshot};
+use agent_types::{AssistantPart, ConversationMessage, ConversationSnapshot};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -60,7 +60,11 @@ impl ContextWindowEvaluator {
             });
         };
 
-        let used_tokens = usage.total_tokens;
+        // Opaque payload 会在下一次同路由请求中原样重放，Provider usage 无法表达其序列化成本。
+        // 采用 1 byte = 1 token 的保守上界，避免把不可解释状态当作零成本。
+        let used_tokens = usage
+            .total_tokens
+            .saturating_add(provider_state_payload_budget(snapshot));
         let used_ratio = used_tokens as f64 / context_window_tokens as f64;
         let decision = if used_ratio >= self.compaction_threshold_ratio {
             ContextWindowDecision::CompactionRequired
@@ -79,7 +83,7 @@ impl ContextWindowEvaluator {
 /// 一次窗口判断的可观察结果。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContextWindowEvaluation {
-    /// 最近完整 Assistant Result 报告的总 token；usage 不可用时为空。
+    /// 最近完整 Assistant Result 报告的总 token，加上不透明状态的保守重放预算；usage 不可用时为空。
     pub used_tokens: Option<u64>,
     /// 当前模型服务显式配置的上下文窗口。
     pub context_window_tokens: u64,
@@ -87,6 +91,22 @@ pub struct ContextWindowEvaluation {
     pub used_ratio: Option<f64>,
     /// 本次判断结论。
     pub decision: ContextWindowDecision,
+}
+
+fn provider_state_payload_budget(snapshot: &ConversationSnapshot) -> u64 {
+    snapshot
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::Assistant(message) => Some(&message.parts),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            AssistantPart::ProviderState(state) => u64::try_from(state.payload().len()).ok(),
+            _ => None,
+        })
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// 窗口判断结论。
@@ -120,8 +140,9 @@ mod tests {
     };
     use agent_types::{
         AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
-        MessageId, ModelIdentity, ProviderId, TokenUsage, ToolCall, ToolCallId, ToolMessage,
-        ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage,
+        MessageId, ModelIdentity, OpaqueProviderState, ProtocolId, ProviderId, TokenUsage,
+        ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent,
+        ToolResultStatus, UserMessage,
     };
 
     use super::*;
@@ -177,6 +198,35 @@ mod tests {
         })
     }
 
+    fn assistant_with_provider_state(
+        total_tokens: u64,
+        payload_bytes: usize,
+    ) -> ConversationMessage {
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new("assistant_state").expect("message id"),
+            model: ModelIdentity::new(ProviderId::new("test").expect("provider"), "test-model"),
+            parts: vec![AssistantPart::ProviderState(
+                OpaqueProviderState::new(
+                    ProviderId::new("test").expect("provider"),
+                    ProtocolId::new("responses").expect("protocol"),
+                    "opaque",
+                    "application/json",
+                    1,
+                    vec![0; payload_bytes],
+                )
+                .expect("provider state"),
+            )],
+            finish_reason: FinishReason::Stop,
+            usage: Some(TokenUsage {
+                input_tokens: total_tokens,
+                output_tokens: 0,
+                total_tokens,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            }),
+        })
+    }
+
     fn user(id: &str) -> ConversationMessage {
         ConversationMessage::User(UserMessage {
             id: MessageId::new(id).expect("valid message id"),
@@ -213,7 +263,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new("call_1").expect("valid call id"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         })
@@ -268,6 +318,22 @@ mod tests {
                 .expect("evaluation")
                 .decision,
             ContextWindowDecision::Ready
+        );
+    }
+
+    #[test]
+    fn opaque_state_bytes_add_a_conservative_replay_budget() {
+        let evaluator = ContextWindowEvaluator::new(0.8).expect("valid evaluator");
+        let snapshot =
+            ConversationSnapshot::new(vec![user("user_1"), assistant_with_provider_state(70, 10)]);
+
+        let evaluation = evaluator
+            .evaluate(&snapshot, &model(100))
+            .expect("evaluation");
+        assert_eq!(evaluation.used_tokens, Some(80));
+        assert_eq!(
+            evaluation.decision,
+            ContextWindowDecision::CompactionRequired
         );
     }
 

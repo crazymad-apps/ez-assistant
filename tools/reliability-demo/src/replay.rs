@@ -1,9 +1,9 @@
-//! 两层 Replay 共用的私有脚本提取、ProtocolAdapter 重建与错误类型。
+//! 两层 Replay 共用的私有脚本提取、ChatProtocolAdapter 重建与错误类型。
 
 use std::collections::BTreeMap;
 
 use agent_model::{ModelCapabilities, ModelError, ModelEvent, ModelRequest};
-use agent_openai_compatible::ProtocolAdapter;
+use agent_openai_compatible::ChatProtocolAdapter;
 use agent_types::ProviderId;
 use thiserror::Error;
 
@@ -152,7 +152,7 @@ pub(crate) fn ensure_complete(trace: &LoadedTrace) -> Result<(), ReplayError> {
 
 pub(crate) fn adapter_from_metadata(
     metadata: &ProviderMetadata,
-) -> Result<ProtocolAdapter, ReplayError> {
+) -> Result<ChatProtocolAdapter, ReplayError> {
     if metadata.adapter != OPENAI_COMPATIBLE_ADAPTER
         || metadata.adapter_version != OPENAI_COMPATIBLE_ADAPTER_VERSION
     {
@@ -170,9 +170,9 @@ pub(crate) fn adapter_from_metadata(
         "generic" => {
             let provider = ProviderId::new(metadata.provider_id.clone())
                 .map_err(|_| ReplayError::InvalidMetadata("provider id is invalid"))?;
-            Ok(ProtocolAdapter::openai_compatible(provider))
+            Ok(ChatProtocolAdapter::openai_compatible(provider))
         }
-        "deepseek" if metadata.provider_id == "deepseek" => Ok(ProtocolAdapter::deepseek()),
+        "deepseek" if metadata.provider_id == "deepseek" => Ok(ChatProtocolAdapter::deepseek()),
         "deepseek" => Err(ReplayError::InvalidMetadata(
             "DeepSeek protocol_adapter requires the DeepSeek provider id",
         )),
@@ -180,11 +180,15 @@ pub(crate) fn adapter_from_metadata(
     }
 }
 
-pub(crate) fn capabilities_from_adapter(protocol_adapter: &ProtocolAdapter) -> ModelCapabilities {
+pub(crate) fn capabilities_from_adapter(
+    protocol_adapter: &ChatProtocolAdapter,
+) -> ModelCapabilities {
     ModelCapabilities {
         reasoning: protocol_adapter.supports_reasoning(),
         image_input: false,
         tool_calls: true,
+        multimodal_tool_result: false,
+        tool_choice: agent_model::ToolChoiceCapabilities::all(),
         streaming: true,
     }
 }

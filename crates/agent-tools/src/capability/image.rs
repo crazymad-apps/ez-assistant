@@ -3,6 +3,45 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::AbsolutePath;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ReadImageRequest {
+    pub path: AbsolutePath,
+}
+
+pub type ImageMaterializationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<agent_types::ToolImageReference, ImageMaterializerError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum ImageMaterializerError {
+    #[error("image materialization was cancelled")]
+    Cancelled,
+    #[error("image source is not a regular file")]
+    InvalidSource,
+    #[error("image source exceeds the supported limit")]
+    TooLarge,
+    #[error("image source is not a supported static image")]
+    Unsupported,
+    #[error("image materialization failed")]
+    Failed,
+}
+
+pub trait ImageMaterializer: Send + Sync {
+    fn materialize<'a>(
+        &'a self,
+        request: ReadImageRequest,
+        cancellation: &'a CancellationToken,
+    ) -> ImageMaterializationFuture<'a>;
+}
+
+pub type SharedImageMaterializer = Arc<dyn ImageMaterializer>;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InspectImagesRequest {
     pub image_paths: Vec<String>,

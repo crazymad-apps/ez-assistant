@@ -179,6 +179,7 @@ mod tests {
                     working_directory: "/volatile/session/private".to_owned(),
                     workspace_private_directory: None,
                     session_attachment_directory: "/volatile/session/attachments".to_owned(),
+                    session_tool_image_directory: "/volatile/session/tool-images".to_owned(),
                     session_private_directory: "/volatile/session/private".to_owned(),
                 },
                 current_variant: AgentVariant::Build,
@@ -272,7 +273,7 @@ mod tests {
                     result: ToolResult {
                         call_id,
                         status: ToolResultStatus::Success,
-                        content: ToolResultContent::Text("done".to_owned()),
+                        content: ToolResultContent::text("done".to_owned()),
                         metadata: None,
                     },
                 }],

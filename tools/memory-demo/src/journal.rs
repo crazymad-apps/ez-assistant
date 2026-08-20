@@ -68,7 +68,7 @@ impl DemoJournal {
                     result: ToolResult {
                         call_id: call_id.clone(),
                         status: ToolResultStatus::Error,
-                        content: ToolResultContent::Text(
+                        content: ToolResultContent::text(
                             "tool execution outcome is unknown because the previous demo process \
                              stopped before the exchange completed"
                                 .to_owned(),
@@ -316,7 +316,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new(id).expect("valid call id"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         }

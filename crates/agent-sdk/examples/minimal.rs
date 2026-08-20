@@ -46,6 +46,8 @@ async fn main() {
             reasoning: false,
             image_input: false,
             tool_calls: false,
+            multimodal_tool_result: false,
+            tool_choice: agent_model::ToolChoiceCapabilities::default(),
             streaming: true,
         },
         16_384,

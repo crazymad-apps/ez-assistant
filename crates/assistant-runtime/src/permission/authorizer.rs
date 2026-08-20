@@ -9,13 +9,14 @@ use agent_core::{
     AuthorizationFuture, PolicyEvaluation, ToolAuthorization, ToolAuthorizer, ToolPolicy,
 };
 use agent_tools::{
-    AbsolutePath, FileAuthorizationFacts, FileOperation, ResolvedToolBatch, ResolvedToolInvocation,
+    AbsolutePath, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation,
+    ResolvedToolBatch, ResolvedToolInvocation,
 };
 use assistant_protocol::{AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode};
 
 use super::{
     PermissionCoordinator, PermissionFileScope,
-    matcher::{InvocationFactKind, fact_kind, matches_rule},
+    matcher::{InvocationFactKind, fact_kind, file_matcher_matches, matches_rule},
 };
 use crate::{RuntimeError, RuntimeResult, SessionExecutionEnvironment};
 
@@ -171,6 +172,46 @@ impl RuntimeToolAuthorizer {
         };
         if loads.iter().any(|load| !load.is_valid()) {
             return deny("permission rules are unavailable");
+        }
+
+        if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+            let mut path_effects = vec![(false, false, false); facts.paths.len()];
+            for load in &loads {
+                let Some(document) = &load.document else {
+                    return deny("permission rules are unavailable");
+                };
+                for rule in &document.rules {
+                    if !rule.variants.contains(&self.variant) {
+                        continue;
+                    }
+                    let super::PermissionMatcher::File(matcher) = &rule.matcher else {
+                        continue;
+                    };
+                    for (index, path) in facts.paths.iter().enumerate() {
+                        if !file_matcher_matches(matcher, facts.operation, path) {
+                            continue;
+                        }
+                        match rule.effect {
+                            super::PermissionEffect::Deny => path_effects[index].0 = true,
+                            super::PermissionEffect::Ask => path_effects[index].1 = true,
+                            super::PermissionEffect::Allow => path_effects[index].2 = true,
+                        }
+                    }
+                }
+            }
+            if path_effects.iter().any(|(denied, _, _)| *denied) {
+                return deny("tool call is denied by a permission rule");
+            }
+            if path_effects.iter().any(|(_, asked, _)| *asked) {
+                return self.resolve_and_recheck(invocation, batch).await;
+            }
+            if path_effects.iter().all(|(_, _, allowed)| *allowed) {
+                return ToolAuthorization::Allow;
+            }
+            return match self.approval_mode {
+                ApprovalMode::Ask => self.resolve_and_recheck(invocation, batch).await,
+                ApprovalMode::Auto => ToolAuthorization::Allow,
+            };
         }
 
         // 三层规则不是“最近一层覆盖上一层”：任意 Deny 胜出，其次 Ask，最后才是 Allow。
@@ -345,9 +386,9 @@ mod tests {
 
     use agent_core::{ToolAuthorization, ToolAuthorizer};
     use agent_tools::{
-        Dispatcher, FileAuthorizationFacts, FileOperation, ResolvedBatchItemRef,
-        SessionPathResolver, Tool, ToolContext, ToolError, ToolExecuteFuture, ToolRegistry,
-        ToolResolution,
+        Dispatcher, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation,
+        ResolvedBatchItemRef, SessionPathResolver, Tool, ToolContext, ToolError, ToolExecuteFuture,
+        ToolRegistry, ToolResolution,
     };
     use agent_types::{ToolCall, ToolCallId, ToolName};
     use assistant_protocol::{AgentVariant, ApprovalId, ApprovalMode};
@@ -369,6 +410,60 @@ mod tests {
     struct FileFactsTool {
         operation: FileOperation,
         resolver: SessionPathResolver,
+    }
+
+    #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+    struct BatchFileInput {
+        paths: Vec<String>,
+    }
+
+    struct BatchFileFactsTool {
+        resolver: SessionPathResolver,
+    }
+
+    impl Tool for BatchFileFactsTool {
+        type Input = BatchFileInput;
+        type ResolvedInput = BatchFileInput;
+        type Output = serde_json::Value;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("inspect_images").expect("tool name")
+        }
+
+        fn description(&self) -> String {
+            "test batch file facts".to_owned()
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            let paths = input
+                .paths
+                .iter()
+                .map(|path| {
+                    self.resolver
+                        .resolve(path)
+                        .map_err(|error| ToolError::invalid_input(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ToolResolution::with_facts(
+                input,
+                FileBatchAuthorizationFacts {
+                    operation: FileOperation::Read,
+                    paths: paths.clone(),
+                },
+                json!({"paths": paths, "operation": "read"}),
+            ))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(json!({"ok": true}))))
+        }
     }
 
     impl Tool for FileFactsTool {
@@ -669,6 +764,80 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn batch_reads_combine_separate_allow_roots_and_deny_any_matching_path() {
+        let root = TempDir::new().expect("tempdir");
+        let environment = environment(&root);
+        let workspace_image = root.path().join("workspace/a.png");
+        let private_image = root.path().join("session-private/b.png");
+        let paths = [&workspace_image, &private_image];
+        let allowed = coordinator([
+            (
+                PermissionFileScope::Global,
+                batch_read_rule_document(
+                    [
+                        ("allow-workspace", "allow", root.path().join("workspace")),
+                        (
+                            "allow-private",
+                            "allow",
+                            root.path().join("session-private"),
+                        ),
+                    ]
+                    .as_slice(),
+                ),
+            ),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Ask,
+            scopes(),
+            allowed,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(ToolAuthorization::Deny {
+                reason: "unexpected approval".to_owned(),
+            })),
+        )
+        .expect("authorizer");
+        assert_eq!(
+            authorize_batch_read(&authorizer, &environment, &paths).await,
+            ToolAuthorization::Allow
+        );
+
+        let denied = coordinator([
+            (
+                PermissionFileScope::Global,
+                batch_read_rule_document(
+                    [
+                        ("allow-all", "allow", root.path().to_path_buf()),
+                        ("deny-private", "deny", root.path().join("session-private")),
+                    ]
+                    .as_slice(),
+                ),
+            ),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Auto,
+            scopes(),
+            denied,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(ToolAuthorization::Allow)),
+        )
+        .expect("authorizer");
+        assert!(matches!(
+            authorize_batch_read(&authorizer, &environment, &paths).await,
+            ToolAuthorization::Deny { .. }
+        ));
+    }
+
     async fn authorize_file(
         authorizer: &RuntimeToolAuthorizer,
         environment: &SessionExecutionEnvironment,
@@ -697,6 +866,33 @@ mod tests {
         authorizer.authorize(invocation, &batch).await
     }
 
+    async fn authorize_batch_read(
+        authorizer: &RuntimeToolAuthorizer,
+        environment: &SessionExecutionEnvironment,
+        paths: &[&std::path::PathBuf],
+    ) -> ToolAuthorization {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(BatchFileFactsTool {
+                resolver: SessionPathResolver::new(
+                    AbsolutePath::new(&environment.working_directory).expect("working directory"),
+                ),
+            })
+            .expect("register tool");
+        let batch = Dispatcher::resolve_batch(
+            &registry.snapshot(),
+            &[ToolCall {
+                id: ToolCallId::new("call-inspect").expect("call id"),
+                name: ToolName::new("inspect_images").expect("tool name"),
+                arguments: json!({"paths": paths}),
+            }],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = batch.get(0).expect("batch item") else {
+            panic!("batch read resolves");
+        };
+        authorizer.authorize(invocation, &batch).await
+    }
+
     async fn coordinator<const N: usize>(
         documents: [(PermissionFileScope, Vec<u8>); N],
     ) -> Arc<PermissionCoordinator> {
@@ -718,11 +914,13 @@ mod tests {
         let workspace = root.path().join("workspace");
         let workspace_private = root.path().join("workspace-private");
         let attachments = root.path().join("attachments");
+        let tool_images = root.path().join("tool-images");
         let session_private = root.path().join("session-private");
         for directory in [
             &workspace,
             &workspace_private,
             &attachments,
+            &tool_images,
             &session_private,
         ] {
             std::fs::create_dir(directory).expect("directory");
@@ -734,6 +932,7 @@ mod tests {
             working_directory: workspace.to_string_lossy().into_owned(),
             workspace_private_directory: Some(workspace_private.to_string_lossy().into_owned()),
             session_attachment_directory: attachments.to_string_lossy().into_owned(),
+            session_tool_image_directory: tool_images.to_string_lossy().into_owned(),
             session_private_directory: session_private.to_string_lossy().into_owned(),
         }
     }
@@ -776,6 +975,24 @@ mod tests {
                     "path_match": "exact"
                 }
             }]
+        }))
+        .expect("permission JSON")
+    }
+
+    fn batch_read_rule_document(rules: &[(&str, &str, PathBuf)]) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "rules": rules.iter().map(|(id, effect, path)| json!({
+                "id": id,
+                "effect": effect,
+                "variants": ["build"],
+                "matcher": {
+                    "type": "file",
+                    "operation": "read",
+                    "path": path,
+                    "path_match": "recursive"
+                }
+            })).collect::<Vec<_>>()
         }))
         .expect("permission JSON")
     }

@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use agent_tools::{
-    FileAuthorizationFacts, FileOperation, GeneralAuthorizationFacts, ResolvedToolInvocation,
-    ShellAuthorizationFacts, ShellProcessMode,
+    FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation, GeneralAuthorizationFacts,
+    ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
 };
 use assistant_protocol::AgentVariant;
 
@@ -23,7 +23,9 @@ pub(crate) enum InvocationFactKind {
 }
 
 pub(crate) fn fact_kind(invocation: &ResolvedToolInvocation) -> InvocationFactKind {
-    if invocation.facts::<FileAuthorizationFacts>().is_some() {
+    if invocation.facts::<FileAuthorizationFacts>().is_some()
+        || invocation.facts::<FileBatchAuthorizationFacts>().is_some()
+    {
         InvocationFactKind::File
     } else if invocation.facts::<ShellAuthorizationFacts>().is_some() {
         InvocationFactKind::Shell
@@ -51,16 +53,26 @@ pub(crate) fn matches_rule(
                         .facts::<DelegationAuthorizationFacts>()
                         .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
             }
-            PermissionMatcher::File(matcher) => invocation
-                .facts::<FileAuthorizationFacts>()
-                .is_some_and(|facts| {
-                    file_operation(facts.operation) == matcher.operation
-                        && path_matches(
-                            facts.path.as_path(),
-                            Path::new(&matcher.path),
-                            matcher.path_match,
-                        )
-                }),
+            PermissionMatcher::File(matcher) => {
+                invocation
+                    .facts::<FileAuthorizationFacts>()
+                    .is_some_and(|facts| {
+                        file_matcher_matches(matcher, facts.operation, &facts.path)
+                    })
+                    || invocation
+                        .facts::<FileBatchAuthorizationFacts>()
+                        .is_some_and(|facts| {
+                            let matches = |path: &agent_tools::AbsolutePath| {
+                                file_matcher_matches(matcher, facts.operation, path)
+                            };
+                            match rule.effect {
+                                super::PermissionEffect::Allow => facts.paths.iter().all(matches),
+                                super::PermissionEffect::Ask | super::PermissionEffect::Deny => {
+                                    facts.paths.iter().any(matches)
+                                }
+                            }
+                        })
+            }
             PermissionMatcher::Shell(matcher) => invocation
                 .facts::<ShellAuthorizationFacts>()
                 .is_some_and(|facts| {
@@ -69,6 +81,15 @@ pub(crate) fn matches_rule(
                         && process_mode(facts.process_mode) == matcher.process_mode
                 }),
         }
+}
+
+pub(crate) fn file_matcher_matches(
+    matcher: &super::FilePermissionMatcher,
+    operation: FileOperation,
+    path: &agent_tools::AbsolutePath,
+) -> bool {
+    file_operation(operation) == matcher.operation
+        && path_matches(path.as_path(), Path::new(&matcher.path), matcher.path_match)
 }
 
 /// 只有能完整表达一次已解析调用事实的 Allow 规则才可以用于审批队列自动重核。
@@ -121,7 +142,8 @@ mod tests {
 
     use agent_testkit::{OrderLog, ScriptedTool};
     use agent_tools::{
-        AbsolutePath, Dispatcher, ResolvedBatchItemRef, SessionPathResolver, ShellExecTool,
+        AbsolutePath, Dispatcher, ImageInspectionFuture, ImageInspector, InspectImagesRequest,
+        InspectImagesTool, ResolvedBatchItemRef, SessionPathResolver, ShellExecTool,
         ShellExecToolConfig, ShellFuture, ShellOutputSink, ShellRequest, ShellTool, ShellToolError,
         ToolRegistry,
     };
@@ -136,6 +158,18 @@ mod tests {
     };
 
     struct NeverShell;
+
+    struct NeverInspector;
+
+    impl ImageInspector for NeverInspector {
+        fn inspect<'a>(
+            &'a self,
+            _request: InspectImagesRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> ImageInspectionFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
 
     impl ShellTool for NeverShell {
         fn exec<'a>(
@@ -224,6 +258,61 @@ mod tests {
         matcher.command_match = CommandMatch::Exact;
         // Exact 与 prefix 的语义不同，完整命令不能被缩写规则命中。
         assert!(!matches_rule(&exact_rule, AgentVariant::Build, invocation));
+    }
+
+    #[test]
+    fn batch_file_rules_allow_all_paths_but_deny_or_ask_any_path() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(InspectImagesTool::new(
+                Arc::new(NeverInspector),
+                SessionPathResolver::new(AbsolutePath::new("/workspace").expect("workspace")),
+            ))
+            .expect("register inspect images");
+        let batch = Dispatcher::resolve_batch(
+            &registry.snapshot(),
+            &[call(
+                "inspect_images",
+                json!({
+                    "image_paths": ["a.png", "/session/private/b.png"],
+                    "goal": "compare"
+                }),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = batch.get(0).expect("item") else {
+            panic!("inspect images resolves");
+        };
+        let rule = |effect, path: &str| PermissionRule {
+            id: format!("{effect:?}-{path}"),
+            effect,
+            variants: vec![AgentVariant::Build],
+            matcher: PermissionMatcher::File(crate::permission::FilePermissionMatcher {
+                operation: PermissionFileOperation::Read,
+                path: path.to_owned(),
+                path_match: PathMatch::Recursive,
+            }),
+        };
+
+        assert!(!matches_rule(
+            &rule(PermissionEffect::Allow, "/workspace"),
+            AgentVariant::Build,
+            invocation
+        ));
+        assert!(matches_rule(
+            &rule(PermissionEffect::Allow, "/"),
+            AgentVariant::Build,
+            invocation
+        ));
+        assert!(matches_rule(
+            &rule(PermissionEffect::Deny, "/session/private"),
+            AgentVariant::Build,
+            invocation
+        ));
+        assert!(matches_rule(
+            &rule(PermissionEffect::Ask, "/workspace"),
+            AgentVariant::Build,
+            invocation
+        ));
     }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {

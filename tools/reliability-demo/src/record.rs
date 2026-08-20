@@ -22,7 +22,7 @@ use agent_model::{
     RetryingModelService, SystemPromptSnapshot, TraceContext,
 };
 use agent_openai_compatible::{
-    BearerCredential, ObservedTransport, OpenAiCompatibleService, ProtocolAdapter,
+    BearerCredential, ChatProtocolAdapter, ObservedTransport, OpenAiChatCompletionsService,
     ReqwestTransport, Transport, TransportTimeouts,
 };
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolRegistry, ToolResolution};
@@ -129,12 +129,12 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
     );
     // 在 Trace header 落盘前先走 Adapter 的 URL 安全校验，避免把含认证信息的
     // endpoint 写入高敏文件。这个临时 Service 不会发出网络请求。
-    let validated_service = OpenAiCompatibleService::with_transport(
+    let validated_service = OpenAiChatCompletionsService::with_transport(
         provider.endpoint.clone(),
         BearerCredential::new(provider.api_key.clone()),
         provider.model.clone(),
         provider.context_window_tokens,
-        ProtocolAdapter::deepseek(),
+        ChatProtocolAdapter::deepseek(),
         raw_transport.clone(),
     )
     .map_err(|error| RecordCommandError::Provider(error.to_string()))?;
@@ -165,12 +165,12 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
         raw_transport,
         Arc::new(sink.clone()),
     ));
-    let provider_service = match OpenAiCompatibleService::with_transport(
+    let provider_service = match OpenAiChatCompletionsService::with_transport(
         provider.endpoint.clone(),
         BearerCredential::new(provider.api_key.clone()),
         provider.model.clone(),
         provider.context_window_tokens,
-        ProtocolAdapter::deepseek(),
+        ChatProtocolAdapter::deepseek(),
         observed_transport,
     ) {
         Ok(service) => service,
@@ -736,6 +736,8 @@ mod tests {
                     reasoning: false,
                     image_input: false,
                     tool_calls: true,
+                    multimodal_tool_result: false,
+                    tool_choice: agent_model::ToolChoiceCapabilities::all(),
                     streaming: true,
                 },
                 events: text_events(),
@@ -786,6 +788,8 @@ mod tests {
                     reasoning: false,
                     image_input: false,
                     tool_calls: true,
+                    multimodal_tool_result: false,
+                    tool_choice: agent_model::ToolChoiceCapabilities::all(),
                     streaming: true,
                 },
                 events: text_events(),
@@ -829,6 +833,8 @@ mod tests {
                 reasoning: false,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             4096,
@@ -907,6 +913,8 @@ mod tests {
                 reasoning: false,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             4096,

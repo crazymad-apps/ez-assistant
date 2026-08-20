@@ -164,7 +164,7 @@ mod tests {
             Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
         );
         assert_eq!(result.status, ToolResultStatus::Success);
-        assert_eq!(result.content, ToolResultContent::Json(json!({"sum": 42})));
+        assert_eq!(result.content, ToolResultContent::json(json!({"sum": 42})));
 
         let repeated = block_on(
             Dispatcher::execute(&mut batch, 0, ToolContext::default()).expect("valid index"),
@@ -182,7 +182,7 @@ mod tests {
         );
         assert_eq!(result.call_id, call.id);
         assert_eq!(result.status, ToolResultStatus::Error);
-        let ToolResultContent::Text(message) = result.content else {
+        let Some(message) = result.content.as_single_text() else {
             panic!("plain execution failure is text");
         };
         assert!(message.contains("boom"));
@@ -262,7 +262,7 @@ mod tests {
         let Some(ResolvedBatchItemRef::Invalid(result)) = batch.get(0) else {
             panic!("resolve error creates invalid item");
         };
-        let ToolResultContent::Text(message) = &result.content else {
+        let Some(message) = result.content.as_single_text() else {
             panic!("resolve error is model-visible text");
         };
         assert!(message.starts_with("invalid tool input:"));

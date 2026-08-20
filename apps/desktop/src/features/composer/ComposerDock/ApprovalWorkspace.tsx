@@ -70,6 +70,9 @@ function ApprovalSubject({ subject }: Readonly<{ subject: ToolApprovalSubject }>
   if (subject.type === "file") {
     return <p>{subject.operation} · <code>{subject.path}</code></p>;
   }
+  if (subject.type === "files") {
+    return <div><p>{subject.operation} · {subject.paths.length} 个文件</p>{subject.paths.map((path) => <p key={path}><code>{path}</code></p>)}</div>;
+  }
   if (subject.type === "delegation") {
     return <p>{subject.title} · {subject.task_summary}</p>;
   }

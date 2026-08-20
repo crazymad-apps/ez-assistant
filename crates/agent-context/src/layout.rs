@@ -107,13 +107,6 @@ impl ContextLayout {
             }
         }
 
-        for (index, block) in self.blocks.iter().enumerate() {
-            if block.contains_provider_state() {
-                split_index = split_index.min(index);
-                break;
-            }
-        }
-
         if protect_active_turn
             && let Some((index, _)) =
                 self.blocks.iter().enumerate().rev().find(|(_, block)| {
@@ -145,7 +138,6 @@ pub struct ContextBlock {
     kind: ContextBlockKind,
     messages: Vec<ConversationMessage>,
     active: bool,
-    contains_provider_state: bool,
 }
 
 impl ContextBlock {
@@ -154,7 +146,6 @@ impl ContextBlock {
             kind: ContextBlockKind::ContextSummary,
             messages: vec![message],
             active: false,
-            contains_provider_state: false,
         }
     }
 
@@ -167,21 +158,10 @@ impl ContextBlock {
                     .iter()
                     .any(|part| matches!(part, AssistantPart::ToolCall(_)))
         );
-        let contains_provider_state = messages.iter().any(|message| {
-            matches!(
-                message,
-                ConversationMessage::Assistant(message)
-                    if message
-                        .parts
-                        .iter()
-                        .any(|part| matches!(part, AssistantPart::ProviderState(_)))
-            )
-        });
         Self {
             kind: ContextBlockKind::UserTurn,
             messages,
             active,
-            contains_provider_state,
         }
     }
 
@@ -198,11 +178,6 @@ impl ContextBlock {
     /// 当前 User Turn 是否仍等待后续模型 Result。
     pub fn is_active(&self) -> bool {
         self.active
-    }
-
-    /// 块内是否含不能由共享层解释的不透明 ProviderState。
-    pub fn contains_provider_state(&self) -> bool {
-        self.contains_provider_state
     }
 }
 
@@ -319,7 +294,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new(call_id).expect("valid call id"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         })
@@ -393,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn active_turn_and_provider_state_force_a_protected_tail() {
+    fn only_active_turn_forces_a_tail_while_old_provider_state_remains_compressible() {
         let active = ContextLayout::build(&ConversationSnapshot::new(vec![
             user("user_1"),
             assistant("assistant_1"),
@@ -412,8 +387,8 @@ mod tests {
         ]))
         .expect("valid stateful layout");
         let partition = stateful.partition(0);
-        assert!(partition.compressible_head().is_empty());
-        assert_eq!(partition.protected_tail().len(), 2);
+        assert_eq!(partition.compressible_head().len(), 2);
+        assert!(partition.protected_tail().is_empty());
     }
 
     #[test]

@@ -138,6 +138,18 @@
 - 队列、usage、effort 和模型能力事件允许丢失；客户端重连后必须以 Session/Run 快照恢复，不把
   本地乐观状态当作权威事实。
 
+## v0.17.0 Tool Image 产品投影
+
+- `ToolFileResourceOrigin::SessionToolImage` 只标识工具详情中的会话私有图片来源；DTO 不携带
+  Image Part、Session 根、外部源路径、Base64 或 ProviderState。
+- `ToolFileResourceState::Available` 表示可靠 Conversation 中存在可解析引用。物理文件仍由 Host
+  在预览时重新校验；失败后 Desktop 可在当前详情中展示 `Unavailable`，不能据此改写 Conversation。
+- Tool Image 不进入 `ConversationFileReference`，因此不能被附件、Context Panel、通用产物或
+  用户文件导出消费。
+- `ToolApprovalSubject::Files` 只投影一次多路径文件调用已经解析的 operation 和有序绝对路径，
+  供 Desktop 完整展示审批范围；它不携带文件正文。Session/Workspace 持久批准仍由 Runtime
+  将每条路径保存为既有 exact File matcher，不新增权限文件 matcher 类型。
+
 ## Harness 验证
 
 - 序列化 round-trip。

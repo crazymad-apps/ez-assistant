@@ -218,6 +218,7 @@ pub struct ImageInspectionDetailSnapshot {
 pub enum ToolFileResourceOrigin {
     WorkspaceFile,
     SessionPrivateFile,
+    SessionToolImage,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -758,6 +759,17 @@ mod tests {
             serde_json::from_value::<ObservedSnapshot<ConversationPage>>(value)
                 .expect("deserialize snapshot"),
             snapshot
+        );
+    }
+
+    #[test]
+    fn session_tool_image_origin_has_a_stable_public_wire_value() {
+        let value = serde_json::to_value(ToolFileResourceOrigin::SessionToolImage)
+            .expect("serialize origin");
+        assert_eq!(value, "session_tool_image");
+        assert_eq!(
+            serde_json::from_value::<ToolFileResourceOrigin>(value).expect("deserialize origin"),
+            ToolFileResourceOrigin::SessionToolImage
         );
     }
 }

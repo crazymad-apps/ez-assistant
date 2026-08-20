@@ -1,0 +1,21 @@
+data: {"type":"response.created","response":{"id":"resp_calls_1","model":"gpt-test","status":"in_progress"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_item_2","type":"function_call","call_id":"call_2","name":"lookup","arguments":"","status":"in_progress"}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_item_2","output_index":1,"delta":"{\"city\":\"Paris\"}"}
+
+data: {"type":"response.function_call_arguments.done","item_id":"fc_item_2","output_index":1,"name":"lookup","arguments":"{\"city\":\"Paris\"}"}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"{\"city\":\"Tokyo\"}"}
+
+data: {"type":"response.function_call_arguments.done","item_id":"fc_item_1","output_index":0,"name":"lookup","arguments":"{\"city\":\"Tokyo\"}"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_item_2","type":"function_call","call_id":"call_2","name":"lookup","arguments":"{\"city\":\"Paris\"}","status":"completed"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"city\":\"Tokyo\"}","status":"completed"}}
+
+data: {"type":"response.completed","response":{"id":"resp_calls_1","model":"gpt-test","status":"completed","usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}}
+
+data: [DONE]

@@ -82,6 +82,23 @@ impl StorageEngine {
                     created_at_ms: fork.session.created_at_ms,
                 });
             }
+            let source_tool_images = self
+                .session_directory(&fork.source_session_id)?
+                .join("tool-images");
+            for reference in &fork.tool_images {
+                crate::image::copy_tool_image(
+                    &source_tool_images,
+                    &paths.tool_image_directory,
+                    reference,
+                )
+                .map_err(|source| {
+                    StoreError::with_source(
+                        StoreErrorKind::ResourceUnavailable,
+                        "fork tool image could not be copied",
+                        source,
+                    )
+                })?;
+            }
             let mut forked_conversation = fork.conversation;
             rewrite_file_reference_paths(&mut forked_conversation, &rewrites)?;
             let payload = conversation::encode_messages(&forked_conversation.messages)?;

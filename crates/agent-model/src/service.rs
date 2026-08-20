@@ -267,6 +267,8 @@ mod tests {
                 reasoning: true,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: crate::ToolChoiceCapabilities::auto_only(),
                 streaming: true,
             },
             context_window_tokens: 128_000,

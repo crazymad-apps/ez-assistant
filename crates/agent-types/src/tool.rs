@@ -109,14 +109,257 @@ pub enum ToolResultStatus {
     Error,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-/// 返回给模型的工具结果内容。
-pub enum ToolResultContent {
-    /// 普通文本结果。
-    Text(String),
-    /// 需要保持结构的 JSON 结果。
-    Json(Value),
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// 工具结果内容不满足规范 Part 约束。
+pub enum ToolResultContentError {
+    #[error("tool result content must contain at least one part")]
+    EmptyParts,
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// 工具图片引用不满足 Session 内稳定路径约束。
+pub enum ToolImageReferenceError {
+    #[error("tool image media type is not supported")]
+    UnsupportedMediaType,
+    #[error(
+        "tool image relative path must be a lowercase SHA-256 name with the canonical extension"
+    )]
+    InvalidRelativePath,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+/// Session 私有 `tool-images/` 中的一份稳定图片引用。
+pub struct ToolImageReference {
+    relative_path: String,
+    media_type: String,
+}
+
+impl ToolImageReference {
+    /// 创建并校验 Session 内图片引用。
+    pub fn new(
+        relative_path: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, ToolImageReferenceError> {
+        let relative_path = relative_path.into();
+        let media_type = media_type.into();
+        let extension = canonical_image_extension(&media_type)
+            .ok_or(ToolImageReferenceError::UnsupportedMediaType)?;
+        let expected_length = 64 + 1 + extension.len();
+        let valid_hash = relative_path
+            .as_bytes()
+            .get(..64)
+            .is_some_and(|hash| hash.iter().all(u8::is_ascii_hexdigit))
+            && relative_path
+                .as_bytes()
+                .get(..64)
+                .is_some_and(|hash| hash.iter().all(|byte| !byte.is_ascii_uppercase()));
+        if relative_path.len() != expected_length
+            || !valid_hash
+            || relative_path.as_bytes().get(64) != Some(&b'.')
+            || relative_path.get(65..) != Some(extension)
+        {
+            return Err(ToolImageReferenceError::InvalidRelativePath);
+        }
+        Ok(Self {
+            relative_path,
+            media_type,
+        })
+    }
+
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolImageReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireReference {
+            relative_path: String,
+            media_type: String,
+        }
+
+        let value = WireReference::deserialize(deserializer)?;
+        Self::new(value.relative_path, value.media_type).map_err(de::Error::custom)
+    }
+}
+
+fn canonical_image_extension(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+/// 返回给模型的一个有序工具结果 Part。
+pub enum ToolResultPart {
+    Text { text: String },
+    Json { value: Value },
+    Image { image: ToolImageReference },
+}
+
+impl ToolResultPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn json(value: Value) -> Self {
+        Self::Json { value }
+    }
+
+    pub fn image(image: ToolImageReference) -> Self {
+        Self::Image { image }
+    }
+}
+
+impl Serialize for ToolResultPart {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = match self {
+            Self::Text { .. } | Self::Json { .. } => serializer.serialize_map(Some(2))?,
+            Self::Image { .. } => serializer.serialize_map(Some(3))?,
+        };
+        match self {
+            Self::Text { text } => {
+                map.serialize_entry("type", "text")?;
+                map.serialize_entry("text", text)?;
+            }
+            Self::Json { value } => {
+                map.serialize_entry("type", "json")?;
+                map.serialize_entry("value", value)?;
+            }
+            Self::Image { image } => {
+                map.serialize_entry("type", "image")?;
+                map.serialize_entry("relative_path", image.relative_path())?;
+                map.serialize_entry("media_type", image.media_type())?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolResultPart {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum WirePart {
+            Text {
+                text: String,
+            },
+            Json {
+                value: Value,
+            },
+            Image {
+                relative_path: String,
+                media_type: String,
+            },
+        }
+
+        match WirePart::deserialize(deserializer)? {
+            WirePart::Text { text } => Ok(Self::text(text)),
+            WirePart::Json { value } => Ok(Self::json(value)),
+            WirePart::Image {
+                relative_path,
+                media_type,
+            } => ToolImageReference::new(relative_path, media_type)
+                .map(Self::image)
+                .map_err(de::Error::custom),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+/// 非空、有序的工具结果内容。
+pub struct ToolResultContent {
+    parts: Vec<ToolResultPart>,
+}
+
+impl ToolResultContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            parts: vec![ToolResultPart::text(text)],
+        }
+    }
+
+    pub fn json(value: Value) -> Self {
+        Self {
+            parts: vec![ToolResultPart::json(value)],
+        }
+    }
+
+    pub fn parts(parts: Vec<ToolResultPart>) -> Result<Self, ToolResultContentError> {
+        if parts.is_empty() {
+            return Err(ToolResultContentError::EmptyParts);
+        }
+        Ok(Self { parts })
+    }
+
+    pub fn as_parts(&self) -> &[ToolResultPart] {
+        &self.parts
+    }
+
+    pub fn into_parts(self) -> Vec<ToolResultPart> {
+        self.parts
+    }
+
+    pub fn as_single_text(&self) -> Option<&str> {
+        match self.parts.as_slice() {
+            [ToolResultPart::Text { text }] => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn as_single_json(&self) -> Option<&Value> {
+        match self.parts.as_slice() {
+            [ToolResultPart::Json { value }] => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolResultContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireContent {
+            Parts { parts: Vec<ToolResultPart> },
+            Legacy(LegacyContent),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "type", content = "value", rename_all = "snake_case")]
+        enum LegacyContent {
+            Text(String),
+            Json(Value),
+        }
+
+        match WireContent::deserialize(deserializer)? {
+            WireContent::Parts { parts } => Self::parts(parts).map_err(de::Error::custom),
+            WireContent::Legacy(LegacyContent::Text(text)) => Ok(Self::text(text)),
+            WireContent::Legacy(LegacyContent::Json(value)) => Ok(Self::json(value)),
+        }
+    }
 }
 
 /// 不发送给模型、但随可靠 Tool Result 保存的执行观测信息。
@@ -167,7 +410,7 @@ mod tests {
         let result = ToolResult {
             call_id: ToolCallId::new("call_1").expect("valid call id"),
             status: ToolResultStatus::Success,
-            content: ToolResultContent::Json(serde_json::json!({"ok": true})),
+            content: ToolResultContent::json(serde_json::json!({"ok": true})),
             metadata: None,
         };
         let json = serde_json::to_string(&result).expect("serialize result");
@@ -175,5 +418,63 @@ mod tests {
             serde_json::from_str::<ToolResult>(&json).expect("deserialize result"),
             result
         );
+    }
+
+    #[test]
+    fn tool_result_content_reads_legacy_and_writes_parts() {
+        let legacy = r#"{"type":"text","value":"done"}"#;
+        let content: ToolResultContent = serde_json::from_str(legacy).expect("legacy content");
+        assert_eq!(content.as_single_text(), Some("done"));
+        assert_eq!(
+            serde_json::to_value(content).expect("serialize content"),
+            serde_json::json!({"parts": [{"type": "text", "text": "done"}]})
+        );
+    }
+
+    #[test]
+    fn tool_result_content_preserves_mixed_part_order() {
+        let image = ToolImageReference::new(format!("{}.png", "a".repeat(64)), "image/png")
+            .expect("valid image reference");
+        let content = ToolResultContent::parts(vec![
+            ToolResultPart::text("before"),
+            ToolResultPart::image(image.clone()),
+            ToolResultPart::json(serde_json::json!({"ok": true})),
+        ])
+        .expect("non-empty parts");
+        let json = serde_json::to_value(&content).expect("serialize parts");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "parts": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "relative_path": format!("{}.png", "a".repeat(64)), "media_type": "image/png"},
+                    {"type": "json", "value": {"ok": true}}
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolResultContent>(json).expect("deserialize parts"),
+            content
+        );
+    }
+
+    #[test]
+    fn tool_image_reference_rejects_paths_and_mime_extension_mismatch() {
+        let hash = "a".repeat(64);
+        assert!(ToolImageReference::new(format!("{hash}.jpg"), "image/jpeg").is_ok());
+        assert!(ToolImageReference::new(format!("{hash}.jpeg"), "image/jpeg").is_err());
+        assert!(ToolImageReference::new(format!("../{hash}.png"), "image/png").is_err());
+        assert!(ToolImageReference::new(format!("{}.png", "A".repeat(64)), "image/png").is_err());
+        assert!(ToolImageReference::new(format!("{hash}.png"), "image/jpeg").is_err());
+        assert!(ToolImageReference::new(format!("{hash}.bmp"), "image/bmp").is_err());
+    }
+
+    #[test]
+    fn empty_tool_result_parts_are_rejected_during_construction_and_deserialization() {
+        assert_eq!(
+            ToolResultContent::parts(Vec::new()),
+            Err(ToolResultContentError::EmptyParts)
+        );
+        assert!(serde_json::from_str::<ToolResultContent>(r#"{"parts":[]}"#).is_err());
     }
 }

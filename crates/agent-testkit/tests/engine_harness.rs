@@ -58,6 +58,8 @@ fn capabilities() -> ModelCapabilities {
         reasoning: true,
         image_input: false,
         tool_calls: true,
+        multimodal_tool_result: false,
+        tool_choice: agent_model::ToolChoiceCapabilities::all(),
         streaming: true,
     }
 }
@@ -133,7 +135,7 @@ fn success_result(id: &str, output: Value) -> ToolResult {
     ToolResult {
         call_id: call_id(id),
         status: ToolResultStatus::Success,
-        content: ToolResultContent::Json(output),
+        content: ToolResultContent::json(output),
         metadata: None,
     }
 }
@@ -142,7 +144,7 @@ fn error_result(id: &str, message: &str) -> ToolResult {
     ToolResult {
         call_id: call_id(id),
         status: ToolResultStatus::Error,
-        content: ToolResultContent::Text(message.to_owned()),
+        content: ToolResultContent::text(message.to_owned()),
         metadata: None,
     }
 }

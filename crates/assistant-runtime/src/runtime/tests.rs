@@ -299,6 +299,7 @@ fn test_fork_environment(
 ) -> PreparedSessionEnvironment {
     let private = format!("/runtime/sessions/{}/private", request.session_id);
     let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
+    let tool_images = format!("/runtime/sessions/{}/tool-images", request.session_id);
     let mut parts = request.source_system_prompt.parts().to_vec();
     if let Some(directory_prompt) = parts.last_mut() {
         *directory_prompt = format!("Session directories for {}", request.session_id);
@@ -313,6 +314,7 @@ fn test_fork_environment(
                 .workspace_private_directory
                 .clone(),
             session_attachment_directory: attachment,
+            session_tool_image_directory: tool_images,
             session_private_directory: private,
         },
     }
@@ -324,6 +326,7 @@ fn test_environment(
 ) -> PreparedSessionEnvironment {
     let private = format!("/runtime/sessions/{}/private", request.session_id);
     let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
+    let tool_images = format!("/runtime/sessions/{}/tool-images", request.session_id);
     let (workspace_id, working_directory, workspace_private_directory) = match request.workspace {
         Some(workspace) => (
             Some(workspace.workspace_id.clone()),
@@ -339,6 +342,7 @@ fn test_environment(
             working_directory,
             workspace_private_directory,
             session_attachment_directory: attachment,
+            session_tool_image_directory: tool_images,
             session_private_directory: private,
         },
     }
@@ -647,6 +651,12 @@ fn model_capabilities(has_tools: bool) -> ModelCapabilities {
         reasoning: false,
         image_input: false,
         tool_calls: has_tools,
+        multimodal_tool_result: false,
+        tool_choice: if has_tools {
+            agent_model::ToolChoiceCapabilities::all()
+        } else {
+            agent_model::ToolChoiceCapabilities::default()
+        },
         streaming: true,
     }
 }

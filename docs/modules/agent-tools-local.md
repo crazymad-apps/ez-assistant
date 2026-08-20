@@ -25,6 +25,8 @@
 - 使用系统 `rg` 作为名称和内容搜索后端，不自行维护递归搜索引擎。
 - 实现平台 Shell launcher、敏感环境过滤、stdout/stderr 流、输出上限、timeout、
   cancellation 和进程树清理。
+- 提供基于已解析 `AbsolutePath` 的可取消、有上限普通二进制文件读取机制；它从打开后的
+  文件句柄核对普通文件类型，并在读取过程中再次执行大小上限，避免只依赖打开前元数据。
 - 维护单 Adapter 实例内按绝对逻辑路径协调的 mutation lock。
 - 把操作系统、文件类型、编码、搜索后端和进程错误转换为 `agent-tools` 的稳定能力
   错误。
@@ -39,6 +41,8 @@
 - Adapter 接收已经 resolve 的绝对逻辑路径，不重新应用默认工作目录或授权规则。
 - 权限规则匹配逻辑路径，不得把 canonical path 或 symlink 目标描述为强沙盒边界。
 - read/edit/search-content 只处理 UTF-8 文本；大小、NUL、BOM 和换行语义必须显式。
+- 二进制读取只返回受限原始字节，不嗅探 MIME、不解码图片，也不知道 Session、
+  `tool-images/`、哈希命名或物化策略；这些语义由 Host 组合。
 - list 同时返回目标类型和独立 symlink 标记；symlink 不是与 File/Directory 平级的
   互斥目标类型。
 - write/edit 可以跟随 symlink 修改目标；delete symlink 只删除链接本身。

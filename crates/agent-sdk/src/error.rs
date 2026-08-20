@@ -14,6 +14,9 @@ pub enum AgentBuildError {
     /// 已注册工具，但模型没有声明 tool-call 能力。
     #[error("registered tools require a model with tool-call capability")]
     ToolCallsUnsupported,
+    /// 当前精确模型路由不支持请求选择的 ToolChoice。
+    #[error("selected tool choice is not supported by the model route")]
+    ToolChoiceUnsupported,
     /// 请求要求模型调用工具，但冻结工具集为空。
     #[error("required tool choice needs at least one registered tool")]
     RequiredToolChoiceWithoutTools,

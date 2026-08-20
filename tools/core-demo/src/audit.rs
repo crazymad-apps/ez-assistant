@@ -9,7 +9,7 @@ use agent_tools::{
     FileAuthorizationFacts, GeneralAuthorizationFacts, ResolvedToolInvocation,
     ShellAuthorizationFacts, ShellProcessMode,
 };
-use agent_types::{ToolCallId, ToolResult, ToolResultContent, ToolResultStatus};
+use agent_types::{ToolCallId, ToolResult, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 
 /// 授权和审批展示的 resolve 后事实；不保存文件内容或 Shell 输出。
@@ -245,26 +245,21 @@ impl DemoAudit {
 }
 
 fn shell_exit_code(result: &ToolResult) -> Option<i32> {
-    match &result.content {
-        ToolResultContent::Json(value) => value
-            .get("exit_code")
-            .and_then(serde_json::Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok()),
-        ToolResultContent::Text(_) => None,
-    }
+    result
+        .content
+        .as_single_json()?
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn classify_error(result: &ToolResult) -> String {
-    match &result.content {
-        ToolResultContent::Text(text)
-            if text.contains("cancel") || text.contains("interrupted") =>
-        {
+    match result.content.as_single_text() {
+        Some(text) if text.contains("cancel") || text.contains("interrupted") => {
             "cancelled".to_owned()
         }
-        ToolResultContent::Text(text) if text.starts_with("invalid tool input:") => {
-            "invalid_input".to_owned()
-        }
-        ToolResultContent::Text(text) if text.contains("timed out") => "timeout".to_owned(),
+        Some(text) if text.starts_with("invalid tool input:") => "invalid_input".to_owned(),
+        Some(text) if text.contains("timed out") => "timeout".to_owned(),
         _ => "tool_error".to_owned(),
     }
 }

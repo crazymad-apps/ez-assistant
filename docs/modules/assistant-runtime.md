@@ -293,16 +293,52 @@ Runtime Host 进程
 - OS 临时目录通过 `ChildTaskWorkspaceFactory` 端口由 Host 创建并以 lease 管理；Runtime 不直接
   操作文件系统。并发、timeout、独立取消和公共查询均由 Runtime 在同一 child 生命周期上编排。
 
-## v0.16.0 模型协议与能力编译边界
+## v0.16.0—v0.17.0 模型协议与能力编译边界
 
-- `protocol` 当前规范值为 `openai_chat_completions`；读取旧 `chat_completions` 时只在内存中
-  归一化，新的模型配置写入规范值。未知协议在模型配置编译期失败。
+- `protocol` 规范值为 `openai_chat_completions` 或 `openai_responses`；读取旧
+  `chat_completions` 时只在内存中归一化，新的模型配置写入规范值。Responses 不接受简称或
+  Chat 别名，未知协议在模型配置编译期失败。
 - Runtime 接收 Host 已严格校验的只读 `ModelCatalog`，并按
   `(provider, protocol, model_id)` 精确匹配；目录未命中时使用当前协议的保守能力基线。
 - 用户 capability override 优先于目录；reasoning 块只允许整块替换。effort 只接受五个稳定 key、
   非空 label 和字符串或正整数 wire value，不接受字段名、JSON path 或请求片段。
 - `ResolvedModelConfig` 同时持有 Route、Protocol 和唯一 `ResolvedModelCapabilities`；Core、Host
   与连接验证不得再次按模型名前缀猜测能力。
+
+## v0.17.0 Tool Result 图片资源边界
+
+- `SessionExecutionEnvironment` 持有 Host 从 Session ID 确定性构造的
+  `session_tool_image_directory`；该路径不写入 System Prompt、Conversation 或数据库列，
+  恢复时必须从固定 Session 目录重新构造。
+- Runtime 的 Conversation、pending exchange、staged append 和 child Conversation 继续通过
+  `agent-types` 的统一 Serde 保存有序 Tool Result Parts；Runtime 不建立图片表、引用计数、
+  全局缓存或第二份图片正文。
+- Fork 请求只携带从所 Fork Conversation 收集并去重的 `ToolImageReference`；Host Store 在
+  提交新 Session 事实前完成独立字节复制，失败时回滚新 Session 资源。不同 Session 不共享
+  inode、链接或生命周期。
+- Session 删除继续删除整个 Session 私有目录，因此 `tool-images/` 与 Session 共生共死；
+  Runtime 不实现跨 Session 垃圾回收。
+- Runtime 从精确 `(provider, protocol, model_id)` 能力编译得到 `ToolImageProjection` 和
+  `ToolChoiceCapabilities`。目录 schema v2 对不自洽组合 fail-closed；未命中路由保持
+  `Unsupported`/Auto-only 保守基线。
+- 只有主模型同时具备 `image_input`、Tool Call 和非 `Unsupported` 投影时，Runtime 才要求 Host
+  注册 `read_image`。文本主模型仍只在有效辅助视觉模型存在时注册 `inspect_images`，两条路径
+  不互相调用。
+- `inspect_images` 与 `read_image` 统一服从文件 Read 权限。多图事实按路径分别合并分层规则：
+  任一 Deny 拒绝整次调用，任一 Ask 进入审批，全部路径被 Allow 才直接执行；交互式持久批准把
+  每条 exact Read 规则作为一次权限文件 CAS 原子写入，不能折叠为共同父目录。
+- 图片准备包装器在主/child Run 和辅助识图调用构造时绑定当前 Session Environment；连接验证
+  不绑定会话资源。它按图片 Part 出现次数执行 10 张上限，并按附件/Tool Image 来源身份去重预处理。
+- `openai_responses` 与 Chat 一样使用本地 Conversation 作为唯一历史事实；Runtime 不保存
+  `previous_response_id` 或服务端 Conversation ID。目录未命中的 Responses 路由采用本协议的
+  保守能力基线，不能因 endpoint 或模型名称自动启用图片、reasoning 或工具选择能力。
+- Runtime 持久化规范 ReasoningPart 与 Adapter 返回的 OpaqueProviderState，但不解释、不解密、
+  不摘要 payload，也不建立独立缓存表。旧 opaque state 可随普通压缩 head 被 replacement 替代；
+  最近 Turn、活动 Turn 和完整 Tool Exchange 的保护继续由 `agent-context` 统一决定。
+- 工具详情中的 Session Tool Image 必须从对应可靠 Tool Result Image Part 生成稳定引用；
+  `read_image` 的 Tool Call `path` 只保留审计语义，不能被投影成图片产物或用于预览回源。
+- 资源解析按 owner/message/call/part 回查可靠 Conversation。主会话与 child Conversation 使用同一
+  Image Part 算法；Tool Image 显式排除出 `project_conversation_file_references`。
 
 ## Harness 验证
 

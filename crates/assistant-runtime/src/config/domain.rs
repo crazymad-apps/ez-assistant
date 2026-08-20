@@ -59,7 +59,7 @@ pub enum ConfigIssueCode {
     InvalidLimit,
     /// Runtime/Agent 策略无效。
     InvalidPolicy,
-    /// 模型 ProtocolAdapter 与 Agent 全局请求参数不兼容。
+    /// 模型协议 Adapter 与 Agent 全局请求参数不兼容。
     UnsupportedProfileCombination,
     /// 默认 key 不存在或指向无效模型。
     DefaultModelUnavailable,
@@ -95,18 +95,22 @@ impl ConfigIssue {
 pub enum ModelProtocol {
     /// OpenAI Chat Completions 协议。
     OpenAiChatCompletions,
+    /// OpenAI Responses 协议。
+    OpenAiResponses,
 }
 
 impl ModelProtocol {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiChatCompletions => "openai_chat_completions",
+            Self::OpenAiResponses => "openai_responses",
         }
     }
 
     pub(crate) fn parse_config(value: &str) -> Option<Self> {
         match value {
             "openai_chat_completions" | "chat_completions" => Some(Self::OpenAiChatCompletions),
+            "openai_responses" => Some(Self::OpenAiResponses),
             _ => None,
         }
     }
@@ -114,6 +118,7 @@ impl ModelProtocol {
     pub(super) fn parse_catalog(value: &str) -> Option<Self> {
         match value {
             "openai_chat_completions" => Some(Self::OpenAiChatCompletions),
+            "openai_responses" => Some(Self::OpenAiResponses),
             _ => None,
         }
     }

@@ -218,7 +218,7 @@ struct CompiledGlobalConfig {
 
 /// 校验 Runtime/Agent 全局字段并直接映射到已有领域类型。
 ///
-/// 这里不读取 Provider ProtocolAdapter，也不处理 tool choice/reasoning；这些是 Run 业务编译职责，
+/// 这里不读取 Provider 协议 Adapter，也不处理 tool choice/reasoning；这些是 Run 业务编译职责，
 /// 不是用户静态配置维度。
 fn compile_global(
     runtime: &RawRuntimeConfig,

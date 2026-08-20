@@ -37,6 +37,7 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
     ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
         let session_directory = self.sessions_directory.join(request.session_id.as_str());
         let attachment_directory = path_text(&session_directory.join("attachments"))?;
+        let tool_image_directory = path_text(&session_directory.join("tool-images"))?;
         let private_directory = path_text(&session_directory.join("private"))?;
         let (workspace_id, working_directory, workspace_private_directory) =
             match &request.workspace {
@@ -52,6 +53,7 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
             working_directory,
             workspace_private_directory,
             session_attachment_directory: attachment_directory,
+            session_tool_image_directory: tool_image_directory,
             session_private_directory: private_directory,
         };
         let mut parts = vec![BASE_SYSTEM_PROMPT.to_owned()];
@@ -102,6 +104,7 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
                 .workspace_private_directory
                 .clone(),
             session_attachment_directory: path_text(&session_directory.join("attachments"))?,
+            session_tool_image_directory: path_text(&session_directory.join("tool-images"))?,
             session_private_directory: path_text(&session_directory.join("private"))?,
         };
         let mut parts = request.source_system_prompt.parts().to_vec();

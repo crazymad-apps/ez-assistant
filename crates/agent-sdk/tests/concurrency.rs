@@ -93,6 +93,8 @@ async fn agents_share_model_service_while_cancellation_remains_execution_local()
             reasoning: false,
             image_input: false,
             tool_calls: false,
+            multimodal_tool_result: false,
+            tool_choice: agent_model::ToolChoiceCapabilities::default(),
             streaming: true,
         },
         entered: entered.clone(),

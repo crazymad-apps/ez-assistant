@@ -130,6 +130,8 @@ pub struct RunToolFactoryRequest<'a> {
     pub conversation_recall_reader: Arc<dyn RecallReferenceReader>,
     /// Runtime 已按主/辅助模型能力判定后的可选识图能力。
     pub image_inspector: Option<agent_tools::SharedImageInspector>,
+    /// 当前精确主模型路由是否允许注册原生图片读取工具。
+    pub read_image_enabled: bool,
 }
 
 impl RunToolBundle {

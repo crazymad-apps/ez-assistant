@@ -394,9 +394,10 @@ mod tests {
 
     use agent_model::{ModelCapabilities, ModelEventStream, ModelService, ModelStreamFuture};
     use agent_types::{
-        AssistantPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, ReasoningPart,
-        SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolMessage, ToolName,
-        ToolResult, ToolResultContent, ToolResultStatus, UserMessage,
+        AssistantPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
+        ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,
+        ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
+        UserMessage,
     };
 
     use super::*;
@@ -746,7 +747,7 @@ mod tests {
                 result: ToolResult {
                     call_id: call_1,
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Text("one".to_owned()),
+                    content: ToolResultContent::text("one".to_owned()),
                     metadata: None,
                 },
             }),
@@ -766,12 +767,27 @@ mod tests {
                 result: ToolResult {
                     call_id: call_2,
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Text("two".to_owned()),
+                    content: ToolResultContent::text("two".to_owned()),
                     metadata: None,
                 },
             }),
             assistant("assistant_2", Some(usage(70))),
         ];
+        let mut old_assistant = match assistant("assistant_1", Some(usage(40))) {
+            ConversationMessage::Assistant(message) => message,
+            _ => unreachable!("assistant helper always returns an assistant"),
+        };
+        old_assistant.parts.push(AssistantPart::ProviderState(
+            OpaqueProviderState::new(
+                ProviderId::new("deepseek").expect("provider"),
+                ProtocolId::new("openai.responses").expect("protocol"),
+                "responses.reasoning_item",
+                "application/json",
+                1,
+                br#"{"type":"reasoning"}"#.to_vec(),
+            )
+            .expect("legacy provider state"),
+        ));
         let mut messages = vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_old"),
@@ -781,7 +797,7 @@ mod tests {
                 compacted_usage: None,
             }),
             user("user_1"),
-            assistant("assistant_1", Some(usage(40))),
+            ConversationMessage::Assistant(old_assistant),
         ];
         messages.extend(tool_turn.clone());
         let snapshot = ConversationSnapshot::new(messages);
@@ -814,6 +830,9 @@ mod tests {
                 if summary.id == id("summary_new")
         ));
         assert_eq!(candidate.replacement.messages.len(), 1 + tool_turn.len());
+        assert!(candidate.replacement.messages.iter().all(|message| {
+            !matches!(message, ConversationMessage::Assistant(message) if message.parts.iter().any(|part| matches!(part, AssistantPart::ProviderState(_))))
+        }));
         assert_eq!(
             candidate.replacement.messages[1], tool_turn[0],
             "tail user message stays at the same boundary"
@@ -854,7 +873,7 @@ mod tests {
                 result: ToolResult {
                     call_id,
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Text("result".to_owned()),
+                    content: ToolResultContent::text("result".to_owned()),
                     metadata: None,
                 },
             }),

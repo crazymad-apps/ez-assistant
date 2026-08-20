@@ -17,7 +17,7 @@ use agent_model::{
     ModelStreamFuture, ProviderOptions, ReasoningConfig, RetryingModelService,
 };
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, TransportTimeouts,
 };
 use agent_types::ToolChoice;
 use thiserror::Error;
@@ -135,12 +135,12 @@ impl DemoModelResources {
         }
 
         let provider: Arc<dyn ModelService> = Arc::new(
-            OpenAiCompatibleService::new(
+            OpenAiChatCompletionsService::new(
                 base_url,
                 BearerCredential::new(api_key),
                 model_name.clone(),
                 context_window_tokens,
-                ProtocolAdapter::deepseek(),
+                ChatProtocolAdapter::deepseek(),
                 TransportTimeouts::default(),
             )
             .map_err(|error| ResourceError::Provider(error.to_string()))?,

@@ -4,7 +4,7 @@ use std::{io, path::Path, str::FromStr};
 
 use assistant_protocol::{
     AttachmentId, AttachmentState, ConversationOwner, GetAttachmentRequest, MessageId,
-    ResourceRefId, RuntimeErrorCode, RuntimeErrorInfo, SessionId,
+    ResourceRefId, RuntimeErrorCode, RuntimeErrorInfo, SessionId, ToolFileResourceOrigin,
 };
 use axum::{
     Json,
@@ -137,10 +137,38 @@ pub(super) async fn preview_tool_file(
     headers: HeaderMap,
 ) -> Response {
     let Some((owner, message_id, resource_ref_id)) =
-        tool_resource_request(&session_id, &message_id, &resource_ref_id)
+        main_tool_resource_request(&session_id, &message_id, &resource_ref_id)
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
+    preview_tool_resource(state, owner, message_id, resource_ref_id, headers).await
+}
+
+pub(super) async fn preview_child_tool_file(
+    State(state): State<HttpState>,
+    RoutePath((session_id, child_task_id, message_id, resource_ref_id)): RoutePath<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((owner, message_id, resource_ref_id)) =
+        child_tool_resource_request(&session_id, &child_task_id, &message_id, &resource_ref_id)
+    else {
+        return resource_error(invalid_request("tool resource identity is invalid"));
+    };
+    preview_tool_resource(state, owner, message_id, resource_ref_id, headers).await
+}
+
+async fn preview_tool_resource(
+    state: HttpState,
+    owner: ConversationOwner,
+    message_id: MessageId,
+    resource_ref_id: ResourceRefId,
+    headers: HeaderMap,
+) -> Response {
     let resource = match state
         .runtime
         .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
@@ -149,10 +177,39 @@ pub(super) async fn preview_tool_file(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
+    if resource.origin == ToolFileResourceOrigin::SessionToolImage {
+        let Some(reference) = resource.tool_image else {
+            return resource_error(invalid_request("tool image reference is invalid"));
+        };
+        let Some(directory) = Path::new(&resource.path).parent().map(Path::to_path_buf) else {
+            return resource_error(invalid_request("tool image path is invalid"));
+        };
+        let generated = tokio::task::spawn_blocking(move || {
+            crate::image::tool_image_thumbnail(&directory, &reference)
+        });
+        let bytes = match generated.await {
+            Ok(Ok(bytes)) => bytes,
+            _ => {
+                return resource_error(RuntimeErrorInfo::new(
+                    RuntimeErrorCode::AttachmentUnavailable,
+                    "tool image is unavailable",
+                ));
+            }
+        };
+        let mut response = Response::new(Body::from(bytes));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, max-age=31536000, immutable"),
+        );
+        return response;
+    }
     preview_path(
         Path::new(&resource.path),
         &resource.display_name,
-        None,
+        resource.media_type.as_deref(),
         headers,
     )
     .await
@@ -163,7 +220,7 @@ pub(super) async fn resolve_tool_file_native_path(
     RoutePath((session_id, message_id, resource_ref_id)): RoutePath<(String, String, String)>,
 ) -> Response {
     let Some((owner, message_id, resource_ref_id)) =
-        tool_resource_request(&session_id, &message_id, &resource_ref_id)
+        main_tool_resource_request(&session_id, &message_id, &resource_ref_id)
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
@@ -175,6 +232,43 @@ pub(super) async fn resolve_tool_file_native_path(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
+    resolve_tool_native_path(resource).await
+}
+
+pub(super) async fn resolve_child_tool_file_native_path(
+    State(state): State<HttpState>,
+    RoutePath((session_id, child_task_id, message_id, resource_ref_id)): RoutePath<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+) -> Response {
+    let Some((owner, message_id, resource_ref_id)) =
+        child_tool_resource_request(&session_id, &child_task_id, &message_id, &resource_ref_id)
+    else {
+        return resource_error(invalid_request("tool resource identity is invalid"));
+    };
+    let resource = match state
+        .runtime
+        .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
+    resolve_tool_native_path(resource).await
+}
+
+async fn resolve_tool_native_path(
+    resource: assistant_runtime::ResolvedToolFileResource,
+) -> Response {
+    if resource.origin == ToolFileResourceOrigin::SessionToolImage {
+        return resource_error(RuntimeErrorInfo::new(
+            RuntimeErrorCode::ResourceNotPreviewable,
+            "session tool images do not expose native paths",
+        ));
+    }
     let resolved_path = match resolve_regular_file(Path::new(&resource.path)).await {
         Ok(value) => value,
         Err(error) => return resource_error(error),
@@ -186,7 +280,7 @@ pub(super) async fn resolve_tool_file_native_path(
     .into_response()
 }
 
-fn tool_resource_request(
+fn main_tool_resource_request(
     session_id: &str,
     message_id: &str,
     resource_ref_id: &str,
@@ -194,6 +288,23 @@ fn tool_resource_request(
     let session_id = SessionId::new(session_id.to_owned()).ok()?;
     Some((
         ConversationOwner::MainSession { session_id },
+        MessageId::new(message_id.to_owned()).ok()?,
+        ResourceRefId::new(resource_ref_id.to_owned()).ok()?,
+    ))
+}
+
+fn child_tool_resource_request(
+    session_id: &str,
+    child_task_id: &str,
+    message_id: &str,
+    resource_ref_id: &str,
+) -> Option<(ConversationOwner, MessageId, ResourceRefId)> {
+    let session_id = SessionId::new(session_id.to_owned()).ok()?;
+    Some((
+        ConversationOwner::ChildTask {
+            session_id,
+            child_task_id: assistant_protocol::ChildTaskId::new(child_task_id.to_owned()).ok()?,
+        },
         MessageId::new(message_id.to_owned()).ok()?,
         ResourceRefId::new(resource_ref_id.to_owned()).ok()?,
     ))
@@ -430,7 +541,25 @@ fn invalid_request(message: &'static str) -> RuntimeErrorInfo {
 
 #[cfg(test)]
 mod tests {
+    use assistant_protocol::ChildTaskId;
+
     use super::*;
+
+    #[test]
+    fn child_tool_resource_identity_keeps_the_owner_namespace() {
+        let (owner, message_id, resource_ref_id) =
+            child_tool_resource_request("session-1", "child-1", "message-1", "resource-1")
+                .expect("child resource identity");
+        assert_eq!(message_id.as_str(), "message-1");
+        assert_eq!(resource_ref_id.as_str(), "resource-1");
+        assert_eq!(
+            owner,
+            ConversationOwner::ChildTask {
+                session_id: SessionId::new("session-1").expect("session"),
+                child_task_id: ChildTaskId::new("child-1").expect("child"),
+            }
+        );
+    }
 
     #[test]
     fn preview_allowlist_excludes_html_and_svg() {

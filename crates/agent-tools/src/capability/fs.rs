@@ -60,6 +60,18 @@ pub struct FileAuthorizationFacts {
     pub path: AbsolutePath,
 }
 
+/// 一次只读工具调用涉及多条路径时提供的类型化授权事实。
+///
+/// 多路径不能压缩成共同父目录，否则会把实际读取范围错误扩大为目录授权。Runtime 必须逐条
+/// 应用文件规则，并且只有全部路径均获准时才允许执行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileBatchAuthorizationFacts {
+    /// 当前工具壳对应的文件操作；首版只用于批量读取。
+    pub operation: FileOperation,
+    /// 已按 Session 工作目录分别完成词法归一化、保持模型输入顺序的绝对逻辑路径。
+    pub paths: Vec<AbsolutePath>,
+}
+
 /// 文件能力失败分类；路径越界、审批等安全约束不在能力契约内。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum FileToolError {

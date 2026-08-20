@@ -36,13 +36,13 @@ mod service;
 #[cfg(test)]
 mod retry_tests;
 
-pub use capabilities::ModelCapabilities;
+pub use capabilities::{ModelCapabilities, ToolChoiceCapabilities, ToolImageProjection};
 pub use context::{ModelCallContext, TraceContext};
 pub use error::{ModelError, ModelTransportErrorKind};
 pub use event::ModelEvent;
 pub use image::{
-    ModelImagePreparation, ModelImagePreparationFuture, ModelImagePreprocessor, ModelServiceBundle,
-    PreparedModelImage, PreparedModelImages,
+    ModelImagePreparation, ModelImagePreparationFuture, ModelImagePreprocessor, ModelImageResource,
+    ModelServiceBundle, PreparedModelImage, PreparedModelImages,
 };
 pub use lifecycle::LifecycleValidator;
 pub use request::{

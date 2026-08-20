@@ -393,8 +393,7 @@ mod tests {
     use agent_model::ModelCapabilities;
     use agent_testkit::{ModelScript, ScriptedModelService, message_events};
     use agent_types::{
-        FinishReason, ModelIdentity, ProviderId, ToolCall, ToolCallId, ToolName, ToolResultContent,
-        ToolResultStatus,
+        FinishReason, ModelIdentity, ProviderId, ToolCall, ToolCallId, ToolName, ToolResultStatus,
     };
     use futures_util::StreamExt;
 
@@ -477,6 +476,8 @@ mod tests {
                 reasoning: false,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             128_000,
@@ -545,7 +546,7 @@ mod tests {
         });
         let recall_result = recall_result.expect("recall result");
         assert_eq!(recall_result.status, ToolResultStatus::Success);
-        let ToolResultContent::Json(value) = &recall_result.content else {
+        let Some(value) = recall_result.content.as_single_json() else {
             panic!("recall result must be structured JSON");
         };
         assert_eq!(value["failures"][0]["source_id"], "failing_demo");
@@ -568,6 +569,8 @@ mod tests {
                 reasoning: false,
                 image_input: false,
                 tool_calls: true,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::all(),
                 streaming: true,
             },
             128_000,

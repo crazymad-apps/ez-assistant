@@ -29,6 +29,14 @@
   流内仍遵守既有错误边界。
 - `GenerationConfig.max_output_tokens` 只表示本次请求的输出上限；是否能编码由具体
   Adapter 的方言配置判断，不在 `ModelCapabilities` 重复声明。
+- `PreparedModelImages` 的附件路径与 Tool Image 相对路径使用两个独立请求级命名空间；
+  `ModelImageResource::ToolImage` 携带的 Session 绝对根只服务当次预处理，不进入
+  `ModelRequest`、Conversation、序列化或持久化。
+- `ToolImageProjection` 是精确协议路由冻结事实，只允许 `Unsupported`、
+  `NativeFunctionOutput` 和 `AggregatedUserInput`；运行时不得根据 Provider 错误或自然语言
+  响应切换投影。`ToolChoiceCapabilities` 独立声明四种规范选择的支持集。
+- 单次请求的图片上限按 Part 出现次数计算；预处理可以按来源身份去重，但不得因此放宽
+  同一图片重复出现时的 Part 上限。
 - 不依赖 Tauri、Runtime、数据库和具体 Provider Adapter。
 - 不持久化 Trace；attempt observer 只报告原生事实，记录失败不能改变模型结果。
 

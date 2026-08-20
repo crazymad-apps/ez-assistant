@@ -208,7 +208,7 @@ mod tests {
             result: ToolResult {
                 call_id: ToolCallId::new("call-1").expect("call"),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         };

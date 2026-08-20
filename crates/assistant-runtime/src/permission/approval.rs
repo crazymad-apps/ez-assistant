@@ -17,8 +17,8 @@ use std::{
 };
 
 use agent_tools::{
-    FileAuthorizationFacts, FileOperation, GeneralAuthorizationFacts, ResolvedToolBatch,
-    ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
+    FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation, GeneralAuthorizationFacts,
+    ResolvedToolBatch, ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
 };
 use assistant_protocol::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
@@ -524,33 +524,47 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
     }
 }
 
-pub(crate) fn rule_for_approval(snapshot: &ApprovalSnapshot) -> RuntimeResult<PermissionRule> {
+pub(crate) fn rules_for_approval(
+    snapshot: &ApprovalSnapshot,
+) -> RuntimeResult<Vec<PermissionRule>> {
     // “本 Session/Workspace 允许”只改变规则保存位置，不扩大匹配器：文件固定到本次
     // operation + path，Shell 固定到完整 command + cwd + process mode，并保留当前变体。
-    let matcher = match &snapshot.exact_rule_preview {
+    let matchers = match &snapshot.exact_rule_preview {
         ToolApprovalSubject::General { tool_name } => {
-            PermissionMatcher::General(GeneralPermissionMatcher {
+            vec![PermissionMatcher::General(GeneralPermissionMatcher {
                 tool_name: tool_name.clone(),
-            })
+            })]
         }
         ToolApprovalSubject::Delegation { tool_name, .. } => {
-            PermissionMatcher::General(GeneralPermissionMatcher {
+            vec![PermissionMatcher::General(GeneralPermissionMatcher {
                 tool_name: tool_name.clone(),
-            })
+            })]
         }
         ToolApprovalSubject::File {
             operation, path, ..
-        } => PermissionMatcher::File(FilePermissionMatcher {
+        } => vec![PermissionMatcher::File(FilePermissionMatcher {
             operation: parse_file_operation(operation)?,
             path: path.clone(),
             path_match: PathMatch::Exact,
-        }),
+        })],
+        ToolApprovalSubject::Files {
+            operation, paths, ..
+        } => paths
+            .iter()
+            .map(|path| {
+                Ok(PermissionMatcher::File(FilePermissionMatcher {
+                    operation: parse_file_operation(operation)?,
+                    path: path.clone(),
+                    path_match: PathMatch::Exact,
+                }))
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?,
         ToolApprovalSubject::Shell {
             command,
             working_directory,
             process_mode,
             ..
-        } => PermissionMatcher::Shell(ShellPermissionMatcher {
+        } => vec![PermissionMatcher::Shell(ShellPermissionMatcher {
             command: command.clone(),
             command_match: CommandMatch::Exact,
             working_directory: working_directory.clone(),
@@ -559,16 +573,21 @@ pub(crate) fn rule_for_approval(snapshot: &ApprovalSnapshot) -> RuntimeResult<Pe
             } else {
                 PermissionProcessMode::Detached
             },
-        }),
+        })],
     };
-    Ok(PermissionRule {
-        id: id::generate("rule").map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "permission rule id",
-        })?,
-        effect: PermissionEffect::Allow,
-        variants: vec![snapshot.variant],
-        matcher,
-    })
+    matchers
+        .into_iter()
+        .map(|matcher| {
+            Ok(PermissionRule {
+                id: id::generate("rule").map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "permission rule id",
+                })?,
+                effect: PermissionEffect::Allow,
+                variants: vec![snapshot.variant],
+                matcher,
+            })
+        })
+        .collect()
 }
 
 fn subject(invocation: &ResolvedToolInvocation) -> Option<ToolApprovalSubject> {
@@ -577,6 +596,17 @@ fn subject(invocation: &ResolvedToolInvocation) -> Option<ToolApprovalSubject> {
             tool_name: invocation.tool_name().as_str().to_owned(),
             operation: file_operation(facts.operation).to_owned(),
             path: facts.path.as_path().to_string_lossy().into_owned(),
+        });
+    }
+    if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+        return Some(ToolApprovalSubject::Files {
+            tool_name: invocation.tool_name().as_str().to_owned(),
+            operation: file_operation(facts.operation).to_owned(),
+            paths: facts
+                .paths
+                .iter()
+                .map(|path| path.as_str().to_owned())
+                .collect(),
         });
     }
     if let Some(facts) = invocation.facts::<ShellAuthorizationFacts>() {

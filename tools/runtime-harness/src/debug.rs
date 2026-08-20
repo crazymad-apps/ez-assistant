@@ -456,6 +456,8 @@ mod tests {
             reasoning: false,
             image_input: false,
             tool_calls: true,
+            multimodal_tool_result: false,
+            tool_choice: agent_model::ToolChoiceCapabilities::all(),
             streaming: true,
         }
     }

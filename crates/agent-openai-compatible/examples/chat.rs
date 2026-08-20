@@ -1,4 +1,4 @@
-//! 最小命令行对话 demo：直接驱动 [`OpenAiCompatibleService`] 与 DeepSeek 真实 API 对话。
+//! 最小命令行对话 demo：直接驱动 [`OpenAiChatCompletionsService`] 与 DeepSeek 真实 API 对话。
 //!
 //! 运行（需要仓库根 `.env` 中的 `DEEPSEEK_API_KEY`，模板见 crate 文档）：
 //!
@@ -23,7 +23,7 @@ use agent_model::{
     SystemPromptSnapshot,
 };
 use agent_openai_compatible::{
-    BearerCredential, OpenAiCompatibleService, ProtocolAdapter, TransportTimeouts,
+    BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, TransportTimeouts,
 };
 use agent_types::{
     ConversationMessage, ConversationSnapshot, MessageId, PartId, TextPart, ToolChoice,
@@ -60,12 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("DEEPSEEK_CONTEXT_WINDOW_TOKENS 必须大于 0".into());
     }
 
-    let service = OpenAiCompatibleService::new(
+    let service = OpenAiChatCompletionsService::new(
         base_url.clone(),
         BearerCredential::new(api_key),
         model.clone(),
         context_window_tokens,
-        ProtocolAdapter::deepseek(),
+        ChatProtocolAdapter::deepseek(),
         TransportTimeouts::default(),
     )?;
     println!("DeepSeek 命令行 demo（模型：{model}）。输入回车发送，/quit 或 Ctrl-D 退出。");

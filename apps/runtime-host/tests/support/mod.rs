@@ -36,7 +36,9 @@ impl FakeProvider {
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener)
                     .expect("fake Provider Tokio listener");
-                let app = Router::new().route("/v1/chat/completions", post(provider_response));
+                let app = Router::new()
+                    .route("/v1/chat/completions", post(provider_response))
+                    .route("/v1/responses", post(responses_provider_response));
                 tokio::select! {
                     result = axum::serve(listener, app) => result.expect("serve fake Provider"),
                     _ = shutdown_receiver => {}
@@ -73,11 +75,32 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
     if matches!(case, "BLOCK_FOR_RESTART" | "CANCEL_CASE") {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let response = if case == "DELEGATE_PARALLEL_CASE"
+    let response = if body.get("model").and_then(Value::as_str) == Some("qwen3.8-max")
+        && body
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        let image_count = body_text.matches("data:image/").count();
+        chat_text_response(
+            "auxiliary-vision",
+            if image_count == 2 {
+                "LOCAL IMAGES VERIFIED"
+            } else {
+                "LOCAL IMAGES MISSING"
+            },
+        )
+    } else if case == "DELEGATE_PARALLEL_CASE"
         && has_tool_definition(&body, "delegate_task")
         && !current_turn_has_tool_result
     {
         parallel_delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "DELEGATE_IMAGE_CASE"
+        && has_tool_definition(&body, "delegate_task")
+        && !has_tool_call_result(&body, "call-delegate-image")
+    {
+        let path = case_path(&body, "DELEGATE_IMAGE_CASE").expect("delegated image path");
+        delegate_image_tool_response(path)
     } else if case == "DELEGATE_BLOCK_CASE"
         && has_tool_definition(&body, "delegate_task")
         && !current_turn_has_tool_result
@@ -97,6 +120,22 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
             attached_file_path(&body).expect("File References request contains a readable path"),
             tool_exchange_number(&body),
         )
+    } else if case == "READ_IMAGE_CASE"
+        && has_tool_definition(&body, "read_image")
+        && !has_tool_call_result(&body, "call-read-image")
+    {
+        read_image_tool_response(case_path(&body, "READ_IMAGE_CASE").expect("read image path"))
+    } else if case == "INSPECT_LOCAL_CASE"
+        && has_tool_definition(&body, "inspect_images")
+        && !has_tool_call_result(&body, "call-inspect-local")
+    {
+        inspect_images_tool_response(
+            case_path(&body, "INSPECT_LOCAL_CASE")
+                .expect("inspect image paths")
+                .split('|')
+                .map(str::trim)
+                .collect(),
+        )
     } else {
         let response_id = if matches!(case, "FILE_REFERENCE_CASE" | "TOOL_CASE" | "WRITE_CASE") {
             format!("text-{case}-{}", tool_exchange_number(&body))
@@ -113,6 +152,10 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
             "file tool result missing"
         } else if case == "QUEUED_AFTER_RESTART" {
             "resumed answer"
+        } else if case == "INSPECT_LOCAL_CASE" && body_text.contains("LOCAL IMAGES VERIFIED") {
+            "local inspect answer"
+        } else if case == "INSPECT_LOCAL_CASE" {
+            "local inspect result missing"
         } else {
             "offline answer"
         };
@@ -121,6 +164,232 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         )
     };
     ([("content-type", "text/event-stream")], response)
+}
+
+fn chat_text_response(response_id: &str, text: &str) -> String {
+    format!(
+        "data: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{text:?}}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":20,\"completion_tokens\":4,\"total_tokens\":24}}}}\n\ndata: [DONE]\n\n"
+    )
+}
+
+fn responses_function_call() -> String {
+    [
+        json!({
+            "type":"response.created",
+            "response":{"id":"resp-offline-tool","model":"offline-responses","status":"in_progress"}
+        }),
+        json!({
+            "type":"response.output_item.added",
+            "output_index":0,
+            "item":{
+                "id":"fc-offline","type":"function_call","call_id":"call-offline",
+                "name":"list_pinned_memories","arguments":"","status":"in_progress"
+            }
+        }),
+        json!({
+            "type":"response.function_call_arguments.done",
+            "item_id":"fc-offline","output_index":0,"name":"list_pinned_memories","arguments":"{}"
+        }),
+        json!({
+            "type":"response.output_item.done",
+            "output_index":0,
+            "item":{
+                "id":"fc-offline","type":"function_call","call_id":"call-offline",
+                "name":"list_pinned_memories","arguments":"{}","status":"completed"
+            }
+        }),
+        json!({
+            "type":"response.completed",
+            "response":{
+                "id":"resp-offline-tool","model":"offline-responses","status":"completed",
+                "usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>()
+        + "data: [DONE]\n\n"
+}
+
+async fn responses_provider_response(Json(body): Json<Value>) -> impl IntoResponse {
+    let body_text = serde_json::to_string(&body).expect("serialize Responses request");
+    if body_text.contains("RESPONSES_OPAQUE_REPLAY_CASE") {
+        let answer = if body_text.contains("opaque-ciphertext") {
+            "responses opaque replayed"
+        } else {
+            "responses opaque missing"
+        };
+        return (
+            [("content-type", "text/event-stream")],
+            responses_text_answer("resp-opaque-replay", "deepseek-v4-pro", answer),
+        );
+    }
+    if body_text.contains("RESPONSES_OPAQUE_CASE") {
+        return (
+            [("content-type", "text/event-stream")],
+            responses_opaque_answer(),
+        );
+    }
+    let is_tool_case = body_text.contains("RESPONSES_TOOL_CASE");
+    let has_function_output = body
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"));
+    if is_tool_case && !has_function_output {
+        return (
+            [("content-type", "text/event-stream")],
+            responses_function_call(),
+        );
+    }
+    let answer = if is_tool_case {
+        "responses tool answer"
+    } else {
+        "responses offline answer"
+    };
+    let response_id = if is_tool_case {
+        "resp-offline-tool-answer"
+    } else {
+        "resp-offline"
+    };
+    let response = [
+        json!({
+            "type": "response.created",
+            "response": {"id":response_id,"model":"offline-responses","status":"in_progress"}
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id":"msg-offline","type":"message","role":"assistant","content":[]}
+        }),
+        json!({
+            "type": "response.output_text.done",
+            "item_id": "msg-offline",
+            "output_index": 0,
+            "content_index": 0,
+            "text": answer
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id":"msg-offline",
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":answer,"annotations":[]}]
+            }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id":response_id,
+                "model":"offline-responses",
+                "status":"completed",
+                "usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>()
+        + "data: [DONE]\n\n";
+    ([("content-type", "text/event-stream")], response)
+}
+
+fn responses_text_answer(response_id: &str, model: &str, answer: &str) -> String {
+    [
+        json!({
+            "type": "response.created",
+            "response": {"id":response_id,"model":model,"status":"in_progress"}
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id":format!("msg-{response_id}"),"type":"message","role":"assistant","content":[]}
+        }),
+        json!({
+            "type": "response.output_text.done",
+            "item_id": format!("msg-{response_id}"),
+            "output_index": 0,
+            "content_index": 0,
+            "text": answer
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id":format!("msg-{response_id}"),
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":answer,"annotations":[]}]
+            }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id":response_id,"model":model,"status":"completed",
+                "usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>()
+        + "data: [DONE]\n\n"
+}
+
+fn responses_opaque_answer() -> String {
+    [
+        json!({
+            "type":"response.created",
+            "response":{"id":"resp-opaque","model":"deepseek-v4-pro","status":"in_progress"}
+        }),
+        json!({
+            "type":"response.output_item.added",
+            "output_index":0,
+            "item":{"id":"rs-opaque","type":"reasoning","summary":[],"content":[]}
+        }),
+        json!({
+            "type":"response.output_item.done",
+            "output_index":0,
+            "item":{
+                "id":"rs-opaque","type":"reasoning","status":"completed","summary":[],
+                "content":[{"type":"reasoning_text","text":"opaque normalized reasoning"}],
+                "encrypted_content":"opaque-ciphertext"
+            }
+        }),
+        json!({
+            "type":"response.output_item.added",
+            "output_index":1,
+            "item":{"id":"msg-opaque","type":"message","role":"assistant","content":[]}
+        }),
+        json!({
+            "type":"response.output_text.done",
+            "item_id":"msg-opaque","output_index":1,"content_index":0,
+            "text":"responses opaque stored"
+        }),
+        json!({
+            "type":"response.output_item.done",
+            "output_index":1,
+            "item":{
+                "id":"msg-opaque","type":"message","role":"assistant",
+                "content":[{"type":"output_text","text":"responses opaque stored","annotations":[]}]
+            }
+        }),
+        json!({
+            "type":"response.completed",
+            "response":{
+                "id":"resp-opaque","model":"deepseek-v4-pro","status":"completed",
+                "usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>()
+        + "data: [DONE]\n\n"
 }
 
 /// 只观察最近一条 User Message 之后的消息，避免历史 Tool Result 让新的 Run
@@ -163,6 +432,40 @@ fn has_tool_definition(body: &Value, expected_name: &str) -> bool {
         })
 }
 
+fn has_tool_call_result(body: &Value, expected_call_id: &str) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("tool")
+                && message.get("tool_call_id").and_then(Value::as_str) == Some(expected_call_id)
+        })
+}
+
+fn case_path<'a>(body: &'a Value, marker: &str) -> Option<&'a str> {
+    body.get("messages")?
+        .as_array()?
+        .iter()
+        .rev()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter_map(|message| message.get("content"))
+        .find_map(|content| {
+            content
+                .as_str()
+                .into_iter()
+                .chain(
+                    content
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str)),
+                )
+                .find_map(|text| text.split_once(marker).map(|(_, path)| path.trim()))
+        })
+        .filter(|path| !path.is_empty())
+}
+
 fn delegate_task_tool_response(exchange_number: usize) -> String {
     let proposal = json!({
         "id": format!("delegate-{exchange_number}"),
@@ -186,6 +489,43 @@ fn delegate_task_tool_response(exchange_number: usize) -> String {
     });
     let finish = json!({
         "id": format!("delegate-{exchange_number}"),
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
+fn delegate_image_tool_response(path: &str) -> String {
+    let arguments = serde_json::to_string(&json!({
+        "title": "Offline image child",
+        "task": format!("READ_IMAGE_CASE {path}"),
+    }))
+    .expect("serialize delegated image arguments");
+    let proposal = json!({
+        "id": "delegate-image",
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-delegate-image",
+                    "type": "function",
+                    "function": { "name": "delegate_task", "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": "delegate-image",
         "model": "offline-model",
         "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
         "usage": {
@@ -340,6 +680,9 @@ fn latest_case(body: &str) -> &'static str {
         "DELEGATE_CASE",
         "DELEGATE_PARALLEL_CASE",
         "DELEGATE_BLOCK_CASE",
+        "DELEGATE_IMAGE_CASE",
+        "READ_IMAGE_CASE",
+        "INSPECT_LOCAL_CASE",
     ]
     .into_iter()
     .filter_map(|marker| body.rfind(marker).map(|position| (position, marker)))
@@ -397,6 +740,77 @@ fn file_read_tool_response(path: &str, exchange_number: usize) -> String {
     format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
+fn read_image_tool_response(path: &str) -> String {
+    let arguments =
+        serde_json::to_string(&json!({ "path": path })).expect("serialize read_image arguments");
+    let proposal = json!({
+        "id": "read-image-tool",
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-read-image",
+                    "type": "function",
+                    "function": { "name": "read_image", "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": "read-image-tool",
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
+fn inspect_images_tool_response(paths: Vec<&str>) -> String {
+    let arguments = serde_json::to_string(&json!({
+        "image_paths": paths,
+        "goal": "Verify that both local images are present."
+    }))
+    .expect("serialize inspect_images arguments");
+    let proposal = json!({
+        "id": "inspect-local-tool",
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-inspect-local",
+                    "type": "function",
+                    "function": { "name": "inspect_images", "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": "inspect-local-tool",
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
 pub fn write_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
     fs::create_dir_all(runtime_home).expect("create runtime home");
     let document = format!(
@@ -427,6 +841,114 @@ max_output_tokens = 4096
 "#
     );
     fs::write(runtime_home.join("config.toml"), document).expect("write test config");
+}
+
+pub fn write_responses_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
+    fs::create_dir_all(runtime_home).expect("create runtime home");
+    let document = format!(
+        r#"schema_version = 1
+default_model = "responses-fixture"
+
+[runtime.model_transport]
+connect_timeout_ms = 1000
+request_timeout_ms = 10000
+
+[models.responses-fixture]
+protocol = "openai_responses"
+provider = "fixture"
+endpoint = "{endpoint}"
+model = "offline-responses"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+"#
+    );
+    fs::write(runtime_home.join("config.toml"), document).expect("write Responses test config");
+}
+
+pub fn write_deepseek_responses_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
+    fs::create_dir_all(runtime_home).expect("create runtime home");
+    let document = format!(
+        r#"schema_version = 1
+default_model = "deepseek-responses"
+
+[runtime.model_transport]
+connect_timeout_ms = 1000
+request_timeout_ms = 10000
+
+[models.deepseek-responses]
+protocol = "openai_responses"
+provider = "deepseek"
+endpoint = "{endpoint}"
+model = "deepseek-v4-pro"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+"#
+    );
+    fs::write(runtime_home.join("config.toml"), document)
+        .expect("write DeepSeek Responses test config");
+}
+
+pub fn write_qwen_image_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
+    fs::create_dir_all(runtime_home).expect("create runtime home");
+    let document = format!(
+        r#"schema_version = 1
+default_model = "qwen-image-fixture"
+
+[runtime.model_transport]
+connect_timeout_ms = 1000
+request_timeout_ms = 10000
+
+[models.qwen-image-fixture]
+protocol = "openai_chat_completions"
+provider = "dashscope"
+endpoint = "{endpoint}"
+model = "qwen3.8-max"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+"#
+    );
+    fs::write(runtime_home.join("config.toml"), document).expect("write Qwen image test config");
+}
+
+pub fn write_auxiliary_vision_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
+    fs::create_dir_all(runtime_home).expect("create runtime home");
+    let document = format!(
+        r#"schema_version = 1
+default_model = "text-fixture"
+
+[runtime.model_transport]
+connect_timeout_ms = 1000
+request_timeout_ms = 10000
+
+[agent.vision]
+model_key = "vision-fixture"
+timeout_ms = 10000
+max_output_tokens = 1024
+
+[models.text-fixture]
+protocol = "openai_chat_completions"
+provider = "fixture"
+endpoint = "{endpoint}"
+model = "offline-text"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+
+[models.vision-fixture]
+protocol = "openai_chat_completions"
+provider = "dashscope"
+endpoint = "{endpoint}"
+model = "qwen3.8-max"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+"#
+    );
+    fs::write(runtime_home.join("config.toml"), document)
+        .expect("write auxiliary vision test config");
 }
 
 pub struct HostProcess {

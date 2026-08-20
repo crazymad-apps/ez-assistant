@@ -125,6 +125,8 @@ impl RepeatingModel {
                 reasoning: false,
                 image_input: false,
                 tool_calls: false,
+                multimodal_tool_result: false,
+                tool_choice: agent_model::ToolChoiceCapabilities::default(),
                 streaming: true,
             },
             sequence: AtomicU64::new(1),
@@ -246,7 +248,7 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
                 result: ToolResult {
                     call_id,
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Json(json!({"index": index})),
+                    content: ToolResultContent::json(json!({"index": index})),
                     metadata: None,
                 },
             }));

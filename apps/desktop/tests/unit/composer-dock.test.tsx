@@ -121,6 +121,28 @@ describe("ComposerDock", () => {
     expect(screen.queryByRole("textbox", { name: "输入消息" })).not.toBeInTheDocument();
   });
 
+  it("shows every resolved path for a multi-file read approval", () => {
+    const subject = {
+      type: "files" as const,
+      tool_name: "inspect_images",
+      operation: "read",
+      paths: ["/workspace/a.png", "/tmp/b.png"],
+    };
+    renderComposer({
+      approvals: [{
+        ...approvalSnapshot(),
+        subject,
+        exact_rule_preview: subject,
+      }],
+    });
+
+    expect(screen.getByText("允许执行 inspect_images？", { exact: true })).toBeVisible();
+    expect(screen.getByText("read · 2 个文件", { exact: true })).toBeVisible();
+    expect(screen.getByText("/workspace/a.png", { exact: true })).toBeVisible();
+    expect(screen.getByText("/tmp/b.png", { exact: true })).toBeVisible();
+    expect(screen.getAllByText("当前会话", { exact: true })).toHaveLength(2);
+  });
+
   it("keeps native selections local until send and submits stable attachment ids", async () => {
     const user = userEvent.setup();
     const store = renderComposer();

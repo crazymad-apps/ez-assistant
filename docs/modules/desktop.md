@@ -58,6 +58,17 @@
 - WebView 生产源码与测试代码物理分离：`src/` 不放测试文件；单元/组件测试、测试支持代码和
   Playwright 场景分别集中在 `tests/unit/`、`tests/support/` 和 `tests/e2e/`。
 
+## v0.17.0 Tool Image 详情边界
+
+- 工具详情预览请求必须携带完整 `ConversationOwner`；child task ID 进入独立 URL 命名空间，不能
+  只用 Session/message ID 猜测归属。
+- `SessionToolImage` 只在对应工具详情中显示有界图片预览。它不进入附件 Store、Context Panel、
+  通用产物列表或导出，也不展示系统打开、目录揭示和复制物理路径操作。
+- Host 返回缺失或损坏错误后，当前详情把对应项标记为不可用；关闭或切换详情时清除此 UI 派生态，
+  不修改可靠 Conversation。
+- 多路径文件审批必须逐条展示 `ToolApprovalSubject::Files.paths`，不能只显示工具名或第一条路径；
+  Runtime 提供的 Session/Workspace 持久批准会精确保存每条路径，Desktop 不自行折叠授权范围。
+
 ## 不应放在本模块的内容
 
 - Agent Loop、模型 Provider 和工具选择策略。

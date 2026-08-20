@@ -308,9 +308,20 @@ pub enum ProviderStateError {
     EmptyMediaType,
     #[error("provider state format version must be greater than zero")]
     InvalidFormatVersion,
+    #[error("provider state route binding must contain both related part and fingerprint")]
+    IncompleteRouteBinding,
+    #[error("provider state route fingerprint must be 64 lowercase hexadecimal characters")]
+    InvalidRouteFingerprint,
+    #[error("provider state payload exceeds the per-item byte limit")]
+    PayloadTooLarge,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// 单个不透明 Provider 状态允许持久化的最大原始 payload。
+pub const MAX_PROVIDER_STATE_ITEM_BYTES: usize = 2 * 1024 * 1024;
+/// 一次 Assistant Turn 允许持久化的不透明 Provider 状态总量。
+pub const MAX_PROVIDER_STATE_TURN_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
 /// 只能由对应 Provider Adapter 解释的不透明续传状态。
 ///
 /// 普通 reasoning 文本不能放在这里；只有确实无法规范化、但下一次请求必须回传的
@@ -321,7 +332,26 @@ pub struct OpaqueProviderState {
     state_type: String,
     media_type: String,
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    related_part_id: Option<PartId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_fingerprint: Option<String>,
     payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for OpaqueProviderState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpaqueProviderState")
+            .field("provider", &self.provider)
+            .field("protocol", &self.protocol)
+            .field("state_type", &self.state_type)
+            .field("media_type", &self.media_type)
+            .field("format_version", &self.format_version)
+            .field("route_bound", &self.route_fingerprint.is_some())
+            .field("payload_bytes", &self.payload.len())
+            .finish()
+    }
 }
 
 // 这是 Serde 反序列化时使用的临时结构。它先接住 JSON 字段，随后必须调用
@@ -333,6 +363,10 @@ struct OpaqueProviderStateWire {
     state_type: String,
     media_type: String,
     format_version: u32,
+    #[serde(default)]
+    related_part_id: Option<PartId>,
+    #[serde(default)]
+    route_fingerprint: Option<String>,
     payload: Vec<u8>,
 }
 
@@ -342,12 +376,14 @@ impl<'de> Deserialize<'de> for OpaqueProviderState {
         D: Deserializer<'de>,
     {
         let wire = OpaqueProviderStateWire::deserialize(deserializer)?;
-        Self::new(
+        Self::build(
             wire.provider,
             wire.protocol,
             wire.state_type,
             wire.media_type,
             wire.format_version,
+            wire.related_part_id,
+            wire.route_fingerprint,
             wire.payload,
         )
         .map_err(de::Error::custom)
@@ -364,6 +400,53 @@ impl OpaqueProviderState {
         format_version: u32,
         payload: Vec<u8>,
     ) -> Result<Self, ProviderStateError> {
+        Self::build(
+            provider,
+            protocol,
+            state_type,
+            media_type,
+            format_version,
+            None,
+            None,
+            payload,
+        )
+    }
+
+    /// 创建绑定到规范 reasoning Part 和精确模型路由的不透明状态。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_routed(
+        provider: ProviderId,
+        protocol: ProtocolId,
+        state_type: impl Into<String>,
+        media_type: impl Into<String>,
+        format_version: u32,
+        related_part_id: PartId,
+        route_fingerprint: impl Into<String>,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProviderStateError> {
+        Self::build(
+            provider,
+            protocol,
+            state_type,
+            media_type,
+            format_version,
+            Some(related_part_id),
+            Some(route_fingerprint.into()),
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        provider: ProviderId,
+        protocol: ProtocolId,
+        state_type: impl Into<String>,
+        media_type: impl Into<String>,
+        format_version: u32,
+        related_part_id: Option<PartId>,
+        route_fingerprint: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProviderStateError> {
         let state_type = state_type.into();
         if state_type.trim().is_empty() {
             return Err(ProviderStateError::EmptyStateType);
@@ -375,12 +458,26 @@ impl OpaqueProviderState {
         if format_version == 0 {
             return Err(ProviderStateError::InvalidFormatVersion);
         }
+        if related_part_id.is_some() != route_fingerprint.is_some() {
+            return Err(ProviderStateError::IncompleteRouteBinding);
+        }
+        if route_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| !valid_route_fingerprint(fingerprint))
+        {
+            return Err(ProviderStateError::InvalidRouteFingerprint);
+        }
+        if payload.len() > MAX_PROVIDER_STATE_ITEM_BYTES {
+            return Err(ProviderStateError::PayloadTooLarge);
+        }
         Ok(Self {
             provider,
             protocol,
             state_type,
             media_type,
             format_version,
+            related_part_id,
+            route_fingerprint,
             payload,
         })
     }
@@ -410,10 +507,27 @@ impl OpaqueProviderState {
         self.format_version
     }
 
+    /// 返回该状态绑定的规范 reasoning Part；旧状态没有此绑定。
+    pub fn related_part_id(&self) -> Option<&PartId> {
+        self.related_part_id.as_ref()
+    }
+
+    /// 返回不含 credential 的精确路由指纹；普通 Debug 不展示其值。
+    pub fn route_fingerprint(&self) -> Option<&str> {
+        self.route_fingerprint.as_deref()
+    }
+
     /// 以只读字节切片形式返回不透明 payload。
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+}
+
+fn valid_route_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -454,7 +568,7 @@ mod tests {
             result: ToolResult {
                 call_id: id(call_id),
                 status: ToolResultStatus::Success,
-                content: ToolResultContent::Text("ok".to_owned()),
+                content: ToolResultContent::text("ok".to_owned()),
                 metadata: None,
             },
         })
@@ -517,7 +631,7 @@ mod tests {
                 result: ToolResult {
                     call_id: id("call_1"),
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::Text("2026-07-17".to_owned()),
+                    content: ToolResultContent::text("2026-07-17".to_owned()),
                     metadata: None,
                 },
             }),
@@ -714,6 +828,74 @@ mod tests {
                 vec![],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn routed_provider_state_is_bounded_redacted_and_backward_compatible() {
+        let routed = OpaqueProviderState::new_routed(
+            id("deepseek"),
+            id("openai.responses"),
+            "responses.reasoning_item",
+            "application/json",
+            1,
+            id("reasoning_1"),
+            "a".repeat(64),
+            br#"{"encrypted_content":"secret-marker"}"#.to_vec(),
+        )
+        .expect("routed state");
+        assert_eq!(
+            routed.related_part_id().map(PartId::as_str),
+            Some("reasoning_1")
+        );
+        assert_eq!(routed.route_fingerprint(), Some("a".repeat(64).as_str()));
+        let debug = format!("{routed:?}");
+        assert!(debug.contains("route_bound: true"));
+        assert!(debug.contains("payload_bytes"));
+        assert!(!debug.contains("secret-marker"));
+        assert!(!debug.contains(&"a".repeat(64)));
+
+        let round_trip: OpaqueProviderState =
+            serde_json::from_str(&serde_json::to_string(&routed).expect("serialize routed state"))
+                .expect("deserialize routed state");
+        assert_eq!(round_trip, routed);
+
+        let legacy = serde_json::json!({
+            "provider":"deepseek",
+            "protocol":"openai.responses",
+            "state_type":"legacy",
+            "media_type":"application/json",
+            "format_version":1,
+            "payload":[1,2,3]
+        });
+        let legacy: OpaqueProviderState =
+            serde_json::from_value(legacy).expect("legacy state without route binding");
+        assert!(legacy.related_part_id().is_none());
+        assert!(legacy.route_fingerprint().is_none());
+
+        assert_eq!(
+            OpaqueProviderState::new_routed(
+                id("deepseek"),
+                id("openai.responses"),
+                "responses.reasoning_item",
+                "application/json",
+                1,
+                id("reasoning_1"),
+                "not-a-fingerprint",
+                Vec::new(),
+            ),
+            Err(ProviderStateError::InvalidRouteFingerprint)
+        );
+        assert_eq!(
+            OpaqueProviderState::new(
+                id("deepseek"),
+                id("openai.responses"),
+                "responses.reasoning_item",
+                "application/json",
+                1,
+                vec![0; MAX_PROVIDER_STATE_ITEM_BYTES + 1],
+            ),
+            Err(ProviderStateError::PayloadTooLarge)
         );
     }
 }

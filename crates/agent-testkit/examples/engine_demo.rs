@@ -22,7 +22,7 @@ use agent_tools::{ToolOutputChannel, ToolOutputChunk, ToolRegistry};
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
     MessageId, ModelIdentity, PartId, ProviderId, ReasoningPart, TextPart, ToolCall, ToolCallId,
-    ToolName, ToolResultContent, UserMessage, UserPart,
+    ToolName, UserMessage, UserPart,
 };
 use futures_util::StreamExt;
 use serde_json::json;
@@ -67,6 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reasoning: true,
             image_input: false,
             tool_calls: true,
+            multimodal_tool_result: false,
+            tool_choice: agent_model::ToolChoiceCapabilities::all(),
             streaming: true,
         },
         128_000,
@@ -275,10 +277,20 @@ fn describe_delta(delta: &ConversationDelta) -> String {
             format!("AssistantMessage (tool_calls={tool_calls})")
         }
         ConversationDelta::Tool(message) => {
-            let content = match &message.result.content {
-                ToolResultContent::Text(text) => text.clone(),
-                ToolResultContent::Json(value) => value.to_string(),
-            };
+            let content = message
+                .result
+                .content
+                .as_parts()
+                .iter()
+                .map(|part| match part {
+                    agent_types::ToolResultPart::Text { text } => text.clone(),
+                    agent_types::ToolResultPart::Json { value } => value.to_string(),
+                    agent_types::ToolResultPart::Image { image } => {
+                        format!("[image: {}]", image.relative_path())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
                 "ToolMessage (call_id={}, status={:?}, content={content})",
                 message.result.call_id, message.result.status

@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Success);
         assert_eq!(
             result.content,
-            ToolResultContent::Json(json!({
+            ToolResultContent::json(json!({
                 "items": [{
                     "content": "User prefers dark mode",
                     "origins": [{"source_id": "notes", "reference": "note-1"}],
@@ -477,11 +477,13 @@ mod tests {
             ToolContext::default(),
         );
         assert_eq!(result.status, ToolResultStatus::Error);
-        assert!(matches!(
-            result.content,
-            ToolResultContent::Json(value)
-                if value["error"]["details"]["type"] == "recall_read_unsupported"
-        ));
+        assert_eq!(
+            result
+                .content
+                .as_single_json()
+                .and_then(|value| value["error"]["details"]["type"].as_str()),
+            Some("recall_read_unsupported")
+        );
     }
 
     #[test]
@@ -503,7 +505,7 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Error);
         assert_eq!(
             result.content,
-            ToolResultContent::Json(json!({
+            ToolResultContent::json(json!({
                 "error": {
                     "message": "all selected recall sources failed",
                     "details": {
@@ -527,7 +529,10 @@ mod tests {
         );
         assert_eq!(result.status, ToolResultStatus::Error);
         assert!(
-            matches!(result.content, ToolResultContent::Text(message) if message.contains("cancelled"))
+            result
+                .content
+                .as_single_text()
+                .is_some_and(|message| message.contains("cancelled"))
         );
     }
 }
