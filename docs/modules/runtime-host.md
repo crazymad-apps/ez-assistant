@@ -29,6 +29,9 @@ Worker 池。
 
 - Session、Conversation、Run、Journal、取消和调度状态只存在于 `assistant-runtime`。
 - Host 可以持有连接、传输缓冲、进程配置和具体资源句柄，但不能复制 Runtime 业务状态机。
+- `SessionToolImage` 预览在重验 Session 边界、普通文件及 MIME/内容身份后直接返回已落盘原图；
+  完整图片解码只发生在首次写入，不在预览请求中重新解码或实时生成缩略图。普通附件列表仍可使用
+  独立的持久化缩略图路由。
 - 跨层稳定语义使用 `assistant-protocol`；HTTP 路由、认证、请求体限制和 SSE 编码
   属于 Host 适配，不把 Web framework 类型或连接对象提升为公共 Protocol。
 - 客户端连接断开只结束连接相关任务，不默认取消 Runtime Run 或关闭 Runtime。
@@ -106,6 +109,9 @@ Worker 池。
 
 - Host 私有 `storage` 模块实现 SQLite 与每 Session Conversation JSONL 的物理格式、一致提交和
   启动恢复；这些路径、表、offset、generation 和 worker 命令不进入应用协议。
+- Conversation JSONL offset 索引同时维护物理消息位置与产品展示位置：隐藏 Runtime User Message
+  保留物理 offset，但不生成 display offset；分页总数、Around 的 display ordinal 与 Recall FTS
+  均只使用产品可见消息。SQLite `sessions.message_count` 继续表示物理 JSONL 消息数。
 - 单一命名阻塞线程从打开到关闭独占 `rusqlite::Connection` 和文件 I/O；Tokio 侧通过有界命令
   队列等待结果，不能直接执行阻塞数据库操作。
 - `rusqlite` 只属于 Host，并使用关闭默认 feature 的 `bundled` SQLite；`assistant-runtime` 只依赖
@@ -293,16 +299,18 @@ Worker 池。
 - `inspect_images` 的本地路径在 Runtime 完成统一文件 Read 授权后进入 Host 公共图片预处理；
   Host 支持相对路径解析后的绝对普通文件，不再要求它属于附件 Registry。结果只进入当次辅助
   `ModelCallContext`，不得复制到 `attachments/` 或 `tool-images/`，也不得产生产品资源投影。
-- 随包模型目录 schema v2 首批只为 DashScope `qwen3.8-max` 与 Moonshot `kimi-k3`/`k3` 的 Chat
-  路由启用 `AggregatedUserInput`。DeepSeek、GLM 和未真实回证的 OpenAI Chat 路由保持
-  `Unsupported`，即使其附件图片输入能力为真也不注册 `read_image`。
+- 随包模型目录 schema v2 为 DashScope `qwen3.8-max`、Moonshot `kimi-k3`/`k3` 和 DeepSeek
+  `deepseek-v4-flash-vision-exp` 的 Chat 路由启用 `AggregatedUserInput`。DeepSeek 的非视觉
+  Flash/Pro、GLM 和未真实回证的 OpenAI Chat 路由保持 `Unsupported`，即使其附件图片输入能力为真
+  也不注册 `read_image`。
 - Host 模型工厂对 `openai_chat_completions` 与 `openai_responses` 做穷尽式协议分派，分别构造
   `OpenAiChatCompletionsService` 和 `OpenAiResponsesService`；不能先请求一个协议再失败回退另一个。
   Responses 使用同一条已校验 Route 的 `/responses`，credential、Transport、超时和 wire observer
   继续复用共享基础设施。
-- 随包目录对 Responses 只启用已真实验证的精确路由：DeepSeek Flash/Pro（reasoning、无图片）、
-  DashScope Qwen `qwen3.8-max`（聚合工具图片）和 Moonshot Kimi `k3`（原生 function output
-  图片）。GLM 保持未启用，OpenAI 官方方言只供 fixture 和用户显式配置，未进入默认目录。
+- 随包目录对 Responses 只启用已验证的精确路由：DeepSeek Flash/Pro（reasoning、无图片）、
+  DeepSeek `deepseek-v4-flash-vision-exp`（原生 content-parts function output 图片）、DashScope
+  Qwen `qwen3.8-max`（聚合工具图片）和 Moonshot Kimi `k3`（原生 function output 图片）。GLM
+  保持未启用，OpenAI 官方方言只供 fixture 和用户显式配置，未进入默认目录。
 - Host 只按精确 provider/protocol/model 构造具名 Responses Adapter；route fingerprint 在已校验
   endpoint 与 model 上确定性计算。切换 endpoint、provider、protocol 或 model 不得把旧 opaque
   payload 发往新路由，也不得根据 Provider 一次成功/失败修改目录能力。
@@ -314,6 +322,73 @@ Worker 池。
 - Runtime Home 整体移动后，Host 启动恢复只重定位可严格验证为旧 Session/Workspace 固定布局的
   Runtime 私有绝对目录，并同步迁移有效 Session 权限文件中位于旧 `private/`、`attachments/`
   根下的 File matcher；用户 Workspace 目录不变，非法或无法归属的路径不得猜测修复。
+
+## v0.18.0 M1 WorkPlan 存储边界
+
+- 正式 SQLite 使用 `session_work_plans` 保存每 Session 当前唯一 WorkPlan；item 作为单列 JSON 整体
+  读写，不拆成可单项查询表。旧数据库只增量创建空表，不扫描、推断或回填既有 Session。
+- Host Store 在单一 Immediate transaction 内实现 revision CAS 与 `last_operation_id` 幂等；重复
+  operation 返回首次结果，旧 revision 不得覆盖新计划。JSON 和不透明 ID 在恢复边界重新校验。
+- Fork 在创建目标 Session 的同一 SQLite transaction 内复制当前 WorkPlan 为 revision 1；源和目标
+  后续独立更新。Session 删除依赖已启用的外键级联清理，归档不删除或改写计划。
+- WorkPlan load/mutate/clear 继续经单一有界阻塞 Store worker 执行；Host 不复制 Session 内存状态，
+  不实现 `update_plan` 工具、Agent 决策或 Goal/自动续跑状态机。
+- 迁移、CAS、重启、Fork、clear 与删除测试只能使用 `TempDir` 隔离 Runtime Home，不读写用户实际库。
+
+## v0.18.0 M2 Goal 恢复存储边界
+
+- 正式 SQLite 增量创建 `session_goals`，每 Session 最多一行，保存 objective message ID、有序载荷 JSON、
+  版本化 hash、三态、暂停原因、generation/turn、冻结预算、累计使用和时间事实；Session 删除通过外键级联。
+- Host 启动在加载 Runtime 投影前，以单一 Immediate transaction 将所有 Running Goal 持久切为
+  Paused(RecoveryRequired) 并将 generation 递增一次；已经暂停或完成的 Goal 重复启动不得再次递增。
+- Host 只解析 SQLite 形状和稳定 ID/数值；objective hash、预算常量、状态机和 latch 由 Runtime 领域层
+  校验。非法 JSON 或存储范围立即 fail-closed，不把损坏行降级为空 Goal。
+- 易失 Store 与 SQLite Store 保持相同的恢复暂停语义。M2 不提供独立 Goal insert/update 通用端口；
+  Goal 的首次持久创建必须等 M3 与 Goal Input/Run 在一个高层原子操作中完成，不能先写控制器再入队。
+- 所有 schema 与恢复验证仅使用 `TempDir`/内存 fixture，不打开、迁移或写入用户实际 Runtime Home。
+
+## v0.18.0 M3 Goal 首次接受存储边界
+
+- `inputs` 增量增加 origin、GoalId、generation 与 turn 列，并以约束和唯一索引保证 Runtime
+  continuation binding 的基本形状；旧行安全缺省为 User/no binding。迁移只增加列和索引，
+  不扫描 Conversation 猜测 Goal 归属。
+- Host 在单一 SQLite Immediate transaction 内插入 `session_goals`、Goal-bound Input、首次 Run
+  并更新 Session；任一步失败整体回滚，幂等 key 命中优先返回首次事实。Host 只校验跨表身份与
+  存储形状，不复制 Goal 状态机或注入内容决策。
+- 加载时重新校验 Input origin、binding 与 queued UserMessage 的来源/可见性组合；Goal 孤儿、
+  generation 超前、同 Session 多条待领取 Goal Input 或非法消息组合均 fail-closed。
+- 迁移、原子回滚、幂等与损坏行测试继续只使用隔离 `TempDir` SQLite，不访问用户 Runtime Home。
+
+## v0.18.0 M4 Goal 事务与恢复存储边界
+
+- `settle_run` 的 staged append 同时携带可选 Goal effect。Host 在写 Conversation JSONL 前，先以
+  同一 `apply_run_settlement` 逻辑执行 Immediate transaction 预检并显式回滚；只有跨表身份、CAS、
+  generation、预算和 continuation 全部合法才允许落盘。正式 finalize 再在单一 transaction 内提交
+  Run、Goal 和可选后继 Input/Run，避免非法 effect 留下 JSONL 半提交。
+- continuation 必须是 Runtime origin、transcript hidden、只含 Injected Part，并精确匹配当前
+  GoalId/new generation/new turn；它不能夹带 new/resumed Goal。Volatile Store 与 SQLite Store 使用
+  相同形状和世代门禁，Store 结果是 Runtime 内存投影的权威输入。
+- Stop 在单一 transaction 中暂停 Goal、递增 generation、删除该 Goal 旧 queued Runtime Input/Run，
+  并记录活动 Run cancel intent；Clear 只删除控制器行。`inputs.goal_id` 是历史绑定而非控制器所有权
+  外键，因此 Clear 后历史 Input 继续可读；Session 外键仍负责永久删除时的整体级联。
+- Resume 新消息、无消息 continuation 和 held Input 复用分别有显式 Store 操作；held 路径只更新已有
+  Input binding/queued message injection 和 Run，不产生重复队列项。历史重入的 Conversation rewrite
+  与 Goal RecoveryRequired/generation 转换同事务提交。
+- 启动恢复除暂停 Running Goal 外还删除旧 generation 的 queued Runtime continuation。Fork 在目标
+  Session/WorkPlan 创建事务中按 Runtime 已验证的前缀条件插入新 GoalId 的 Forked 快照，Host 不自行
+  推断 objective 是否属于前缀。
+- 所有恢复、回滚、Fork、Stop/Resume/Clear 与 schema 用例只使用隔离 `TempDir`/内存 Store，不打开或
+  迁移用户实际 Runtime Home。
+
+## v0.18.0 M5 Goal/WorkPlan 正式 Host 边界
+
+- `/commands` 薄分发 ClearWorkPlan、StopGoal、ResumeGoal 与 ClearGoal，业务准入和状态转换仍由
+  `assistant-runtime` 持有；Host 只做 DTO 路由与稳定 HTTP status 映射，不复制 Goal 状态机。
+- WorkPlan/Goal changed 复用正式 SSE RuntimeEvent 通道作为 invalidation。断流、未知事件或 sequence
+  gap 继续要求客户端重新读取 SessionView，不能用事件负载拼装权威快照。
+- 正式离线 Host E2E 使用 Fake Provider 和隔离 `TempDir` Runtime Home，覆盖 WorkPlan 工具更新、
+  三次 continuation、blocked/resume、Stop 取消以及进程杀死/重启后的 RecoveryRequired/显式恢复；
+  测试不访问用户 Runtime Home，也不向真实 Provider 发请求。
 
 ## 验证
 

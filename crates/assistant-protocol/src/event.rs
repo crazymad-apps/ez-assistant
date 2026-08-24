@@ -5,8 +5,8 @@ use ts_rs::TS;
 
 use crate::{
     ApprovalDecision, ApprovalId, ApprovalSnapshot, ChildTaskId, ChildTaskSnapshot,
-    ChildTaskStatus, ConversationOwner, GuardrailKind, GuardrailMode, ModelFailureKind, PartId,
-    PermissionFileSummary, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
+    ChildTaskStatus, ConversationOwner, GoalId, GuardrailKind, GuardrailMode, ModelFailureKind,
+    PartId, PermissionFileSummary, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
     TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel, WorkspaceId,
 };
 
@@ -90,6 +90,17 @@ pub enum RuntimeEvent {
     QueueChanged {
         session_id: SessionId,
         revision: u64,
+    },
+    /// WorkPlan 已改变；正文由 SessionView 重新获取，不进入 SSE。
+    WorkPlanChanged {
+        session_id: SessionId,
+        revision: u64,
+    },
+    /// Goal 控制状态或预算已改变；完整投影由 SessionView 重新获取。
+    GoalChanged {
+        session_id: SessionId,
+        goal_id: GoalId,
+        generation: u64,
     },
     /// 规范 Conversation 已经可靠提交；客户端应按 owner/generation 失效历史页。
     ConversationCommitted {
@@ -435,6 +446,21 @@ mod tests {
                     session_id: session_id(),
                 },
                 "session_deleted",
+            ),
+            (
+                RuntimeEvent::WorkPlanChanged {
+                    session_id: session_id(),
+                    revision: 3,
+                },
+                "work_plan_changed",
+            ),
+            (
+                RuntimeEvent::GoalChanged {
+                    session_id: session_id(),
+                    goal_id: GoalId::new("goal-1").expect("goal id"),
+                    generation: 2,
+                },
+                "goal_changed",
             ),
             (
                 RuntimeEvent::SessionVariantChanged {

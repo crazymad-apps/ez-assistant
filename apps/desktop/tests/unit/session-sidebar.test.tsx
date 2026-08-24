@@ -8,7 +8,10 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { SessionSidebar } from "../../src/features/sessions/SessionSidebar";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("SessionSidebar grouping", () => {
   it("filters the current session list by title without a search scope", () => {
@@ -103,6 +106,60 @@ describe("SessionSidebar grouping", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建独立会话" }));
 
     expect(create_session).toHaveBeenCalledWith(null);
+  });
+
+  it("confirms before removing a workspace without deleting its existing sessions", async () => {
+    const store = connectedStore();
+    const remove_workspace = vi.spyOn(store, "removeWorkspace").mockResolvedValue(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    render(
+      <RootStoreProvider store={store}>
+        <SessionSidebar />
+      </RootStoreProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "project 工作空间操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "移除工作空间…" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会删除本地目录或历史会话"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("重新添加此目录后恢复显示"));
+    expect(remove_workspace).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "project 工作空间操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "移除工作空间…" }));
+    expect(remove_workspace).toHaveBeenCalledWith("workspace-1");
+
+    confirm.mockRestore();
+  });
+
+  it("hides a removed workspace and all of its sessions until it is restored", () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    snapshot.workspaces[0] = {
+      ...snapshot.workspaces[0],
+      lifecycle: "removed",
+      removed_at_ms: 2,
+    };
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+    store.navigation.ensureWorkspaceExpanded("workspace-1");
+
+    render(
+      <RootStoreProvider store={store}>
+        <SessionSidebar />
+      </RootStoreProvider>,
+    );
+
+    expect(screen.queryByText("project")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^工作区会话/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    expect(screen.queryByRole("menuitem", { name: "project" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "独立会话" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "搜索会话" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索会话名称" }), {
+      target: { value: "工作区" },
+    });
+    expect(screen.getByText("没有匹配的会话名称")).toBeInTheDocument();
   });
 
   it("shows a loading indicator instead of a timestamp for a running session", () => {

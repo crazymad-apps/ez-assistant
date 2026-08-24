@@ -163,6 +163,20 @@ pub enum ConversationMessage {
     Tool(ToolMessage),
 }
 
+impl ConversationMessage {
+    /// 返回该消息是否属于产品中可见的用户/助手转录。
+    ///
+    /// System、Context Summary 和 Tool 始终不是产品转录项；Runtime 隐藏
+    /// UserMessage 仍保留在规范上下文中，但不计入转录。
+    pub fn is_transcript_visible(&self) -> bool {
+        match self {
+            Self::User(message) => message.transcript_visibility.is_visible(),
+            Self::Assistant(_) => true,
+            Self::System(_) | Self::ContextSummary(_) | Self::Tool(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// 一条系统指令。
 pub struct SystemMessage {
@@ -195,8 +209,43 @@ pub struct ContextSummaryMessage {
 pub struct UserMessage {
     /// 规范消息 ID。
     pub id: MessageId,
+    /// 谁创建了该 user role 消息；旧数据缺省为真实用户。
+    #[serde(default)]
+    pub origin: UserMessageOrigin,
+    /// 该整条消息是否进入产品转录；不影响模型上下文可见性。
+    #[serde(default)]
+    pub transcript_visibility: TranscriptVisibility,
     /// 用户消息的有序内容片段，包含正文、应用注入文本和可见文件引用。
     pub parts: Vec<UserPart>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// user role 消息的业务创建者；不会编码到 Provider wire。
+pub enum UserMessageOrigin {
+    /// 由用户实际提交。
+    #[default]
+    User,
+    /// 由 Runtime 为受控执行链内部创建。
+    Runtime,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// UserMessage 在产品转录中的可见性；不会编码到 Provider wire。
+pub enum TranscriptVisibility {
+    /// 参与分页、搜索、导出和用户输入统计。
+    #[default]
+    Visible,
+    /// 仅保留于规范上下文、回放和审计，不进入产品转录。
+    Hidden,
+}
+
+impl TranscriptVisibility {
+    /// 是否应进入产品转录。
+    pub const fn is_visible(self) -> bool {
+        matches!(self, Self::Visible)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -609,6 +658,8 @@ mod tests {
     fn conversation_round_trips_tool_call_and_result() {
         let snapshot = ConversationSnapshot::new(vec![
             ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: id("message_1"),
                 parts: vec![UserPart::Text(TextPart {
                     id: id("text_1"),
@@ -740,6 +791,8 @@ mod tests {
     #[test]
     fn user_parts_distinguish_injected_text() {
         let turn = UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: id("message_1"),
             parts: vec![
                 UserPart::Injected(TextPart {
@@ -771,8 +824,65 @@ mod tests {
     }
 
     #[test]
+    fn legacy_user_message_defaults_to_visible_user_origin() {
+        let legacy = serde_json::json!({
+            "id": "message_legacy",
+            "parts": [{
+                "type": "text",
+                "data": {"id": "part_legacy", "text": "legacy"}
+            }]
+        });
+
+        let decoded: UserMessage =
+            serde_json::from_value(legacy).expect("deserialize legacy user message");
+        assert_eq!(decoded.origin, UserMessageOrigin::User);
+        assert_eq!(decoded.transcript_visibility, TranscriptVisibility::Visible);
+
+        let encoded = serde_json::to_value(decoded).expect("serialize current user message");
+        assert_eq!(encoded["origin"], "user");
+        assert_eq!(encoded["transcript_visibility"], "visible");
+    }
+
+    #[test]
+    fn hidden_runtime_user_message_remains_a_context_message_not_a_transcript_item() {
+        let hidden = ConversationMessage::User(UserMessage {
+            origin: UserMessageOrigin::Runtime,
+            transcript_visibility: TranscriptVisibility::Hidden,
+            id: id("message_runtime"),
+            parts: vec![UserPart::Injected(TextPart {
+                id: id("part_runtime"),
+                text: "<runtime>continue</runtime>".to_owned(),
+            })],
+        });
+        let visible = ConversationMessage::User(UserMessage {
+            origin: UserMessageOrigin::User,
+            transcript_visibility: TranscriptVisibility::Visible,
+            id: id("message_user"),
+            parts: vec![UserPart::Text(TextPart {
+                id: id("part_user"),
+                text: "continue".to_owned(),
+            })],
+        });
+
+        assert!(!hidden.is_transcript_visible());
+        assert!(visible.is_transcript_visible());
+        assert!(
+            ConversationMessage::Assistant(AssistantMessage {
+                id: id("message_assistant"),
+                model: ModelIdentity::new(id("deepseek"), "deepseek-chat"),
+                parts: Vec::new(),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            })
+            .is_transcript_visible()
+        );
+    }
+
+    #[test]
     fn file_references_round_trip_in_user_part_order() {
         let turn = UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: id("message_1"),
             parts: vec![
                 UserPart::Text(TextPart {

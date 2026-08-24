@@ -8,7 +8,7 @@ use agent_types::{
     ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
     SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition,
     ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
-    ToolResultStatus, UserMessage, UserPart,
+    ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
 use serde_json::{Value, json};
 
@@ -104,6 +104,8 @@ fn request(conversation: Vec<ConversationMessage>) -> ModelRequest {
 
 fn user_message(id: &str, texts: &[&str]) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id(id),
         parts: texts
             .iter()

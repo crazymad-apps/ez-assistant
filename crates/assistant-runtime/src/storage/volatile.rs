@@ -19,17 +19,21 @@ use super::{
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementTarget, ConversationMessageLocationRequest, ConversationRawWindowRequest,
     ConversationRewrite, ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, MessageFeedbackChange, ModelChange,
-    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
-    SessionFork, SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
-    StoredConversationWindow, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
-    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionLifecycle,
-    StoredSessionUsage, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkspaceRemoval,
+    ConversationSearchScope, ConversationWindowRequest, GoalClear, GoalHeldInputResume,
+    GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
+    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
+    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
+    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
+    StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationState, StoredConversationWindow, StoredGoal, StoredGoalPauseReason,
+    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
+    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredRunSettlementResult,
+    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage,
+    StoredTodoItemStatus, StoredWorkPlan, StoredWorkspace, StoredWorkspaceLifecycle,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
+    WorkPlanMutationResult, WorkspaceRemoval, validate_input_message,
 };
 use crate::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
@@ -67,6 +71,9 @@ struct State {
     pending_tool_exchanges: BTreeMap<String, VolatilePendingExchange>,
     pending_child_tool_exchanges: BTreeMap<String, VolatileChildPendingExchange>,
     session_usage: BTreeMap<SessionId, StoredSessionUsage>,
+    work_plans: BTreeMap<SessionId, StoredWorkPlan>,
+    work_plan_completion_receipts: BTreeMap<(SessionId, String), StoredWorkPlan>,
+    goals: BTreeMap<SessionId, StoredGoal>,
     usage_request_ids: BTreeSet<(SessionId, String)>,
     next_queue_order: u64,
 }
@@ -80,7 +87,39 @@ pub(crate) struct VolatileRuntimeStore {
 impl RuntimeStore for VolatileRuntimeStore {
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         Box::pin(async move {
-            let state = self.lock()?;
+            let mut state = self.lock()?;
+            state.work_plans.retain(|_, plan| {
+                plan.items.is_empty()
+                    || plan
+                        .items
+                        .iter()
+                        .any(|item| item.status != StoredTodoItemStatus::Completed)
+            });
+            state
+                .goals
+                .retain(|_, goal| goal.state != StoredGoalState::Completed);
+            pause_running_goals_for_recovery(&mut state.goals)?;
+            let stale_goal_inputs = state
+                .inputs
+                .values()
+                .filter(|input| {
+                    input.state == StoredInputState::Queued
+                        && input.origin == InputOrigin::Runtime
+                        && input.goal_binding.as_ref().is_some_and(|binding| {
+                            state.goals.get(&input.session_id).is_some_and(|goal| {
+                                goal.goal_id == binding.goal_id
+                                    && binding.generation < goal.generation
+                            })
+                        })
+                })
+                .map(|input| input.input_id.clone())
+                .collect::<BTreeSet<_>>();
+            state
+                .inputs
+                .retain(|input_id, _| !stale_goal_inputs.contains(input_id));
+            state
+                .runs
+                .retain(|_, run| !stale_goal_inputs.contains(&run.input_id));
             Ok(RecoveredRuntime {
                 workspaces: state.workspaces.values().cloned().collect(),
                 attachments: state.attachments.values().cloned().collect(),
@@ -88,7 +127,100 @@ impl RuntimeStore for VolatileRuntimeStore {
                 inputs: state.inputs.values().cloned().collect(),
                 runs: state.runs.values().cloned().collect(),
                 child_tasks: state.child_tasks.values().cloned().collect(),
+                work_plans: state.work_plans.values().cloned().collect(),
+                goals: state.goals.values().cloned().collect(),
             })
+        })
+    }
+
+    fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {
+        let session_id = session_id.clone();
+        Box::pin(async move { Ok(self.lock()?.work_plans.get(&session_id).cloned()) })
+    }
+
+    fn mutate_work_plan(
+        &self,
+        mutation: WorkPlanMutation,
+    ) -> StoreFuture<'_, WorkPlanMutationResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get(&mutation.session_id)
+                .ok_or_else(|| conflict("work plan session does not exist"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("work plan session is archived"));
+            }
+            let receipt_key = (mutation.session_id.clone(), mutation.operation_id.clone());
+            if let Some(plan) = state.work_plan_completion_receipts.get(&receipt_key) {
+                return Ok(WorkPlanMutationResult {
+                    plan: plan.clone(),
+                    cleared: true,
+                });
+            }
+            if let Some(current) = state.work_plans.get(&mutation.session_id) {
+                if current.last_operation_id == mutation.operation_id {
+                    return Ok(WorkPlanMutationResult {
+                        plan: current.clone(),
+                        cleared: false,
+                    });
+                }
+                if current.revision != mutation.expected_revision {
+                    return Err(conflict("work plan revision changed"));
+                }
+            } else if mutation.expected_revision != 0 {
+                return Err(conflict("work plan revision changed"));
+            }
+            let revision = mutation
+                .expected_revision
+                .checked_add(1)
+                .ok_or_else(|| conflict("work plan revision exhausted"))?;
+            let stored = StoredWorkPlan {
+                session_id: mutation.session_id.clone(),
+                revision,
+                objective: mutation.objective,
+                items: mutation.items,
+                last_operation_id: mutation.operation_id,
+                updated_at_ms: mutation.updated_at_ms,
+            };
+            let completed = !stored.items.is_empty()
+                && stored
+                    .items
+                    .iter()
+                    .all(|item| item.status == StoredTodoItemStatus::Completed);
+            if completed {
+                state.work_plans.remove(&mutation.session_id);
+                state
+                    .work_plan_completion_receipts
+                    .insert(receipt_key, stored.clone());
+            } else {
+                state.work_plans.insert(mutation.session_id, stored.clone());
+            }
+            Ok(WorkPlanMutationResult {
+                plan: stored,
+                cleared: completed,
+            })
+        })
+    }
+
+    fn clear_work_plan(&self, clear: WorkPlanClear) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get(&clear.session_id)
+                .ok_or_else(|| conflict("work plan session does not exist"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("work plan session is archived"));
+            }
+            match state.work_plans.get(&clear.session_id) {
+                Some(current) if current.revision == clear.expected_revision => {
+                    state.work_plans.remove(&clear.session_id);
+                    Ok(())
+                }
+                None if clear.expected_revision == 0 => Ok(()),
+                _ => Err(conflict("work plan revision changed")),
+            }
         })
     }
 
@@ -325,6 +457,67 @@ impl RuntimeStore for VolatileRuntimeStore {
                     is_duplicate: true,
                 });
             }
+            validate_input_message(input.origin, input.goal_binding.as_ref(), &input.message)
+                .map_err(|_| conflict("input message origin or Goal binding is invalid"))?;
+            if input.new_goal.is_some() && input.resumed_goal.is_some() {
+                return Err(conflict("input cannot start and resume a Goal together"));
+            }
+            if let Some(goal) = input.new_goal.as_ref() {
+                let binding = input
+                    .goal_binding
+                    .as_ref()
+                    .ok_or_else(|| conflict("new Goal input has no Goal binding"))?;
+                if input.origin != InputOrigin::User
+                    || goal.session_id != input.session_id
+                    || goal.goal_id != binding.goal_id
+                    || goal.generation != binding.generation
+                    || goal.turn != binding.turn
+                    || goal.objective.source_message_id != input.message.id
+                    || state.goals.contains_key(&goal.session_id)
+                {
+                    return Err(conflict("new Goal does not match its first input"));
+                }
+            }
+            if let Some(goal) = input.resumed_goal.as_ref() {
+                let binding = input
+                    .goal_binding
+                    .as_ref()
+                    .ok_or_else(|| conflict("resumed Goal input has no Goal binding"))?;
+                let current = state
+                    .goals
+                    .get(&input.session_id)
+                    .ok_or_else(|| conflict("resumed Goal does not exist"))?;
+                if goal.session_id != input.session_id
+                    || goal.goal_id != binding.goal_id
+                    || goal.generation != binding.generation
+                    || goal.turn != binding.turn
+                    || current.state != StoredGoalState::Paused
+                    || goal.state != StoredGoalState::Running
+                    || goal.pause_reason.is_some()
+                    || goal.generation
+                        != current
+                            .generation
+                            .checked_add(1)
+                            .ok_or_else(|| conflict("Goal generation is exhausted"))?
+                    || goal.turn
+                        != current
+                            .turn
+                            .checked_add(1)
+                            .ok_or_else(|| conflict("Goal turn is exhausted"))?
+                    || goal.objective != current.objective
+                    || goal.budget != current.budget
+                    || goal.consecutive_failures != current.consecutive_failures
+                    || goal.created_at_ms != current.created_at_ms
+                    || goal.updated_at_ms < current.updated_at_ms
+                    || goal.completed_at_ms.is_some()
+                    || (input.origin == InputOrigin::Runtime
+                        && (input.idempotency_key.is_some()
+                            || input.generated_title.is_some()
+                            || input.new_goal.is_some()))
+                {
+                    return Err(conflict("resumed Goal projection is invalid"));
+                }
+            }
             state.next_queue_order += 1;
             let stored = StoredInput {
                 queue_order: state.next_queue_order,
@@ -332,6 +525,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 session_id: input.session_id.clone(),
                 idempotency_key: input.idempotency_key,
                 agent_variant: input.agent_variant,
+                origin: input.origin,
+                goal_binding: input.goal_binding,
                 user_message_id: input.message.id.clone(),
                 state: StoredInputState::Queued,
                 queued_message: Some(input.message),
@@ -366,6 +561,12 @@ impl RuntimeStore for VolatileRuntimeStore {
             {
                 session.title = title;
             }
+            if let Some(goal) = input.new_goal {
+                state.goals.insert(goal.session_id.clone(), goal);
+            }
+            if let Some(goal) = input.resumed_goal {
+                state.goals.insert(goal.session_id.clone(), goal);
+            }
             state.inputs.insert(input.input_id, stored.clone());
             state.runs.insert(run.run_id.clone(), run.clone());
             Ok(AcceptedInput {
@@ -389,7 +590,11 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .inputs
                 .get(&input_id)
                 .ok_or_else(|| conflict("input does not exist"))?;
-            if input.session_id != session_id || input.state != StoredInputState::Queued {
+            if input.session_id != session_id
+                || input.state != StoredInputState::Queued
+                || input.origin != InputOrigin::User
+                || input.goal_binding.is_some()
+            {
                 return Err(conflict("input is not queued"));
             }
             state.inputs.remove(&input_id);
@@ -405,7 +610,10 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .inputs
                 .values()
                 .filter(|input| {
-                    input.session_id == change.session_id && input.state == StoredInputState::Queued
+                    input.session_id == change.session_id
+                        && input.state == StoredInputState::Queued
+                        && input.origin == InputOrigin::User
+                        && input.goal_binding.is_none()
                 })
                 .map(|input| (input.queue_order, input.input_id.clone()))
                 .collect::<Vec<_>>();
@@ -525,6 +733,35 @@ impl RuntimeStore for VolatileRuntimeStore {
             if state.sessions.contains_key(&fork.session.session_id) {
                 return Err(conflict("fork session already exists"));
             }
+            if let Some(goal) = fork.goal.as_ref() {
+                let source_goal = state
+                    .goals
+                    .get(&fork.source_session_id)
+                    .ok_or_else(|| conflict("fork source Goal does not exist"))?;
+                if goal.session_id != fork.session.session_id
+                    || goal.goal_id == source_goal.goal_id
+                    || goal.state != StoredGoalState::Paused
+                    || goal.pause_reason != Some(StoredGoalPauseReason::Forked)
+                    || goal.generation != 1
+                    || goal.turn != source_goal.turn
+                    || goal.objective != source_goal.objective
+                    || goal.budget != source_goal.budget
+                    || goal.consecutive_failures != source_goal.consecutive_failures
+                    || goal.created_at_ms != fork.session.created_at_ms
+                    || goal.updated_at_ms != fork.session.created_at_ms
+                    || goal.completed_at_ms.is_some()
+                    || !fork.conversation.messages.iter().any(|message| {
+                        matches!(message, ConversationMessage::User(user)
+                            if user.id == goal.objective.source_message_id)
+                    })
+                    || state
+                        .goals
+                        .values()
+                        .any(|current| current.goal_id == goal.goal_id)
+                {
+                    return Err(conflict("fork Goal projection is invalid"));
+                }
+            }
             let mut new_attachment_ids = BTreeSet::new();
             for reference in &fork.attachments {
                 if !new_attachment_ids.insert(reference.attachment_id.clone())
@@ -596,10 +833,29 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .session_usage
                 .insert(stored.session_id.clone(), StoredSessionUsage::default());
+            let work_plan = fork.work_plan.map(|source| StoredWorkPlan {
+                session_id: stored.session_id.clone(),
+                revision: 1,
+                objective: source.objective,
+                items: source.items,
+                last_operation_id: format!("fork:{}", fork.source_session_id),
+                updated_at_ms: stored.created_at_ms,
+            });
+            if let Some(plan) = &work_plan {
+                state
+                    .work_plans
+                    .insert(stored.session_id.clone(), plan.clone());
+            }
+            let goal = fork.goal;
+            if let Some(goal) = &goal {
+                state.goals.insert(stored.session_id.clone(), goal.clone());
+            }
             Ok(StoredSessionFork {
                 session: stored,
                 conversation,
                 attachments,
+                work_plan,
+                goal,
             })
         })
     }
@@ -697,6 +953,8 @@ impl RuntimeStore for VolatileRuntimeStore {
             state.sessions.remove(&deletion.session_id);
             state.conversations.remove(&deletion.session_id);
             state.session_usage.remove(&deletion.session_id);
+            state.work_plans.remove(&deletion.session_id);
+            state.goals.remove(&deletion.session_id);
             state
                 .usage_request_ids
                 .retain(|(session_id, _)| session_id != &deletion.session_id);
@@ -1241,7 +1499,10 @@ impl RuntimeStore for VolatileRuntimeStore {
         })
     }
 
-    fn settle_run(&self, settlement: StoredRunSettlement) -> StoreFuture<'_, ()> {
+    fn settle_run(
+        &self,
+        settlement: StoredRunSettlement,
+    ) -> StoreFuture<'_, StoredRunSettlementResult> {
         Box::pin(async move {
             if !settlement.status.is_terminal() {
                 return Err(StoreError::new(
@@ -1257,6 +1518,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             {
                 return Err(conflict("run has a pending tool exchange"));
             }
+            validate_volatile_goal_effect(&state, &settlement)?;
             append(&mut state, &settlement.session_id, &settlement.messages)?;
             let run = state
                 .runs
@@ -1277,7 +1539,204 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .expect("run session exists");
             session.updated_at_ms = settlement.finished_at_ms;
             record_session_usage(&mut state, &settlement.session_id, &settlement.messages);
+            apply_volatile_goal_effect(&mut state, settlement.goal_effect)
+        })
+    }
+
+    fn stop_goal(&self, stop: GoalStop) -> StoreFuture<'_, GoalStopResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let current = state
+                .goals
+                .get(&stop.session_id)
+                .ok_or_else(|| conflict("Goal does not exist"))?;
+            let stopped = &stop.stopped_goal;
+            if current.goal_id != stop.goal_id
+                || current.generation != stop.expected_generation
+                || current.state != StoredGoalState::Running
+                || stopped.goal_id != current.goal_id
+                || stopped.session_id != current.session_id
+                || stopped.objective != current.objective
+                || stopped.state != StoredGoalState::Paused
+                || stopped.pause_reason != Some(StoredGoalPauseReason::UserStopped)
+                || stopped.generation
+                    != current
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("Goal generation is exhausted"))?
+                || stopped.turn != current.turn
+                || stopped.budget != current.budget
+                || stopped.consecutive_failures != current.consecutive_failures
+                || stopped.created_at_ms != current.created_at_ms
+                || stopped.updated_at_ms < current.updated_at_ms
+                || stopped.completed_at_ms.is_some()
+            {
+                return Err(conflict("Goal stop generation is stale"));
+            }
+            let removed_input_ids = state
+                .inputs
+                .values()
+                .filter(|input| {
+                    input.session_id == stop.session_id
+                        && input.state == StoredInputState::Queued
+                        && input.origin == InputOrigin::Runtime
+                        && input.goal_binding.as_ref().is_some_and(|binding| {
+                            binding.goal_id == stop.goal_id
+                                && binding.generation == stop.expected_generation
+                        })
+                })
+                .map(|input| input.input_id.clone())
+                .collect::<Vec<_>>();
+            if removed_input_ids.len() > 1 {
+                return Err(conflict("Goal has multiple queued continuations"));
+            }
+            let active_run_ids = state
+                .runs
+                .values()
+                .filter(|run| !run.status.is_terminal())
+                .filter_map(|run| {
+                    let input = state.inputs.get(&run.input_id)?;
+                    (input.state == StoredInputState::Committed
+                        && input.goal_binding.as_ref().is_some_and(|binding| {
+                            binding.goal_id == stop.goal_id
+                                && binding.generation == stop.expected_generation
+                        }))
+                    .then_some(run.run_id.clone())
+                })
+                .collect::<Vec<_>>();
+            if active_run_ids.len() > 1 {
+                return Err(conflict("Goal has multiple active Runs"));
+            }
+            for input_id in &removed_input_ids {
+                state.inputs.remove(input_id);
+                state.runs.retain(|_, run| &run.input_id != input_id);
+            }
+            let cancelling_run_id = active_run_ids.into_iter().next();
+            if let Some(run_id) = cancelling_run_id.as_ref() {
+                let run = state
+                    .runs
+                    .get_mut(run_id)
+                    .ok_or_else(|| conflict("active Goal Run disappeared"))?;
+                run.cancel_requested = true;
+                run.status = RunStatus::Cancelling;
+            }
+            state
+                .goals
+                .insert(stop.session_id, stop.stopped_goal.clone());
+            Ok(GoalStopResult {
+                goal: stop.stopped_goal,
+                removed_input_ids,
+                cancelling_run_id,
+            })
+        })
+    }
+
+    fn clear_goal(&self, clear: GoalClear) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let current = state
+                .goals
+                .get(&clear.session_id)
+                .ok_or_else(|| conflict("Goal does not exist"))?;
+            if current.goal_id != clear.goal_id
+                || current.generation != clear.expected_generation
+                || current.state == StoredGoalState::Running
+            {
+                return Err(conflict("Goal cannot be cleared"));
+            }
+            let has_active_run = state.runs.values().any(|run| {
+                !run.status.is_terminal()
+                    && state.inputs.get(&run.input_id).is_some_and(|input| {
+                        input
+                            .goal_binding
+                            .as_ref()
+                            .is_some_and(|binding| binding.goal_id == clear.goal_id)
+                    })
+            });
+            if has_active_run {
+                return Err(conflict("Goal still has an active Run"));
+            }
+            state.goals.remove(&clear.session_id);
             Ok(())
+        })
+    }
+
+    fn resume_goal_with_held_input(
+        &self,
+        resume: GoalHeldInputResume,
+    ) -> StoreFuture<'_, GoalHeldInputResumeResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let current_goal = state
+                .goals
+                .get(&resume.session_id)
+                .ok_or_else(|| conflict("Goal does not exist"))?;
+            let goal = &resume.resumed_goal;
+            if current_goal.goal_id != resume.expected_goal_id
+                || current_goal.generation != resume.expected_generation
+                || current_goal.state != StoredGoalState::Paused
+                || goal.goal_id != current_goal.goal_id
+                || goal.session_id != current_goal.session_id
+                || goal.objective != current_goal.objective
+                || goal.state != StoredGoalState::Running
+                || goal.pause_reason.is_some()
+                || goal.generation
+                    != current_goal
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("Goal generation is exhausted"))?
+                || goal.turn
+                    != current_goal
+                        .turn
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("Goal turn is exhausted"))?
+                || goal.budget != current_goal.budget
+                || goal.consecutive_failures != current_goal.consecutive_failures
+                || goal.created_at_ms != current_goal.created_at_ms
+                || goal.completed_at_ms.is_some()
+            {
+                return Err(conflict("held Input Goal resume is stale"));
+            }
+            let input = state
+                .inputs
+                .get(&resume.input_id)
+                .ok_or_else(|| conflict("held Input does not exist"))?;
+            if input.session_id != resume.session_id
+                || input.state != StoredInputState::Queued
+                || input.origin != InputOrigin::User
+                || input.goal_binding.is_some()
+                || input.user_message_id != resume.message.id
+            {
+                return Err(conflict("Input is not held user guidance"));
+            }
+            let binding = super::GoalInputBinding {
+                goal_id: goal.goal_id.clone(),
+                generation: goal.generation,
+                turn: goal.turn,
+            };
+            validate_input_message(InputOrigin::User, Some(&binding), &resume.message)
+                .map_err(|_| conflict("held Goal resume message is invalid"))?;
+            let run = state
+                .runs
+                .values()
+                .find(|run| run.input_id == resume.input_id && run.status == RunStatus::Accepted)
+                .cloned()
+                .ok_or_else(|| conflict("held Input has no accepted Run"))?;
+            let input = state
+                .inputs
+                .get_mut(&resume.input_id)
+                .expect("checked held Input");
+            input.goal_binding = Some(binding);
+            input.queued_message = Some(resume.message);
+            let input = input.clone();
+            state
+                .goals
+                .insert(resume.session_id, resume.resumed_goal.clone());
+            Ok(GoalHeldInputResumeResult {
+                goal: resume.resumed_goal,
+                input,
+                run,
+            })
         })
     }
 
@@ -1440,22 +1899,13 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .iter()
                 .position(|message| message_id(message) == &request.message_id)
                 .map(|ordinal| {
-                    let display_ordinal = matches!(
-                        snapshot.messages[ordinal],
-                        ConversationMessage::User(_) | ConversationMessage::Assistant(_)
-                    )
-                    .then(|| {
-                        snapshot.messages[..ordinal]
-                            .iter()
-                            .filter(|message| {
-                                matches!(
-                                    message,
-                                    ConversationMessage::User(_)
-                                        | ConversationMessage::Assistant(_)
-                                )
-                            })
-                            .count()
-                    });
+                    let display_ordinal =
+                        snapshot.messages[ordinal].is_transcript_visible().then(|| {
+                            snapshot.messages[..ordinal]
+                                .iter()
+                                .filter(|message| message.is_transcript_visible())
+                                .count()
+                        });
                     Ok(StoredConversationMessageLocation {
                         generation,
                         message_ordinal: u64::try_from(ordinal)
@@ -1727,6 +2177,34 @@ impl RuntimeStore for VolatileRuntimeStore {
                     "replacement input does not match conversation",
                 ));
             }
+            if let Some(effect) = rewrite.goal_effect.as_ref() {
+                let current = state
+                    .goals
+                    .get(&rewrite.session_id)
+                    .ok_or_else(|| conflict("history rewrite Goal does not exist"))?;
+                let goal = &effect.goal;
+                if current.goal_id != effect.expected_goal_id
+                    || current.generation != effect.expected_generation
+                    || goal.goal_id != current.goal_id
+                    || goal.session_id != current.session_id
+                    || goal.objective != current.objective
+                    || goal.state != StoredGoalState::Paused
+                    || goal.pause_reason != Some(StoredGoalPauseReason::RecoveryRequired)
+                    || goal.generation
+                        != current
+                            .generation
+                            .checked_add(1)
+                            .ok_or_else(|| conflict("Goal generation is exhausted"))?
+                    || goal.turn != current.turn
+                    || goal.budget != current.budget
+                    || goal.consecutive_failures != current.consecutive_failures
+                    || goal.created_at_ms != current.created_at_ms
+                    || goal.updated_at_ms != rewrite.changed_at_ms
+                    || goal.completed_at_ms.is_some()
+                {
+                    return Err(conflict("history rewrite Goal projection is invalid"));
+                }
+            }
 
             let removed = state
                 .inputs
@@ -1740,6 +2218,11 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .inputs
                 .retain(|_, input| !removed.contains(&input.input_id));
             state.runs.retain(|_, run| !removed.contains(&run.input_id));
+            if let Some(effect) = rewrite.goal_effect.as_ref() {
+                state
+                    .goals
+                    .insert(rewrite.session_id.clone(), effect.goal.clone());
+            }
             state.next_queue_order += 1;
             let input = StoredInput {
                 queue_order: state.next_queue_order,
@@ -1747,6 +2230,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 session_id: rewrite.session_id.clone(),
                 idempotency_key: rewrite.input.idempotency_key,
                 agent_variant: rewrite.input.agent_variant,
+                origin: rewrite.input.origin,
+                goal_binding: rewrite.input.goal_binding,
                 user_message_id: new_message.id.clone(),
                 state: StoredInputState::Committed,
                 queued_message: None,
@@ -1848,6 +2333,190 @@ fn append(
         .ok_or_else(|| conflict("session does not exist in runtime storage"))?
         .message_count = count;
     Ok(())
+}
+
+fn validate_volatile_goal_effect(
+    state: &State,
+    settlement: &StoredRunSettlement,
+) -> Result<(), StoreError> {
+    let Some(effect) = settlement.goal_effect.as_ref() else {
+        return Ok(());
+    };
+    let (expected_goal_id, expected_generation, goal, next_input) = match effect {
+        StoredGoalSettlementEffect::Continue {
+            expected_goal_id,
+            expected_generation,
+            goal,
+            next_input,
+        } => (
+            expected_goal_id,
+            *expected_generation,
+            goal,
+            Some(next_input),
+        ),
+        StoredGoalSettlementEffect::Transition {
+            expected_goal_id,
+            expected_generation,
+            goal,
+            ..
+        } => (expected_goal_id, *expected_generation, goal, None),
+    };
+    let current = state
+        .goals
+        .get(&settlement.session_id)
+        .ok_or_else(|| conflict("Goal settlement has no current Goal"))?;
+    if current.goal_id != *expected_goal_id
+        || current.generation != expected_generation
+        || current.state != StoredGoalState::Running
+        || goal.goal_id != current.goal_id
+        || goal.session_id != settlement.session_id
+        || goal.objective != current.objective
+        || goal.budget.max_runs != current.budget.max_runs
+        || goal.budget.max_total_tokens != current.budget.max_total_tokens
+        || goal.budget.max_consecutive_failures != current.budget.max_consecutive_failures
+        || goal.budget.used_runs != current.budget.used_runs.saturating_add(1)
+        || goal.budget.used_total_tokens < current.budget.used_total_tokens
+        || (!current.budget.usage_complete && goal.budget.usage_complete)
+        || goal.updated_at_ms != settlement.finished_at_ms
+        || crate::goal::GoalControl::try_from(goal.clone()).is_err()
+    {
+        return Err(conflict("Goal settlement CAS or projection is invalid"));
+    }
+    let run = state
+        .runs
+        .get(&settlement.run_id)
+        .ok_or_else(|| conflict("Goal settlement run does not exist"))?;
+    let input = state
+        .inputs
+        .get(&run.input_id)
+        .ok_or_else(|| conflict("Goal settlement input does not exist"))?;
+    if input.goal_binding.as_ref().is_none_or(|binding| {
+        binding.goal_id != *expected_goal_id || binding.generation != expected_generation
+    }) {
+        return Err(conflict("Goal settlement run binding is stale"));
+    }
+    match (effect, next_input) {
+        (StoredGoalSettlementEffect::Continue { .. }, Some(next_input)) => {
+            let binding = next_input
+                .goal_binding
+                .as_ref()
+                .ok_or_else(|| conflict("Goal continuation has no binding"))?;
+            if goal.state != StoredGoalState::Running
+                || goal.pause_reason.is_some()
+                || goal.generation != expected_generation
+                || goal.turn != current.turn.saturating_add(1)
+                || next_input.origin != InputOrigin::Runtime
+                || next_input.session_id != settlement.session_id
+                || next_input.new_goal.is_some()
+                || next_input.resumed_goal.is_some()
+                || binding.goal_id != goal.goal_id
+                || binding.generation != goal.generation
+                || binding.turn != goal.turn
+                || state.inputs.contains_key(&next_input.input_id)
+                || state.runs.contains_key(&next_input.run_id)
+                || state.inputs.values().any(|candidate| {
+                    candidate.session_id == settlement.session_id
+                        && candidate.state == StoredInputState::Queued
+                        && candidate.goal_binding.is_some()
+                })
+            {
+                return Err(conflict("Goal continuation projection is invalid"));
+            }
+            validate_input_message(
+                next_input.origin,
+                next_input.goal_binding.as_ref(),
+                &next_input.message,
+            )
+            .map_err(|_| conflict("Goal continuation message is invalid"))?;
+        }
+        (StoredGoalSettlementEffect::Transition { .. }, None) => {
+            if goal.state == StoredGoalState::Running
+                || goal.generation != expected_generation.saturating_add(1)
+                || goal.turn != current.turn
+            {
+                return Err(conflict("Goal terminal transition is invalid"));
+            }
+        }
+        _ => return Err(conflict("Goal settlement effect is inconsistent")),
+    }
+    Ok(())
+}
+
+fn apply_volatile_goal_effect(
+    state: &mut State,
+    effect: Option<StoredGoalSettlementEffect>,
+) -> Result<StoredRunSettlementResult, StoreError> {
+    let Some(effect) = effect else {
+        return Ok(StoredRunSettlementResult::default());
+    };
+    match effect {
+        StoredGoalSettlementEffect::Continue {
+            goal, next_input, ..
+        } => {
+            state.next_queue_order = state.next_queue_order.saturating_add(1);
+            let stored_input = StoredInput {
+                queue_order: state.next_queue_order,
+                input_id: next_input.input_id.clone(),
+                session_id: next_input.session_id.clone(),
+                idempotency_key: next_input.idempotency_key,
+                agent_variant: next_input.agent_variant,
+                origin: next_input.origin,
+                goal_binding: next_input.goal_binding,
+                user_message_id: next_input.message.id.clone(),
+                state: StoredInputState::Queued,
+                queued_message: Some(next_input.message),
+                accepted_at_ms: next_input.accepted_at_ms,
+            };
+            let stored_run = StoredRun {
+                run_id: next_input.run_id.clone(),
+                session_id: next_input.session_id,
+                input_id: next_input.input_id.clone(),
+                attempt: 1,
+                status: RunStatus::Accepted,
+                agent_variant: next_input.agent_variant,
+                approval_mode: next_input.approval_mode,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                created_at_ms: next_input.accepted_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            };
+            state.goals.insert(goal.session_id.clone(), goal.clone());
+            state
+                .inputs
+                .insert(stored_input.input_id.clone(), stored_input.clone());
+            state
+                .runs
+                .insert(stored_run.run_id.clone(), stored_run.clone());
+            Ok(StoredRunSettlementResult {
+                goal: Some(goal),
+                continuation: Some(AcceptedInput {
+                    input: stored_input,
+                    run: stored_run,
+                    is_duplicate: false,
+                }),
+                resume_required: false,
+            })
+        }
+        StoredGoalSettlementEffect::Transition {
+            goal,
+            resume_required,
+            ..
+        } => {
+            if goal.state == StoredGoalState::Completed {
+                state.goals.remove(&goal.session_id);
+            } else {
+                state.goals.insert(goal.session_id.clone(), goal.clone());
+            }
+            Ok(StoredRunSettlementResult {
+                goal: Some(goal),
+                continuation: None,
+                resume_required,
+            })
+        }
+    }
 }
 
 fn append_child(
@@ -2019,13 +2688,7 @@ fn conversation_window(
         .messages
         .iter()
         .enumerate()
-        .filter_map(|(index, message)| {
-            matches!(
-                message,
-                ConversationMessage::User(_) | ConversationMessage::Assistant(_)
-            )
-            .then_some(index)
-        })
+        .filter_map(|(index, message)| message.is_transcript_visible().then_some(index))
         .collect::<Vec<_>>();
     let total = display_indices.len();
     let end = request.end.unwrap_or(total).min(total);
@@ -2066,6 +2729,9 @@ fn collect_volatile_hits(
     query: &str,
 ) {
     for (ordinal, message) in snapshot.messages.iter().enumerate() {
+        if !message.is_transcript_visible() {
+            continue;
+        }
         let (message_id, text) = match message {
             ConversationMessage::User(message) => {
                 let mut parts = Vec::new();
@@ -2154,4 +2820,159 @@ fn count_u64(value: usize) -> Result<u64, StoreError> {
 
 fn conflict(message: &'static str) -> StoreError {
     StoreError::new(StoreErrorKind::Conflict, message)
+}
+
+fn pause_running_goals_for_recovery(
+    goals: &mut BTreeMap<SessionId, StoredGoal>,
+) -> Result<(), StoreError> {
+    for goal in goals.values_mut() {
+        if goal.state != StoredGoalState::Running {
+            continue;
+        }
+        goal.generation = goal.generation.checked_add(1).ok_or_else(|| {
+            StoreError::new(
+                StoreErrorKind::InvalidData,
+                "stored goal generation is exhausted",
+            )
+        })?;
+        goal.state = StoredGoalState::Paused;
+        goal.pause_reason = Some(StoredGoalPauseReason::RecoveryRequired);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_types::{PartId, TextPart, TranscriptVisibility, UserMessage, UserMessageOrigin};
+    use assistant_protocol::GoalId;
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    fn user_message(
+        message_id: &str,
+        part_id: &str,
+        text: &str,
+        origin: UserMessageOrigin,
+        visibility: TranscriptVisibility,
+    ) -> ConversationMessage {
+        ConversationMessage::User(UserMessage {
+            id: MessageId::new(message_id).expect("message ID"),
+            origin,
+            transcript_visibility: visibility,
+            parts: vec![UserPart::Text(TextPart {
+                id: PartId::new(part_id).expect("part ID"),
+                text: text.to_owned(),
+            })],
+        })
+    }
+
+    #[test]
+    fn hidden_runtime_users_do_not_change_display_windows_or_volatile_recall() {
+        let visible = user_message(
+            "visible-user",
+            "visible-user-text",
+            "visible-recall-token",
+            UserMessageOrigin::User,
+            TranscriptVisibility::Visible,
+        );
+        let hidden = user_message(
+            "runtime-hidden-user",
+            "runtime-hidden-user-text",
+            "runtime-hidden-recall-token",
+            UserMessageOrigin::Runtime,
+            TranscriptVisibility::Hidden,
+        );
+        let snapshot = ConversationSnapshot::new(vec![visible, hidden]);
+        let session_id = SessionId::new("session-visible-window").expect("session ID");
+        let owner = ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        };
+
+        let window = conversation_window(
+            snapshot.clone(),
+            &ConversationWindowRequest {
+                owner: owner.clone(),
+                generation: 1,
+                end: None,
+                limit: 1,
+            },
+        );
+        assert_eq!((window.start, window.end, window.total), (0, 1, 1));
+        assert_eq!(window.conversation.messages.len(), 2);
+        assert!(!window.conversation.messages[1].is_transcript_visible());
+
+        let mut hits = Vec::new();
+        collect_volatile_hits(
+            &mut hits,
+            owner.clone(),
+            1,
+            1_000,
+            &snapshot,
+            "runtime-hidden-recall-token",
+        );
+        assert!(hits.is_empty());
+        collect_volatile_hits(
+            &mut hits,
+            owner,
+            1,
+            1_000,
+            &snapshot,
+            "visible-recall-token",
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id.as_str(), "visible-user");
+    }
+
+    #[tokio::test]
+    async fn volatile_recovery_pauses_a_running_goal_once() {
+        let store = VolatileRuntimeStore::default();
+        let session_id = SessionId::new("session-goal-recovery").expect("session id");
+        let payload = vec![crate::StoredGoalObjectivePart::Text(TextPart {
+            id: PartId::new("goal-objective-part").expect("part id"),
+            text: "finish safely".to_owned(),
+        })];
+        let hash = format!(
+            "sha256-v1:{:x}",
+            Sha256::digest(serde_json::to_vec(&payload).expect("encode objective"))
+        );
+        store.lock().expect("state").goals.insert(
+            session_id.clone(),
+            crate::StoredGoal {
+                goal_id: GoalId::new("goal-recovery").expect("goal id"),
+                session_id,
+                objective: crate::StoredGoalObjective {
+                    source_message_id: MessageId::new("goal-source").expect("message id"),
+                    payload,
+                    payload_hash: hash,
+                },
+                state: StoredGoalState::Running,
+                pause_reason: None,
+                generation: 1,
+                turn: 1,
+                budget: crate::StoredGoalBudget {
+                    max_runs: 20,
+                    max_total_tokens: 500_000,
+                    max_consecutive_failures: 3,
+                    used_runs: 1,
+                    used_total_tokens: 100,
+                    usage_complete: true,
+                },
+                consecutive_failures: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: None,
+            },
+        );
+
+        let first = store.load_runtime().await.expect("first recovery");
+        assert_eq!(first.goals[0].state, StoredGoalState::Paused);
+        assert_eq!(
+            first.goals[0].pause_reason,
+            Some(StoredGoalPauseReason::RecoveryRequired)
+        );
+        assert_eq!(first.goals[0].generation, 2);
+        let second = store.load_runtime().await.expect("second recovery");
+        assert_eq!(second.goals[0].generation, 2);
+    }
 }

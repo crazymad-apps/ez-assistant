@@ -117,6 +117,8 @@ fn connection_validation_request(
     let (reasoning, provider_options) =
         protocol_request_options(provider, protocol, model_id, capabilities, None)?;
     let user_message = UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new("connection-validation-message")
             .expect("static validation message id is valid"),
         parts: vec![UserPart::Text(TextPart {

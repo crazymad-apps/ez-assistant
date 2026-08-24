@@ -485,6 +485,8 @@ mod tests {
 
     fn user(value: &str) -> UserMessage {
         UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: id(value),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new(format!("{value}_text")).expect("valid part id"),

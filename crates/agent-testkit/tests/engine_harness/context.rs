@@ -130,6 +130,8 @@ async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
     });
     let history = vec![
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: msg_id("message_previous_user"),
             parts: vec![UserPart::Text(TextPart {
                 id: part_id("message_previous_user_text"),

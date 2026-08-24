@@ -148,6 +148,9 @@ Runtime Host 进程
   不依赖 SQLite、Runtime Home 路径、文件句柄或具体 JSONL 提交算法。
 - SQLite 结构化状态和每 Session Conversation JSONL 共同组成产品数据集，但规范 Conversation
   仍是正文事实源；流式 RuntimeEvent、pending exchange 和 staged append 不进入规范快照。
+- 产品 Conversation 投影、Around 定位、Markdown 导出和 Conversation Recall 必须排除
+  `TranscriptVisibility::Hidden` 的 Runtime User Message；规范快照、Context Layout、重放、Fork
+  和物理 `message_count` 仍保留它，不能把产品可见数冒充正文物理数量。
 - Runtime 通过异步 `open` 在进入 Running 前恢复 Session 与 Run registry；Conversation 只在首次
   查询或执行时读取并缓存，单 Session 正文不可用不得回退成第二份空状态。
 - 创建 Session、提交 User Message 与 Run 起始、结算 Run 终态均先完成 Store，再更新内存投影和
@@ -214,7 +217,10 @@ Runtime Host 进程
 - Runtime 只定义按 Run 装配端口和脱敏错误映射，不直接依赖 `agent-tools-local`。
   绑定 Workspace 的工作目录在 Run 前不可用时返回 `WorkspaceUnavailable`；其他工具构造
   失败按 Agent 构造失败处理，不向客户端泄露路径或底层 Adapter 错误。
-- Workspace 假删只阻止新 Session 绑定；已绑定 Session 继续使用其冻结路径。
+- Workspace 假删只阻止新 Session 绑定；已绑定 Session 的冻结路径和持久事实不改写。
+  `ApplicationSnapshot` 与 `list_workspaces` 只投影活动 Workspace，并从活动/归档 Session 列表隐藏
+  绑定已移除 Workspace 的 Session；重新登记同一 canonical path 恢复原 Workspace ID 后，
+  这些 Session 自然重新进入组合快照。
   附件正文不自动进入模型上下文，Agent 通过持久化 File References 和文件工具按需读取。
 
 ## v0.12.0 Agent 变体与权限边界
@@ -339,6 +345,108 @@ Runtime Host 进程
   `read_image` 的 Tool Call `path` 只保留审计语义，不能被投影成图片产物或用于预览回源。
 - 资源解析按 owner/message/call/part 回查可靠 Conversation。主会话与 child Conversation 使用同一
   Image Part 算法；Tool Image 显式排除出 `project_conversation_file_references`。
+
+## v0.18.0 M1 Session WorkPlan 边界
+
+- WorkPlan 是独立于 Goal 的 Session 权威状态，包含 revision、总体 objective、有序扁平 item 与
+  更新时间；最多 100 项、ID 唯一且同时最多一个 `InProgress`。它不是 Goal 子对象，也不决定是否续跑。
+- 父 Agent 在支持 Tool Call 时由 Runtime 追加私有 `update_plan` 工具；child 只持有 Host Base
+  ToolSet，不能改写父 Session 计划。该工具使用 Runtime 私有授权 facts 自动允许，不进入 Ask/Auto，
+  但 Tool Call/Result 仍按普通可靠 Tool Exchange 保存。
+- `update_plan` 使用完整替换语义，但 `TodoItemId` 只属于 Runtime 持久化与产品投影，不进入模型
+  输入、隐藏上下文或工具结果。Runtime 在内部按文本、原位置和剩余项依次调和 ID，新项才分配；
+  旧 Conversation 按兼容字段接受并忽略模型提交的 `id`。已有计划可省略 objective 并沿用当前值，
+  首次创建仍必须提供。Runtime 以当前 revision 做 CAS，并以模型 ToolCallId 作为 Store operation
+  幂等身份；Store 成功后才替换 Session 内存投影，真实 revision conflict 不做容错覆盖。
+- WorkPlan 通过 `RuntimeStore` 的 load/mutate/clear 业务操作持久化。易失 Store 与正式 Store 必须保持
+  相同的 revision、幂等、归档、Fork 和删除约束；非法恢复内容令 Runtime 启动 fail-closed。
+- `update_plan` 提交至少一个且全部 Completed 的 item 时，Store 必须在同一事务保存 ToolCallId
+  完成回执并删除当前 WorkPlan；重放返回首次计划结果，SessionView 与后续 claim 均视为无计划。
+  空 item 的总体目标计划不触发自动清除。
+- 排队输入不提前冻结计划。queue driver 在实际领取一条新用户输入、首次提交 Journal 前，把当时最新
+  WorkPlan 追加为版本化 `WORK_PLAN_CONTEXT_V1` Injected Part；已进入 Conversation 的历史消息不回写，
+  retry 继续沿用已有历史上下文。
+- Fork 在 Session 创建操作中把源 WorkPlan 复制成目标 Session revision 1 独立快照；归档保留计划，
+  Session 永久删除随 Store 级联清理。M1 不增加 Goal、自动 continuation 或产品 WorkPlan 查询事件，
+  后者属于 v0.18.0 后续协议里程碑。
+
+## v0.18.0 M2 Goal 领域与 Run 信号边界
+
+- Goal 是独立于 WorkPlan 的 Session 权威状态，主状态仅为 Running、Paused(reason)、Completed；
+  清除表示控制器不存在。冻结预算固定为 20 Run、500,000 total tokens、连续失败 3 次，恢复值必须
+  满足版本常量和状态/时间不变量。
+- objective 恢复副本只保存原始消息 ID、Text/FileReferences 有序用户载荷和
+  `sha256-v1` 内容哈希；恢复时重新序列化并核验哈希，Injected Part、摘要或 LLM 重述都不能成为来源。
+- 所有支持 Tool Call 的父 Agent 都获得 Runtime 私有 `update_goal`；child 不获得。普通 Run 调用得到
+  受控错误，不改变 Goal。Goal-bound Run 必须以 GoalId、generation、RunId 三元绑定创建唯一内存 latch。
+- `update_goal` 必须是 Assistant Turn 唯一 Tool Call；混合或重复信号批次全部拒绝。latch 接受信号后，
+  当前 Run 的后续工具全部拒绝，只允许模型生成最终正文。工具只记录 complete/blocked 与 summary，
+  不直接写 Store 或切换 Session Goal。
+- latch 由 Run 装配层持有并随执行对象释放，不进入 SQLite、Conversation、Recorder 或协议 DTO。M2 不把
+  latch 应用到 Run 结算，因此模型流、Recorder、取消或进程失败不会提前转换 Goal；可靠结算转换与
+  continuation 属于 M4。
+- Runtime 恢复把 Store 已暂停的 Goal 经领域校验装入 Session；孤儿、重复 Session Goal、错误 hash、
+  非法预算或状态/暂停原因组合均令恢复 fail-closed。M2 不实现 `/goal` 输入、Goal Input binding 或自动续跑。
+
+## v0.18.0 M3 Goal Input 与首次启动边界
+
+- `StoredInput` 以正交的 `InputOrigin::{User, Runtime}` 和可选 Goal binding 保存来源、GoalId、
+  generation 与 turn。User Input 必须对应可见的 User-origin Message，Runtime continuation 必须
+  绑定 Goal、保持 transcript hidden 且只包含 Injected Part；非法恢复组合令启动 fail-closed。
+- `start_goal` 在 Runtime 内构造一条仍属于 Conversation 的可见 User Message，并追加版本化
+  Goal 指令。objective 恢复副本只从该消息的 Text/FileReferences 产生，附件顺序与正文完整保留，
+  Injected Part 不进入 objective。
+- Store 的高层 Input 接受操作必须把新 Goal、Goal-bound Input 和首次 Run 原子提交；同一
+  idempotency key 返回首次事实，不能重复建立 Goal。模型不支持 Tool Call 或 Session 已有 Goal 时
+  在持久化前拒绝。
+- Session 调度把普通用户输入与 Goal 输入放入独立 lane。存在 Running Goal 时只领取匹配当前
+  GoalId/generation 的 Goal lane，之后到达的普通用户输入只持久排队，不会被 Goal 自动消费；
+  Queue 的优先级和取消只作用于普通用户 lane。
+- M3 只建立首次 Run，尚不消费 `update_goal` latch 来结算 Goal，也不创建 Runtime continuation。
+  Stop/Resume、预算结算、重启恢复、Fork 和 Goal 历史生命周期统一归 M4；为避免破坏 objective，
+  M3 已禁止 Goal 存在时执行历史重入。
+- 物理模块按领域与用例分层：`src/goal/` 只保存 GoalControl、objective、上下文与 signal；
+  `runtime/goal/commands.rs` 负责 start 准入、resume 未开放门禁及 Goal 专属事实构造；
+  `runtime/input/submission.rs` 负责普通与 Goal 输入共享的消息准备、原子接受和 lane 投影。
+  后续 M4 的结算与 continuation 继续内聚到 `runtime/goal/`，不得回填进通用 Input commands。
+
+## v0.18.0 M4 Goal 续跑与生命周期边界
+
+- Run settlement 是 Run、Goal、预算和后继 Input/Run 的单一高层 Store 操作。Runtime 先根据本 Run
+  signal、规范 usage 和执行结果构造 effect，Store 原子提交后再用返回的权威 Goal/continuation
+  更新 Session 投影；不能先在内存切换 Goal 或另行入队后继。
+- 没有 complete/blocked signal 且预算未触发时，结算创建只含版本化 Injected Part 的隐藏 Runtime
+  continuation；complete 在结算事务中形成 Completed 回执并立即删除 Goal，blocked 转
+  Paused(Blocked)，Run/token/连续失败预算统一转为 Paused(BudgetExceeded)。usage 不完整时
+  不猜测 token，但仍记录该 Run 并保持 usage incomplete 事实。
+- Stop 是 Goal 级操作：先持久暂停为 UserStopped、递增 generation、删除未领取 Runtime continuation，
+  并为活动 Run 记录取消意图；成功后才发布取消 token。当前 Goal Run 不允许走普通单 Run cancel。
+  Clear 主要删除已暂停且无活动 Run 的控制器；完成 Goal 已在结算事务中自动删除。两者都不删除
+  Conversation、WorkPlan 或 held 用户队列。
+- Resume 是显式的新 generation。它可创建无正文隐藏 continuation、原子接受新的可见用户消息，或把
+  已有 held User Input/Run 绑定到新 generation；第三种方式复用原 ID，不复制队列项。所有方式均由
+  Store 返回权威结果后更新 Session，迟到 signal、取消回调和旧 continuation 不能越过 generation。
+- 启动恢复把 Running Goal 原子转为 Paused(RecoveryRequired)、递增 generation 并删除旧 queued
+  continuation。Fork 仅在 objective source message 位于复制前缀内时复制 Goal，分配新 GoalId 并以
+  Paused(Forked)、generation 1 建立独立控制器。历史重入到 objective 或之前拒绝；重入其后时随
+  Conversation generation 切换原子暂停 Goal。Session 删除仍按 Session 所有权清理 Goal 和历史绑定。
+- 恢复时只有仍为 Queued 的 Goal-bound Input 必须匹配当前 GoalId/generation；Committed Input 的
+  binding 是历史审计事实，可以引用已完成、已清除或上一生命周期的 Goal，不能因此要求当前控制器存在。
+- 领域实现继续内聚：`runtime/goal/settlement.rs` 负责 effect，Goal commands 负责 Stop/Resume/Clear，
+  通用 Input 模块只提供消息准备与 lane 投影。M4 不增加 Desktop 快照、HTTP 命令或 SSE 事件；这些
+  公共应用契约属于 M5。
+
+## v0.18.0 M5 产品投影与控制命令边界
+
+- SessionView 从 Session controller 的权威内存状态统一投影 WorkPlan、Goal、held Queue 与当前模型
+  Goal capability；Goal objective 只派生有界预览和附件数，不返回恢复 payload/hash。Runtime 不从
+  Conversation 文本、Todo 状态或 `update_goal` Tool Result 反推 Goal。
+- ClearWorkPlan、Stop/Resume/Clear Goal 都先进入 Session mutation gate，核对 revision 或
+  GoalId/generation，再调用高层 Store 操作；只有持久化成功才替换内存投影并发布失效事件。
+  Goal-bound Run 的普通 retry/cancel 返回 `goal_run_requires_resume`，保持 Goal 级控制入口唯一。
+- `update_plan` 在 Store CAS 与 Session 投影成功后发布 `WorkPlanChanged`；Goal 首次启动、用户消息
+  resume、生命周期命令、Run settlement 和强制 shutdown settlement 在权威转换后发布
+  `GoalChanged`。事件只要求客户端重新读取 SessionView，不成为第二份业务状态。
 
 ## Harness 验证
 

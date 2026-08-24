@@ -96,6 +96,8 @@ mod tests {
                 compacted_usage: None,
             }),
             ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: id("user_1"),
                 parts: vec![],
             }),
@@ -112,6 +114,8 @@ mod tests {
     fn summary_is_required_and_must_not_be_blank() {
         let missing = ConversationSnapshot::new(vec![
             ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: id("user_1"),
                 parts: vec![],
             }),
@@ -156,6 +160,8 @@ mod tests {
                 compacted_usage: None,
             }),
             ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: id("user_1"),
                 parts: vec![],
             }),

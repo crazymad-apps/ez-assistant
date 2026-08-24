@@ -18,7 +18,9 @@
   Tool Definition 或授权事实。`ToolSetSnapshot` 支持消费式追加一个新工具，派生时保留既有
   定义、顺序与实现句柄，并继续执行重名和定义校验。
 - 整批规范 Tool Call 无副作用解析：按原数量和顺序形成 Valid/Invalid item；Valid
-  同时持有只读 resolved invocation 与不可公开、不可替换的一次性 executor。
+  同时持有只读 resolved invocation 与不可公开、不可替换的一次性 executor；Invalid
+  保留原始尝试的工具名和受控错误结果，供上层执行整批 fail-closed 策略，但不产生授权
+  facts 或可执行载荷。
 - `ResolvedToolBatch` 可被 Send authorizer future 安全持有只读引用；可执行
   payload 仍保持 crate-private，只能由 Dispatcher 消费一次。
 - 按批次位置一次性执行：重复执行或执行 Invalid item 形成绑定原 call ID 的内部

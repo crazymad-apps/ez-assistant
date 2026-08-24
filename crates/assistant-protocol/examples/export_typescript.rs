@@ -6,11 +6,12 @@ use assistant_protocol::{
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
-    GetToolDetailRequest, GetToolDetailResult, InterruptRunRequest, InterruptRunResult,
+    GetToolDetailRequest, GetToolDetailResult, GoalId, InterruptRunRequest, InterruptRunResult,
     ListConversationPageRequest, ListConversationPageResult, PrioritizeQueuedInputRequest,
     PrioritizeQueuedInputResult, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
     ResumeQueuedInputRequest, ResumeQueuedInputResult, RuntimeCommand, RuntimeCommandResult,
-    RuntimeEventEnvelope, RuntimeHostCapabilities, RuntimeHostHealth, UploadAttachmentResult,
+    RuntimeEventEnvelope, RuntimeHostCapabilities, RuntimeHostHealth, SubmitInputMode, TodoItemId,
+    UploadAttachmentResult,
 };
 use ts_rs::{Config, TS};
 
@@ -32,6 +33,9 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     export_roots!(
         RuntimeHostHealth,
         RuntimeHostCapabilities,
+        GoalId,
+        SubmitInputMode,
+        TodoItemId,
         UploadAttachmentResult,
         RuntimeCommand,
         RuntimeCommandResult,

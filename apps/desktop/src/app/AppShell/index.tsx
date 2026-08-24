@@ -93,7 +93,7 @@ export const AppShell = observer(function AppShell() {
 
       <div className={styles.app_body}>
         {store.navigation.left_sidebar_open && <SessionSidebar />}
-        <section className={styles.conversation_area}>
+        <section className={styles.conversation_area} data-conversation-area>
           <div className={styles.conversation_headers}>
             <SessionHeader session={session} />
             <ChildTaskSubheader />

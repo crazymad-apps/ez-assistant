@@ -41,12 +41,15 @@ impl Dispatcher {
                         invocation: resolved.invocation,
                         executor: Mutex::new(Some(resolved.executor)),
                     },
-                    Err(result) => ResolvedBatchItem::Invalid(result),
+                    Err(result) => ResolvedBatchItem::Invalid {
+                        tool_name: call.name.clone(),
+                        result,
+                    },
                 },
-                None => ResolvedBatchItem::Invalid(text_error_result(
-                    call,
-                    format!("unknown tool: `{}`", call.name),
-                )),
+                None => ResolvedBatchItem::Invalid {
+                    tool_name: call.name.clone(),
+                    result: text_error_result(call, format!("unknown tool: `{}`", call.name)),
+                },
             })
             .collect();
         ResolvedToolBatch { items }
@@ -67,10 +70,13 @@ impl Dispatcher {
             .get_mut(index)
             .ok_or(DispatchError::IndexOutOfBounds { index, len })?;
         match item {
-            ResolvedBatchItem::Invalid(result) => Ok(ready_result(text_error_result_for_id(
-                result.call_id.clone(),
-                "dispatcher contract violation: cannot execute an invalid resolved item".to_owned(),
-            ))),
+            ResolvedBatchItem::Invalid { result, .. } => {
+                Ok(ready_result(text_error_result_for_id(
+                    result.call_id.clone(),
+                    "dispatcher contract violation: cannot execute an invalid resolved item"
+                        .to_owned(),
+                )))
+            }
             ResolvedBatchItem::Valid {
                 invocation,
                 executor,
@@ -128,12 +134,12 @@ mod tests {
         assert!(matches!(batch.get(0), Some(ResolvedBatchItemRef::Valid(_))));
         assert!(matches!(
             batch.get(1),
-            Some(ResolvedBatchItemRef::Invalid(result))
+            Some(ResolvedBatchItemRef::Invalid { result, .. })
                 if result.call_id == calls[1].id
         ));
         assert!(matches!(
             batch.get(2),
-            Some(ResolvedBatchItemRef::Invalid(result))
+            Some(ResolvedBatchItemRef::Invalid { result, .. })
                 if result.call_id == calls[2].id
         ));
     }
@@ -259,7 +265,7 @@ mod tests {
         let snapshot = registry.snapshot();
         let call = tool_call("resolve_flag", json!({"wrong_phase": true}));
         let batch = Dispatcher::resolve_batch(&snapshot, &[call]);
-        let Some(ResolvedBatchItemRef::Invalid(result)) = batch.get(0) else {
+        let Some(ResolvedBatchItemRef::Invalid { result, .. }) = batch.get(0) else {
             panic!("resolve error creates invalid item");
         };
         let Some(message) = result.content.as_single_text() else {

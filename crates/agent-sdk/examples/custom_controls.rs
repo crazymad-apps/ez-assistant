@@ -55,6 +55,8 @@ fn final_turn() -> AssistantMessage {
 fn input() -> ExecutionInput {
     ExecutionInput {
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new("user_1").expect("valid fixture message id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new("user_text").expect("valid fixture part id"),

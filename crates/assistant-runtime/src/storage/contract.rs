@@ -10,16 +10,18 @@ use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
-    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
+    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest, GoalClear,
+    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
     NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
     PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RewriteResult,
     SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreFuture,
     StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkspaceRemoval,
+    StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -31,6 +33,8 @@ pub struct RecoveredRuntime {
     pub inputs: Vec<StoredInput>,
     pub runs: Vec<StoredRun>,
     pub child_tasks: Vec<StoredChildTask>,
+    pub work_plans: Vec<StoredWorkPlan>,
+    pub goals: Vec<StoredGoal>,
 }
 
 /// Assistant Runtime 使用的持久化能力端口。
@@ -42,6 +46,19 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 为新 Session 一致读取当前 Persona 与 Pinned Memory。
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot>;
+
+    /// 读取一个 Session 的当前 WorkPlan；不存在时返回 `None`。
+    fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>>;
+
+    /// 原子执行完整 WorkPlan 替换；全部 Todo 完成时同事务清除当前计划。
+    /// 同 operation id 即使已自动清除，也返回首次成功结果。
+    fn mutate_work_plan(
+        &self,
+        mutation: WorkPlanMutation,
+    ) -> StoreFuture<'_, WorkPlanMutationResult>;
+
+    /// 以当前修订号 CAS 清除 WorkPlan；空计划与 expected revision 0 幂等成功。
+    fn clear_work_plan(&self, clear: WorkPlanClear) -> StoreFuture<'_, ()>;
 
     /// 读取单例 Persona 的当前权威投影。
     fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot>;
@@ -155,7 +172,22 @@ pub trait RuntimeStore: Send + Sync {
     fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()>;
 
     /// 可靠写入本 Run 尚未提交的完整消息，并同时结算 Run 终态。
-    fn settle_run(&self, settlement: StoredRunSettlement) -> StoreFuture<'_, ()>;
+    fn settle_run(
+        &self,
+        settlement: StoredRunSettlement,
+    ) -> StoreFuture<'_, StoredRunSettlementResult>;
+
+    /// CAS 暂停 Goal、作废排队 continuation，并可靠记录活动 Run 取消意图。
+    fn stop_goal(&self, stop: GoalStop) -> StoreFuture<'_, GoalStopResult>;
+
+    /// CAS 删除非运行中的 Goal 控制器；WorkPlan 与普通用户队列保持不变。
+    fn clear_goal(&self, clear: GoalClear) -> StoreFuture<'_, ()>;
+
+    /// 原子把一条 held 用户 Input 绑定到恢复后的新 Goal generation。
+    fn resume_goal_with_held_input(
+        &self,
+        resume: GoalHeldInputResume,
+    ) -> StoreFuture<'_, GoalHeldInputResumeResult>;
 
     /// 按当前权威 generation 加载并校验完整规范 Conversation。
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot>;

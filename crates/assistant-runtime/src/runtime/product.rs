@@ -17,17 +17,18 @@ use assistant_protocol::{
     GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
     GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
     GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
-    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, ImageHandlingMode,
+    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot,
+    GoalPauseReasonSnapshot, GoalSnapshot, GoalStateSnapshot, ImageHandlingMode,
     ListAttachmentsRequest, ListConversationPageRequest, ListConversationPageResult,
     ListSessionsRequest, ListWorkspacesRequest, MessageId, ObservedSnapshot, PartId,
     QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, ReasoningEffortKey,
     ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
     RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot,
     SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionUsageSnapshot, SessionViewSnapshot, TokenUsageSnapshot,
-    ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference,
-    ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot, UsageTotals,
-    UserMessageSnapshot,
+    SessionListFilter, SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot,
+    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot,
+    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
+    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,7 @@ struct ConversationCursor {
     end: usize,
 }
 
-struct ProjectionContext {
+pub(super) struct ProjectionContext {
     run_by_message: HashMap<String, MessageRunProjection>,
     input_by_message: HashMap<String, assistant_protocol::InputId>,
     attachment_by_path: HashMap<String, AttachmentId>,
@@ -92,7 +93,9 @@ impl AssistantRuntime {
         markdown.push_str("\n\n");
         for message in snapshot.messages {
             match message {
-                ConversationMessage::User(message) => {
+                ConversationMessage::User(message)
+                    if message.transcript_visibility.is_visible() =>
+                {
                     markdown.push_str("## 用户\n\n");
                     for part in message.parts {
                         match part {
@@ -133,7 +136,8 @@ impl AssistantRuntime {
                         markdown.push('\n');
                     }
                 }
-                ConversationMessage::Tool(_)
+                ConversationMessage::User(_)
+                | ConversationMessage::Tool(_)
                 | ConversationMessage::System(_)
                 | ConversationMessage::ContextSummary(_) => {}
             }
@@ -162,6 +166,18 @@ impl AssistantRuntime {
                     filter: SessionListFilter::Archived,
                 })?
                 .sessions;
+            let active_workspace_ids = workspaces
+                .iter()
+                .map(|workspace| workspace.workspace_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let belongs_to_visible_workspace = |session: &assistant_protocol::SessionSummary| {
+                session
+                    .workspace_id
+                    .as_ref()
+                    .is_none_or(|workspace_id| active_workspace_ids.contains(workspace_id))
+            };
+            active_sessions.retain(&belongs_to_visible_workspace);
+            archived_sessions.retain(belongs_to_visible_workspace);
             for session in active_sessions
                 .iter_mut()
                 .chain(archived_sessions.iter_mut())
@@ -264,6 +280,13 @@ impl AssistantRuntime {
             let usage = project_usage(&stored_usage, &summary, self)?;
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
+            let (work_plan, goal) = {
+                let state = session.lock_state()?;
+                (
+                    state.work_plan.as_ref().map(project_work_plan),
+                    state.goal.as_ref().map(project_goal).transpose()?,
+                )
+            };
             let child_tasks = self.child_tasks.list_for_session(&request.session_id)?;
             let mut child_task_items = Vec::with_capacity(child_tasks.len());
             for task in child_tasks {
@@ -277,6 +300,8 @@ impl AssistantRuntime {
                         value: SessionViewSnapshot {
                             session: summary,
                             composer_capabilities,
+                            work_plan,
+                            goal,
                             active_run,
                             queue,
                             approvals,
@@ -1156,6 +1181,7 @@ impl AssistantRuntime {
         Ok(ComposerCapabilitiesSnapshot {
             reasoning_effort_options,
             image_handling,
+            goal_supported: model.capabilities().tool_calls,
         })
     }
 }
@@ -1170,7 +1196,7 @@ fn protocol_effort_key(value: crate::ReasoningEffortKey) -> ReasoningEffortKey {
     }
 }
 
-fn empty_child_projection() -> ProjectionContext {
+pub(super) fn empty_child_projection() -> ProjectionContext {
     ProjectionContext {
         run_by_message: HashMap::new(),
         input_by_message: HashMap::new(),
@@ -1184,8 +1210,9 @@ pub(super) fn queue_snapshot(
     session: &crate::session::SessionController,
 ) -> RuntimeResult<QueueSnapshot> {
     let state = session.lock_state()?;
+    let held_by_goal = state.goal.is_some();
     let items = state
-        .runnable_inputs
+        .user_inputs
         .iter()
         .enumerate()
         .filter_map(|(position, input_id)| {
@@ -1202,6 +1229,7 @@ pub(super) fn queue_snapshot(
                 submitted_at_ms: input.stored.accepted_at_ms,
                 position: u32::try_from(position).unwrap_or(u32::MAX),
                 is_prioritized: position == 0,
+                held_by_goal,
             })
         })
         .collect();
@@ -1219,7 +1247,100 @@ pub(super) fn queue_snapshot(
     })
 }
 
-fn project_conversation(
+pub(super) fn project_work_plan(plan: &crate::work_plan::WorkPlan) -> WorkPlanSnapshot {
+    WorkPlanSnapshot {
+        revision: plan.revision,
+        objective: plan.objective.clone(),
+        items: plan
+            .items
+            .iter()
+            .map(|item| WorkPlanItemSnapshot {
+                id: item.id.clone(),
+                text: item.text.clone(),
+                status: match item.status {
+                    crate::work_plan::TodoItemStatus::Pending => TodoItemStatusSnapshot::Pending,
+                    crate::work_plan::TodoItemStatus::InProgress => {
+                        TodoItemStatusSnapshot::InProgress
+                    }
+                    crate::work_plan::TodoItemStatus::Completed => {
+                        TodoItemStatusSnapshot::Completed
+                    }
+                },
+            })
+            .collect(),
+        updated_at_ms: plan.updated_at_ms,
+    }
+}
+
+pub(crate) fn project_goal(goal: &crate::goal::GoalControl) -> RuntimeResult<GoalSnapshot> {
+    let mut objective_text = String::new();
+    let mut attachment_count = 0usize;
+    for part in &goal.objective.payload {
+        match part {
+            crate::goal::GoalObjectivePart::Text(part) => {
+                if !objective_text.is_empty() {
+                    objective_text.push('\n');
+                }
+                objective_text.push_str(&part.text);
+            }
+            crate::goal::GoalObjectivePart::FileReferences(part) => {
+                attachment_count = attachment_count.saturating_add(part.files.len());
+            }
+        }
+    }
+    let (state, pause_reason) = match &goal.state {
+        crate::goal::GoalState::Running => (GoalStateSnapshot::Running, None),
+        crate::goal::GoalState::Paused(reason) => (
+            GoalStateSnapshot::Paused,
+            Some(match reason {
+                crate::goal::GoalPauseReason::Blocked { summary } => {
+                    GoalPauseReasonSnapshot::Blocked {
+                        summary: summary.clone(),
+                    }
+                }
+                crate::goal::GoalPauseReason::UserStopped => GoalPauseReasonSnapshot::UserStopped,
+                crate::goal::GoalPauseReason::RunLimitReached => {
+                    GoalPauseReasonSnapshot::RunLimitReached
+                }
+                crate::goal::GoalPauseReason::TokenLimitReached => {
+                    GoalPauseReasonSnapshot::TokenLimitReached
+                }
+                crate::goal::GoalPauseReason::ConsecutiveFailures => {
+                    GoalPauseReasonSnapshot::ConsecutiveFailures
+                }
+                crate::goal::GoalPauseReason::RecoveryRequired => {
+                    GoalPauseReasonSnapshot::RecoveryRequired
+                }
+                crate::goal::GoalPauseReason::Forked => GoalPauseReasonSnapshot::Forked,
+            }),
+        ),
+        crate::goal::GoalState::Completed => (GoalStateSnapshot::Completed, None),
+    };
+    Ok(GoalSnapshot {
+        goal_id: goal.id.clone(),
+        objective_message_id: protocol_message_id(goal.objective.source_message_id.as_str())?,
+        objective_preview: truncate_chars(&objective_text, TOOL_SUMMARY_CHARS),
+        attachment_count: u32::try_from(attachment_count).unwrap_or(u32::MAX),
+        state,
+        pause_reason,
+        generation: goal.generation,
+        turn: goal.turn,
+        budget: GoalBudgetSnapshot {
+            max_runs: goal.budget.max_runs,
+            max_total_tokens: goal.budget.max_total_tokens,
+            max_consecutive_failures: goal.budget.max_consecutive_failures,
+            used_runs: goal.budget.used_runs,
+            used_total_tokens: goal.budget.used_total_tokens,
+            consecutive_failures: goal.consecutive_failures,
+            usage_complete: goal.budget.usage_complete,
+        },
+        created_at_ms: goal.created_at_ms,
+        updated_at_ms: goal.updated_at_ms,
+        completed_at_ms: goal.completed_at_ms,
+    })
+}
+
+pub(super) fn project_conversation(
     snapshot: &ConversationSnapshot,
     context: &ProjectionContext,
 ) -> RuntimeResult<Vec<ConversationItem>> {
@@ -1236,7 +1357,7 @@ fn project_conversation(
     let mut items = Vec::new();
     for message in &snapshot.messages {
         match message {
-            ConversationMessage::User(user) => {
+            ConversationMessage::User(user) if user.transcript_visibility.is_visible() => {
                 let attachment_ids = user
                     .parts
                     .iter()
@@ -1316,7 +1437,8 @@ fn project_conversation(
                         .copied(),
                 }));
             }
-            ConversationMessage::System(_)
+            ConversationMessage::User(_)
+            | ConversationMessage::System(_)
             | ConversationMessage::ContextSummary(_)
             | ConversationMessage::Tool(_) => {}
         }

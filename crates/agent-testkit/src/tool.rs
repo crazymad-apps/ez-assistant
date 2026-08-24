@@ -271,7 +271,7 @@ mod tests {
         let snapshot = registry.snapshot();
         let mut batch = Dispatcher::resolve_batch(&snapshot, std::slice::from_ref(call));
         match batch.get(0) {
-            Some(ResolvedBatchItemRef::Invalid(result)) => result.clone(),
+            Some(ResolvedBatchItemRef::Invalid { result, .. }) => result.clone(),
             Some(ResolvedBatchItemRef::Valid(_)) => {
                 Dispatcher::execute(&mut batch, 0, ToolContext::default())
                     .expect("single-item batch index")

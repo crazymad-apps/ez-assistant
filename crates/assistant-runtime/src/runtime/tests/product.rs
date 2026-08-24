@@ -8,6 +8,8 @@ use assistant_protocol::{
     SetMessageFeedbackRequest,
 };
 
+use crate::runtime::product::{empty_child_projection, project_conversation};
+
 #[tokio::test]
 async fn markdown_export_contains_product_content_without_runtime_metadata() {
     let runtime = runtime(Arc::new(ScriptedModelService::new(
@@ -27,6 +29,7 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
         .expect("session");
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session.session.session_id.clone(),
             message: "exported question".to_owned(),
             attachment_ids: Vec::new(),
@@ -37,6 +40,26 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
         .expect("submit");
     wait_for_terminal(&runtime, &session.session.session_id, &submitted.run.run_id).await;
 
+    let controller = runtime
+        .session(&session.session.session_id)
+        .expect("session controller");
+    controller
+        .lock_state()
+        .expect("session state")
+        .journal
+        .as_mut()
+        .expect("conversation journal")
+        .append_completed(ConversationMessage::User(agent_types::UserMessage {
+            id: MessageId::new("runtime-hidden-export").expect("message id"),
+            origin: agent_types::UserMessageOrigin::Runtime,
+            transcript_visibility: agent_types::TranscriptVisibility::Hidden,
+            parts: vec![UserPart::Injected(TextPart {
+                id: PartId::new("runtime-hidden-export-injected").expect("part id"),
+                text: "runtime-export-secret".to_owned(),
+            })],
+        }))
+        .expect("append hidden runtime message");
+
     let markdown = runtime
         .export_session_markdown(&session.session.session_id)
         .await
@@ -46,6 +69,39 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
     assert!(markdown.contains("## 助手\n\nexported answer"));
     assert!(!markdown.contains("provider_state"));
     assert!(!markdown.contains("agent_readable_path"));
+    assert!(!markdown.contains("runtime-export-secret"));
+}
+
+#[test]
+fn conversation_projection_omits_hidden_runtime_user_messages() {
+    let snapshot = agent_types::ConversationSnapshot::new(vec![
+        ConversationMessage::User(agent_types::UserMessage {
+            id: MessageId::new("visible-user").expect("message id"),
+            origin: agent_types::UserMessageOrigin::User,
+            transcript_visibility: agent_types::TranscriptVisibility::Visible,
+            parts: vec![UserPart::Text(TextPart {
+                id: PartId::new("visible-user-text").expect("part id"),
+                text: "visible question".to_owned(),
+            })],
+        }),
+        ConversationMessage::User(agent_types::UserMessage {
+            id: MessageId::new("runtime-hidden-user").expect("message id"),
+            origin: agent_types::UserMessageOrigin::Runtime,
+            transcript_visibility: agent_types::TranscriptVisibility::Hidden,
+            parts: vec![UserPart::Injected(TextPart {
+                id: PartId::new("runtime-hidden-user-injected").expect("part id"),
+                text: "continue internally".to_owned(),
+            })],
+        }),
+    ]);
+
+    let items = project_conversation(&snapshot, &empty_child_projection()).expect("projection");
+    assert_eq!(items.len(), 1);
+    let ConversationItem::User(user) = &items[0] else {
+        panic!("visible user item")
+    };
+    assert_eq!(user.message_id.as_str(), "visible-user");
+    assert_eq!(user.text, "visible question");
 }
 
 #[tokio::test]
@@ -66,6 +122,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "finish time".to_owned(),
             attachment_ids: Vec::new(),
@@ -137,6 +194,7 @@ async fn session_usage_projects_latest_and_token_weighted_cache_hit_rates() {
     for message in ["first request", "second request"] {
         let run = runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
@@ -178,6 +236,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "question".to_owned(),
             attachment_ids: Vec::new(),
@@ -315,6 +374,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
     for message in ["one", "two"] {
         let submitted = runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session.session.session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
@@ -455,6 +515,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .session_id;
     let active = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "active".to_owned(),
             attachment_ids: Vec::new(),
@@ -468,6 +529,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .expect("model entered");
     let second = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
@@ -478,6 +540,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .expect("second input");
     let third = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "third".to_owned(),
             attachment_ids: Vec::new(),
@@ -552,6 +615,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
     assert_eq!(paused.items[0].input_id, third.input_id);
     runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "continue".to_owned(),
             attachment_ids: Vec::new(),
@@ -613,6 +677,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
     set_auto_approval(&runtime, &session_id).await;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "save a report".to_owned(),
             attachment_ids: Vec::new(),

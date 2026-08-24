@@ -27,8 +27,9 @@ use super::{
 use crate::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, ForkSessionEnvironmentFactoryRequest,
     ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewStoredInput,
-    NewStoredSession, ReasoningEffortChange, RuntimeError, RuntimeResult, SessionDeletion,
-    SessionFork, SessionPinnedChange, SessionTitleChange, StoredInputState, VariantChange,
+    NewStoredSession, ReasoningEffortChange, RewriteGoalEffect, RuntimeError, RuntimeResult,
+    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoredInputState,
+    VariantChange,
     journal::InMemoryJournal,
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
@@ -50,7 +51,16 @@ impl AssistantRuntime {
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
         let _mutation = source.mutation().await;
-        let (source_generation, title, model_key, reasoning_effort, current_variant, approval_mode) = {
+        let (
+            source_generation,
+            title,
+            model_key,
+            reasoning_effort,
+            current_variant,
+            approval_mode,
+            work_plan,
+            source_goal,
+        ) = {
             let state = source.lock_state()?;
             (
                 state.body_generation,
@@ -59,6 +69,19 @@ impl AssistantRuntime {
                 state.reasoning_effort,
                 state.current_variant,
                 state.approval_mode,
+                state.work_plan.as_ref().map(|plan| crate::StoredWorkPlan {
+                    session_id: request.session_id.clone(),
+                    revision: plan.revision,
+                    objective: plan.objective.clone(),
+                    items: plan
+                        .items
+                        .iter()
+                        .map(crate::StoredWorkPlanItem::from)
+                        .collect(),
+                    last_operation_id: "fork-source-snapshot".to_owned(),
+                    updated_at_ms: plan.updated_at_ms,
+                }),
+                state.goal.clone(),
             )
         };
         if source_generation != request.expected_generation {
@@ -175,6 +198,19 @@ impl AssistantRuntime {
             .into_iter()
             .collect();
         let created_at_ms = now_ms()?;
+        let forked_goal = source_goal
+            .filter(|goal| {
+                conversation.messages.iter().any(|message| {
+                    matches!(message, ConversationMessage::User(user)
+                        if user.id == goal.objective.source_message_id)
+                })
+            })
+            .map(|goal| {
+                Ok(goal
+                    .forked(crate::goal::allocate_goal_id()?, created_at_ms)
+                    .to_stored(session_id.clone()))
+            })
+            .transpose()?;
         let stored = self
             .store
             .fork_session(SessionFork {
@@ -195,16 +231,34 @@ impl AssistantRuntime {
                 conversation,
                 attachments,
                 tool_images,
+                work_plan,
+                goal: forked_goal,
             })
             .await
             .map_err(|source| RuntimeError::from_store("fork session", source))?;
         self.permission_coordinator
             .register_scope(crate::PermissionFileScope::Session(session_id.clone()))
             .await?;
+        let work_plan = stored
+            .work_plan
+            .map(crate::work_plan::WorkPlan::try_from)
+            .transpose()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "forked work plan",
+            })?;
+        let goal = stored
+            .goal
+            .map(crate::goal::GoalControl::try_from)
+            .transpose()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "forked Goal",
+            })?;
         let controller = std::sync::Arc::new(crate::session::SessionController::recovered(
             stored.session,
             Vec::new(),
             Vec::new(),
+            work_plan,
+            goal,
         ));
         self.sessions
             .write()
@@ -603,6 +657,11 @@ impl AssistantRuntime {
             .ok_or_else(|| RuntimeError::ModelUnavailable {
                 model_key: model_key.clone(),
             })?;
+        if session.lock_state()?.goal.is_some() && !model.capabilities().tool_calls {
+            return Err(RuntimeError::GoalUnsupportedByModel {
+                session_id: request.session_id.clone(),
+            });
+        }
         let reasoning_effort = downgrade_effort(current_effort, model.capabilities());
         let changed_at_ms = now_ms()?;
         self.store
@@ -758,7 +817,6 @@ impl AssistantRuntime {
             return Ok(ReenterFromUserMessageResult { input_id, run });
         }
         session.ensure_idle()?;
-
         let current = session.conversation_snapshot()?;
         let target_message_id =
             agent_types::MessageId::new(request.message_id.as_str()).map_err(|_| {
@@ -775,6 +833,18 @@ impl AssistantRuntime {
             .ok_or(RuntimeError::InvalidRequest {
                 reason: "target message is not a user message in this session",
             })?;
+        let current_goal = session.lock_state()?.goal.clone();
+        if let Some(goal) = current_goal.as_ref() {
+            let objective_index = current.messages.iter().position(|message| {
+                matches!(message, ConversationMessage::User(user)
+                        if user.id == goal.objective.source_message_id)
+            });
+            if objective_index.is_none_or(|objective_index| target_index <= objective_index) {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "history re-entry at or before the Goal objective requires stopping and clearing the Goal first",
+                });
+            }
+        }
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
         let new_message = create_user_message(request.message, files, request.variant)?;
         let mut messages = current.messages[..target_index].to_vec();
@@ -849,10 +919,30 @@ impl AssistantRuntime {
                 run_id: run_id.clone(),
                 cancellation: self.root_cancellation.child_token(),
                 events: self.event_sender.clone(),
+                goal_binding: None,
             },
             None,
         )?;
         let changed_at_ms = now_ms()?;
+        let rewritten_goal = current_goal
+            .map(|goal| {
+                let expected_goal_id = goal.id.clone();
+                let expected_generation = goal.generation;
+                let paused = goal.paused_for_recovery(changed_at_ms).map_err(|_| {
+                    RuntimeError::InternalStateUnavailable {
+                        component: "history rewrite Goal transition",
+                    }
+                })?;
+                Ok((
+                    paused.clone(),
+                    RewriteGoalEffect {
+                        expected_goal_id,
+                        expected_generation,
+                        goal: paused.to_stored(session.id().clone()),
+                    },
+                ))
+            })
+            .transpose()?;
         let rewritten = self
             .store
             .rewrite_from_user(ConversationRewrite {
@@ -865,11 +955,16 @@ impl AssistantRuntime {
                     session_id: request.session_id,
                     idempotency_key: request.idempotency_key,
                     agent_variant: request.variant,
+                    origin: crate::InputOrigin::User,
+                    goal_binding: None,
                     approval_mode,
                     message: new_message.clone(),
+                    new_goal: None,
+                    resumed_goal: None,
                     generated_title: None,
                     accepted_at_ms: changed_at_ms,
                 },
+                goal_effect: rewritten_goal.as_ref().map(|(_, effect)| effect.clone()),
                 changed_at_ms,
             })
             .await
@@ -885,8 +980,10 @@ impl AssistantRuntime {
             state
                 .inputs
                 .retain(|_, input| !removed_inputs.contains(&input.stored.input_id));
-            state.runnable_inputs.clear();
-            state.resume_required = false;
+            state.user_inputs.clear();
+            state.goal_inputs.clear();
+            state.goal = rewritten_goal.map(|(goal, _)| goal);
+            state.resume_required = state.goal.is_some() || !state.user_inputs.is_empty();
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.message_count = replacement_message_count;
@@ -896,7 +993,7 @@ impl AssistantRuntime {
             state.current_variant = rewritten.input.agent_variant;
             state.runs.insert(rewritten.run.run_id.clone(), run);
             state
-                .runnable_inputs
+                .user_inputs
                 .push_back(rewritten.input.input_id.clone());
             state.inputs.insert(
                 rewritten.input.input_id.clone(),

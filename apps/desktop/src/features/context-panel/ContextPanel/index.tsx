@@ -1,6 +1,10 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
-import type { AttachmentSummary, SystemContextSnapshot } from "../../../generated/assistant-protocol";
+import type {
+  AttachmentSummary,
+  SessionViewSnapshot,
+  SystemContextSnapshot,
+} from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { AttachmentPreviewDialog } from "../AttachmentPreviewDialog";
@@ -99,6 +103,7 @@ export const ContextPanel = observer(function ContextPanel() {
                 session.resume_required,
               )}</dd></div>
               <div><dt>模型</dt><dd>{formatModelIdentity(model?.display_name, session.model_key)}</dd></div>
+              <div><dt>图片理解</dt><dd>{imageHandlingLabel(session_view?.composer_capabilities.image_handling)}</dd></div>
               <div><dt>执行方式</dt><dd>{formatVariant(session.current_variant)} · {formatApprovalMode(session.approval_mode)}</dd></div>
               <div><dt>消息</dt><dd>{session.message_count}</dd></div>
             </dl>
@@ -248,3 +253,9 @@ export const ContextPanel = observer(function ContextPanel() {
     </aside>
   );
 });
+
+function imageHandlingLabel(mode: SessionViewSnapshot["composer_capabilities"]["image_handling"] | undefined): string {
+  if (mode === "native") return "模型原生";
+  if (mode === "tool") return "辅助视觉模型";
+  return "当前不可用";
+}

@@ -5,10 +5,12 @@ import type {
   ApprovalId,
   AttachmentId,
   ChildTaskId,
+  GoalId,
   InputId,
   RunId,
   ReasoningEffortKey,
   SessionId,
+  SubmitInputMode,
 } from "../generated/assistant-protocol";
 import type { ConnectionStore } from "./ConnectionStore";
 import type { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
@@ -59,6 +61,7 @@ export class RunInteractionController {
     message: string,
     variant: AgentVariant,
     attachment_ids: readonly AttachmentId[] = [],
+    mode: SubmitInputMode = "normal",
   ): Promise<boolean> {
     const { connection, runtime, state } = this.dependencies;
     const client = runtime.client;
@@ -74,6 +77,7 @@ export class RunInteractionController {
           session_id,
           message,
           variant,
+          mode,
           attachment_ids: [...attachment_ids],
           idempotency_key: createIdempotencyKey(),
         },
@@ -127,8 +131,41 @@ export class RunInteractionController {
     }));
   }
 
-  async setSessionReasoningEffort(session_id: SessionId, effort: ReasoningEffortKey | null): Promise<void> {
-    await this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+  async clearWorkPlan(session_id: SessionId, expected_revision: number): Promise<boolean> {
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "clear_work_plan",
+      payload: { session_id, expected_revision },
+    }));
+  }
+
+  async stopGoal(session_id: SessionId, goal_id: GoalId, expected_generation: number): Promise<boolean> {
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "stop_goal",
+      payload: { session_id, goal_id, expected_generation },
+    }));
+  }
+
+  async resumeGoal(
+    session_id: SessionId,
+    goal_id: GoalId,
+    expected_generation: number,
+    input_id: InputId | null = null,
+  ): Promise<boolean> {
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "resume_goal",
+      payload: { session_id, goal_id, expected_generation, input_id },
+    }));
+  }
+
+  async clearGoal(session_id: SessionId, goal_id: GoalId, expected_generation: number): Promise<boolean> {
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "clear_goal",
+      payload: { session_id, goal_id, expected_generation },
+    }));
+  }
+
+  async setSessionReasoningEffort(session_id: SessionId, effort: ReasoningEffortKey | null): Promise<boolean> {
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
       type: "set_session_reasoning_effort",
       payload: { session_id, effort },
     }));

@@ -184,11 +184,20 @@ async fn preview_tool_resource(
         let Some(directory) = Path::new(&resource.path).parent().map(Path::to_path_buf) else {
             return resource_error(invalid_request("tool image path is invalid"));
         };
-        let generated = tokio::task::spawn_blocking(move || {
-            crate::image::tool_image_thumbnail(&directory, &reference)
+        let media_type = reference.media_type().to_owned();
+        // Session Tool Image 已在写入时完成完整解码校验。预览只重验普通文件、MIME 与内容哈希，
+        // 并复用本次读取的原始字节，避免重复解码、缩放、JPEG 编码和第二次文件读取。
+        let loaded = tokio::task::spawn_blocking(move || {
+            crate::image::read_tool_image_for_preview(&directory, &reference)
         });
-        let bytes = match generated.await {
-            Ok(Ok(bytes)) => bytes,
+        let bytes = match loaded.await {
+            Ok(Ok(bytes)) if bytes.len() <= MAX_IMAGE_PREVIEW_BYTES as usize => bytes,
+            Ok(Ok(_)) => {
+                return resource_error(RuntimeErrorInfo::new(
+                    RuntimeErrorCode::ResourceTooLarge,
+                    "resource exceeds the preview size limit",
+                ));
+            }
             _ => {
                 return resource_error(RuntimeErrorInfo::new(
                     RuntimeErrorCode::AttachmentUnavailable,
@@ -197,9 +206,9 @@ async fn preview_tool_resource(
             }
         };
         let mut response = Response::new(Body::from(bytes));
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+        if let Ok(value) = HeaderValue::from_str(&media_type) {
+            response.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
         response.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("private, max-age=31536000, immutable"),

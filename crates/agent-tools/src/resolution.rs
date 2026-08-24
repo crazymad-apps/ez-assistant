@@ -224,7 +224,10 @@ pub(crate) enum ResolvedBatchItem {
         executor: Mutex<Option<Box<dyn ErasedResolvedExecution>>>,
     },
     /// 未知工具、参数无效或 resolve 失败产生的稳定错误结果。
-    Invalid(ToolResult),
+    Invalid {
+        tool_name: ToolName,
+        result: ToolResult,
+    },
 }
 
 /// resolved batch 中单个位置的只读视图。
@@ -233,7 +236,10 @@ pub enum ResolvedBatchItemRef<'a> {
     /// 解析成功，可进入策略、授权和执行。
     Valid(&'a ResolvedToolInvocation),
     /// 未知工具、输入无效或 resolve 失败，不得进入授权和执行。
-    Invalid(&'a ToolResult),
+    Invalid {
+        tool_name: &'a ToolName,
+        result: &'a ToolResult,
+    },
 }
 
 /// 保留原 Tool Call 数量与顺序的完整 resolved batch。
@@ -256,7 +262,9 @@ impl ResolvedToolBatch {
     pub fn get(&self, index: usize) -> Option<ResolvedBatchItemRef<'_>> {
         self.items.get(index).map(|item| match item {
             ResolvedBatchItem::Valid { invocation, .. } => ResolvedBatchItemRef::Valid(invocation),
-            ResolvedBatchItem::Invalid(result) => ResolvedBatchItemRef::Invalid(result),
+            ResolvedBatchItem::Invalid { tool_name, result } => {
+                ResolvedBatchItemRef::Invalid { tool_name, result }
+            }
         })
     }
 
@@ -264,7 +272,9 @@ impl ResolvedToolBatch {
     pub fn iter(&self) -> impl ExactSizeIterator<Item = ResolvedBatchItemRef<'_>> {
         self.items.iter().map(|item| match item {
             ResolvedBatchItem::Valid { invocation, .. } => ResolvedBatchItemRef::Valid(invocation),
-            ResolvedBatchItem::Invalid(result) => ResolvedBatchItemRef::Invalid(result),
+            ResolvedBatchItem::Invalid { tool_name, result } => {
+                ResolvedBatchItemRef::Invalid { tool_name, result }
+            }
         })
     }
 }

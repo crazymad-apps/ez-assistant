@@ -45,6 +45,8 @@ pub(super) fn child_user_message(
         task_private_directory,
     ))?);
     Ok(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: allocate_message_id()?,
         parts,
     })

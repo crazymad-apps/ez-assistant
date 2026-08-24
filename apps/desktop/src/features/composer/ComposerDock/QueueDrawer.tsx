@@ -1,28 +1,33 @@
 import { observer } from "mobx-react-lite";
-import type { QueueSnapshot } from "../../../generated/assistant-protocol";
+import type { GoalSnapshot, QueueSnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { ComposerSecondaryDrawer } from "./ComposerSecondaryDrawer";
 import styles from "./index.module.scss";
 
 export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
   open: boolean;
   on_open_change: (open: boolean) => void;
+  goal: GoalSnapshot | null;
   queue: QueueSnapshot;
   session_id: string;
 }>) {
   const store = useRootStore();
   const needs_resume = props.queue.state !== "automatic";
+  const held_count = props.queue.items.filter((item) => item.held_by_goal).length;
   return (
-    <section className={styles.queue_drawer} data-open={props.open}>
-      <button className={styles.queue_header} onClick={() => props.on_open_change(!props.open)} type="button">
+    <ComposerSecondaryDrawer
+      label="输入队列"
+      on_open_change={props.on_open_change}
+      open={props.open}
+      summary={<>
         <Icon name="fork" size={16} />
-        <strong>{needs_resume ? "待恢复队列" : "待执行队列"}</strong>
-        <b>{props.queue.items.length}</b>
-        <Icon name="chevron-down" size={14} />
-      </button>
-      {props.open && (
-        <div className={styles.queue_items}>
-          {needs_resume && (
+        <strong>{held_count > 0 ? "待处理指导" : needs_resume ? "待恢复队列" : "待执行队列"}</strong>
+        <b className={styles.secondary_drawer_count}>{props.queue.items.length}</b>
+      </>}
+    >
+      <div className={styles.queue_items}>
+          {needs_resume && held_count === 0 && (
             <button
               disabled={store.pending_queue_input_id !== null}
               onClick={() => void store.resumeAllQueuedInputs(props.session_id, props.queue.revision)}
@@ -35,15 +40,27 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
             <div className={styles.queue_item} key={item.input_id}>
               <span>{item.position}</span>
               <p title={item.text_preview}>{item.text_preview}</p>
+              <small>{item.held_by_goal ? "Goal 暂存" : ""}</small>
               <time>{formatTime(item.submitted_at_ms)}</time>
               <button
-                disabled={store.pending_queue_input_id !== null}
-                onClick={() => needs_resume
-                  ? void store.resumeQueuedInput(props.session_id, item.input_id, props.queue.revision)
-                  : void store.prioritizeQueuedInput(props.session_id, item.input_id, props.queue.revision)}
+                disabled={
+                  store.pending_queue_input_id !== null
+                  || Boolean(item.held_by_goal && props.goal?.state !== "paused")
+                }
+                onClick={() => {
+                  if (item.held_by_goal && props.goal?.state === "paused") {
+                    void store.resumeGoal(props.session_id, props.goal.goal_id, props.goal.generation, item.input_id);
+                  } else if (needs_resume) {
+                    void store.resumeQueuedInput(props.session_id, item.input_id, props.queue.revision);
+                  } else if (!item.held_by_goal) {
+                    void store.prioritizeQueuedInput(props.session_id, item.input_id, props.queue.revision);
+                  }
+                }}
                 type="button"
               >
-                {needs_resume ? "恢复" : item.is_prioritized ? "已优先" : "优先"}
+                {item.held_by_goal
+                  ? props.goal?.state === "paused" ? "用于 Goal" : "已暂存"
+                  : needs_resume ? "恢复" : item.is_prioritized ? "已优先" : "优先"}
               </button>
               <button
                 aria-label="移除排队输入"
@@ -55,9 +72,8 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
               </button>
             </div>
           ))}
-        </div>
-      )}
-    </section>
+      </div>
+    </ComposerSecondaryDrawer>
   );
 });
 

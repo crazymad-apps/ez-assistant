@@ -21,6 +21,9 @@
   生成摘要的模型身份、摘要请求自身的 usage 和被压缩历史的累计 usage 分字段保存。
 - `UserPart::Injected` 可承载 Runtime 已确定且需要持久重放的变体指令或 continuation 锚点；
   它不是用户正文，但必须随规范 User Message 持久化，不能在会话重建时重新猜测生成。
+- `UserMessageOrigin` 与 `TranscriptVisibility` 是正交应用元数据：旧 JSON 缺字段时必须分别按
+  `User`、`Visible` 读取；`Hidden` 只排除产品转录，不得从规范 Conversation 或模型上下文移除。
+  Provider Adapter 不编码这两个字段。
 - `UserPart::FileReferences` 是持久化的用户可见 Part，只保存原始文件名与
   Agent 稳定可读路径；不包含应用层 Attachment ID、文件正文、Base64 或解析结果。
 - `ToolResultContent` 是非空、有序的 `Text`/`Json`/`Image` Part 集合；新写入统一使用

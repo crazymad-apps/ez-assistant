@@ -45,6 +45,14 @@ impl AssistantRuntime {
                     RuntimeError::from_store("register workspace", source)
                 }
             })?;
+        let restored = self
+            .workspaces
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "workspace registry",
+            })?
+            .get(&stored.workspace_id)
+            .is_some_and(|workspace| workspace.lifecycle == StoredWorkspaceLifecycle::Removed);
         self.permission_coordinator
             .register_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))
             .await?;
@@ -60,6 +68,7 @@ impl AssistantRuntime {
         });
         Ok(RegisterWorkspaceResult {
             workspace: projection,
+            restored,
         })
     }
 

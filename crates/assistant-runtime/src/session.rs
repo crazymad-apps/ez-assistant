@@ -15,9 +15,12 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
 use crate::{
     RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
-    StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredSession, id,
+    StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredSession,
+    goal::{GoalControl, GoalState},
+    id,
     journal::InMemoryJournal,
     run::{ActiveRun, RunRecord},
+    work_plan::WorkPlan,
 };
 
 pub(crate) struct SessionController {
@@ -45,7 +48,10 @@ pub(crate) struct SessionState {
     pub(crate) is_conversation_available: bool,
     pub(crate) runs: BTreeMap<RunId, RunRecord>,
     pub(crate) inputs: BTreeMap<InputId, InputRecord>,
-    pub(crate) runnable_inputs: VecDeque<InputId>,
+    /// 产品 Queue 中的普通用户输入。
+    pub(crate) user_inputs: VecDeque<InputId>,
+    /// 当前 Goal 专用输入；可靠状态下最多一条。
+    pub(crate) goal_inputs: VecDeque<InputId>,
     pub(crate) queue_revision: u64,
     pub(crate) queue_paused_by_user: bool,
     pub(crate) resume_required: bool,
@@ -54,6 +60,8 @@ pub(crate) struct SessionState {
     pub(crate) is_faulted: bool,
     pub(crate) updated_at_ms: i64,
     pub(crate) archived_at_ms: Option<i64>,
+    pub(crate) work_plan: Option<WorkPlan>,
+    pub(crate) goal: Option<GoalControl>,
 }
 
 #[derive(Clone)]
@@ -61,6 +69,47 @@ pub(crate) struct InputRecord {
     pub(crate) stored: StoredInput,
     pub(crate) first_run_id: RunId,
     pub(crate) latest_run_id: RunId,
+}
+
+impl SessionState {
+    /// 按 Goal 状态选择唯一可自动领取的输入；Goal 存在时不会回退消费用户队列。
+    pub(crate) fn next_runnable_input(&self) -> Option<InputId> {
+        match self.goal.as_ref() {
+            None => {
+                if self.queue_paused_by_user || self.resume_required {
+                    None
+                } else {
+                    self.user_inputs.front().cloned()
+                }
+            }
+            Some(goal) if matches!(goal.state, GoalState::Running) => self
+                .goal_inputs
+                .front()
+                .filter(|input_id| {
+                    self.inputs
+                        .get(*input_id)
+                        .and_then(|input| input.stored.goal_binding.as_ref())
+                        .is_some_and(|binding| {
+                            binding.goal_id == goal.id && binding.generation == goal.generation
+                        })
+                })
+                .cloned(),
+            Some(_) => None,
+        }
+    }
+
+    /// 移除已领取或启动失败的输入，返回它是否属于产品用户 Queue。
+    pub(crate) fn pop_runnable_input(&mut self, input_id: &InputId) -> Option<bool> {
+        if self.goal_inputs.front() == Some(input_id) {
+            self.goal_inputs.pop_front();
+            return Some(false);
+        }
+        if self.user_inputs.front() == Some(input_id) {
+            self.user_inputs.pop_front();
+            return Some(true);
+        }
+        None
+    }
 }
 
 /// 在当前 Session Registry 中分配一个未占用的短标识。
@@ -107,7 +156,8 @@ impl SessionController {
                 is_conversation_available: true,
                 runs: BTreeMap::new(),
                 inputs: BTreeMap::new(),
-                runnable_inputs: VecDeque::new(),
+                user_inputs: VecDeque::new(),
+                goal_inputs: VecDeque::new(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required: false,
@@ -116,6 +166,8 @@ impl SessionController {
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
+                work_plan: None,
+                goal: None,
             }),
         }
     }
@@ -124,6 +176,8 @@ impl SessionController {
         stored: StoredSession,
         runs: Vec<StoredRun>,
         inputs: Vec<StoredInput>,
+        work_plan: Option<WorkPlan>,
+        goal: Option<GoalControl>,
     ) -> Self {
         let is_conversation_available =
             stored.conversation_state == StoredConversationState::Available;
@@ -132,7 +186,8 @@ impl SessionController {
             .map(|run| (run.run_id.clone(), RunRecord::recovered(run)))
             .collect::<BTreeMap<_, _>>();
         let mut input_records = BTreeMap::new();
-        let mut runnable = Vec::new();
+        let mut user_inputs = Vec::new();
+        let mut goal_inputs = Vec::new();
         for input in inputs {
             let mut owned_runs = run_records
                 .values()
@@ -143,7 +198,11 @@ impl SessionController {
                 if input.state == StoredInputState::Queued
                     && latest.status() == assistant_protocol::RunStatus::Accepted
                 {
-                    runnable.push((input.queue_order, input.input_id.clone()));
+                    if input.goal_binding.is_some() {
+                        goal_inputs.push((input.queue_order, input.input_id.clone()));
+                    } else {
+                        user_inputs.push((input.queue_order, input.input_id.clone()));
+                    }
                 }
                 input_records.insert(
                     input.input_id.clone(),
@@ -155,8 +214,9 @@ impl SessionController {
                 );
             }
         }
-        runnable.sort_by_key(|(order, _)| *order);
-        let resume_required = !runnable.is_empty();
+        user_inputs.sort_by_key(|(order, _)| *order);
+        goal_inputs.sort_by_key(|(order, _)| *order);
+        let resume_required = !user_inputs.is_empty();
         Self {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
@@ -179,7 +239,8 @@ impl SessionController {
                 is_conversation_available,
                 runs: run_records,
                 inputs: input_records,
-                runnable_inputs: runnable.into_iter().map(|(_, id)| id).collect(),
+                user_inputs: user_inputs.into_iter().map(|(_, id)| id).collect(),
+                goal_inputs: goal_inputs.into_iter().map(|(_, id)| id).collect(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required,
@@ -188,6 +249,8 @@ impl SessionController {
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
+                work_plan,
+                goal,
             }),
         }
     }
@@ -211,7 +274,11 @@ impl SessionController {
             queued_input_count: state
                 .inputs
                 .values()
-                .filter(|input| input.stored.state == StoredInputState::Queued)
+                .filter(|input| {
+                    input.stored.state == StoredInputState::Queued
+                        && input.stored.origin == crate::InputOrigin::User
+                        && input.stored.goal_binding.is_none()
+                })
                 .count() as u64,
             resume_required: state.resume_required,
             created_at_ms: Some(self.created_at_ms),
@@ -284,7 +351,8 @@ impl SessionController {
         let state = self.lock_state()?;
         let has_nonterminal_run = state.runs.values().any(|run| !run.status().is_terminal());
         if state.active_run.is_some()
-            || !state.runnable_inputs.is_empty()
+            || !state.user_inputs.is_empty()
+            || !state.goal_inputs.is_empty()
             || has_nonterminal_run
             || state
                 .inputs

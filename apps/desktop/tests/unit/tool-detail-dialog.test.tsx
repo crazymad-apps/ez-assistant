@@ -71,7 +71,7 @@ describe("ToolDetailDialog", () => {
     });
   });
 
-  it("previews a child-task tool image without exposing native file actions", async () => {
+  it("opens a read_image result directly as the primary image without exposing native file actions", async () => {
     const owner = {
       type: "child_task" as const,
       session_id: "session-image",
@@ -86,8 +86,10 @@ describe("ToolDetailDialog", () => {
     });
     render(<ToolDetailDialog
       detail={detailView({
+        tool_name: "read_image",
         owner,
         message_id: "message-image",
+        input: { type: "file", operation: "read_image", path: "/workspace/reference.png" },
         files: [{
           resource_ref_id: "tool-image-call-0",
           origin: "session_tool_image",
@@ -103,13 +105,16 @@ describe("ToolDetailDialog", () => {
       on_close={vi.fn()}
     />);
 
-    fireEvent.click(screen.getByRole("button", { name: /预览/ }));
     await waitFor(() => expect(nativeMocks.previewToolFile).toHaveBeenCalledWith(
       owner,
       "message-image",
       "tool-image-call-0",
     ));
     expect(await screen.findByRole("img")).toBeVisible();
+    expect(screen.getByText("/workspace/reference.png")).toBeVisible();
+    expect(screen.queryByText("请求参数")).not.toBeInTheDocument();
+    expect(screen.queryByText("执行结果")).not.toBeInTheDocument();
+    expect(screen.queryByText("文件预览")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "系统打开" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "在目录中打开" })).not.toBeInTheDocument();
   });
@@ -118,8 +123,10 @@ describe("ToolDetailDialog", () => {
     nativeMocks.previewToolFile.mockRejectedValue(new Error("图片已不可用。"));
     render(<ToolDetailDialog
       detail={detailView({
+        tool_name: "read_image",
         owner: { type: "main_session", session_id: "session-image" },
         message_id: "message-image",
+        input: { type: "file", operation: "read_image", path: "/workspace/missing.png" },
         files: [{
           resource_ref_id: "tool-image-call-0",
           origin: "session_tool_image",
@@ -135,9 +142,8 @@ describe("ToolDetailDialog", () => {
       on_close={vi.fn()}
     />);
 
-    fireEvent.click(screen.getByRole("button", { name: /预览/ }));
     expect(await screen.findByText("图片已不可用。")).toBeVisible();
-    expect(screen.getByRole("button", { name: /不可用/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /预览|不可用/ })).not.toBeInTheDocument();
   });
 });
 

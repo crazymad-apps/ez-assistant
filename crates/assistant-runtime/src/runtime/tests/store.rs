@@ -19,8 +19,8 @@ use crate::{
     StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkspace, UserMessageCommit, VariantChange,
-    WorkspaceRemoval,
+    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -75,6 +75,21 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
         self.inner.load_memory_context()
+    }
+
+    fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {
+        self.inner.load_work_plan(session_id)
+    }
+
+    fn mutate_work_plan(
+        &self,
+        mutation: WorkPlanMutation,
+    ) -> StoreFuture<'_, WorkPlanMutationResult> {
+        self.inner.mutate_work_plan(mutation)
+    }
+
+    fn clear_work_plan(&self, clear: WorkPlanClear) -> StoreFuture<'_, ()> {
+        self.inner.clear_work_plan(clear)
     }
 
     fn get_persona(&self) -> StoreFuture<'_, PersonaSnapshot> {
@@ -218,7 +233,10 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.complete_tool_exchange(completed)
     }
 
-    fn settle_run(&self, settlement: StoredRunSettlement) -> StoreFuture<'_, ()> {
+    fn settle_run(
+        &self,
+        settlement: StoredRunSettlement,
+    ) -> StoreFuture<'_, crate::StoredRunSettlementResult> {
         if self.panic_next_settlement.swap(false, Ordering::AcqRel) {
             return Box::pin(async { panic!("private injected settlement panic") });
         }
@@ -229,6 +247,21 @@ impl RuntimeStore for FaultInjectingStore {
             ))));
         }
         self.inner.settle_run(settlement)
+    }
+
+    fn stop_goal(&self, stop: crate::GoalStop) -> StoreFuture<'_, crate::GoalStopResult> {
+        self.inner.stop_goal(stop)
+    }
+
+    fn clear_goal(&self, clear: crate::GoalClear) -> StoreFuture<'_, ()> {
+        self.inner.clear_goal(clear)
+    }
+
+    fn resume_goal_with_held_input(
+        &self,
+        resume: crate::GoalHeldInputResume,
+    ) -> StoreFuture<'_, crate::GoalHeldInputResumeResult> {
+        self.inner.resume_goal_with_held_input(resume)
     }
 
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot> {

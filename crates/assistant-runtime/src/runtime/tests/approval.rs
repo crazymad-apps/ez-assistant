@@ -54,6 +54,7 @@ async fn allow_once_resumes_exactly_one_waiting_call_and_emits_lifecycle_events(
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -135,6 +136,7 @@ async fn session_allow_is_persisted_before_resume_and_matches_the_next_run() {
         .session_id;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "first".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -176,6 +178,7 @@ async fn session_allow_is_persisted_before_resume_and_matches_the_next_run() {
 
     let second = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "second".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -239,6 +242,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
         .session_id;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: first_session.clone(),
             message: "first".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -271,6 +275,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
 
     let second = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: second_session.clone(),
             message: "second".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -324,6 +329,7 @@ async fn unavailable_workspace_scope_keeps_the_approval_pending_until_a_valid_de
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -401,6 +407,7 @@ async fn permission_write_failure_keeps_the_call_pending_and_never_executes_it()
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -475,6 +482,7 @@ async fn one_permission_revision_conflict_is_reloaded_and_retried_before_resume(
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -528,6 +536,7 @@ async fn a_deny_reloaded_while_pending_overrides_the_older_allow_once_decision()
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -589,6 +598,7 @@ async fn runtime_shutdown_cancels_and_removes_pending_approvals() {
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "wait for approval".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -638,6 +648,7 @@ async fn cancelling_a_run_drops_its_pending_approval_without_executing_the_tool(
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "wait for approval".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,

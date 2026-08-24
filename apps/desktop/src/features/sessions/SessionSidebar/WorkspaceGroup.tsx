@@ -18,6 +18,22 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
   const store = useRootStore();
   const is_expanded = store.navigation.expanded_workspaces.has(props.workspace.workspace_id);
   const name = workspaceDisplayName(props.workspace.user_directory);
+  const retained_session_count = [
+    ...(store.projection.application?.active_sessions ?? []),
+    ...(store.projection.application?.archived_sessions ?? []),
+  ].filter((session) => session.workspace_id === props.workspace.workspace_id).length;
+
+  async function removeWorkspace() {
+    const session_note = retained_session_count > 0
+      ? `\n\n已有 ${retained_session_count} 个会话会一并从侧栏隐藏，重新添加此目录后恢复显示。`
+      : "";
+    const confirmed = window.confirm(
+      `移除工作空间“${name}”？\n\n不会删除本地目录或历史会话。${session_note}`,
+    );
+    if (confirmed) {
+      await store.removeWorkspace(props.workspace.workspace_id);
+    }
+  }
 
   return (
     <section className={styles.workspace_group}>
@@ -58,6 +74,18 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
               <DropdownMenuItem onSelect={() => void store.copyWorkspacePath(props.workspace.user_directory)}>
                 <Icon name="copy" size={15} />
                 <span>复制目录路径</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={styles.workspace_remove_action}
+                disabled={
+                  store.connection.state !== "connected" ||
+                  store.pending_session_action ||
+                  store.pending_workspace_action
+                }
+                onSelect={() => void removeWorkspace()}
+              >
+                <Icon name="trash" size={15} />
+                <span>移除工作空间…</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

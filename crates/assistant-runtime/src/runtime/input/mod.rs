@@ -1,6 +1,7 @@
 //! 单 Session 队列执行器：持久化领取、启动 Agent，并等待 Run 收敛后领取下一项。
 
 mod commands;
+mod submission;
 
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
@@ -22,6 +23,7 @@ use crate::{
         MAX_AUTOMATIC_COMPACTIONS, compact_parent_context, compaction_reason_label,
         consume_execution_budget,
     },
+    goal::GoalRunBinding,
     observation::ObservationCoordinator,
     run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, observe_run_execution},
     session::SessionController,
@@ -48,10 +50,8 @@ impl AssistantRuntime {
         let should_spawn = {
             let mut state = session.lock_state()?;
             if state.is_faulted
-                || state.queue_paused_by_user
-                || state.resume_required
                 || state.is_queue_driver_running
-                || state.runnable_inputs.is_empty()
+                || state.next_runnable_input().is_none()
             {
                 false
             } else {
@@ -116,10 +116,10 @@ async fn recover_panicked_queue_inner(
         fault_driver(&session);
         return;
     };
-    if let Ok(snapshot) =
+    if let Ok(settlement) =
         crate::run::settle_run(&session, &run_id, None, context.store.as_ref(), None).await
     {
-        publish_settlement_events(&context.events, &session, snapshot);
+        publish_settlement_events(&context.events, &session, settlement);
     }
     // Runtime supervisor 已异常退出，而 Core completion 的 observer 有意独立存在。
     // 在没有重新取得旧 Core 退出事实前，不能直接启动下一条输入；由下次启动从
@@ -151,14 +151,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 state.is_queue_driver_running = false;
                 return;
             }
-            let Some(input_id) = state.runnable_inputs.front().cloned() else {
+            let Some(input_id) = state.next_runnable_input() else {
                 state.is_queue_driver_running = false;
                 return;
             };
-            if state.queue_paused_by_user || state.resume_required {
-                state.is_queue_driver_running = false;
-                return;
-            }
             let Some(input) = state.inputs.get(&input_id).cloned() else {
                 fault_locked_driver(&mut state);
                 return;
@@ -196,14 +192,43 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     run_id: next.2.run_id.clone(),
                     cancellation: run_cancellation.clone(),
                     events: context.events.clone(),
+                    goal_binding: next.1.stored.goal_binding.as_ref().map(|binding| {
+                        GoalRunBinding {
+                            goal_id: binding.goal_id.clone(),
+                            generation: binding.generation,
+                            run_id: next.2.run_id.clone(),
+                        }
+                    }),
                 },
                 Some(model_diagnostics.clone()),
             )
         }) {
             Ok(compiled) => {
-                let (agent, authorizer, compactor, reasoning_effort) = compiled.into_parts();
+                let super::model::CompiledRunParts {
+                    agent,
+                    authorizer,
+                    compactor,
+                    reasoning_effort,
+                    goal_signal_latch,
+                } = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
-                    next.1.stored.queued_message.clone()
+                    let plan = match session.lock_state() {
+                        Ok(state) => state.work_plan.clone(),
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
+                    };
+                    match crate::work_plan::inject_claimed_context(
+                        next.1.stored.queued_message.clone(),
+                        plan.as_ref(),
+                    ) {
+                        Ok(message) => message,
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
+                    }
                 } else {
                     None
                 };
@@ -243,8 +268,17 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         Ok(state) => state,
                         Err(_) => return,
                     };
-                    state.runnable_inputs.pop_front();
-                    state.queue_revision = state.queue_revision.saturating_add(1);
+                    let queue_revision = match state.pop_runnable_input(&next.0) {
+                        Some(true) => {
+                            state.queue_revision = state.queue_revision.saturating_add(1);
+                            Some(state.queue_revision)
+                        }
+                        Some(false) => None,
+                        None => {
+                            fault_locked_driver(&mut state);
+                            return;
+                        }
+                    };
                     if let Some(message) = message {
                         if state
                             .journal
@@ -276,6 +310,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     state.active_run = Some(ActiveRun {
                         run_id: next.2.run_id.clone(),
                         cancellation: cancellation.clone(),
+                        goal_signal_latch,
                     });
                     state
                         .runs
@@ -290,7 +325,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     (
                         ExecutionInput { conversation },
                         cancellation,
-                        state.queue_revision,
+                        queue_revision,
                         state.body_generation,
                     )
                 };
@@ -300,10 +335,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     },
                     generation,
                 });
-                let _ = context.events.send(RuntimeEvent::QueueChanged {
-                    session_id: session.id().clone(),
-                    revision: queue_revision,
-                });
+                if let Some(queue_revision) = queue_revision {
+                    let _ = context.events.send(RuntimeEvent::QueueChanged {
+                        session_id: session.id().clone(),
+                        revision: queue_revision,
+                    });
+                }
                 // 领取提交完成后立即释放变更门禁；supervisor 的终态结算还要再次取得同一门禁。
                 drop(mutation);
                 let recorder = Arc::new(RuntimeRecorder::new(
@@ -419,8 +456,8 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     .await
                 };
                 match settled {
-                    Ok(snapshot) => {
-                        publish_settlement_events(&context.events, &session, snapshot);
+                    Ok(settlement) => {
+                        publish_settlement_events(&context.events, &session, settlement);
                     }
                     Err(_) => fault_driver(&session),
                 }
@@ -447,9 +484,22 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
 fn publish_settlement_events(
     events: &ObservationCoordinator,
     session: &SessionController,
-    snapshot: assistant_protocol::RunSnapshot,
+    settlement: crate::run::RunSettlementResult,
 ) {
-    let _ = events.send(crate::run::finished_event(snapshot));
+    let _ = events.send(crate::run::finished_event(settlement.run));
+    if let Some(goal) = settlement.goal {
+        let _ = events.send(RuntimeEvent::GoalChanged {
+            session_id: session.id().clone(),
+            goal_id: goal.goal_id,
+            generation: goal.generation,
+        });
+    }
+    if let Some(continuation) = settlement.continuation {
+        let _ = events.send(RuntimeEvent::RunAccepted {
+            session_id: continuation.session_id,
+            run_id: continuation.run_id,
+        });
+    }
     if let Ok(state) = session.lock_state() {
         let generation = state.body_generation;
         drop(state);
@@ -486,6 +536,7 @@ async fn fail_before_start(
             cancel_requested: false,
             error: Some(error.clone()),
             messages: Vec::new(),
+            goal_effect: None,
             finished_at_ms: finished_at,
         })
         .await
@@ -496,8 +547,10 @@ async fn fail_before_start(
     }
     if let Ok(mut state) = session.lock_state() {
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
-        if state.runnable_inputs.front() == failed_input_id.as_ref() {
-            state.runnable_inputs.pop_front();
+        if let Some(input_id) = failed_input_id.as_ref()
+            && let Some(is_user) = state.pop_runnable_input(input_id)
+            && is_user
+        {
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
         if let Some(run) = state.runs.get_mut(run_id) {

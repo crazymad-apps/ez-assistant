@@ -16,29 +16,34 @@ use agent_types::{
     FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
     ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId,
     ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
-    ToolResultStatus, UserMessage, UserPart,
+    ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, IdempotencyKey, InputId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, GoalId, IdempotencyKey, InputId,
     MessageFeedback, ModelKey, PermissionDiagnosticCode, RunId, RunStatus, SessionId,
-    SessionTitleOrigin, WorkspaceId,
+    SessionTitleOrigin, TodoItemId, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationRewrite, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, ForkedAttachmentReference,
-    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
-    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
-    PermissionDocument, PermissionEffect, PermissionFileOperation, PermissionFileRevision,
-    PermissionFileScope, PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy,
-    PinnedMemoryMutation, QueuePriorityChange, RuntimeStore, SessionDeletion,
-    SessionExecutionEnvironment, SessionFork, SessionPinnedChange, SessionTitleChange,
-    StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState,
-    StoredRunSettlement, StoredSession, StoredSessionLifecycle, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkspaceRemoval,
+    ContextReplacementTarget, ConversationMessageLocationRequest, ConversationRewrite,
+    ConversationSearchRequest, ConversationSearchScope, ConversationWindowRequest,
+    ForkedAttachmentReference, GoalInputBinding, GoalStop, InputOrigin, MessageFeedbackChange,
+    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredSession,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionDocument,
+    PermissionEffect, PermissionFileOperation, PermissionFileRevision, PermissionFileScope,
+    PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy, PinnedMemoryMutation,
+    QueuePriorityChange, RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork,
+    SessionPinnedChange, SessionTitleChange, StoreErrorKind, StoredAttachmentState,
+    StoredChildTaskSettlement, StoredConversationState, StoredGoal, StoredGoalBudget,
+    StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
+    StoredGoalSettlementEffect, StoredGoalState, StoredRunSettlement, StoredSession,
+    StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
+    WorkspaceRemoval,
 };
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::{
@@ -190,6 +195,8 @@ fn assert_default_session_permissions(session: &StoredSession) {
 
 fn user_message(value: &str, text: &str) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new(value).expect("message id"),
         parts: vec![UserPart::Text(TextPart {
             id: PartId::new(format!("part-{value}")).expect("part id"),
@@ -293,6 +300,8 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
             conversation: source_conversation,
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            work_plan: None,
+            goal: None,
         })
         .expect("fork session");
     assert_eq!(
@@ -467,6 +476,8 @@ fn fork_copies_tool_images_without_cross_session_links() {
             conversation,
             attachments: Vec::new(),
             tool_images: vec![reference.clone()],
+            work_plan: None,
+            goal: None,
         })
         .expect("fork session with image");
 
@@ -532,6 +543,8 @@ fn failed_tool_image_fork_rolls_back_target_session_directory() {
         conversation: tool_image_exchange(reference.clone()),
         attachments: Vec::new(),
         tool_images: vec![reference],
+        work_plan: None,
+        goal: None,
     });
 
     assert!(result.is_err());
@@ -831,6 +844,10 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
             session_id: session.clone(),
             idempotency_key: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: assistant_runtime::InputOrigin::User,
+            goal_binding: None,
+            new_goal: None,
+            resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: raw_user_message("user-navigation-persistence", "first input"),
             generated_title: Some("Generated first input".to_owned()),
@@ -1157,6 +1174,10 @@ fn commit_completed_turn(
     engine
         .accept_input(NewStoredInput {
             agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: assistant_runtime::InputOrigin::User,
+            goal_binding: None,
+            new_goal: None,
+            resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             input_id: input_id.clone(),
             run_id: run_id.clone(),
@@ -1187,6 +1208,7 @@ fn commit_completed_turn(
             cancel_requested: false,
             error: None,
             messages: vec![assistant_message(&format!("assistant-{suffix}"), suffix)],
+            goal_effect: None,
             finished_at_ms: accepted_at_ms + 2,
         })
         .expect("settle fixture run");
@@ -1223,6 +1245,8 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            work_plan: None,
+            goal: None,
         })
         .expect("fork session");
     assert_eq!(forked.session.session_id, forked_id);
@@ -1290,6 +1314,8 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
     let source_readable_path = source_attachment.agent_readable_path.clone();
     let conversation = ConversationSnapshot::new(vec![
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new("message-transfer-file").expect("message id"),
             parts: vec![UserPart::FileReferences(FileReferencesPart {
                 id: PartId::new("part-transfer-file").expect("part id"),
@@ -1313,6 +1339,8 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
                 attachment_id: forked_attachment_id.clone(),
             }],
             tool_images: Vec::new(),
+            work_plan: None,
+            goal: None,
         })
         .expect("fork attachment session");
 
@@ -1551,13 +1579,13 @@ fn initializes_private_database_and_current_schema() {
              WHERE type = 'table' AND name IN (
                 'sessions', 'inputs', 'runs', 'run_message_refs',
                 'pending_tool_exchanges', 'pending_tool_starts', 'body_appends',
-                'workspaces', 'session_resources'
+                'workspaces', 'session_resources', 'session_work_plans', 'session_goals'
              )",
             [],
             |row| row.get(0),
         )
         .expect("table count");
-    assert_eq!(table_count, 9);
+    assert_eq!(table_count, 11);
 
     let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
     assert_eq!(
@@ -1606,6 +1634,749 @@ fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
         .expect("count rows after compatible schema initialization");
     assert_eq!((after.0, after.1), before);
     assert_eq!(after.2, 0);
+}
+
+#[test]
+fn work_plan_migration_cas_idempotency_restart_and_clear_are_durable() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session = session_id("s-work-plan-durable");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    let first_result = engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: session.clone(),
+            expected_revision: 0,
+            operation_id: "call-work-plan-1".to_owned(),
+            objective: "ship M1".to_owned(),
+            items: vec![StoredWorkPlanItem {
+                id: TodoItemId::new("todo-work-plan-1").expect("todo id"),
+                text: "persist plan".to_owned(),
+                status: StoredTodoItemStatus::InProgress,
+            }],
+            updated_at_ms: 2_000,
+        })
+        .expect("create work plan");
+    assert!(!first_result.cleared);
+    let first = first_result.plan;
+    assert_eq!(first.revision, 1);
+
+    let duplicate = engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: session.clone(),
+            expected_revision: 0,
+            operation_id: "call-work-plan-1".to_owned(),
+            objective: "ignored duplicate payload".to_owned(),
+            items: Vec::new(),
+            updated_at_ms: 3_000,
+        })
+        .expect("duplicate operation returns first result");
+    assert!(!duplicate.cleared);
+    assert_eq!(duplicate.plan, first);
+    let conflict = engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: session.clone(),
+            expected_revision: 0,
+            operation_id: "call-work-plan-2".to_owned(),
+            objective: "stale update".to_owned(),
+            items: Vec::new(),
+            updated_at_ms: 3_000,
+        })
+        .expect_err("stale revision must conflict");
+    assert_eq!(conflict.kind(), StoreErrorKind::Conflict);
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.work_plans, vec![first.clone()]);
+    reopened
+        .clear_work_plan(WorkPlanClear {
+            session_id: session.clone(),
+            expected_revision: 1,
+        })
+        .expect("clear plan");
+    assert!(
+        reopened
+            .load_work_plan(&session)
+            .expect("load cleared plan")
+            .is_none()
+    );
+    reopened
+        .clear_work_plan(WorkPlanClear {
+            session_id: session,
+            expected_revision: 0,
+        })
+        .expect("empty clear is idempotent");
+}
+
+#[test]
+fn completed_work_plan_is_atomically_cleared_with_a_durable_operation_receipt() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session = session_id("s-work-plan-completed");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    let initial = engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: session.clone(),
+            expected_revision: 0,
+            operation_id: "call-work-plan-start".to_owned(),
+            objective: "ship completion".to_owned(),
+            items: vec![StoredWorkPlanItem {
+                id: TodoItemId::new("todo-work-plan-complete").expect("todo id"),
+                text: "finish verification".to_owned(),
+                status: StoredTodoItemStatus::InProgress,
+            }],
+            updated_at_ms: 2_000,
+        })
+        .expect("create work plan");
+    let completed_mutation = WorkPlanMutation {
+        session_id: session.clone(),
+        expected_revision: initial.plan.revision,
+        operation_id: "call-work-plan-complete".to_owned(),
+        objective: initial.plan.objective.clone(),
+        items: vec![StoredWorkPlanItem {
+            id: initial.plan.items[0].id.clone(),
+            text: initial.plan.items[0].text.clone(),
+            status: StoredTodoItemStatus::Completed,
+        }],
+        updated_at_ms: 3_000,
+    };
+    let completed = engine
+        .mutate_work_plan(completed_mutation.clone())
+        .expect("complete work plan");
+    assert!(completed.cleared);
+    assert_eq!(completed.plan.revision, 2);
+    assert!(
+        engine
+            .load_work_plan(&session)
+            .expect("load plan")
+            .is_none()
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    assert!(
+        reopened
+            .load_runtime()
+            .expect("recover runtime")
+            .work_plans
+            .is_empty()
+    );
+    let duplicate = reopened
+        .mutate_work_plan(completed_mutation)
+        .expect("replay completed operation");
+    assert_eq!(duplicate, completed);
+    let replacement = reopened
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: session.clone(),
+            expected_revision: 0,
+            operation_id: "call-work-plan-restart".to_owned(),
+            objective: "next plan".to_owned(),
+            items: vec![StoredWorkPlanItem {
+                id: TodoItemId::new("todo-work-plan-next").expect("todo id"),
+                text: "start next task".to_owned(),
+                status: StoredTodoItemStatus::Pending,
+            }],
+            updated_at_ms: 4_000,
+        })
+        .expect("create next work plan");
+    assert!(!replacement.cleared);
+    assert_eq!(replacement.plan.revision, 1);
+}
+
+#[test]
+fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let session_id = session_id("s-goal-first-input");
+    engine
+        .create_session(new_session(
+            session_id.as_str(),
+            &engine.sessions_directory.clone(),
+        ))
+        .expect("create session");
+    let text = TextPart {
+        id: PartId::new("goal-objective-text").expect("part id"),
+        text: "ship the Goal".to_owned(),
+    };
+    let objective_part = StoredGoalObjectivePart::Text(text.clone());
+    let objective_hash = format!(
+        "sha256-v1:{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&vec![objective_part.clone()]).expect("encode objective")
+        )
+    );
+    let message = UserMessage {
+        id: MessageId::new("goal-first-message").expect("message id"),
+        origin: UserMessageOrigin::User,
+        transcript_visibility: TranscriptVisibility::Visible,
+        parts: vec![
+            UserPart::Text(text),
+            UserPart::Injected(TextPart {
+                id: PartId::new("goal-start-context").expect("part id"),
+                text: "GOAL_START_INJECTION_V1".to_owned(),
+            }),
+        ],
+    };
+    let goal_id = GoalId::new("goal-first").expect("goal id");
+    let goal = StoredGoal {
+        goal_id: goal_id.clone(),
+        session_id: session_id.clone(),
+        objective: StoredGoalObjective {
+            source_message_id: message.id.clone(),
+            payload: vec![objective_part],
+            payload_hash: objective_hash,
+        },
+        state: StoredGoalState::Running,
+        pause_reason: None,
+        generation: 1,
+        turn: 1,
+        budget: StoredGoalBudget {
+            max_runs: 20,
+            max_total_tokens: 500_000,
+            max_consecutive_failures: 3,
+            used_runs: 0,
+            used_total_tokens: 0,
+            usage_complete: true,
+        },
+        consecutive_failures: 0,
+        created_at_ms: 2_000,
+        updated_at_ms: 2_000,
+        completed_at_ms: None,
+    };
+    let input = NewStoredInput {
+        input_id: InputId::new("input-goal-first").expect("input id"),
+        run_id: RunId::new("run-goal-first").expect("run id"),
+        session_id: session_id.clone(),
+        idempotency_key: Some(IdempotencyKey::new("goal-first-key").expect("key")),
+        agent_variant: assistant_protocol::AgentVariant::Build,
+        origin: InputOrigin::User,
+        goal_binding: Some(GoalInputBinding {
+            goal_id: goal_id.clone(),
+            generation: 1,
+            turn: 1,
+        }),
+        approval_mode: assistant_protocol::ApprovalMode::Ask,
+        message: message.clone(),
+        new_goal: Some(goal.clone()),
+        resumed_goal: None,
+        generated_title: None,
+        accepted_at_ms: 2_000,
+    };
+    let accepted = engine
+        .accept_input(input.clone())
+        .expect("accept Goal input");
+    assert!(!accepted.is_duplicate);
+    let duplicate = engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-goal-duplicate").expect("input id"),
+            run_id: RunId::new("run-goal-duplicate").expect("run id"),
+            ..input.clone()
+        })
+        .expect("idempotent duplicate");
+    assert!(duplicate.is_duplicate);
+    assert_eq!(duplicate.input.input_id, accepted.input.input_id);
+    assert_eq!(duplicate.run.run_id, accepted.run.run_id);
+
+    let rejected = engine.accept_input(NewStoredInput {
+        input_id: InputId::new("input-second-goal").expect("input id"),
+        run_id: RunId::new("run-second-goal").expect("run id"),
+        idempotency_key: None,
+        ..input
+    });
+    assert!(rejected.is_err());
+    assert_eq!(engine.load_inputs().expect("load inputs").len(), 1);
+    assert_eq!(engine.load_runs().expect("load runs").len(), 1);
+    assert_eq!(engine.load_all_goals().expect("load goals"), vec![goal]);
+    engine
+        .connection
+        .execute(
+            "UPDATE inputs SET origin = 'runtime' WHERE input_id = ?1",
+            [accepted.input.input_id.as_str()],
+        )
+        .expect("corrupt input origin");
+    assert!(
+        engine.load_inputs().is_err(),
+        "an illegal persisted origin/message combination must fail closed"
+    );
+}
+
+#[test]
+fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    let session = session_id("s-goal-settlement");
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    let objective_part = StoredGoalObjectivePart::Text(TextPart {
+        id: PartId::new("goal-settlement-objective").expect("part id"),
+        text: "finish release".to_owned(),
+    });
+    let objective_hash = format!(
+        "sha256-v1:{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&vec![objective_part.clone()]).expect("encode objective")
+        )
+    );
+    let first_message = UserMessage {
+        id: MessageId::new("goal-settlement-user").expect("message id"),
+        origin: UserMessageOrigin::User,
+        transcript_visibility: TranscriptVisibility::Visible,
+        parts: vec![UserPart::Text(TextPart {
+            id: PartId::new("goal-settlement-user-text").expect("part id"),
+            text: "finish release".to_owned(),
+        })],
+    };
+    let goal_id = GoalId::new("goal-settlement").expect("goal id");
+    let goal = StoredGoal {
+        goal_id: goal_id.clone(),
+        session_id: session.clone(),
+        objective: StoredGoalObjective {
+            source_message_id: first_message.id.clone(),
+            payload: vec![objective_part],
+            payload_hash: objective_hash,
+        },
+        state: StoredGoalState::Running,
+        pause_reason: None,
+        generation: 1,
+        turn: 1,
+        budget: StoredGoalBudget {
+            max_runs: 20,
+            max_total_tokens: 500_000,
+            max_consecutive_failures: 3,
+            used_runs: 0,
+            used_total_tokens: 0,
+            usage_complete: true,
+        },
+        consecutive_failures: 0,
+        created_at_ms: 2_000,
+        updated_at_ms: 2_000,
+        completed_at_ms: None,
+    };
+    let first = engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-goal-settlement").expect("input id"),
+            run_id: RunId::new("run-goal-settlement").expect("run id"),
+            session_id: session.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: Some(GoalInputBinding {
+                goal_id: goal_id.clone(),
+                generation: 1,
+                turn: 1,
+            }),
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: first_message,
+            new_goal: Some(goal.clone()),
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 2_000,
+        })
+        .expect("accept first Goal input");
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "start-goal-settlement".to_owned(),
+            input_id: first.input.input_id,
+            run_id: first.run.run_id.clone(),
+            session_id: session.clone(),
+            message: first.input.queued_message,
+            reasoning_effort: None,
+            created_at_ms: 2_100,
+        })
+        .expect("start first Goal Run");
+    let mut updated_goal = goal.clone();
+    updated_goal.turn = 2;
+    updated_goal.budget.used_runs = 1;
+    updated_goal.budget.used_total_tokens = 50;
+    updated_goal.updated_at_ms = 3_000;
+    let continuation_message = UserMessage {
+        id: MessageId::new("goal-continuation-message").expect("message id"),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        parts: vec![UserPart::Injected(TextPart {
+            id: PartId::new("goal-continuation-context").expect("part id"),
+            text: "GOAL_CONTINUATION_V1".to_owned(),
+        })],
+    };
+    let next_input = NewStoredInput {
+        input_id: InputId::new("input-goal-continuation").expect("input id"),
+        run_id: RunId::new("run-goal-continuation").expect("run id"),
+        session_id: session.clone(),
+        idempotency_key: None,
+        agent_variant: assistant_protocol::AgentVariant::Build,
+        origin: InputOrigin::Runtime,
+        goal_binding: Some(GoalInputBinding {
+            goal_id: goal_id.clone(),
+            generation: 1,
+            turn: 2,
+        }),
+        approval_mode: assistant_protocol::ApprovalMode::Ask,
+        message: continuation_message,
+        new_goal: None,
+        resumed_goal: None,
+        generated_title: None,
+        accepted_at_ms: 3_000,
+    };
+    let mut invalid_next_input = next_input.clone();
+    invalid_next_input
+        .goal_binding
+        .as_mut()
+        .expect("Goal binding")
+        .generation = 2;
+    assert!(
+        engine
+            .settle_run(StoredRunSettlement {
+                operation_id: "reject-invalid-goal-continuation".to_owned(),
+                run_id: first.run.run_id.clone(),
+                session_id: session.clone(),
+                status: RunStatus::Completed,
+                cancel_requested: false,
+                error: None,
+                messages: vec![assistant_message("invalid-goal-answer", "must roll back")],
+                goal_effect: Some(StoredGoalSettlementEffect::Continue {
+                    expected_goal_id: goal_id.clone(),
+                    expected_generation: 1,
+                    goal: updated_goal.clone(),
+                    next_input: Box::new(invalid_next_input),
+                }),
+                finished_at_ms: 3_000,
+            })
+            .is_err()
+    );
+    assert_eq!(
+        engine.load_runs().expect("Runs after rejected settlement")[0].status,
+        RunStatus::Running
+    );
+    assert_eq!(
+        engine.load_all_goals().expect("Goal after rollback"),
+        vec![goal.clone()]
+    );
+    assert_eq!(
+        engine.load_inputs().expect("inputs after rollback").len(),
+        1
+    );
+    assert_eq!(
+        engine
+            .load_conversation(&session)
+            .expect("conversation after rollback")
+            .messages
+            .len(),
+        1
+    );
+    let result = engine
+        .settle_run(StoredRunSettlement {
+            operation_id: "settle-goal-and-continue".to_owned(),
+            run_id: first.run.run_id,
+            session_id: session.clone(),
+            status: RunStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message("goal-settlement-answer", "progress")],
+            goal_effect: Some(StoredGoalSettlementEffect::Continue {
+                expected_goal_id: goal_id,
+                expected_generation: 1,
+                goal: updated_goal.clone(),
+                next_input: Box::new(next_input.clone()),
+            }),
+            finished_at_ms: 3_000,
+        })
+        .expect("settle Goal and create continuation");
+    assert_eq!(result.goal, Some(updated_goal.clone()));
+    let continuation = result.continuation.expect("continuation result");
+    assert_eq!(continuation.input.input_id, next_input.input_id);
+    assert_eq!(continuation.run.run_id, next_input.run_id);
+    assert_eq!(continuation.input.origin, InputOrigin::Runtime);
+    assert_eq!(
+        engine.load_all_goals().expect("load Goal"),
+        vec![updated_goal.clone()]
+    );
+    assert_eq!(engine.load_inputs().expect("load inputs").len(), 2);
+    assert_eq!(engine.load_runs().expect("load runs").len(), 2);
+    let held_message = raw_user_message("goal-resume-user", "use stable channel");
+    let held = engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-goal-resume").expect("input id"),
+            run_id: RunId::new("run-goal-resume").expect("run id"),
+            session_id: session.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: held_message.clone(),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 3_500,
+        })
+        .expect("hold user guidance");
+
+    let mut stopped_goal = updated_goal.clone();
+    stopped_goal.state = StoredGoalState::Paused;
+    stopped_goal.pause_reason = Some(StoredGoalPauseReason::UserStopped);
+    stopped_goal.generation = 2;
+    stopped_goal.updated_at_ms = 4_000;
+    let stopped = engine
+        .stop_goal(GoalStop {
+            session_id: session.clone(),
+            goal_id: updated_goal.goal_id.clone(),
+            expected_generation: 1,
+            stopped_goal: stopped_goal.clone(),
+        })
+        .expect("stop Goal");
+    assert_eq!(stopped.removed_input_ids, vec![next_input.input_id]);
+    assert!(stopped.cancelling_run_id.is_none());
+    assert_eq!(engine.load_inputs().expect("inputs after stop").len(), 2);
+
+    let mut resumed_goal = stopped_goal;
+    resumed_goal.state = StoredGoalState::Running;
+    resumed_goal.pause_reason = None;
+    resumed_goal.generation = 3;
+    resumed_goal.turn = 3;
+    resumed_goal.updated_at_ms = 5_000;
+    let mut resume_message = held_message;
+    resume_message.parts.push(UserPart::Injected(TextPart {
+        id: PartId::new("goal-resume-context").expect("part id"),
+        text: "GOAL_RESUME_INJECTION_V1".to_owned(),
+    }));
+    let resumed = engine
+        .resume_goal_with_held_input(assistant_runtime::GoalHeldInputResume {
+            session_id: session.clone(),
+            input_id: held.input.input_id,
+            expected_goal_id: resumed_goal.goal_id.clone(),
+            expected_generation: 2,
+            resumed_goal: resumed_goal.clone(),
+            message: resume_message,
+        })
+        .expect("resume Goal with held input");
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "start-goal-resume".to_owned(),
+            input_id: resumed.input.input_id,
+            run_id: resumed.run.run_id.clone(),
+            session_id: session.clone(),
+            message: resumed.input.queued_message,
+            reasoning_effort: None,
+            created_at_ms: 5_100,
+        })
+        .expect("start resumed Goal Run");
+    let mut completed_goal = resumed_goal;
+    completed_goal.state = StoredGoalState::Completed;
+    completed_goal.generation = 4;
+    completed_goal.budget.used_runs = 2;
+    completed_goal.updated_at_ms = 6_000;
+    completed_goal.completed_at_ms = Some(6_000);
+    let completed_result = engine
+        .settle_run(StoredRunSettlement {
+            operation_id: "complete-resumed-goal".to_owned(),
+            run_id: resumed.run.run_id,
+            session_id: session.clone(),
+            status: RunStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message("goal-resume-answer", "done")],
+            goal_effect: Some(StoredGoalSettlementEffect::Transition {
+                expected_goal_id: completed_goal.goal_id.clone(),
+                expected_generation: 3,
+                goal: completed_goal.clone(),
+                resume_required: false,
+            }),
+            finished_at_ms: 6_000,
+        })
+        .expect("complete resumed Goal");
+    assert_eq!(completed_result.goal, Some(completed_goal));
+    assert!(
+        engine
+            .load_all_goals()
+            .expect("goals after completion")
+            .is_empty()
+    );
+    assert_eq!(engine.load_inputs().expect("historical inputs").len(), 2);
+}
+
+#[test]
+fn running_goal_is_durably_paused_once_during_recovery() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    let session = session_id("s-goal-recovery");
+    engine
+        .create_session(new_session(session.as_str(), &sessions_directory))
+        .expect("create session");
+    let payload = vec![StoredGoalObjectivePart::Text(TextPart {
+        id: PartId::new("goal-objective-part").expect("part id"),
+        text: "finish the release".to_owned(),
+    })];
+    let payload_json = serde_json::to_string(&payload).expect("encode payload");
+    let objective_hash = format!(
+        "sha256-v1:{:x}",
+        Sha256::digest(serde_json::to_vec(&payload).expect("hash payload"))
+    );
+    engine
+        .connection
+        .execute(
+            "INSERT INTO session_goals (
+                goal_id, session_id, objective_message_id, objective_payload_json,
+                objective_hash, state, pause_reason_json, generation, turn, max_runs,
+                max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens,
+                usage_complete, consecutive_failures, created_at_ms, updated_at_ms,
+                completed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', NULL, 1, 1, 20, 500000, 3,
+                       1, 100, 1, 0, 1000, 2000, NULL)",
+            params![
+                GoalId::new("goal-recovery").expect("goal id").as_str(),
+                session.as_str(),
+                "goal-source-message",
+                payload_json,
+                objective_hash,
+            ],
+        )
+        .expect("seed running goal");
+    engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-recovery-continuation").expect("input id"),
+            run_id: RunId::new("run-recovery-continuation").expect("run id"),
+            session_id: session.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::Runtime,
+            goal_binding: Some(GoalInputBinding {
+                goal_id: GoalId::new("goal-recovery").expect("goal id"),
+                generation: 1,
+                turn: 2,
+            }),
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: UserMessage {
+                id: MessageId::new("recovery-continuation-message").expect("message id"),
+                origin: UserMessageOrigin::Runtime,
+                transcript_visibility: TranscriptVisibility::Hidden,
+                parts: vec![UserPart::Injected(TextPart {
+                    id: PartId::new("recovery-continuation-context").expect("part id"),
+                    text: "GOAL_CONTINUATION_V1".to_owned(),
+                })],
+            },
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 2_500,
+        })
+        .expect("seed accepted continuation");
+
+    let first = engine.load_runtime().expect("first recovery");
+    assert_eq!(first.goals.len(), 1);
+    assert_eq!(first.goals[0].state, StoredGoalState::Paused);
+    assert_eq!(
+        first.goals[0].pause_reason,
+        Some(StoredGoalPauseReason::RecoveryRequired)
+    );
+    assert_eq!(first.goals[0].generation, 2);
+    assert!(first.inputs.is_empty(), "stale continuation is removed");
+    assert!(
+        first.runs.is_empty(),
+        "continuation Run is removed with Input"
+    );
+
+    let second = engine.load_runtime().expect("second recovery");
+    assert_eq!(second.goals[0].generation, 2);
+    let persisted: (String, String, i64) = engine
+        .connection
+        .query_row(
+            "SELECT state, pause_reason_json, generation FROM session_goals WHERE session_id = ?1",
+            [session.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("persisted goal recovery state");
+    assert_eq!(persisted.0, "paused");
+    assert_eq!(persisted.2, 2);
+    assert_eq!(
+        serde_json::from_str::<StoredGoalPauseReason>(&persisted.1).expect("pause reason"),
+        StoredGoalPauseReason::RecoveryRequired
+    );
+}
+
+#[test]
+fn work_plan_fork_is_independent_and_session_delete_cascades() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    let source = session_id("s-work-plan-source");
+    let target = session_id("s-work-plan-target");
+    engine
+        .create_session(new_session(source.as_str(), &sessions_directory))
+        .expect("create source");
+    let source_plan = engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: source.clone(),
+            expected_revision: 0,
+            operation_id: "call-source-plan".to_owned(),
+            objective: "source objective".to_owned(),
+            items: vec![StoredWorkPlanItem {
+                id: TodoItemId::new("todo-fork-1").expect("todo id"),
+                text: "source item".to_owned(),
+                status: StoredTodoItemStatus::Pending,
+            }],
+            updated_at_ms: 2_000,
+        })
+        .expect("create source plan")
+        .plan;
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: source.clone(),
+            source_generation: 1,
+            session: new_session(target.as_str(), &sessions_directory),
+            conversation: ConversationSnapshot::default(),
+            attachments: Vec::new(),
+            tool_images: Vec::new(),
+            work_plan: Some(source_plan.clone()),
+            goal: None,
+        })
+        .expect("fork with plan");
+    let target_plan = forked.work_plan.expect("forked plan");
+    assert_eq!(target_plan.revision, 1);
+    assert_eq!(target_plan.objective, source_plan.objective);
+    engine
+        .mutate_work_plan(WorkPlanMutation {
+            session_id: target.clone(),
+            expected_revision: 1,
+            operation_id: "call-target-plan".to_owned(),
+            objective: "target objective".to_owned(),
+            items: target_plan.items,
+            updated_at_ms: 3_000,
+        })
+        .expect("update target plan");
+    assert_eq!(
+        engine
+            .load_work_plan(&source)
+            .expect("source plan")
+            .expect("source exists")
+            .objective,
+        "source objective"
+    );
+
+    let impact = engine
+        .inspect_session_deletion(&target)
+        .expect("inspect target deletion");
+    engine
+        .delete_session(SessionDeletion {
+            session_id: target.clone(),
+            operation_id: "delete-work-plan-target".to_owned(),
+            expected_impact: impact,
+        })
+        .expect("delete target");
+    assert!(
+        engine
+            .load_work_plan(&target)
+            .expect("query deleted plan")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1676,6 +2447,8 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            work_plan: None,
+            goal: None,
         })
         .expect("fork legacy session");
     engine
@@ -2466,6 +3239,10 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
         engine
             .accept_input(NewStoredInput {
                 agent_variant: assistant_protocol::AgentVariant::Build,
+                origin: assistant_runtime::InputOrigin::User,
+                goal_binding: None,
+                new_goal: None,
+                resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
                 input_id: InputId::new(format!("input-{suffix}")).expect("input id"),
                 run_id: run_id(&format!("run-{suffix}")),
@@ -2547,7 +3324,7 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
     commit_completed_turn(&mut engine, &session, "four", 1_400);
     let appended = engine
         .load_conversation_window(ConversationWindowRequest {
-            owner,
+            owner: owner.clone(),
             generation: 1,
             end: None,
             limit: 2,
@@ -2558,6 +3335,50 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
         conversation::message_id(&appended.conversation.messages[0]).as_str(),
         "user-four"
     );
+
+    let hidden_id = MessageId::new("runtime-hidden-window").expect("message id");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-runtime-hidden-window".to_owned(),
+            session_id: session.clone(),
+            run_id: run_id("run-four"),
+            messages: vec![ConversationMessage::User(UserMessage {
+                id: hidden_id.clone(),
+                origin: UserMessageOrigin::Runtime,
+                transcript_visibility: TranscriptVisibility::Hidden,
+                parts: vec![UserPart::Injected(TextPart {
+                    id: PartId::new("runtime-hidden-window-injected").expect("part id"),
+                    text: "continue the active goal".to_owned(),
+                })],
+            })],
+            created_at_ms: 1_403,
+        })
+        .expect("append hidden runtime message");
+
+    let after_hidden = engine
+        .load_conversation_window(ConversationWindowRequest {
+            owner: owner.clone(),
+            generation: 1,
+            end: None,
+            limit: 2,
+        })
+        .expect("window after hidden runtime message");
+    assert_eq!(
+        (after_hidden.start, after_hidden.end, after_hidden.total),
+        (6, 8, 8)
+    );
+    assert_eq!(after_hidden.conversation.messages.len(), 3);
+    assert!(!after_hidden.conversation.messages[2].is_transcript_visible());
+
+    let location = engine
+        .locate_conversation_message(ConversationMessageLocationRequest {
+            owner,
+            message_id: hidden_id,
+        })
+        .expect("locate hidden runtime message")
+        .expect("hidden runtime message exists");
+    assert_eq!(location.message_ordinal, 8);
+    assert_eq!(location.display_ordinal, None);
 }
 
 #[tokio::test]
@@ -2699,6 +3520,8 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
         .create_session(new_session(session.as_str(), &engine.sessions_directory))
         .expect("create session");
     let message = UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new("message-files").expect("message id"),
         parts: vec![
             UserPart::Text(TextPart {
@@ -2723,6 +3546,10 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     engine
         .accept_input(NewStoredInput {
             agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: assistant_runtime::InputOrigin::User,
+            goal_binding: None,
+            new_goal: None,
+            resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             input_id: InputId::new("input-files").expect("input id"),
             run_id: run_id("run-files"),
@@ -3012,6 +3839,7 @@ fn pending_tool_exchange_prevents_run_terminal_settlement() {
             cancel_requested: false,
             error: None,
             messages: Vec::new(),
+            goal_effect: None,
             finished_at_ms: 3_000,
         })
         .expect_err("pending exchange must block terminal settlement");
@@ -3401,6 +4229,7 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
                 status: assistant_protocol::RunStatus::Completed,
                 cancel_requested: false,
                 error: None,
+                goal_effect: None,
             },
         )
         .expect("stage run settlement");
@@ -3581,10 +4410,15 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
             "r-compact-run",
         ))
         .expect("append original");
-    let replacement = ConversationSnapshot::new(vec![user_message(
-        "message-compact-run",
-        "summary replacement",
-    )]);
+    let replacement = ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+        id: MessageId::new("message-compact-run").expect("message id"),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        parts: vec![UserPart::Injected(TextPart {
+            id: PartId::new("message-compact-run-injected").expect("part id"),
+            text: "continue after summary replacement".to_owned(),
+        })],
+    })]);
 
     engine
         .replace_context(ContextReplacement {
@@ -3621,6 +4455,18 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
             .expect("replacement conversation"),
         replacement
     );
+    let product_window = engine
+        .load_conversation_window(ConversationWindowRequest {
+            owner: ConversationOwner::MainSession {
+                session_id: session_id("s-compact-run"),
+            },
+            generation: 2,
+            end: None,
+            limit: 20,
+        })
+        .expect("product window after replacement");
+    assert_eq!(product_window.total, 0);
+    assert!(product_window.conversation.messages.is_empty());
 }
 
 #[test]
@@ -3712,6 +4558,10 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         engine
             .accept_input(NewStoredInput {
                 agent_variant: assistant_protocol::AgentVariant::Build,
+                origin: assistant_runtime::InputOrigin::User,
+                goal_binding: None,
+                new_goal: None,
+                resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
                 input_id: InputId::new(input).expect("input id"),
                 run_id: run_id(run),
@@ -3742,6 +4592,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 cancel_requested: false,
                 error: None,
                 messages: vec![assistant_message(assistant, assistant)],
+                goal_effect: None,
                 finished_at_ms: at + 2,
             })
             .expect("settle run");
@@ -3779,6 +4630,10 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             )]),
             input: NewStoredInput {
                 agent_variant: assistant_protocol::AgentVariant::Build,
+                origin: assistant_runtime::InputOrigin::User,
+                goal_binding: None,
+                new_goal: None,
+                resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
                 input_id: InputId::new("input-replacement").expect("input id"),
                 run_id: run_id("run-replacement"),
@@ -3788,6 +4643,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 generated_title: None,
                 accepted_at_ms: 2_000,
             },
+            goal_effect: None,
             changed_at_ms: 2_000,
         })
         .expect("rewrite history");
@@ -3863,6 +4719,10 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     engine
         .accept_input(NewStoredInput {
             agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: assistant_runtime::InputOrigin::User,
+            goal_binding: None,
+            new_goal: None,
+            resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             input_id: InputId::new("queued-input").expect("input id"),
             run_id: run_id("queued-run"),
@@ -4159,6 +5019,8 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
     let call_id = ToolCallId::new("call-recall-visible").expect("tool call id");
     let messages = vec![
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new("recall-user").expect("message id"),
             parts: vec![
                 UserPart::Text(TextPart {
@@ -4208,6 +5070,28 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
                 metadata: None,
             },
         }),
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new("recall-assistant-final").expect("message id"),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider id"),
+                "fixture-model",
+            ),
+            parts: vec![AssistantPart::Text(TextPart {
+                id: PartId::new("recall-assistant-final-text").expect("part id"),
+                text: "tool exchange complete".to_owned(),
+            })],
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }),
+        ConversationMessage::User(UserMessage {
+            id: MessageId::new("recall-runtime-hidden").expect("message id"),
+            origin: UserMessageOrigin::Runtime,
+            transcript_visibility: TranscriptVisibility::Hidden,
+            parts: vec![UserPart::Text(TextPart {
+                id: PartId::new("recall-runtime-hidden-text").expect("part id"),
+                text: "runtime-hidden-recall-token".to_owned(),
+            })],
+        }),
     ];
     engine
         .append_messages(AppendRequest {
@@ -4244,6 +5128,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
         "tool-argument-token",
         "tool-result-token",
         "architecture.png",
+        "runtime-hidden-recall-token",
         "' OR 1=1 --",
     ] {
         let page = engine

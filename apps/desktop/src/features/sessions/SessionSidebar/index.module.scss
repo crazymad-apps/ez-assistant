@@ -276,6 +276,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+
+    small {
+      margin-left: 6px;
+      color: var(--ez-text-muted);
+      font-size: 10px;
+      font-weight: 500;
+    }
   }
 
   &:hover:not(:disabled) {
@@ -285,6 +292,10 @@
   &:disabled {
     cursor: default;
   }
+}
+
+.workspace_remove_action {
+  color: var(--ez-danger, #d84b4b);
 }
 
 .workspace_action,

@@ -147,6 +147,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     let key = IdempotencyKey::new("files-submit").expect("key");
     let accepted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "compare".to_owned(),
@@ -197,6 +198,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
 
     let reused = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "reuse one file".to_owned(),
@@ -236,6 +238,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
 
     let idempotent = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
             message: "ignored retry payload".to_owned(),
@@ -248,6 +251,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id.clone(),
                 message: "duplicate ids".to_owned(),
@@ -260,6 +264,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: second_session.session_id,
                 message: "cross session".to_owned(),
@@ -279,6 +284,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id,
                 message: "unavailable".to_owned(),

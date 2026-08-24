@@ -1,18 +1,15 @@
-//! 输入准入、排队取消、恢复与失败 Run 重试命令。
+//! 用户 Queue 控制、Session 恢复与失败 Run 重试命令。
 
 use assistant_protocol::{
     CancelQueuedInputRequest, CancelQueuedInputResult, InputId, PrioritizeQueuedInputRequest,
     PrioritizeQueuedInputResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
     ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RunStatus,
-    SessionTitleOrigin, SubmitInputRequest, SubmitInputResult,
 };
 
 use super::AssistantRuntime;
 use crate::{
-    NewStoredInput, NewStoredRunAttempt, QueuePriorityChange, RuntimeError, RuntimeResult,
-    StoredInputState,
-    run::{RunRecord, allocate_run_id, create_user_message},
-    session::InputRecord,
+    NewStoredRunAttempt, QueuePriorityChange, RuntimeError, RuntimeResult, StoredInputState,
+    run::{RunRecord, allocate_run_id},
 };
 
 impl AssistantRuntime {
@@ -33,7 +30,7 @@ impl AssistantRuntime {
                 return Err(RuntimeError::QueueConflict);
             }
             let position = state
-                .runnable_inputs
+                .user_inputs
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or_else(|| RuntimeError::InputNotFound {
@@ -52,17 +49,17 @@ impl AssistantRuntime {
                 .map_err(|source| RuntimeError::from_store("prioritize queued input", source))?;
             let mut state = session.lock_state()?;
             let position = state
-                .runnable_inputs
+                .user_inputs
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or(RuntimeError::QueueConflict)?;
-            let input_id = state.runnable_inputs.remove(position).ok_or(
+            let input_id = state.user_inputs.remove(position).ok_or(
                 RuntimeError::InternalStateUnavailable {
                     component: "queued input priority",
                 },
             )?;
-            state.runnable_inputs.push_front(input_id);
-            let ordered_ids = state.runnable_inputs.iter().cloned().collect::<Vec<_>>();
+            state.user_inputs.push_front(input_id);
+            let ordered_ids = state.user_inputs.iter().cloned().collect::<Vec<_>>();
             for (queue_order, input_id) in ordered_ids.into_iter().enumerate() {
                 if let Some(input) = state.inputs.get_mut(&input_id) {
                     input.stored.queue_order = u64::try_from(queue_order).map_err(|_| {
@@ -105,7 +102,7 @@ impl AssistantRuntime {
                 .as_ref()
                 .map(|input_id| {
                     state
-                        .runnable_inputs
+                        .user_inputs
                         .iter()
                         .position(|candidate| candidate == input_id)
                         .ok_or_else(|| RuntimeError::InputNotFound {
@@ -131,16 +128,16 @@ impl AssistantRuntime {
             if should_move {
                 let target = request.input_id.as_ref().expect("move requires target");
                 let position = state
-                    .runnable_inputs
+                    .user_inputs
                     .iter()
                     .position(|candidate| candidate == target)
                     .ok_or(RuntimeError::QueueConflict)?;
-                let input_id = state.runnable_inputs.remove(position).ok_or(
+                let input_id = state.user_inputs.remove(position).ok_or(
                     RuntimeError::InternalStateUnavailable {
                         component: "queued input resume",
                     },
                 )?;
-                state.runnable_inputs.push_front(input_id);
+                state.user_inputs.push_front(input_id);
             }
             state.resume_required = false;
             state.queue_paused_by_user = false;
@@ -153,111 +150,6 @@ impl AssistantRuntime {
         });
         self.wake_queue(session.clone())?;
         Ok(ResumeQueuedInputResult { queue })
-    }
-
-    /// 先持久化 Input 与首次 Run，再把它加入目标 Session 的执行队列。
-    pub async fn submit_input(
-        &self,
-        request: SubmitInputRequest,
-    ) -> RuntimeResult<SubmitInputResult> {
-        let _operation = self.operation_gate.read().await;
-        self.ensure_running()?;
-        if request.message.trim().is_empty() {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "message must not be blank",
-            });
-        }
-        let session = self.session(&request.session_id)?;
-        let _mutation = session.mutation().await;
-        session.ensure_active()?;
-        if let Some(key) = request.idempotency_key.as_ref()
-            && let Some((input_id, run)) = session.find_idempotent(key)?
-        {
-            return Ok(SubmitInputResult { input_id, run });
-        }
-        session.ensure_healthy()?;
-        let generated_title = automatic_session_title(&request.message);
-        let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
-        let message = create_user_message(request.message, files, request.variant)?;
-        let (input_id, run_id, approval_mode, should_generate_title) = {
-            let state = session.lock_state()?;
-            (
-                self.allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
-                state.approval_mode,
-                state.title_origin == SessionTitleOrigin::Generated
-                    && state.inputs.is_empty()
-                    && state.message_count == 0,
-            )
-        };
-        let generated_title = should_generate_title.then_some(generated_title);
-        let accepted = self
-            .store
-            .accept_input(NewStoredInput {
-                input_id: input_id.clone(),
-                run_id: run_id.clone(),
-                session_id: session.id().clone(),
-                idempotency_key: request.idempotency_key,
-                agent_variant: request.variant,
-                approval_mode,
-                message,
-                generated_title: generated_title.clone(),
-                accepted_at_ms: super::super::now_ms()?,
-            })
-            .await
-            .map_err(|source| RuntimeError::from_store("accept input", source))?;
-        if accepted.is_duplicate {
-            let state = session.lock_state()?;
-            let run = state
-                .runs
-                .get(&accepted.run.run_id)
-                .map(RunRecord::snapshot)
-                .ok_or(RuntimeError::InternalStateUnavailable {
-                    component: "idempotent run projection",
-                })?;
-            return Ok(SubmitInputResult {
-                input_id: accepted.input.input_id,
-                run,
-            });
-        }
-        let snapshot = {
-            let mut state = session.lock_state()?;
-            let record = RunRecord::accepted(&accepted.run, Vec::new());
-            let snapshot = record.snapshot();
-            state.current_variant = accepted.input.agent_variant;
-            if let Some(title) = generated_title {
-                state.title = title;
-            }
-            state.runs.insert(accepted.run.run_id.clone(), record);
-            state
-                .runnable_inputs
-                .push_back(accepted.input.input_id.clone());
-            state.queue_paused_by_user = false;
-            state.queue_revision = state.queue_revision.saturating_add(1);
-            state.inputs.insert(
-                accepted.input.input_id.clone(),
-                InputRecord {
-                    stored: accepted.input.clone(),
-                    first_run_id: accepted.run.run_id.clone(),
-                    latest_run_id: accepted.run.run_id.clone(),
-                },
-            );
-            snapshot
-        };
-        self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
-            session_id: session.id().clone(),
-            run_id: snapshot.run_id.clone(),
-        });
-        let revision = session.lock_state()?.queue_revision;
-        self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
-            session_id: session.id().clone(),
-            revision,
-        });
-        self.wake_queue(session.clone())?;
-        Ok(SubmitInputResult {
-            input_id: accepted.input.input_id,
-            run: snapshot,
-        })
     }
 
     /// 取消尚未进入规范 Conversation 的 Input。
@@ -286,13 +178,18 @@ impl AssistantRuntime {
                     reason: "input is not queued",
                 });
             }
+            if input.stored.goal_binding.is_some() {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "Goal inputs are not part of the user queue",
+                });
+            }
         }
         self.store
             .cancel_queued_input(session.id(), &request.input_id)
             .await
             .map_err(|source| RuntimeError::from_store("cancel queued input", source))?;
         let mut state = session.lock_state()?;
-        state.runnable_inputs.retain(|id| id != &request.input_id);
+        state.user_inputs.retain(|id| id != &request.input_id);
         state
             .runs
             .retain(|_, run| run.input_id() != &request.input_id);
@@ -371,11 +268,19 @@ impl AssistantRuntime {
                     run_id: request.run_id.clone(),
                 });
             }
-            if state
-                .inputs
-                .get(source.input_id())
-                .is_none_or(|input| input.latest_run_id != request.run_id)
-            {
+            let Some(input) = state.inputs.get(source.input_id()) else {
+                return Err(RuntimeError::RunNotRetryable {
+                    session_id: request.session_id.clone(),
+                    run_id: request.run_id.clone(),
+                });
+            };
+            if input.stored.goal_binding.is_some() {
+                return Err(RuntimeError::GoalRunRequiresResume {
+                    session_id: request.session_id.clone(),
+                    run_id: request.run_id.clone(),
+                });
+            }
+            if input.latest_run_id != request.run_id {
                 return Err(RuntimeError::RunNotRetryable {
                     session_id: request.session_id.clone(),
                     run_id: request.run_id.clone(),
@@ -422,7 +327,7 @@ impl AssistantRuntime {
                 .expect("checked input")
                 .latest_run_id = stored.run_id.clone();
             let position = state
-                .runnable_inputs
+                .user_inputs
                 .iter()
                 .position(|id| {
                     state
@@ -430,8 +335,8 @@ impl AssistantRuntime {
                         .get(id)
                         .is_some_and(|input| input.stored.queue_order > queue_order)
                 })
-                .unwrap_or(state.runnable_inputs.len());
-            state.runnable_inputs.insert(position, input_id.clone());
+                .unwrap_or(state.user_inputs.len());
+            state.user_inputs.insert(position, input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
             snapshot
         };
@@ -469,15 +374,4 @@ impl AssistantRuntime {
             component: "input id collision",
         })
     }
-}
-
-fn automatic_session_title(message: &str) -> String {
-    let line = message
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("New Session");
-    line.chars()
-        .take(AssistantRuntime::MAX_SESSION_TITLE_CHARS)
-        .collect()
 }

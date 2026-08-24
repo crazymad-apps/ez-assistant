@@ -24,6 +24,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
     let key = IdempotencyKey::new("submit-1").expect("key");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: AgentVariant::Plan,
             session_id: session.session.session_id.clone(),
             message: "first payload".to_owned(),
@@ -34,6 +35,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .expect("first submit");
     let repeated = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "different payload is ignored for the same key".to_owned(),
@@ -89,6 +91,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let active = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "active".to_owned(),
@@ -102,6 +105,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .expect("tool entered");
     let queued = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "queued".to_owned(),
@@ -181,6 +185,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
@@ -194,6 +199,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
         .expect("first entered");
     let second = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "second".to_owned(),
@@ -288,6 +294,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .expect("remove config");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "retry me".to_owned(),

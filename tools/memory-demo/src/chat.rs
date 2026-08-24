@@ -364,6 +364,8 @@ fn tool_proposed_label(call: &agent_types::ToolCall) -> String {
 fn user_message(text: String) -> Result<UserMessage, DemoError> {
     let suffix = unique_suffix();
     Ok(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new(format!("user_{suffix}"))
             .map_err(|error| DemoError::Session(error.to_string()))?,
         parts: vec![UserPart::Text(TextPart {

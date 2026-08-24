@@ -412,6 +412,8 @@ impl DemoRuntime {
             state.next_message = state.next_message.saturating_add(1);
             let run_id = DemoRunId(format!("{}-run-{}", session.id, state.next_run));
             let user_message = UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: MessageId::new(format!("{}-user-{}", session.id, state.next_message))
                     .map_err(|_| RuntimeError::Identifier)?,
                 parts: vec![UserPart::Text(TextPart {

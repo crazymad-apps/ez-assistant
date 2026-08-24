@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::Read,
     net::TcpListener,
     path::Path,
     process::{Child, Command, Output, Stdio},
@@ -72,7 +73,10 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
     let body_text = serde_json::to_string(&body).expect("serialize fake Provider request");
     let case = latest_case(&body_text);
     let current_turn_has_tool_result = current_turn_has_tool_result(&body);
-    if matches!(case, "BLOCK_FOR_RESTART" | "CANCEL_CASE") {
+    if matches!(case, "BLOCK_FOR_RESTART" | "CANCEL_CASE")
+        || matches!(case, "GOAL_STOP_CASE" | "GOAL_RECOVERY_CASE")
+            && !body_text.contains("GOAL_CONTINUATION_V1")
+    {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
     let response = if body.get("model").and_then(Value::as_str) == Some("qwen3.8-max")
@@ -111,6 +115,21 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         && !current_turn_has_tool_result
     {
         delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "GOAL_LONG_CASE" {
+        goal_long_response(&body, &body_text)
+    } else if case == "GOAL_BLOCK_CASE" {
+        goal_block_response(&body)
+    } else if case == "GOAL_RECOVERY_CASE" && body_text.contains("GOAL_CONTINUATION_V1") {
+        if current_turn_has_tool_result {
+            chat_text_response("goal-recovery-final", "recovered Goal complete")
+        } else {
+            named_tool_response(
+                "goal-recovery-complete",
+                "call-goal-recovery-complete",
+                "update_goal",
+                json!({"status":"complete","summary":"recovered safely"}),
+            )
+        }
     } else if case == "TOOL_CASE" && !current_turn_has_tool_result {
         directory_list_tool_response(tool_exchange_number(&body))
     } else if case == "WRITE_CASE" && !current_turn_has_tool_result {
@@ -170,6 +189,108 @@ fn chat_text_response(response_id: &str, text: &str) -> String {
     format!(
         "data: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{text:?}}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":20,\"completion_tokens\":4,\"total_tokens\":24}}}}\n\ndata: [DONE]\n\n"
     )
+}
+
+fn goal_long_response(body: &Value, body_text: &str) -> String {
+    if current_turn_has_tool_result(body) {
+        let response_id = if has_tool_call_result(body, "call-goal-long-complete") {
+            "goal-long-complete-final"
+        } else {
+            "goal-long-plan-final"
+        };
+        return chat_text_response(response_id, "Goal tool applied");
+    }
+    if !has_tool_call_result(body, "call-goal-plan") {
+        return named_tool_response(
+            "goal-plan",
+            "call-goal-plan",
+            "update_plan",
+            json!({
+                "objective":"complete the offline Goal lifecycle",
+                "items":[{"text":"run continuations","status":"in_progress"}]
+            }),
+        );
+    }
+    let continuation_count = body_text.matches("GOAL_CONTINUATION_V1").count();
+    if continuation_count >= 3 && !has_tool_call_result(body, "call-goal-long-complete") {
+        named_tool_response(
+            "goal-long-complete",
+            "call-goal-long-complete",
+            "update_goal",
+            json!({"status":"complete","summary":"offline Goal completed"}),
+        )
+    } else {
+        chat_text_response(
+            &format!("goal-long-turn-{continuation_count}"),
+            "continue the Goal",
+        )
+    }
+}
+
+fn goal_block_response(body: &Value) -> String {
+    if current_turn_has_tool_result(body) {
+        let response_id = if has_tool_call_result(body, "call-goal-block-resumed-complete") {
+            "goal-block-complete-final"
+        } else {
+            "goal-block-paused-final"
+        };
+        return chat_text_response(response_id, "Goal state recorded");
+    }
+    if !has_tool_call_result(body, "call-goal-blocked") {
+        named_tool_response(
+            "goal-blocked",
+            "call-goal-blocked",
+            "update_goal",
+            json!({"status":"blocked","summary":"need explicit user confirmation"}),
+        )
+    } else if !has_tool_call_result(body, "call-goal-block-resumed-complete") {
+        named_tool_response(
+            "goal-block-resumed-complete",
+            "call-goal-block-resumed-complete",
+            "update_goal",
+            json!({"status":"complete","summary":"user resumed the Goal"}),
+        )
+    } else {
+        chat_text_response("goal-block-complete-final", "resumed Goal complete")
+    }
+}
+
+fn named_tool_response(
+    response_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> String {
+    let arguments = serde_json::to_string(&arguments).expect("serialize fake tool arguments");
+    let proposal = json!({
+        "id": response_id,
+        "model": "offline-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": tool_name, "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": response_id,
+        "model": "offline-model",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+        "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 4,
+            "total_tokens": 24,
+            "prompt_tokens_details": { "cached_tokens": 8 }
+        }
+    });
+    format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
 fn responses_function_call() -> String {
@@ -683,6 +804,10 @@ fn latest_case(body: &str) -> &'static str {
         "DELEGATE_IMAGE_CASE",
         "READ_IMAGE_CASE",
         "INSPECT_LOCAL_CASE",
+        "GOAL_LONG_CASE",
+        "GOAL_BLOCK_CASE",
+        "GOAL_STOP_CASE",
+        "GOAL_RECOVERY_CASE",
     ]
     .into_iter()
     .filter_map(|marker| body.rfind(marker).map(|position| (position, marker)))
@@ -1193,7 +1318,17 @@ fn wait_until_ready(runtime_home: &Path, child: &mut Child) -> (String, String) 
             return (base_url.to_owned(), access_token.to_owned());
         }
         if let Some(status) = child.try_wait().expect("poll Runtime Host") {
-            panic!("Runtime Host exited before ready: {status}");
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!(
+                "Runtime Host exited before ready: {status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
         }
         assert!(
             Instant::now() < deadline,

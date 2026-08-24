@@ -6,7 +6,7 @@ use assistant_protocol::{AttachmentId, ChildTaskId, InputId, RunId, SessionId, W
 
 use crate::{
     RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredChildTask,
-    StoredWorkspace, session::SessionController,
+    StoredWorkspace, goal::GoalControl, session::SessionController, work_plan::WorkPlan,
 };
 
 pub(super) struct RecoveredRegistries {
@@ -35,6 +35,35 @@ pub(super) fn recover_registries(
             .is_some()
         {
             return Err(invalid_recovery());
+        }
+    }
+    let mut stored_goals_by_session = BTreeMap::new();
+    for goal in &recovered.goals {
+        if stored_goals_by_session
+            .insert(goal.session_id.clone(), goal)
+            .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+    }
+    let mut queued_goal_inputs = BTreeMap::<SessionId, usize>::new();
+    for input in &recovered.inputs {
+        if input.state == crate::StoredInputState::Queued
+            && let Some(binding) = input.goal_binding.as_ref()
+        {
+            let Some(goal) = stored_goals_by_session.get(&input.session_id) else {
+                return Err(invalid_recovery());
+            };
+            if binding.goal_id != goal.goal_id || binding.generation > goal.generation {
+                return Err(invalid_recovery());
+            }
+            let count = queued_goal_inputs
+                .entry(input.session_id.clone())
+                .or_default();
+            *count += 1;
+            if *count > 1 {
+                return Err(invalid_recovery());
+            }
         }
     }
     let mut referenced_inputs = std::collections::BTreeSet::new();
@@ -71,6 +100,22 @@ pub(super) fn recover_registries(
             .or_default()
             .push(input);
     }
+    let mut work_plans_by_session = BTreeMap::<SessionId, WorkPlan>::new();
+    for stored in recovered.work_plans {
+        let session_id = stored.session_id.clone();
+        let plan = WorkPlan::try_from(stored).map_err(|_| invalid_recovery())?;
+        if work_plans_by_session.insert(session_id, plan).is_some() {
+            return Err(invalid_recovery());
+        }
+    }
+    let mut goals_by_session = BTreeMap::<SessionId, GoalControl>::new();
+    for stored in recovered.goals {
+        let session_id = stored.session_id.clone();
+        let goal = GoalControl::try_from(stored).map_err(|_| invalid_recovery())?;
+        if goals_by_session.insert(session_id, goal).is_some() {
+            return Err(invalid_recovery());
+        }
+    }
 
     let mut sessions = BTreeMap::new();
     for stored in recovered.sessions {
@@ -84,12 +129,18 @@ pub(super) fn recover_registries(
             stored,
             runs_by_session.remove(&session_id).unwrap_or_default(),
             inputs_by_session.remove(&session_id).unwrap_or_default(),
+            work_plans_by_session.remove(&session_id),
+            goals_by_session.remove(&session_id),
         ));
         if sessions.insert(session_id, controller).is_some() {
             return Err(invalid_recovery());
         }
     }
-    if !runs_by_session.is_empty() || !inputs_by_session.is_empty() {
+    if !runs_by_session.is_empty()
+        || !inputs_by_session.is_empty()
+        || !work_plans_by_session.is_empty()
+        || !goals_by_session.is_empty()
+    {
         return Err(invalid_recovery());
     }
     let mut child_tasks = BTreeMap::new();

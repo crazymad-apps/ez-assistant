@@ -106,7 +106,7 @@ impl Engine {
                 .await;
         };
         let invocation = match item {
-            ResolvedBatchItemRef::Invalid(result) => {
+            ResolvedBatchItemRef::Invalid { result, .. } => {
                 self.guardrails.reset_repeated_invocation();
                 return self
                     .settle_result(exchange, calls, index + 1, results, result.clone())

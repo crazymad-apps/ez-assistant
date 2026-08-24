@@ -10,7 +10,7 @@ use agent_core::{
 };
 use agent_tools::{
     AbsolutePath, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation,
-    ResolvedToolBatch, ResolvedToolInvocation,
+    ResolvedBatchItemRef, ResolvedToolBatch, ResolvedToolInvocation,
 };
 use assistant_protocol::{AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode};
 
@@ -18,7 +18,11 @@ use super::{
     PermissionCoordinator, PermissionFileScope,
     matcher::{InvocationFactKind, fact_kind, file_matcher_matches, matches_rule},
 };
-use crate::{RuntimeError, RuntimeResult, SessionExecutionEnvironment};
+use crate::{
+    RuntimeError, RuntimeResult, SessionExecutionEnvironment,
+    goal::{GoalRunSignalLatch, GoalSignalAuthorizationFacts, UPDATE_GOAL_TOOL_NAME},
+    work_plan::WorkPlanAuthorizationFacts,
+};
 
 pub(crate) type ApprovalFuture<'a> = Pin<Box<dyn Future<Output = ApprovalResolution> + Send + 'a>>;
 
@@ -82,6 +86,7 @@ pub(crate) struct RuntimeToolAuthorizer {
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     private_roots: Vec<AbsolutePath>,
     approval_resolver: Arc<dyn PermissionApprovalResolver>,
+    goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
 }
 
 #[derive(Clone)]
@@ -111,7 +116,13 @@ impl RuntimeToolAuthorizer {
             infrastructure_policies,
             private_roots,
             approval_resolver,
+            goal_signal_latch: None,
         })
+    }
+
+    pub(crate) fn with_goal_signal_latch(mut self, latch: Option<Arc<GoalRunSignalLatch>>) -> Self {
+        self.goal_signal_latch = latch;
+        self
     }
 
     /// 把单个活动子任务的 OS 临时目录加入 Plan 可写私有根。
@@ -135,6 +146,45 @@ impl RuntimeToolAuthorizer {
         invocation: &ResolvedToolInvocation,
         batch: &ResolvedToolBatch,
     ) -> ToolAuthorization {
+        let goal_signal_calls = batch
+            .iter()
+            .filter(|item| match item {
+                ResolvedBatchItemRef::Valid(candidate) => {
+                    candidate.facts::<GoalSignalAuthorizationFacts>().is_some()
+                }
+                ResolvedBatchItemRef::Invalid { tool_name, .. } => {
+                    tool_name.as_str() == UPDATE_GOAL_TOOL_NAME
+                }
+            })
+            .count();
+        if goal_signal_calls > 0 {
+            if batch.len() != 1 || goal_signal_calls != 1 {
+                return deny("update_goal must be the only tool call in its assistant turn");
+            }
+            if invocation.facts::<GoalSignalAuthorizationFacts>().is_none() {
+                return deny("update_goal must be the only tool call in its assistant turn");
+            }
+            if self
+                .goal_signal_latch
+                .as_ref()
+                .is_some_and(|latch| latch.has_signal())
+            {
+                return deny("this Run already reported a Goal terminal signal");
+            }
+            return ToolAuthorization::Allow;
+        }
+        if self
+            .goal_signal_latch
+            .as_ref()
+            .is_some_and(|latch| latch.has_signal())
+        {
+            return deny("no further tools are allowed after a Goal terminal signal");
+        }
+        // WorkPlan 是 Session 内部结构化状态，不触及 OS、网络或 Host 基础设施；只有
+        // Runtime 私有工具能构造该 facts，因此不进入用户审批和通用权限匹配。
+        if invocation.facts::<WorkPlanAuthorizationFacts>().is_some() {
+            return ToolAuthorization::Allow;
+        }
         // 授权器按解析后的结构化 facts 判断，未知 facts 默认拒绝；不能退回到工具名或原始
         // JSON 猜测权限，否则新工具可能意外绕过现有策略。
         if fact_kind(invocation) == InvocationFactKind::Unknown {
@@ -391,7 +441,7 @@ mod tests {
         ToolRegistry, ToolResolution,
     };
     use agent_types::{ToolCall, ToolCallId, ToolName};
-    use assistant_protocol::{AgentVariant, ApprovalId, ApprovalMode};
+    use assistant_protocol::{AgentVariant, ApprovalId, ApprovalMode, GoalId, RunId};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -419,6 +469,47 @@ mod tests {
 
     struct BatchFileFactsTool {
         resolver: SessionPathResolver,
+    }
+
+    #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+    struct GoalSignalInput {
+        summary: String,
+    }
+
+    struct GoalSignalFactsTool;
+
+    impl Tool for GoalSignalFactsTool {
+        type Input = GoalSignalInput;
+        type ResolvedInput = GoalSignalInput;
+        type Output = serde_json::Value;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("update_goal").expect("tool name")
+        }
+
+        fn description(&self) -> String {
+            "test goal signal facts".to_owned()
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            let semantic = json!({"summary": input.summary});
+            Ok(ToolResolution::with_facts(
+                input,
+                GoalSignalAuthorizationFacts,
+                semantic,
+            ))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::ready(Ok(json!({"ok": true}))))
+        }
     }
 
     impl Tool for BatchFileFactsTool {
@@ -891,6 +982,114 @@ mod tests {
             panic!("batch read resolves");
         };
         authorizer.authorize(invocation, &batch).await
+    }
+
+    #[tokio::test]
+    async fn goal_signal_must_be_alone_and_closes_the_run_tool_gate() {
+        let root = TempDir::new().expect("tempdir");
+        let environment = environment(&root);
+        let permissions = coordinator([
+            (PermissionFileScope::Global, empty_document()),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let latch = Arc::new(crate::goal::GoalRunSignalLatch::new(
+            crate::goal::GoalRunBinding {
+                goal_id: GoalId::new("goal-authorizer").expect("goal id"),
+                generation: 1,
+                run_id: RunId::new("run-authorizer").expect("run id"),
+            },
+        ));
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Auto,
+            scopes(),
+            permissions,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(ToolAuthorization::Allow)),
+        )
+        .expect("authorizer")
+        .with_goal_signal_latch(Some(latch.clone()));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(GoalSignalFactsTool).expect("goal tool");
+        registry
+            .register(FileFactsTool {
+                operation: FileOperation::Write,
+                resolver: SessionPathResolver::new(
+                    AbsolutePath::new(&environment.working_directory).expect("working directory"),
+                ),
+            })
+            .expect("file tool");
+        let snapshot = registry.snapshot();
+        let goal_call = ToolCall {
+            id: ToolCallId::new("call-goal").expect("call id"),
+            name: ToolName::new("update_goal").expect("tool name"),
+            arguments: json!({"summary": "done"}),
+        };
+        let file_call = ToolCall {
+            id: ToolCallId::new("call-write").expect("call id"),
+            name: ToolName::new("write_file").expect("tool name"),
+            arguments: json!({"path": root.path().join("workspace/out.txt")}),
+        };
+        let mixed = Dispatcher::resolve_batch(&snapshot, &[file_call.clone(), goal_call.clone()]);
+        for item in mixed.iter() {
+            let ResolvedBatchItemRef::Valid(invocation) = item else {
+                panic!("mixed calls resolve");
+            };
+            assert!(matches!(
+                authorizer.authorize(invocation, &mixed).await,
+                ToolAuthorization::Deny { .. }
+            ));
+        }
+
+        let malformed_goal = ToolCall {
+            id: ToolCallId::new("call-goal-invalid").expect("call id"),
+            name: ToolName::new("update_goal").expect("tool name"),
+            arguments: json!({}),
+        };
+        let malformed_mixed =
+            Dispatcher::resolve_batch(&snapshot, &[file_call.clone(), malformed_goal]);
+        let ResolvedBatchItemRef::Valid(file_invocation) =
+            malformed_mixed.get(0).expect("file item")
+        else {
+            panic!("file call resolves");
+        };
+        assert!(matches!(
+            authorizer
+                .authorize(file_invocation, &malformed_mixed)
+                .await,
+            ToolAuthorization::Deny { .. }
+        ));
+
+        let goal_only = Dispatcher::resolve_batch(&snapshot, std::slice::from_ref(&goal_call));
+        let ResolvedBatchItemRef::Valid(goal_invocation) = goal_only.get(0).expect("goal item")
+        else {
+            panic!("goal call resolves");
+        };
+        assert_eq!(
+            authorizer.authorize(goal_invocation, &goal_only).await,
+            ToolAuthorization::Allow
+        );
+
+        latch
+            .record(crate::goal::GoalAgentStatus::Complete, "done".to_owned())
+            .expect("record signal");
+        assert!(matches!(
+            authorizer.authorize(goal_invocation, &goal_only).await,
+            ToolAuthorization::Deny { .. }
+        ));
+        let file_only = Dispatcher::resolve_batch(&snapshot, std::slice::from_ref(&file_call));
+        let ResolvedBatchItemRef::Valid(file_invocation) = file_only.get(0).expect("file item")
+        else {
+            panic!("file call resolves");
+        };
+        assert!(matches!(
+            authorizer.authorize(file_invocation, &file_only).await,
+            ToolAuthorization::Deny { .. }
+        ));
     }
 
     async fn coordinator<const N: usize>(

@@ -16,6 +16,7 @@ mod snapshot;
 pub use command::{
     ArchiveSessionRequest, ArchiveSessionResult, CancelChildTaskRequest, CancelChildTaskResult,
     CancelQueuedInputRequest, CancelQueuedInputResult, CancelRunRequest, CancelRunResult,
+    ClearGoalRequest, ClearGoalResult, ClearWorkPlanRequest, ClearWorkPlanResult,
     ConfigurationMutationResult, ConnectionValidationFailure, ConnectionValidationFailureKind,
     ConnectionValidationOutcome, CreateModelRequest, CreatePinnedMemoryRequest,
     CreateSessionRequest, CreateSessionResult, DecideApprovalRequest, DecideApprovalResult,
@@ -37,16 +38,17 @@ pub use command::{
     RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest,
     ReloadPermissionsResult, RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest,
     RenameSessionResult, ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult,
-    RestoreSessionRequest, RestoreSessionResult, ResumeSessionRequest, ResumeSessionResult,
-    RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult, SecretValue,
-    SetAuxiliaryVisionModelRequest, SetDefaultModelRequest, SetMessageFeedbackRequest,
-    SetMessageFeedbackResult, SetPersonaRequest, SetPersonaResult, SetSessionApprovalModeRequest,
-    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
-    SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionReasoningEffortRequest,
-    SetSessionReasoningEffortResult, SetSessionVariantRequest, SetSessionVariantResult,
-    ShutdownRuntimeRequest, ShutdownRuntimeResult, SubmitInputRequest, SubmitInputResult,
-    UpdateModelRequest, UpdatePinnedMemoryRequest, UploadAttachmentResult,
-    ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    RestoreSessionRequest, RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult,
+    ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
+    RuntimeCommandResult, SecretValue, SetAuxiliaryVisionModelRequest, SetDefaultModelRequest,
+    SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest, SetPersonaResult,
+    SetSessionApprovalModeRequest, SetSessionApprovalModeResult, SetSessionModelRequest,
+    SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
+    SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
+    SetSessionVariantResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, StopGoalRequest,
+    StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult, UpdateModelRequest,
+    UpdatePinnedMemoryRequest, UploadAttachmentResult, ValidateModelConnectionRequest,
+    ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
@@ -58,9 +60,9 @@ pub use host::{
     RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
 };
 pub use id::{
-    ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, IdempotencyKey,
+    ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, GoalId, IdempotencyKey,
     IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId, ResourceRefId, RunId,
-    SessionId, ToolCallId, WorkspaceId,
+    SessionId, TodoItemId, ToolCallId, WorkspaceId,
 };
 pub use memory::{
     MemoryAttributeValue, MemoryCapabilities, PersonaSnapshot, PinnedMemoryCollectionSnapshot,
@@ -83,7 +85,8 @@ pub use product::{
     GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
     GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
     GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
-    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, ImageHandlingMode,
+    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot,
+    GoalPauseReasonSnapshot, GoalSnapshot, GoalStateSnapshot, ImageHandlingMode,
     ImageInspectionDetailSnapshot, InterruptRunRequest, InterruptRunResult,
     ListConversationPageRequest, ListConversationPageResult, MessageFeedback, ObservedSnapshot,
     PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot,
@@ -91,9 +94,9 @@ pub use product::{
     RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot,
     RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
     ResumeQueuedInputResult, SearchConversationHistoryRequest, SearchConversationHistoryResult,
-    SessionUsageSnapshot, SessionViewSnapshot, ToolDetailSnapshot, ToolEventSnapshot,
-    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
-    UsageTotals, UserMessageSnapshot,
+    SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
+    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
+    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,

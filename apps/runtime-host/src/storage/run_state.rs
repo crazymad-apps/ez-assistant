@@ -103,7 +103,10 @@ impl StorageEngine {
     }
 
     /// 将 Run 与本次新增的完整规范消息作为一个可恢复操作提交。
-    pub(super) fn settle_run(&mut self, settlement: StoredRunSettlement) -> StorageResult<()> {
+    pub(super) fn settle_run(
+        &mut self,
+        settlement: StoredRunSettlement,
+    ) -> StorageResult<assistant_runtime::StoredRunSettlementResult> {
         if !settlement.status.is_terminal() {
             return Err(assistant_runtime::StoreError::new(
                 assistant_runtime::StoreErrorKind::InvalidInput,
@@ -123,10 +126,12 @@ impl StorageEngine {
         if pending_count != 0 {
             return Err(conflict("run has a pending tool exchange"));
         }
+        let goal_effect = settlement.goal_effect.clone();
         let purpose = AppendPurpose::RunSettlement {
             status: settlement.status,
             cancel_requested: settlement.cancel_requested,
             error: settlement.error,
+            goal_effect: settlement.goal_effect.map(Box::new),
         };
         if settlement.messages.is_empty() {
             let transaction = self
@@ -140,10 +145,29 @@ impl StorageEngine {
                 &purpose,
                 settlement.finished_at_ms,
             )?;
-            return transaction.commit().map_err(|source| {
+            transaction.commit().map_err(|source| {
                 database_write_error("run settlement could not be committed", source)
-            });
+            })?;
+            return self.goal_settlement_result(goal_effect.as_ref());
         }
+
+        // JSONL 先写、SQLite 后提交的 staged append 只能承受进程崩溃，不能承受一个
+        // 可预知的业务 effect 校验失败。单 worker 内先在回滚事务中执行同一 effect，
+        // 确认 Run/Goal CAS 与 continuation 形状均有效后才允许正文落盘。
+        let preflight = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| internal_error("run settlement preflight could not begin", source))?;
+        apply_run_settlement(
+            &preflight,
+            &settlement.run_id,
+            &settlement.session_id,
+            &purpose,
+            settlement.finished_at_ms,
+        )?;
+        preflight.rollback().map_err(|source| {
+            internal_error("run settlement preflight could not roll back", source)
+        })?;
 
         let operation_id = settlement.operation_id.clone();
         self.stage_append_for(
@@ -156,7 +180,51 @@ impl StorageEngine {
             },
             purpose,
         )?;
-        self.complete_staged_append(&settlement.operation_id)
+        self.complete_staged_append(&settlement.operation_id)?;
+        self.goal_settlement_result(goal_effect.as_ref())
+    }
+
+    fn goal_settlement_result(
+        &self,
+        effect: Option<&assistant_runtime::StoredGoalSettlementEffect>,
+    ) -> StorageResult<assistant_runtime::StoredRunSettlementResult> {
+        let Some(effect) = effect else {
+            return Ok(assistant_runtime::StoredRunSettlementResult::default());
+        };
+        match effect {
+            assistant_runtime::StoredGoalSettlementEffect::Continue {
+                goal, next_input, ..
+            } => {
+                let input = self
+                    .load_inputs()?
+                    .into_iter()
+                    .find(|input| input.input_id == next_input.input_id)
+                    .ok_or_else(|| super::invalid_data("Goal continuation input is missing"))?;
+                let run = self
+                    .load_runs()?
+                    .into_iter()
+                    .find(|run| run.run_id == next_input.run_id)
+                    .ok_or_else(|| super::invalid_data("Goal continuation Run is missing"))?;
+                Ok(assistant_runtime::StoredRunSettlementResult {
+                    goal: Some(goal.clone()),
+                    continuation: Some(assistant_runtime::AcceptedInput {
+                        input,
+                        run,
+                        is_duplicate: false,
+                    }),
+                    resume_required: false,
+                })
+            }
+            assistant_runtime::StoredGoalSettlementEffect::Transition {
+                goal,
+                resume_required,
+                ..
+            } => Ok(assistant_runtime::StoredRunSettlementResult {
+                goal: Some(goal.clone()),
+                continuation: None,
+                resume_required: *resume_required,
+            }),
+        }
     }
 
     /// 重启时只中断已经领取或已经提交 User Message 的未终结 Run。

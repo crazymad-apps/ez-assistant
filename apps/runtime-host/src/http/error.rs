@@ -81,11 +81,17 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::ModelNotFound
         | RuntimeErrorCode::WorkspaceNotFound
         | RuntimeErrorCode::AttachmentNotFound => StatusCode::NOT_FOUND,
+        RuntimeErrorCode::GoalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::SessionBusy
         | RuntimeErrorCode::SessionArchived
         | RuntimeErrorCode::SessionNotIdle
         | RuntimeErrorCode::RunNotRetryable
+        | RuntimeErrorCode::GoalAlreadyExists
+        | RuntimeErrorCode::GoalGenerationConflict
+        | RuntimeErrorCode::GoalNotResumable
+        | RuntimeErrorCode::GoalRunRequiresResume
+        | RuntimeErrorCode::WorkPlanRevisionConflict
         | RuntimeErrorCode::WorkspaceRemoved
         | RuntimeErrorCode::WorkspaceUnavailable
         | RuntimeErrorCode::AttachmentUnavailable
@@ -99,6 +105,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::QueueConflict
         | RuntimeErrorCode::SnapshotStale
         | RuntimeErrorCode::OperationNotAllowed => StatusCode::CONFLICT,
+        RuntimeErrorCode::GoalUnsupportedByModel => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::AttachmentTooLarge | RuntimeErrorCode::ResourceTooLarge => {
             StatusCode::PAYLOAD_TOO_LARGE
         }

@@ -52,6 +52,8 @@ fn prompt() -> SystemPromptSnapshot {
 fn input(id: &str, text: &str) -> ExecutionInput {
     ExecutionInput {
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new(id).expect("valid message id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new(format!("{id}_text")).expect("valid part id"),

@@ -674,6 +674,8 @@ fn user_message(run_id: &HarnessRunId, text: &str) -> Result<UserMessage, Harnes
     let part_id = PartId::new(format!("{run_id}_user_text"))
         .map_err(crate::journal::JournalError::InvalidIdentifier)?;
     Ok(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id,
         parts: vec![UserPart::Text(TextPart {
             id: part_id,

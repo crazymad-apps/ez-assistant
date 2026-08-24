@@ -50,6 +50,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
 
     let old_run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: before_reload.session.session_id.clone(),
             message: "race before swap".to_owned(),
@@ -81,6 +82,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
     );
     let new_run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: after_reload.session.session_id.clone(),
             message: "run after swap".to_owned(),
@@ -160,6 +162,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
 
     let first_run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
@@ -184,6 +187,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     let second_run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
@@ -213,6 +217,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     let rejected = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
             message: "must not use stale key".to_owned(),

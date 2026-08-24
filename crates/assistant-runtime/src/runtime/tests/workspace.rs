@@ -1,6 +1,7 @@
 use assistant_protocol::{
-    CreateSessionRequest, GetWorkspaceRequest, ListWorkspacesRequest, RegisterWorkspaceRequest,
-    RemoveWorkspaceRequest, RuntimeErrorCode, SubmitInputRequest, WorkspaceLifecycle,
+    CreateSessionRequest, GetApplicationSnapshotRequest, GetWorkspaceRequest,
+    ListWorkspacesRequest, RegisterWorkspaceRequest, RemoveWorkspaceRequest, RuntimeErrorCode,
+    SubmitInputRequest, WorkspaceLifecycle,
 };
 
 use super::*;
@@ -8,20 +9,22 @@ use super::*;
 #[tokio::test]
 async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions() {
     let runtime = runtime_with_tools(empty_model(), ToolSetSnapshot::default());
-    let first = runtime
+    let first_registration = runtime
         .register_workspace(RegisterWorkspaceRequest {
             path: "/workspace/project".to_owned(),
         })
         .await
-        .expect("register workspace")
-        .workspace;
-    let duplicate = runtime
+        .expect("register workspace");
+    assert!(!first_registration.restored);
+    let first = first_registration.workspace;
+    let duplicate_registration = runtime
         .register_workspace(RegisterWorkspaceRequest {
             path: "/workspace/project".to_owned(),
         })
         .await
-        .expect("idempotent registration")
-        .workspace;
+        .expect("idempotent registration");
+    assert!(!duplicate_registration.restored);
+    let duplicate = duplicate_registration.workspace;
     assert_eq!(duplicate.workspace_id, first.workspace_id);
 
     let bound = runtime
@@ -63,13 +66,21 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
     assert_eq!(
         runtime
             .get_session(assistant_protocol::GetSessionRequest {
-                session_id: bound.session_id,
+                session_id: bound.session_id.clone(),
             })
             .expect("get bound session")
             .session
             .workspace_id,
         Some(first.workspace_id.clone())
     );
+    let application = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .expect("application snapshot after workspace removal")
+        .snapshot
+        .value;
+    assert!(application.workspaces.is_empty());
+    assert!(application.active_sessions.is_empty());
 
     let error = runtime
         .create_session(CreateSessionRequest {
@@ -81,15 +92,24 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
         .expect_err("removed workspace must reject new binding");
     assert!(matches!(error, RuntimeError::WorkspaceRemoved { .. }));
 
-    let restored = runtime
+    let restored_registration = runtime
         .register_workspace(RegisterWorkspaceRequest {
             path: "/workspace/project".to_owned(),
         })
         .await
-        .expect("restore workspace")
-        .workspace;
+        .expect("restore workspace");
+    assert!(restored_registration.restored);
+    let restored = restored_registration.workspace;
     assert_eq!(restored.workspace_id, first.workspace_id);
     assert_eq!(restored.lifecycle, WorkspaceLifecycle::Active);
+    let restored_application = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .expect("application snapshot after workspace restore")
+        .snapshot
+        .value;
+    assert_eq!(restored_application.workspaces, vec![restored]);
+    assert_eq!(restored_application.active_sessions, vec![bound]);
 }
 
 #[tokio::test]
@@ -171,6 +191,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     ] {
         let accepted = runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message: message.to_owned(),
@@ -222,6 +243,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
         .session;
     let accepted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session_id.clone(),
             message: "must fail before start".to_owned(),

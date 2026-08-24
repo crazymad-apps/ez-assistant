@@ -400,7 +400,7 @@ fn apply_output_budget(response: &mut MemoryRecallResponse) {
 
 fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'static str, String)> {
     match message {
-        ConversationMessage::User(message) => {
+        ConversationMessage::User(message) if message.transcript_visibility.is_visible() => {
             let mut parts = Vec::new();
             for part in &message.parts {
                 match part {
@@ -431,7 +431,8 @@ fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'st
                 .collect::<Vec<_>>()
                 .join("\n"),
         )),
-        ConversationMessage::System(_)
+        ConversationMessage::User(_)
+        | ConversationMessage::System(_)
         | ConversationMessage::ContextSummary(_)
         | ConversationMessage::Tool(_) => None,
     }
@@ -677,6 +678,34 @@ mod tests {
             response.items[0]
                 .content
                 .is_char_boundary(response.items[0].content.len())
+        );
+    }
+
+    #[test]
+    fn hidden_runtime_user_message_is_not_searchable() {
+        let hidden = ConversationMessage::User(agent_types::UserMessage {
+            id: message_id("runtime-hidden"),
+            origin: agent_types::UserMessageOrigin::Runtime,
+            transcript_visibility: agent_types::TranscriptVisibility::Hidden,
+            parts: vec![agent_types::UserPart::Text(agent_types::TextPart {
+                id: agent_types::PartId::new("runtime-hidden-text").expect("part ID"),
+                text: "runtime-hidden-recall-token".to_owned(),
+            })],
+        });
+        assert!(searchable_message(&hidden).is_none());
+
+        let visible = ConversationMessage::User(agent_types::UserMessage {
+            id: message_id("user-visible"),
+            origin: agent_types::UserMessageOrigin::User,
+            transcript_visibility: agent_types::TranscriptVisibility::Visible,
+            parts: vec![agent_types::UserPart::Text(agent_types::TextPart {
+                id: agent_types::PartId::new("user-visible-text").expect("part ID"),
+                text: "visible-recall-token".to_owned(),
+            })],
+        });
+        assert_eq!(
+            searchable_message(&visible).map(|(_, role, text)| (role, text)),
+            Some(("user", "visible-recall-token".to_owned()))
         );
     }
 }

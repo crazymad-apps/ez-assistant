@@ -11,17 +11,18 @@ use crate::{
     GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
-    GetToolDetailRequest, GetToolDetailResult, IdempotencyKey, InputId, InterruptRunRequest,
-    InterruptRunResult, ListConversationPageRequest, ListConversationPageResult,
-    MemoryAttributeValue, MemoryCapabilities, MessageFeedback, MessageId, ModelConfiguration,
-    ModelKey, PermissionDiagnostic, PermissionDocumentDraft, PermissionDocumentRevision,
-    PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
-    PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
-    PrioritizeQueuedInputResult, ReasoningEffortKey, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
-    RunSnapshot, RuntimeLifecycle, SearchConversationHistoryRequest,
-    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSummary,
-    SystemContextSnapshot, WorkspaceId, WorkspaceSummary,
+    GetToolDetailRequest, GetToolDetailResult, GoalId, GoalSnapshot, IdempotencyKey, InputId,
+    InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
+    ListConversationPageResult, MemoryAttributeValue, MemoryCapabilities, MessageFeedback,
+    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionDocumentDraft,
+    PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
+    PermissionFileSummary, PersonaSnapshot, PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, ReasoningEffortKey,
+    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
+    ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle,
+    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
+    SessionListFilter, SessionSummary, SystemContextSnapshot, WorkPlanSnapshot, WorkspaceId,
+    WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -359,6 +360,9 @@ pub struct RegisterWorkspaceRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RegisterWorkspaceResult {
     pub workspace: WorkspaceSummary,
+    /// 本次登记是否恢复了一条已假删的 Workspace 记录。
+    #[serde(default)]
+    pub restored: bool,
 }
 
 /// 查询一个 Workspace；已移除 Workspace 仍可查询。
@@ -542,6 +546,26 @@ pub struct GetSessionResult {
 }
 
 /// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SubmitInputMode {
+    /// 普通用户输入，不改变 Goal 控制状态。
+    #[default]
+    Normal,
+    /// 把本次完整用户消息作为新的 Goal objective。
+    StartGoal,
+    /// 使用本次用户消息恢复已有 Goal；具体状态转换由 Goal 恢复里程碑实现。
+    ResumeGoal,
+}
+
+impl SubmitInputMode {
+    fn is_normal(&self) -> bool {
+        *self == Self::Normal
+    }
+}
+
+/// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SubmitInputRequest {
@@ -551,6 +575,9 @@ pub struct SubmitInputRequest {
     pub message: String,
     /// 本次输入实际使用的 Agent 变体；不能由 Session 展示状态代替。
     pub variant: AgentVariant,
+    /// 一次性提交意图；旧客户端缺省为普通输入。
+    #[serde(default, skip_serializing_if = "SubmitInputMode::is_normal")]
+    pub mode: SubmitInputMode,
     /// 按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
@@ -565,6 +592,69 @@ pub struct SubmitInputRequest {
 pub struct SubmitInputResult {
     pub input_id: InputId,
     pub run: RunSnapshot,
+}
+
+/// 以 revision CAS 清除 Session WorkPlan；Goal 和 Conversation 保持不变。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearWorkPlanRequest {
+    pub session_id: SessionId,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearWorkPlanResult {
+    pub work_plan: Option<WorkPlanSnapshot>,
+}
+
+/// 原子停止当前 Goal；ID 与 generation 防止旧界面控制新的 Goal 世代。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct StopGoalRequest {
+    pub session_id: SessionId,
+    pub goal_id: GoalId,
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct StopGoalResult {
+    pub goal: GoalSnapshot,
+    pub run: Option<RunSnapshot>,
+}
+
+/// 显式恢复暂停 Goal；input_id 缺失时由 Runtime 创建隐藏 continuation。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ResumeGoalRequest {
+    pub session_id: SessionId,
+    pub goal_id: GoalId,
+    pub expected_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<InputId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ResumeGoalResult {
+    pub goal: GoalSnapshot,
+    pub run: RunSnapshot,
+}
+
+/// 清除已暂停或完成的 Goal 控制器，不删除 WorkPlan、Conversation 或 held queue。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearGoalRequest {
+    pub session_id: SessionId,
+    pub goal_id: GoalId,
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearGoalResult {
+    pub goal: Option<GoalSnapshot>,
 }
 
 /// 取消尚未进入 Conversation 的排队输入。
@@ -1042,6 +1132,14 @@ pub enum RuntimeCommand {
     GetSession(GetSessionRequest),
     /// 提交持久化输入。
     SubmitInput(SubmitInputRequest),
+    /// 清除 Session 工作计划。
+    ClearWorkPlan(ClearWorkPlanRequest),
+    /// 停止当前 Goal。
+    StopGoal(StopGoalRequest),
+    /// 恢复暂停 Goal。
+    ResumeGoal(ResumeGoalRequest),
+    /// 退出已暂停或完成的 Goal。
+    ClearGoal(ClearGoalRequest),
     /// 取消排队输入。
     CancelQueuedInput(CancelQueuedInputRequest),
     /// 恢复重启后暂停的队列。
@@ -1153,6 +1251,10 @@ pub enum RuntimeCommandResult {
     GetSession(GetSessionResult),
     /// 输入已接受。
     SubmitInput(SubmitInputResult),
+    ClearWorkPlan(ClearWorkPlanResult),
+    StopGoal(StopGoalResult),
+    ResumeGoal(ResumeGoalResult),
+    ClearGoal(ClearGoalResult),
     /// 排队输入已取消。
     CancelQueuedInput(CancelQueuedInputResult),
     /// Session 队列已恢复。
@@ -1239,6 +1341,31 @@ mod tests {
             text: String::new(),
             tools: Vec::new(),
             error: None,
+        }
+    }
+
+    fn goal_snapshot() -> GoalSnapshot {
+        GoalSnapshot {
+            goal_id: GoalId::new("goal-1").expect("goal id"),
+            objective_message_id: MessageId::new("message-1").expect("message id"),
+            objective_preview: "ship the release".to_owned(),
+            attachment_count: 1,
+            state: crate::GoalStateSnapshot::Paused,
+            pause_reason: Some(crate::GoalPauseReasonSnapshot::UserStopped),
+            generation: 2,
+            turn: 1,
+            budget: crate::GoalBudgetSnapshot {
+                max_runs: 20,
+                max_total_tokens: 500_000,
+                max_consecutive_failures: 3,
+                used_runs: 1,
+                used_total_tokens: 100,
+                consecutive_failures: 0,
+                usage_complete: true,
+            },
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            completed_at_ms: None,
         }
     }
 
@@ -1331,6 +1458,7 @@ mod tests {
     #[test]
     fn command_uses_explicit_type_and_payload_tags() {
         let command = RuntimeCommand::SubmitInput(SubmitInputRequest {
+            mode: SubmitInputMode::Normal,
             session_id: SessionId::new("session-1").expect("session id"),
             message: "hello".to_owned(),
             variant: AgentVariant::Build,
@@ -1357,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn input_variant_is_required_and_attachment_ids_default_to_empty() {
+    fn input_variant_is_required_and_mode_defaults_to_normal() {
         let missing_variant = serde_json::from_value::<SubmitInputRequest>(json!({
             "session_id": "session-1",
             "message": "hello"
@@ -1371,8 +1499,10 @@ mod tests {
         }))
         .expect("minimal input request");
         assert!(minimal.attachment_ids.is_empty());
+        assert_eq!(minimal.mode, SubmitInputMode::Normal);
 
         let request = SubmitInputRequest {
+            mode: SubmitInputMode::Normal,
             session_id: SessionId::new("session-1").expect("session id"),
             message: "compare".to_owned(),
             variant: AgentVariant::Plan,
@@ -1385,6 +1515,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize input request")["attachment_ids"],
             json!(["attachment-2", "attachment-1"])
+        );
+        let start_goal = SubmitInputRequest {
+            mode: SubmitInputMode::StartGoal,
+            session_id: SessionId::new("session-1").expect("session id"),
+            message: "ship".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            idempotency_key: None,
+        };
+        assert_eq!(
+            serde_json::to_value(start_goal).expect("serialize Goal input")["mode"],
+            "start_goal"
         );
     }
 
@@ -1539,6 +1681,7 @@ mod tests {
             ),
             (
                 RuntimeCommand::SubmitInput(SubmitInputRequest {
+                    mode: SubmitInputMode::Normal,
                     session_id: session_id.clone(),
                     message: "hello".to_owned(),
                     variant: AgentVariant::Build,
@@ -1546,6 +1689,38 @@ mod tests {
                     idempotency_key: None,
                 }),
                 "submit_input",
+            ),
+            (
+                RuntimeCommand::ClearWorkPlan(ClearWorkPlanRequest {
+                    session_id: session_id.clone(),
+                    expected_revision: 3,
+                }),
+                "clear_work_plan",
+            ),
+            (
+                RuntimeCommand::StopGoal(StopGoalRequest {
+                    session_id: session_id.clone(),
+                    goal_id: GoalId::new("goal-1").expect("goal id"),
+                    expected_generation: 1,
+                }),
+                "stop_goal",
+            ),
+            (
+                RuntimeCommand::ResumeGoal(ResumeGoalRequest {
+                    session_id: session_id.clone(),
+                    goal_id: GoalId::new("goal-1").expect("goal id"),
+                    expected_generation: 2,
+                    input_id: Some(InputId::new("input-1").expect("input id")),
+                }),
+                "resume_goal",
+            ),
+            (
+                RuntimeCommand::ClearGoal(ClearGoalRequest {
+                    session_id: session_id.clone(),
+                    goal_id: GoalId::new("goal-1").expect("goal id"),
+                    expected_generation: 2,
+                }),
+                "clear_goal",
             ),
             (
                 RuntimeCommand::CancelQueuedInput(CancelQueuedInputRequest {
@@ -1748,6 +1923,7 @@ mod tests {
             (
                 RuntimeCommandResult::RegisterWorkspace(RegisterWorkspaceResult {
                     workspace: workspace_summary(),
+                    restored: false,
                 }),
                 "register_workspace",
             ),
@@ -1841,6 +2017,28 @@ mod tests {
                     run: run_snapshot(),
                 }),
                 "submit_input",
+            ),
+            (
+                RuntimeCommandResult::ClearWorkPlan(ClearWorkPlanResult { work_plan: None }),
+                "clear_work_plan",
+            ),
+            (
+                RuntimeCommandResult::StopGoal(StopGoalResult {
+                    goal: goal_snapshot(),
+                    run: Some(run_snapshot()),
+                }),
+                "stop_goal",
+            ),
+            (
+                RuntimeCommandResult::ResumeGoal(ResumeGoalResult {
+                    goal: goal_snapshot(),
+                    run: run_snapshot(),
+                }),
+                "resume_goal",
+            ),
+            (
+                RuntimeCommandResult::ClearGoal(ClearGoalResult { goal: None }),
+                "clear_goal",
             ),
             (
                 RuntimeCommandResult::CancelQueuedInput(CancelQueuedInputResult {

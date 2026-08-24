@@ -30,6 +30,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
         .session;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
@@ -167,6 +168,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
         .session;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "persist a reliable turn".to_owned(),
             attachment_ids: Vec::new(),
@@ -237,6 +239,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .session;
     runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: generated.session_id.clone(),
             message: "\n  首行作为会话标题  \n后续正文".to_owned(),
             attachment_ids: Vec::new(),
@@ -271,6 +274,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .expect("rename");
     runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: renamed.session_id.clone(),
             message: "不应覆盖标题".to_owned(),
             attachment_ids: Vec::new(),
@@ -430,6 +434,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
                 message: "not allowed".to_owned(),
@@ -518,6 +523,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
     let session_id = created.session.session_id;
     let active = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "active input".to_owned(),
@@ -657,6 +663,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .attachment;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "first question".to_owned(),
@@ -668,6 +675,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
     let second = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
             message: "second question".to_owned(),

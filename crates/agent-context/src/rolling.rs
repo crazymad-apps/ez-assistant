@@ -215,6 +215,8 @@ fn build_compression_conversation(
 
 fn compression_instruction_message() -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new(COMPRESSION_MESSAGE_ID)
             .expect("static compression message id must be valid"),
         parts: vec![UserPart::Injected(TextPart {
@@ -303,6 +305,8 @@ fn build_replacement(
 
 fn continuation_anchor(summary_id: &MessageId) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new(format!(
             "{}{CONTINUATION_MESSAGE_ID_SUFFIX}",
             summary_id.as_str()
@@ -487,6 +491,8 @@ mod tests {
 
     fn user(value: &str) -> ConversationMessage {
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: id(value),
             parts: vec![],
         })

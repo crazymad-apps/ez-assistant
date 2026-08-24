@@ -1,7 +1,14 @@
 use agent_types::{ConversationSnapshot, MessageId};
-use assistant_protocol::{ChildTaskId, ConversationOwner, RunId, SessionId, WorkspaceId};
+use assistant_protocol::{ChildTaskId, ConversationOwner, GoalId, RunId, SessionId, WorkspaceId};
 
-use super::{NewStoredInput, StoredInput, StoredRun};
+use super::{NewStoredInput, StoredGoal, StoredInput, StoredRun};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewriteGoalEffect {
+    pub expected_goal_id: GoalId,
+    pub expected_generation: u64,
+    pub goal: StoredGoal,
+}
 
 /// 历史重新输入所需的完整新正文和结构化关联。
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +17,7 @@ pub struct ConversationRewrite {
     pub target_user_message_id: MessageId,
     pub conversation: ConversationSnapshot,
     pub input: NewStoredInput,
+    pub goal_effect: Option<RewriteGoalEffect>,
     pub changed_at_ms: i64,
 }
 

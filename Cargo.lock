@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-openai-compatible"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -250,7 +250,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "assistant-protocol"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3620,7 +3620,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3722,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3874,7 +3874,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-context",
  "agent-core",

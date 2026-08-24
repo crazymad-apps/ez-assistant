@@ -134,6 +134,7 @@ impl StorageEngine {
         let tool_image_diagnostics = self.recover_tool_images()?;
         self.unavailable_sessions.extend(tool_image_diagnostics);
         self.interrupt_nonterminal_runs()?;
+        self.pause_running_goals_for_recovery()?;
         self.backfill_session_usage()?;
         Ok(RecoveredRuntime {
             workspaces: self.load_all_workspaces()?,
@@ -142,6 +143,8 @@ impl StorageEngine {
             inputs: self.load_inputs()?,
             runs: self.load_runs()?,
             child_tasks: self.load_child_tasks()?,
+            work_plans: self.load_all_work_plans()?,
+            goals: self.load_all_goals()?,
         })
     }
 

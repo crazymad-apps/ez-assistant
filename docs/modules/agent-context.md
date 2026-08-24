@@ -52,6 +52,8 @@
   仅清除派生 replacement 中旧 Assistant usage，不得修改原始历史。
 - `ContextLayout::build` 只做共享结构校验和原子分块；Rolling Summary 的
   `minimum_recent_user_turns` 只在 `partition` 时参与 head/tail 边界计算。
+- `ContextLayout` 不按 `TranscriptVisibility` 过滤消息；隐藏 Runtime User Message 与可见 User
+  Message 使用同一 user role 和 Turn 结构进入模型上下文，产品转录过滤属于 Runtime/Host 投影职责。
 - Runtime continuation 使用 `partition_for_continuation`：普通阈值压缩保留最近完整 User Turn；
   Provider overflow 可压缩当前已经形成完整 Tool Exchange 的活动 Turn。若 replacement 会以
   Assistant 继续执行，必须追加持久化的 Injected User continuation 锚点，维持规范 Turn 布局。

@@ -64,10 +64,58 @@
   只用 Session/message ID 猜测归属。
 - `SessionToolImage` 只在对应工具详情中显示有界图片预览。它不进入附件 Store、Context Panel、
   通用产物列表或导出，也不展示系统打开、目录揭示和复制物理路径操作。
+- `read_image` 详情以唯一的 `SessionToolImage` 原图为主体，打开弹窗后直接加载；来源路径、媒体类型
+  和大小只作为紧凑附属信息，不再要求用户依次展开请求、结果、文件列表后手动触发预览，也不使用
+  Host 请求时实时生成的 320px 缩略图。
 - Host 返回缺失或损坏错误后，当前详情把对应项标记为不可用；关闭或切换详情时清除此 UI 派生态，
   不修改可靠 Conversation。
 - 多路径文件审批必须逐条展示 `ToolApprovalSubject::Files.paths`，不能只显示工具名或第一条路径；
   Runtime 提供的 Session/Workspace 持久批准会精确保存每条路径，Desktop 不自行折叠授权范围。
+
+## v0.18.0 M3 Goal 提交兼容边界
+
+- 现有 Composer 显式以 `mode: normal` 提交输入，确保协议增加 Goal mode 后普通输入行为不变；
+  TypeScript 类型继续由 `assistant-protocol` 生成，前端不得复制字符串枚举。
+- M3 不在 Desktop 暴露 `/goal`、Goal 标签、状态或控制入口。客户端必须等 M5 的正式快照/命令
+  闭环后再于 M6 实现交互，不能根据输入文本、`update_goal` 工具结果或 Accepted Run 猜测 Goal。
+
+## v0.18.0 M5 Goal/WorkPlan Client 边界
+
+- Runtime Client 与 RootStore 已接入协议生成的 SubmitInputMode 以及 ClearWorkPlan、Stop/Resume/Clear
+  Goal 命令；调用成功后统一重新读取 SessionView，不在前端预测 generation、状态或后继 Run。
+- `work_plan_changed` 与 `goal_changed` 进入既有 Session invalidation/refresh 调用链；sequence gap、
+  reconnect 和未知事件仍以全量快照恢复为准。
+- M5 只打通数据和意图，不增加 `/goal` 草稿解析、Goal 标签、Todo/Goal 展示或 Composer 布局。
+  这些 UI 行为必须等 M5 确认后在 M6 依据交互指导实现。
+
+## v0.18.0 M6 Composer 交互边界
+
+- `/goal` 只武装下一次完整提交；标签属于 Composer 草稿状态，只能点击 `×` 取消。提交失败必须保留
+  正文、附件与标签，成功后才清空；已有 Goal 和 capability 不支持时必须使用 SessionView 禁用。
+- Todo 与 Goal 是正交投影：Todo 浮动摘要不占 Composer 正常布局高度；Goal row 占正常高度且只在
+  点击后像 Queue 一样向下内联展开有最大高度的详情，不使用浮层，也不因 hover 或单纯获得焦点自动展开。
+- Todo 详情以摘要条中线居中，采用紧凑宽高上限；位置必须由 trigger/overlay 实测 DOM 尺寸计算并
+  保留视口夹取，不能写死相对偏移。详情是 `pointer-events: none` 的纯检视层，不提供清空计划入口，
+  鼠标离开摘要后立即关闭；objective 标题允许换行并驱动 header 自动增高。摘要使用浅色 primary
+  surface；详情使用实色 surface 和中等阴影，并在会话区背层生成与详情高度联动、向上渐隐的 message list
+  底部模糊遮罩，不创建全屏蒙层或第二份 JavaScript 高度状态。
+- Goal 与 Queue 复用 Composer 私有二级抽屉外壳和无局部 hover 的 header；Goal 详情不重复
+  objective header、generation 或操作 footer，Paused 的退出收敛为摘要行 `×`，二次确认后才发送
+  ClearGoal。收起和展开态都必须用相同负 margin/padding 覆盖下一区域圆角；展开态再增加外壳和正文
+  底部留白。两类抽屉使用同一算法和单一展开状态，同时最多展开一个，不新增悬浮层。
+- 纵向顺序固定为 Todo floating、Goal row、Approval Restore、Queue、Approval/Input。完整 Approval
+  只与输入区互斥；Approval Restore 和 Queue 可以同时出现，不能为了压缩高度互相替换。
+- 底栏常驻视觉项固定为添加、执行设置、上下文用量、模型设置、发送/停止。执行 variant 与 approval、
+  model 与 reasoning effort 各自独立，只能以分类级联组织，不得在客户端构造排列组合状态。
+- Runtime Goal 的 Running/Paused、budget、pause reason 和 held Queue 都以 SessionView 为准；Goal
+  完成和全完成 WorkPlan 均由 Runtime 自动清除，Desktop 只响应快照移除对应 UI，不自行判断完成。
+  Desktop 只调用 Stop/Resume/Clear/ClearPlan，不预测 generation 或 continuation。
+- image handling 只在 Context Panel 作为模型能力说明展示，不占 Composer 底栏；标准宽度与 `720px`
+  窄宽度必须保持主操作、Ask/Auto 状态可辨认且无主区域水平滚动。
+- 工作空间行的移除只发送 `remove_workspace` 假删意图；执行前必须二次确认并明示不删除
+  本地目录或历史会话。已移除 Workspace 及其 Session 不得进入会话边栏、标题搜索或
+  新会话候选，也不得被归为“独立会话”。重新添加同一目录时，恢复原 Workspace ID
+  和关联 Session 的展示。
 
 ## 不应放在本模块的内容
 

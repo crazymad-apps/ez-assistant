@@ -97,6 +97,8 @@ fn weather_tool() -> ToolDefinition {
 
 fn user_message(id: &str, text: &str) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id(id),
         parts: vec![UserPart::Text(TextPart {
             id: part_id(&format!("{id}_text")),

@@ -121,7 +121,7 @@ fn responses_adapter(
     model_id: &str,
 ) -> ResponsesProtocolAdapter {
     match (provider.as_str(), model_id) {
-        ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro") => {
+        ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp") => {
             ResponsesProtocolAdapter::deepseek()
         }
         ("dashscope", "qwen3.8-max") => ResponsesProtocolAdapter::qwen(),
@@ -226,7 +226,7 @@ mod tests {
         let catalog = ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
             .expect("bundled model catalog");
 
-        assert_eq!(catalog.revision(), "2026-08-20-m4");
+        assert_eq!(catalog.revision(), "2026-08-22-m6");
         assert!(catalog.routes().iter().any(|route| {
             route.provider.as_str() == "dashscope"
                 && route.provider_label == "阿里云百炼（Qwen）"
@@ -237,6 +237,11 @@ mod tests {
             route.provider.as_str() == "deepseek"
                 && route.protocol == ModelProtocol::OpenAiResponses
                 && route.model_ids == ["deepseek-v4-flash", "deepseek-v4-pro"]
+        }));
+        assert!(catalog.routes().iter().any(|route| {
+            route.provider.as_str() == "deepseek"
+                && route.protocol == ModelProtocol::OpenAiResponses
+                && route.model_ids == ["deepseek-v4-flash-vision-exp"]
         }));
         assert!(catalog.routes().iter().any(|route| {
             route.provider.as_str() == "dashscope"
@@ -322,6 +327,30 @@ mod tests {
             resolved(&catalog, "deepseek", "deepseek-v4-pro").tool_image_projection,
             agent_model::ToolImageProjection::Unsupported
         );
+        let deepseek_vision = resolved(&catalog, "deepseek", "deepseek-v4-flash-vision-exp");
+        assert!(deepseek_vision.image_input);
+        assert_eq!(
+            deepseek_vision.tool_image_projection,
+            agent_model::ToolImageProjection::AggregatedUserInput
+        );
+        assert_eq!(
+            deepseek_vision
+                .reasoning
+                .as_ref()
+                .expect("deepseek vision reasoning")
+                .default_effort,
+            Some(ReasoningEffortKey::High)
+        );
+        assert_eq!(
+            deepseek_vision
+                .reasoning
+                .expect("deepseek vision reasoning")
+                .efforts
+                .into_iter()
+                .map(|effort| effort.key)
+                .collect::<Vec<_>>(),
+            [ReasoningEffortKey::High, ReasoningEffortKey::Max]
+        );
 
         // 旧批次不再由随包表猜测能力，未命中时回到协议保守基线。
         let legacy = resolved(&catalog, "deepseek", "deepseek-chat");
@@ -334,8 +363,20 @@ mod tests {
             ModelProtocol::OpenAiResponses,
             "deepseek-v4-pro",
         );
+        assert!(deepseek_responses.tool_calls);
         assert!(deepseek_responses.reasoning_enabled());
         assert!(!deepseek_responses.image_input);
+        let deepseek_vision_responses = resolved_protocol(
+            &catalog,
+            "deepseek",
+            ModelProtocol::OpenAiResponses,
+            "deepseek-v4-flash-vision-exp",
+        );
+        assert!(deepseek_vision_responses.image_input);
+        assert_eq!(
+            deepseek_vision_responses.tool_image_projection,
+            agent_model::ToolImageProjection::NativeFunctionOutput
+        );
         let qwen_responses = resolved_protocol(
             &catalog,
             "dashscope",
@@ -386,5 +427,14 @@ mod tests {
                 Some(agent_openai_compatible::ReasoningReplayPolicy::PreserveAll)
             );
         }
+    }
+
+    #[test]
+    fn deepseek_vision_responses_uses_the_verified_deepseek_dialect() {
+        let deepseek = ProviderId::new("deepseek").expect("provider id");
+        assert_eq!(
+            super::responses_adapter(&deepseek, "deepseek-v4-flash-vision-exp"),
+            agent_openai_compatible::ResponsesProtocolAdapter::deepseek()
+        );
     }
 }

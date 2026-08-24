@@ -2,7 +2,7 @@
 
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
-    ApprovalId, AttachmentId, ChildTaskId, InputId, ModelKey, RunId, RuntimeErrorCode,
+    ApprovalId, AttachmentId, ChildTaskId, GoalId, InputId, ModelKey, RunId, RuntimeErrorCode,
     RuntimeErrorInfo, RuntimeLifecycle, SessionId, WorkspaceId,
 };
 use thiserror::Error;
@@ -67,6 +67,36 @@ pub enum RuntimeError {
         session_id: SessionId,
         run_id: RunId,
     },
+    /// Session 已存在尚未清除的 Goal。
+    #[error("session `{session_id}` already has a Goal")]
+    GoalAlreadyExists { session_id: SessionId },
+    /// 目标 Session 没有未清除的 Goal 控制器。
+    #[error("session `{session_id}` has no Goal")]
+    GoalNotFound { session_id: SessionId },
+    /// 客户端基于旧 GoalId 或 generation 发起了控制操作。
+    #[error("Goal `{goal_id}` generation changed in session `{session_id}")]
+    GoalGenerationConflict {
+        session_id: SessionId,
+        goal_id: GoalId,
+    },
+    /// Goal 存在，但当前状态不允许恢复。
+    #[error("Goal `{goal_id}` is not resumable in session `{session_id}")]
+    GoalNotResumable {
+        session_id: SessionId,
+        goal_id: GoalId,
+    },
+    /// Goal-bound Run 必须通过 Goal 生命周期命令继续处理。
+    #[error("run `{run_id}` in session `{session_id}` requires Goal resume")]
+    GoalRunRequiresResume {
+        session_id: SessionId,
+        run_id: RunId,
+    },
+    /// 当前 Session 模型不具备 Goal 所需的 Tool Call 能力。
+    #[error("session `{session_id}` model does not support Goal execution")]
+    GoalUnsupportedByModel { session_id: SessionId },
+    /// WorkPlan revision 已被其他写入更新。
+    #[error("work plan revision changed in session `{session_id}")]
+    WorkPlanRevisionConflict { session_id: SessionId },
     /// Session 内部结算不变量已被破坏，后续变更被拒绝。
     #[error("session `{session_id}` is faulted")]
     SessionFaulted {
@@ -217,6 +247,33 @@ impl RuntimeError {
             Self::RunNotRetryable { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::RunNotRetryable, "run is not retryable")
             }
+            Self::GoalAlreadyExists { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::GoalAlreadyExists,
+                "session already has a Goal",
+            ),
+            Self::GoalNotFound { .. } => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::GoalNotFound, "Goal was not found")
+            }
+            Self::GoalGenerationConflict { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::GoalGenerationConflict,
+                "Goal changed; reload the latest state",
+            ),
+            Self::GoalNotResumable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::GoalNotResumable,
+                "Goal cannot be resumed from its current state",
+            ),
+            Self::GoalRunRequiresResume { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::GoalRunRequiresResume,
+                "Goal run must be handled through Goal controls",
+            ),
+            Self::GoalUnsupportedByModel { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::GoalUnsupportedByModel,
+                "the current model does not support Goal execution",
+            ),
+            Self::WorkPlanRevisionConflict { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::WorkPlanRevisionConflict,
+                "work plan changed; reload the latest plan",
+            ),
             Self::SessionFaulted { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
                 "session internal state is unavailable",

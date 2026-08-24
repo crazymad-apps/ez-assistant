@@ -13,6 +13,9 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
   const workspace = application?.workspaces.find(
     (item) => item.workspace_id === session?.workspace_id,
   );
+  const first_active_workspace = application?.workspaces.find(
+    (item) => item.lifecycle === "active",
+  );
 
   if (!application) {
     const is_connecting = ["booting", "starting_runtime", "connecting", "reconnecting"].includes(
@@ -39,7 +42,7 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
             store.pending_session_action ||
             store.pending_workspace_action
           }
-          onClick={() => void store.createSession(application.workspaces[0]?.workspace_id)}
+          onClick={() => void store.createSession(first_active_workspace?.workspace_id)}
           type="button"
         >
           新对话

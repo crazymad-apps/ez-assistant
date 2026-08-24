@@ -239,6 +239,8 @@ fn make_spec_with_threshold(
 /// 默认输入：Runtime 已将固定用户消息追加到历史；返回完整输入与用户消息副本。
 fn make_input(mut history: Vec<ConversationMessage>) -> (ExecutionInput, UserMessage) {
     let user_input = UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: msg_id("message_u1"),
         parts: vec![UserPart::Text(TextPart {
             id: part_id("text_u1"),

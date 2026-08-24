@@ -1,12 +1,12 @@
 import { Icon } from "../../../components/Icon";
-import type { SlashCommand } from "./composerOptions";
+import type { SlashCommandItem } from "./composerOptions";
 import styles from "./index.module.scss";
 
 export function SlashCommandMenu(props: Readonly<{
   active_index: number;
-  items: readonly SlashCommand[];
+  items: readonly SlashCommandItem[];
   menu_ref: React.RefObject<HTMLDivElement | null>;
-  on_select: (command: SlashCommand) => void;
+  on_select: (command: SlashCommandItem) => void;
 }>) {
   return (
     <div className={styles.slash_menu} ref={props.menu_ref} role="listbox">
@@ -14,6 +14,7 @@ export function SlashCommandMenu(props: Readonly<{
       {props.items.map((command, index) => (
         <button
           aria-selected={index === props.active_index}
+          disabled={Boolean(command.disabled_reason)}
           data-slash-index={index}
           key={command.name}
           onClick={() => props.on_select(command)}
@@ -21,7 +22,7 @@ export function SlashCommandMenu(props: Readonly<{
           type="button"
         >
           <b>{command.name}</b>
-          <span>{command.description}</span>
+          <span>{command.disabled_reason ?? command.description}</span>
         </button>
       ))}
     </div>

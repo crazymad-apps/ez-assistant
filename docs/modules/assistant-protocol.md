@@ -86,6 +86,8 @@
 - M1 新增 `WorkspaceId`、Workspace lifecycle/summary、登记/查询/活动列表/假删命令，
   `CreateSession` 和 `SessionSummary` 通过可选 `workspace_id` 表达创建时冻结绑定；协议不提供
   Session 换绑命令，也不暴露 `session_resources` 等物理存储结构。
+- `RegisterWorkspaceResult.restored` 明确表达本次登记是否恢复已假删记录；旧结果缺字段时
+  安全缺省为 `false`。Desktop 使用该事实避免恢复工作空间时额外创建空会话。
 - `WorkspaceId` 和 `AttachmentId` 是应用层不透明 ID；附件投影只返回客户端需要的
   原始名称、稳定状态和可展示元数据，不暴露 Blob、staging、SQLite 或客户端源路径。
 - Workspace 意图、Attachment 查询和 Session 绑定进入可序列化
@@ -149,6 +151,54 @@
 - `ToolApprovalSubject::Files` 只投影一次多路径文件调用已经解析的 operation 和有序绝对路径，
   供 Desktop 完整展示审批范围；它不携带文件正文。Session/Workspace 持久批准仍由 Runtime
   将每条路径保存为既有 exact File matcher，不新增权限文件 matcher 类型。
+
+## v0.18.0 M1 WorkPlan ID 增量
+
+- 新增不透明 `TodoItemId`，与其他应用 ID 一样校验非空、使用透明字符串 wire 形状，并进入统一
+  TypeScript 导出。ID 不编码 Session、排序、状态或数据库主键策略。
+- M1 只先稳定 item 身份；WorkPlan 快照、clear 命令、revision conflict 和事件在 v0.18.0 的应用协议
+  闭环里程碑统一加入，不能在 Desktop 先建立非权威的并行 DTO。
+
+## v0.18.0 M2 Goal ID 增量
+
+- 新增不透明 `GoalId`，沿用透明字符串 wire 形状、非空校验和统一 TypeScript 导出；ID 不编码
+  Session、generation、turn、状态或预算。
+- M2 只稳定跨层身份。Goal 快照、预算投影、停止/恢复/清除命令和事件仍归 M5，Desktop 不得读取
+  Runtime 私有 `StoredGoal` 或根据 `update_goal` Tool Result 推导产品状态。
+
+## v0.18.0 M3 Goal 提交意图
+
+- `SubmitInputRequest` 增加具有旧客户端安全缺省的 `mode`：`normal`、`start_goal`、
+  `resume_goal`。缺失字段按 `normal` 读取，普通提交序列化时可省略；Desktop 现有 Composer
+  显式提交 `normal`，`/goal` 交互仍归 M6。
+- `start_goal` 只表达“以本次完整用户输入首次建立 Goal”的用户意图，不携带 GoalId、generation、
+  turn、预算、Injected Part 或内部 Input 来源；这些事实均由 Runtime 分配和冻结。
+- M3 稳定 `goal_already_exists` 与 `goal_unsupported_by_model` 错误，分别表达 Session 已有 Goal
+  和当前冻结模型不支持 Tool Call。`resume_goal` 的跨层状态与命令闭环仍归 M4/M5，M3 Runtime
+  对提前调用返回受控请求错误。
+
+## v0.18.0 M4 Goal 生命周期协议边界
+
+- `SubmitInputMode::ResumeGoal` 已由 Runtime library 实现为“以本次完整可见 UserMessage 恢复已有
+  Paused Goal”的意图；客户端仍不提交 GoalId、generation、turn、预算或内部 continuation 内容。
+- Stop、无消息 Resume、held Input Resume、Clear、Goal 快照、预算投影和事件在 M4 仍是 Runtime/Store
+  私有能力，尚未增加公共 HTTP Command/SSE DTO。M5 必须基于 Runtime 权威结果统一稳定这些跨层契约，
+  Desktop 不得先读取 Store 私有类型或根据 Conversation/Tool Result 猜测 Goal 状态。
+
+## v0.18.0 M5 WorkPlan/Goal 应用契约
+
+- `SessionViewSnapshot` 正式增加可选 WorkPlan/Goal，并在 Composer capability 中声明当前冻结模型
+  是否支持 Goal；Queue item 只增加 `held_by_goal` 展示事实。旧 JSON 缺少这些字段时按无状态或
+  不支持读取，Desktop 不复制 Runtime 私有类型。
+- Goal 快照只包含 GoalId、generation、turn、状态、结构化暂停原因、预算、objective message ID、
+  有界正文预览、附件数和时间；内部 objective payload/hash、Injected Part 和 Input origin 不进入
+  产品协议。WorkPlan 快照保留 revision、objective、有序 item 与稳定 TodoItemId。
+- ClearWorkPlan 以 expected revision 做 CAS；Stop/Resume/Clear Goal 均携带 GoalId 和 expected
+  generation。Resume 可省略 InputId 以创建隐藏 continuation，也可指定 held Input；所有结果返回
+  Runtime 权威快照/Run，而不是让客户端预测状态转换。
+- `WorkPlanChanged`/`GoalChanged` 只作为 Session 快照失效信号；事件本身不携带完整业务正文。
+  `goal_not_found`、`goal_generation_conflict`、`goal_not_resumable`、`goal_run_requires_resume` 与
+  `work_plan_revision_conflict` 是跨 HTTP/持久 Run 投影稳定的错误码。
 
 ## Harness 验证
 

@@ -492,6 +492,8 @@ mod tests {
 
     fn user() -> UserMessage {
         UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new("user_debug").expect("message id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new("user_debug_text").expect("part id"),

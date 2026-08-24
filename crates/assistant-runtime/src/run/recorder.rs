@@ -195,8 +195,12 @@ mod tests {
                 session_id: session_id.clone(),
                 idempotency_key: None,
                 agent_variant: AgentVariant::Build,
+                origin: crate::InputOrigin::User,
+                goal_binding: None,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),
+                new_goal: None,
+                resumed_goal: None,
                 generated_title: None,
                 accepted_at_ms: 2,
             })
@@ -302,6 +306,8 @@ mod tests {
 
     fn user_message(id: &str) -> UserMessage {
         UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new(id).expect("message id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new(format!("part-{id}")).expect("part id"),

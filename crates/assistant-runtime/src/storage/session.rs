@@ -7,7 +7,7 @@ use assistant_protocol::{
 
 use crate::SessionExecutionEnvironment;
 
-use super::StoredAttachment;
+use super::{StoredAttachment, StoredGoal, StoredWorkPlan};
 
 /// Session 的持久化生命周期。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +58,10 @@ pub struct SessionFork {
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<ForkedAttachmentReference>,
     pub tool_images: Vec<ToolImageReference>,
+    /// Fork 时冻结的源 WorkPlan；Store 在同一事务中为目标 Session 创建 revision 1。
+    pub work_plan: Option<StoredWorkPlan>,
+    /// 仅当 objective source 位于前缀时提供的新 Goal；状态固定为 Paused(Forked)。
+    pub goal: Option<StoredGoal>,
 }
 
 /// Store 完成路径重写和跨介质提交后的 Fork 结果。
@@ -66,6 +70,8 @@ pub struct StoredSessionFork {
     pub session: StoredSession,
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<StoredAttachment>,
+    pub work_plan: Option<StoredWorkPlan>,
+    pub goal: Option<StoredGoal>,
 }
 
 /// 带预检影响摘要的永久删除业务原语。

@@ -7,10 +7,10 @@ use ts_rs::TS;
 
 use crate::{
     ApprovalId, ApprovalSnapshot, AttachmentId, AttachmentSummary, ChildTaskId, ChildTaskSnapshot,
-    ConfigurationStatus, InputId, MessageId, ModelConfiguration, ModelKey, PartId,
+    ConfigurationStatus, GoalId, InputId, MessageId, ModelConfiguration, ModelKey, PartId,
     ReasoningEffortKey, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeLifecycle,
-    SessionId, SessionLifecycle, SessionSummary, TokenUsageSnapshot, ToolActivityStatus,
-    ToolCallId, WorkspaceSummary,
+    SessionId, SessionLifecycle, SessionSummary, TodoItemId, TokenUsageSnapshot,
+    ToolActivityStatus, ToolCallId, WorkspaceSummary,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -34,6 +34,90 @@ pub enum ImageHandlingMode {
 pub struct ComposerCapabilitiesSnapshot {
     pub reasoning_effort_options: Vec<ReasoningEffortOptionSnapshot>,
     pub image_handling: ImageHandlingMode,
+    /// 当前冻结模型是否支持 Goal 所需的 Tool Call。
+    #[serde(default)]
+    pub goal_supported: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum TodoItemStatusSnapshot {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct WorkPlanItemSnapshot {
+    pub id: TodoItemId,
+    pub text: String,
+    pub status: TodoItemStatusSnapshot,
+}
+
+/// Session 当前唯一工作计划；它与 Goal 是否自动续跑正交。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct WorkPlanSnapshot {
+    pub revision: u64,
+    pub objective: String,
+    pub items: Vec<WorkPlanItemSnapshot>,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStateSnapshot {
+    Running,
+    Paused,
+    Completed,
+}
+
+/// Goal 暂停原因；Blocked summary 是 Agent 提交的安全、有限摘要，不包含 objective 正文。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GoalPauseReasonSnapshot {
+    Blocked { summary: String },
+    UserStopped,
+    RunLimitReached,
+    TokenLimitReached,
+    ConsecutiveFailures,
+    RecoveryRequired,
+    Forked,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GoalBudgetSnapshot {
+    pub max_runs: u32,
+    pub max_total_tokens: u64,
+    pub max_consecutive_failures: u32,
+    pub used_runs: u32,
+    pub used_total_tokens: u64,
+    pub consecutive_failures: u32,
+    /// false 表示至少一次 Provider 未报告完整 usage；Runtime 不对缺失 token 做猜测。
+    pub usage_complete: bool,
+}
+
+/// Desktop 展示所需的 Goal 最小投影；不包含恢复 payload、注入正文或内容哈希。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GoalSnapshot {
+    pub goal_id: GoalId,
+    pub objective_message_id: MessageId,
+    pub objective_preview: String,
+    pub attachment_count: u32,
+    pub state: GoalStateSnapshot,
+    pub pause_reason: Option<GoalPauseReasonSnapshot>,
+    pub generation: u64,
+    pub turn: u32,
+    pub budget: GoalBudgetSnapshot,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub completed_at_ms: Option<i64>,
 }
 
 /// 带有 Runtime 观察水位的权威快照。
@@ -66,6 +150,7 @@ pub struct ApplicationSnapshot {
     pub runtime_lifecycle: RuntimeLifecycle,
     pub configuration: ConfigurationStatus,
     pub models: Vec<ModelConfiguration>,
+    /// 活动 Workspace，以及仍被当前 Session 绑定的已移除 Workspace。
     pub workspaces: Vec<WorkspaceSummary>,
     pub active_sessions: Vec<SessionSummary>,
     pub archived_sessions: Vec<SessionSummary>,
@@ -399,6 +484,9 @@ pub struct QueuedInputSnapshot {
     pub submitted_at_ms: i64,
     pub position: u32,
     pub is_prioritized: bool,
+    /// Goal 存在时该用户输入只暂存于 Queue，必须由用户显式选择恢复或退出 Goal 后处理。
+    #[serde(default)]
+    pub held_by_goal: bool,
 }
 
 /// Session 的有序输入队列。
@@ -425,6 +513,10 @@ pub struct ApprovalQueueSnapshot {
 pub struct SessionViewSnapshot {
     pub session: SessionSummary,
     pub composer_capabilities: ComposerCapabilitiesSnapshot,
+    #[serde(default)]
+    pub work_plan: Option<WorkPlanSnapshot>,
+    #[serde(default)]
+    pub goal: Option<GoalSnapshot>,
     pub active_run: Option<RunSnapshot>,
     pub queue: QueueSnapshot,
     pub approvals: ApprovalQueueSnapshot,

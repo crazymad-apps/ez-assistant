@@ -8,8 +8,10 @@ mod contract;
 mod conversation;
 mod error;
 mod execution;
+mod goal;
 mod session;
 mod volatile;
+mod work_plan;
 mod workspace;
 
 pub use child_task::{
@@ -21,14 +23,20 @@ pub use conversation::{
     ContextReplacement, ContextReplacementTarget, ConversationMessageLocationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
-    ConversationWindowRequest, RewriteResult, StoredConversationMessageLocation,
+    ConversationWindowRequest, RewriteGoalEffect, RewriteResult, StoredConversationMessageLocation,
     StoredConversationRawWindow, StoredConversationWindow,
 };
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
-    AcceptedInput, CompletedToolExchange, NewStoredInput, NewStoredRunAttempt, PendingToolExchange,
-    QueuePriorityChange, StoredInput, StoredInputState, StoredRun, StoredRunSettlement,
-    ToolExecutionStart, UserMessageCommit,
+    AcceptedInput, CompletedToolExchange, GoalInputBinding, InputMessageValidationError,
+    InputOrigin, NewStoredInput, NewStoredRunAttempt, PendingToolExchange, QueuePriorityChange,
+    StoredGoalSettlementEffect, StoredInput, StoredInputState, StoredRun, StoredRunSettlement,
+    StoredRunSettlementResult, ToolExecutionStart, UserMessageCommit, validate_input_message,
+};
+pub use goal::{
+    GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
+    StoredGoal, StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart,
+    StoredGoalPauseReason, StoredGoalState,
 };
 pub use session::{
     ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, MessageFeedbackChange,
@@ -37,6 +45,10 @@ pub use session::{
     StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, VariantChange,
 };
 pub(crate) use volatile::VolatileRuntimeStore;
+pub use work_plan::{
+    StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem, WorkPlanClear, WorkPlanMutation,
+    WorkPlanMutationResult,
+};
 pub use workspace::{
     NewAttachmentUpload, NewWorkspaceRegistration, StoredAttachment, StoredAttachmentState,
     StoredWorkspace, StoredWorkspaceLifecycle, WorkspaceRemoval,

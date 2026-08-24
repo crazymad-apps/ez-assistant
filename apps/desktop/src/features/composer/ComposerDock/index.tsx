@@ -2,25 +2,25 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApprovalDecision,
-  ModelKey,
-  ReasoningEffortKey,
+  GoalStateSnapshot,
   SessionViewSnapshot,
+  SubmitInputMode,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { Tooltip } from "../../../components/Tooltip";
-import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
 import {
-  APPROVAL_OPTIONS,
   formatCompact,
-  type PickerName,
   SLASH_COMMANDS,
-  type SlashCommand,
-  VARIANT_OPTIONS,
+  type SlashCommandItem,
 } from "./composerOptions";
+import { ExecutionSettingsPopover } from "./ExecutionSettingsPopover";
+import { GoalStatusRow } from "./GoalStatusRow";
+import { ModelSettingsPopover } from "./ModelSettingsPopover";
 import { QueueDrawer } from "./QueueDrawer";
 import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
+import { TodoSummary } from "./TodoSummary";
 import { type ComposerAttachment, useComposerAttachments } from "./useComposerAttachments";
 import styles from "./index.module.scss";
 
@@ -33,9 +33,11 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const session = session_view?.session;
   const [draft, setDraft] = useState("");
-  const [open_picker, setOpenPicker] = useState<PickerName>(null);
+  const [goal_armed, setGoalArmed] = useState(false);
+  const [active_overlay, setActiveOverlay] = useState<"todo" | "execution" | "model" | null>(null);
+  const [initial_settings_category, setInitialSettingsCategory] = useState<"variant" | "approval" | "model" | "effort" | null>(null);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
-  const [queue_open, setQueueOpen] = useState(true);
+  const [expanded_drawer, setExpandedDrawer] = useState<"goal" | "queue" | null>("queue");
   const [approval_minimized, setApprovalMinimized] = useState(false);
   const [approval_decision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
   const [show_help, setShowHelp] = useState(false);
@@ -50,31 +52,34 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     session_id,
   });
 
-  const model_options = useMemo<readonly SelectionOption<ModelKey>[]>(() =>
+  const model_options = useMemo(() =>
     (application?.models ?? []).flatMap((model) => model.model_key && model.is_valid ? [{
       value: model.model_key,
       label: model.display_name,
       description: [model.provider ?? model.protocol, model.model, model.context_window_tokens ? formatCompact(model.context_window_tokens) : null]
         .filter(Boolean).join(" · "),
-      icon: <Icon name="message" size={15} />,
     }] : []), [application?.models]);
-  type EffortSelection = ReasoningEffortKey | "default";
-  const effort_options = useMemo<readonly SelectionOption<EffortSelection>[]>(() => [
-    { value: "default", label: "默认", description: "使用当前模型的默认思考强度" },
-    ...(session_view?.composer_capabilities.reasoning_effort_options ?? []).map((option) => ({
-      value: option.key,
-      label: option.label,
-    })),
-  ], [session_view?.composer_capabilities.reasoning_effort_options]);
 
   const slash_query = draft.startsWith("/") && !draft.includes("\n") ? draft.toLocaleLowerCase() : null;
-  const slash_items = slash_query === null ? [] : SLASH_COMMANDS.filter((item) =>
-    item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)),
-  );
+  const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
+    .filter((item) => item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)))
+    .map((item) => ({ ...item, disabled_reason: slashDisabledReason(item.name, session_view) }));
 
   useEffect(() => {
-    setSlashActiveIndex(0);
+    const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
+    setSlashActiveIndex(Math.max(0, first_enabled));
+    if (slash_query !== null) {
+      setActiveOverlay(null);
+      setShowHelp(false);
+    }
   }, [slash_query]);
+
+  useEffect(() => {
+    setGoalArmed(false);
+    setExpandedDrawer("queue");
+    setActiveOverlay(null);
+    setShowHelp(false);
+  }, [session_id]);
 
   useEffect(() => {
     const count = session_view?.approvals.items.length ?? 0;
@@ -98,6 +103,13 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   }, [approval?.approval_id]);
 
   useEffect(() => {
+    if (approval && !approval_minimized) {
+      setActiveOverlay(null);
+      setShowHelp(false);
+    }
+  }, [approval, approval_minimized]);
+
+  useEffect(() => {
     resizeTextarea(textarea_ref.current);
   }, [draft]);
 
@@ -117,7 +129,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       return;
     }
     if (slash_query) {
-      const exact = SLASH_COMMANDS.find((item) => item.name === slash_query.trim());
+      const exact = slash_items.find((item) => item.name === slash_query.trim());
       if (exact) {
         handleSlashCommand(exact);
         return;
@@ -127,16 +139,31 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     if (!attachment_ids) {
       return;
     }
-    if (await store.submitInput(session!.session_id, value, session!.current_variant, attachment_ids)) {
+    const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
+    if (await store.submitInput(session!.session_id, value, session!.current_variant, attachment_ids, mode)) {
       setDraft("");
+      setGoalArmed(false);
       attachment_flow.clear();
     }
   }
 
-  function handleSlashCommand(command: SlashCommand) {
+  function handleSlashCommand(command: SlashCommandItem) {
+    if (command.disabled_reason) {
+      setDraft("");
+      store.showInteractionError(command.disabled_reason);
+      requestAnimationFrame(() => textarea_ref.current?.focus());
+      return;
+    }
+    if (command.name === "/goal") {
+      setDraft("");
+      setGoalArmed(true);
+      requestAnimationFrame(() => textarea_ref.current?.focus());
+      return;
+    }
     if (command.picker) {
       setDraft("");
-      setOpenPicker(command.picker);
+      setInitialSettingsCategory(command.picker);
+      setActiveOverlay(command.picker === "model" ? "model" : "execution");
       return;
     }
     if (command.name === "/new") {
@@ -155,7 +182,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     if (slash_items.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const next = (slash_active_index + direction + slash_items.length) % slash_items.length;
+      const next = nextEnabledSlashIndex(slash_items, slash_active_index, direction);
       setSlashActiveIndex(next);
       slash_ref.current?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
       return;
@@ -169,7 +196,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       event.preventDefault();
       const exact = slash_query === null
         ? undefined
-        : SLASH_COMMANDS.find((item) => item.name === slash_query.trim());
+        : slash_items.find((item) => item.name === slash_query.trim());
       if (exact) {
         handleSlashCommand(exact);
         return;
@@ -183,13 +210,73 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     }
   }
 
+  const goal = session_view.goal;
+  const goal_stops_from_primary = !draft.trim() && goal?.state === "running";
+  const run_interrupts_from_primary = !draft.trim() && !goal_stops_from_primary && Boolean(session.active_run_id);
+  const primary_action_available = Boolean(draft.trim()) || goal_stops_from_primary || run_interrupts_from_primary;
+  const primary_action = resolvePrimaryAction(goal_stops_from_primary, run_interrupts_from_primary);
+  const primary_label = primaryActionLabel(primary_action);
+  const execution_initial_category = active_overlay === "execution"
+    && (initial_settings_category === "variant" || initial_settings_category === "approval")
+    ? initial_settings_category
+    : null;
+  const model_initial_category = active_overlay === "model"
+    && (initial_settings_category === "model" || initial_settings_category === "effort")
+    ? initial_settings_category
+    : null;
+
+  function updateActiveOverlay(
+    overlay: Exclude<typeof active_overlay, null>,
+    open: boolean,
+  ) {
+    setActiveOverlay((current) => {
+      if (open) return overlay;
+      return current === overlay ? null : current;
+    });
+  }
+
   return (
     <div className={styles.dock}>
+      {!read_only && session_view.work_plan && (
+        <TodoSummary
+          on_open_change={(open) => updateActiveOverlay("todo", open)}
+          open={active_overlay === "todo"}
+          work_plan={session_view.work_plan}
+        />
+      )}
       {store.interaction_error && (
         <div className={styles.error_notice} role="alert">
           <span>{store.interaction_error}</span>
           <button aria-label="关闭错误提示" onClick={() => store.clearInteractionError()} type="button"><Icon name="x" size={14} /></button>
         </div>
+      )}
+      {!read_only && goal && (
+        <GoalStatusRow
+          goal={goal}
+          on_clear={() => store.clearGoal(session.session_id, goal.goal_id, goal.generation)}
+          on_open_change={(open) => setExpandedDrawer(open ? "goal" : null)}
+          on_resume={() => store.resumeGoal(session.session_id, goal.goal_id, goal.generation)}
+          on_stop={() => store.stopGoal(session.session_id, goal.goal_id, goal.generation)}
+          open={expanded_drawer === "goal"}
+          pending={store.composer_pending || is_archived}
+        />
+      )}
+      {approval && approval_minimized && (
+        <button className={styles.approval_restore} onClick={() => setApprovalMinimized(false)} type="button">
+          <Icon name="shield" size={16} />
+          <span>等待审批</span>
+          <b>{session_view.approvals.items.length}</b>
+          <Icon name="chevron-down" size={14} />
+        </button>
+      )}
+      {!read_only && session_view.queue.items.length > 0 && (
+        <QueueDrawer
+          goal={goal}
+          open={expanded_drawer === "queue"}
+          on_open_change={(open) => setExpandedDrawer(open ? "queue" : null)}
+          queue={session_view.queue}
+          session_id={session.session_id}
+        />
       )}
       {approval && !approval_minimized ? (
         <ApprovalWorkspace
@@ -203,149 +290,124 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
           queue_revision={session_view.queue.revision}
           remaining={session_view.approvals.items.length - 1}
         />
+      ) : read_only ? null : is_archived ? (
+        <div className={styles.archived_notice}>
+          <span>此会话已归档，只能查看历史内容。</span>
+          <button disabled={store.composer_pending} onClick={() => void store.restoreSession(session.session_id)} type="button">恢复会话</button>
+        </div>
       ) : (
-        <>
-          {!read_only && session_view.queue.items.length > 0 && (
-            <QueueDrawer open={queue_open} on_open_change={setQueueOpen} queue={session_view.queue} session_id={session.session_id} />
+        <section className={styles.composer}>
+          {slash_items.length > 0 && (
+            <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} />
           )}
-          {approval && approval_minimized && (
-            <button className={styles.approval_restore} onClick={() => setApprovalMinimized(false)} type="button">
-              <Icon name="shield" size={16} />
-              <span>等待审批</span>
-              <b>{session_view.approvals.items.length}</b>
-              <Icon name="chevron-down" size={14} />
-            </button>
-          )}
-          {read_only ? null : is_archived ? (
-            <div className={styles.archived_notice}>
-              <span>此会话已归档，只能查看历史内容。</span>
-              <button disabled={store.composer_pending} onClick={() => void store.restoreSession(session.session_id)} type="button">恢复会话</button>
+          {show_help && <SlashCommandHelp on_close={() => setShowHelp(false)} />}
+          {goal_armed && (
+            <div className={styles.draft_tags}>
+              <span>
+                Goal
+                <button aria-label="取消 Goal 标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
+              </span>
             </div>
-          ) : (
-            <section className={styles.composer}>
-              {slash_items.length > 0 && (
-                <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} />
-              )}
-              {show_help && <SlashCommandHelp on_close={() => setShowHelp(false)} />}
-              {attachment_flow.attachments.length > 0 && (
-                <div aria-label="待发送附件" className={styles.attachment_list}>
-                  {attachment_flow.attachments.map((attachment) => (
-                    <div data-state={attachment.state} key={attachment.selection_id} title={attachment.error ?? attachment.original_name}>
-                      <Icon name="paperclip" size={14} />
-                      <span>{attachment.original_name}</span>
-                      <small>{attachmentStateLabel(attachment)}</small>
-                      <button
-                        aria-label={`移除附件 ${attachment.original_name}`}
-                        title={attachment.state === "uploading" ? "取消上传" : "移除附件"}
-                        onClick={() => attachment_flow.remove(attachment)}
-                        type="button"
-                      >
-                        <Icon name="x" size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <textarea
-                aria-label="输入消息"
-                disabled={store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
-                onChange={(event) => setDraft(event.target.value)}
-                onCompositionEnd={() => { composing_ref.current = false; }}
-                onCompositionStart={() => { composing_ref.current = true; }}
-                onKeyDown={handleTextareaKeyDown}
-                placeholder="输入消息…  / 使用指令"
-                ref={textarea_ref}
-                rows={2}
-                value={draft}
-              />
-              <footer className={styles.composer_actions}>
-                <Tooltip content="添加附件">
+          )}
+          {attachment_flow.attachments.length > 0 && (
+            <div aria-label="待发送附件" className={styles.attachment_list}>
+              {attachment_flow.attachments.map((attachment) => (
+                <div data-state={attachment.state} key={attachment.selection_id} title={attachment.error ?? attachment.original_name}>
+                  <Icon name="paperclip" size={14} />
+                  <span>{attachment.original_name}</span>
+                  <small>{attachmentStateLabel(attachment)}</small>
                   <button
-                    aria-label="添加附件"
-                    className={styles.icon_button}
-                    disabled={store.composer_pending || attachment_flow.pending}
-                    onClick={() => void attachment_flow.choose()}
+                    aria-label={`移除附件 ${attachment.original_name}`}
+                    title={attachment.state === "uploading" ? "取消上传" : "移除附件"}
+                    onClick={() => attachment_flow.remove(attachment)}
                     type="button"
                   >
-                    <Icon name="paperclip" size={16} />
+                    <Icon name="x" size={13} />
                   </button>
-                </Tooltip>
-                <SelectionPopover
-                  aria_label="切换执行模式"
-                  content_width="content"
-                  disabled={store.composer_pending}
-                  on_open_change={(open) => setOpenPicker(open ? "variant" : null)}
-                  on_select={(variant) => void store.setSessionVariant(session.session_id, variant)}
-                  open={open_picker === "variant"}
-                  options={VARIANT_OPTIONS}
-                  selected={session.current_variant}
-                  trigger_class_name={styles.compact_selector}
-                />
-                <SelectionPopover
-                  aria_label="切换审批模式"
-                  content_width="content"
-                  disabled={store.composer_pending}
-                  on_open_change={(open) => setOpenPicker(open ? "approval" : null)}
-                  on_select={(mode) => void store.setSessionApprovalMode(session.session_id, mode)}
-                  open={open_picker === "approval"}
-                  options={APPROVAL_OPTIONS}
-                  selected={session.approval_mode}
-                  trigger_class_name={styles.compact_selector}
-                />
-                {session_view.composer_capabilities.reasoning_effort_options.length > 0 && (
-                  <SelectionPopover
-                    aria_label="推理强度"
-                    content_width="content"
-                    disabled={store.composer_pending}
-                    on_open_change={(open) => setOpenPicker(open ? "effort" : null)}
-                    on_select={(effort) => void store.setSessionReasoningEffort(
-                      session.session_id,
-                      effort === "default" ? null : effort,
-                    )}
-                    open={open_picker === "effort"}
-                    options={effort_options}
-                    selected={session.reasoning_effort ?? "default"}
-                    title="推理强度"
-                    trigger_class_name={styles.compact_selector}
-                  />
-                )}
-                <Tooltip content={imageHandlingText(session_view.composer_capabilities.image_handling)}>
-                  <span aria-label={imageHandlingText(session_view.composer_capabilities.image_handling)} className={styles.image_capability} role="status">
-                    {session_view.composer_capabilities.image_handling === "native" ? "原生识图" : session_view.composer_capabilities.image_handling === "tool" ? "工具识图" : "暂不可识图"}
-                  </span>
-                </Tooltip>
-                <span className={styles.action_spacer} />
-                <ContextUsageRing view={session_view} />
-                {model_options.length > 0 && (
-                  <SelectionPopover
-                    aria_label="切换会话模型"
-                    disabled={!is_idle_for_model || store.composer_pending}
-                    on_open_change={(open) => setOpenPicker(open ? "model" : null)}
-                    on_select={(model_key) => void store.setSessionModel(session.session_id, model_key)}
-                    open={open_picker === "model"}
-                    options={model_options}
-                    selected={session.model_key}
-                    title="选择模型"
-                    trigger_class_name={styles.model_selector}
-                    trigger_content={modelDisplayName(application, session.model_key)}
-                  />
-                )}
-                <button
-                  aria-label={draft.trim() ? "发送消息" : session.active_run_id ? "中断当前轮次" : "发送消息"}
-                  className={styles.send_button}
-                  data-action={!draft.trim() && session.active_run_id ? "interrupt" : "send"}
-                  disabled={store.composer_pending || attachment_flow.pending || (!draft.trim() && !session.active_run_id)}
-                  onClick={() => draft.trim()
-                    ? void submitDraft()
-                    : session.active_run_id && void store.interruptRun(session.session_id, session.active_run_id)}
-                  type="button"
-                >
-                  <Icon name={!draft.trim() && session.active_run_id ? "stop" : "arrow-down"} size={16} />
-                </button>
-              </footer>
-            </section>
+                </div>
+              ))}
+            </div>
           )}
-        </>
+          <textarea
+            aria-label="输入消息"
+            disabled={store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
+            onChange={(event) => setDraft(event.target.value)}
+            onCompositionEnd={() => { composing_ref.current = false; }}
+            onCompositionStart={() => { composing_ref.current = true; }}
+            onKeyDown={handleTextareaKeyDown}
+            placeholder={goal?.state === "paused" ? "输入新指导并恢复 Goal…" : "输入消息…  / 使用指令"}
+            ref={textarea_ref}
+            rows={2}
+            value={draft}
+          />
+          <footer className={styles.composer_actions}>
+            <Tooltip content="添加附件">
+              <button
+                aria-label="添加附件"
+                className={styles.icon_button}
+                disabled={store.composer_pending || attachment_flow.pending}
+                onClick={() => void attachment_flow.choose()}
+                type="button"
+              >
+                <Icon name="plus" size={17} />
+              </button>
+            </Tooltip>
+            <ExecutionSettingsPopover
+              approval_mode={session.approval_mode}
+              disabled={store.composer_pending}
+              initial_category={execution_initial_category}
+              on_approval_change={(mode) => store.setSessionApprovalMode(session.session_id, mode)}
+              on_open_change={(open) => {
+                setShowHelp(false);
+                if (open) setInitialSettingsCategory(null);
+                updateActiveOverlay("execution", open);
+              }}
+              on_variant_change={(variant) => store.setSessionVariant(session.session_id, variant)}
+              open={active_overlay === "execution"}
+              trigger_class_name={styles.execution_selector}
+              variant={session.current_variant}
+            />
+            <span className={styles.action_spacer} />
+            <ContextUsageRing view={session_view} />
+            <ModelSettingsPopover
+              disabled={store.composer_pending}
+              effort={session.reasoning_effort ?? null}
+              effort_options={session_view.composer_capabilities.reasoning_effort_options}
+              initial_category={model_initial_category}
+              model_display_name={modelDisplayName(application, session.model_key)}
+              model_key={session.model_key}
+              model_options={model_options}
+              model_switch_disabled_reason={is_idle_for_model ? undefined : "存在活动 Run 或排队输入时不能切换模型"}
+              on_effort_change={(effort) => store.setSessionReasoningEffort(session.session_id, effort)}
+              on_model_change={(model_key) => store.setSessionModel(session.session_id, model_key)}
+              on_open_change={(open) => {
+                setShowHelp(false);
+                if (open) setInitialSettingsCategory(null);
+                updateActiveOverlay("model", open);
+              }}
+              open={active_overlay === "model"}
+              trigger_class_name={styles.model_selector}
+            />
+            <button
+              aria-label={draft.trim() ? "发送消息" : primary_label}
+              className={styles.send_button}
+              data-action={primary_action}
+              disabled={store.composer_pending || attachment_flow.pending || !primary_action_available}
+              onClick={() => {
+                if (draft.trim()) {
+                  void submitDraft();
+                } else if (goal_stops_from_primary && goal) {
+                  void store.stopGoal(session.session_id, goal.goal_id, goal.generation);
+                } else if (session.active_run_id) {
+                  void store.interruptRun(session.session_id, session.active_run_id);
+                }
+              }}
+              type="button"
+            >
+              <Icon name={goal_stops_from_primary || run_interrupts_from_primary ? "stop" : "arrow-down"} size={16} />
+            </button>
+          </footer>
+        </section>
       )}
     </div>
   );
@@ -392,8 +454,48 @@ function formatBytes(value: number): string {
   return `${value} B`;
 }
 
-function imageHandlingText(mode: SessionViewSnapshot["composer_capabilities"]["image_handling"]): string {
-  if (mode === "native") return "当前模型可直接理解图片";
-  if (mode === "tool") return "当前模型将通过辅助视觉模型理解图片";
-  return "当前没有可用的图片理解模型；图片仍会作为普通附件发送";
+function slashDisabledReason(
+  command_name: string,
+  view: SessionViewSnapshot | undefined,
+): string | null {
+  if (command_name !== "/goal") return null;
+  if (view?.goal) return "当前会话已有 Goal，请先继续或退出现有 Goal";
+  return null;
+}
+
+function resolveSubmitMode(
+  goal_armed: boolean,
+  goal_state: GoalStateSnapshot | undefined,
+): SubmitInputMode {
+  if (goal_armed) return "start_goal";
+  if (goal_state === "paused") return "resume_goal";
+  return "normal";
+}
+
+function nextEnabledSlashIndex(
+  items: readonly SlashCommandItem[],
+  current: number,
+  direction: 1 | -1,
+): number {
+  let next = current;
+  for (let checked = 0; checked < items.length; checked += 1) {
+    next = (next + direction + items.length) % items.length;
+    if (!items[next]?.disabled_reason) return next;
+  }
+  return current;
+}
+
+function primaryActionLabel(action: "send" | "stop-goal" | "interrupt"): string {
+  if (action === "stop-goal") return "停止 Goal";
+  if (action === "interrupt") return "中断当前轮次";
+  return "发送消息";
+}
+
+function resolvePrimaryAction(
+  stop_goal: boolean,
+  interrupt_run: boolean,
+): "send" | "stop-goal" | "interrupt" {
+  if (stop_goal) return "stop-goal";
+  if (interrupt_run) return "interrupt";
+  return "send";
 }

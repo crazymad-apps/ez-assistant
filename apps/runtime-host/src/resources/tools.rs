@@ -849,6 +849,8 @@ mod tests {
             ExecutionInput {
                 conversation: ConversationSnapshot::new(vec![ConversationMessage::User(
                     UserMessage {
+                        origin: Default::default(),
+                        transcript_visibility: Default::default(),
                         id: MessageId::new("user-files").expect("message id"),
                         parts: vec![
                             UserPart::Text(TextPart {

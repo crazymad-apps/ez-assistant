@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "catalog_revision": "2026-08-20-m4",
+  "catalog_revision": "2026-08-22-m6",
   "models": [
     {
       "provider": "deepseek",
@@ -26,6 +26,44 @@
       "protocol_label": "Responses API（OpenAI Compatible）",
       "model_ids": ["deepseek-v4-flash", "deepseek-v4-pro"],
       "capabilities": {
+        "reasoning": {
+          "enabled": true,
+          "default_effort": "high",
+          "effort_map": {
+            "high": { "label": "High", "wire_value": "high" },
+            "max": { "label": "Max", "wire_value": "max" }
+          }
+        }
+      }
+    },
+    {
+      "provider": "deepseek",
+      "provider_label": "DeepSeek",
+      "protocol": "openai_chat_completions",
+      "protocol_label": "Chat Completions（OpenAI Compatible）",
+      "model_ids": ["deepseek-v4-flash-vision-exp"],
+      "capabilities": {
+        "image_input": true,
+        "tool_image_projection": "aggregated_user_input",
+        "reasoning": {
+          "enabled": true,
+          "default_effort": "high",
+          "effort_map": {
+            "high": { "label": "High", "wire_value": "high" },
+            "max": { "label": "Max", "wire_value": "max" }
+          }
+        }
+      }
+    },
+    {
+      "provider": "deepseek",
+      "provider_label": "DeepSeek",
+      "protocol": "openai_responses",
+      "protocol_label": "Responses API（OpenAI Compatible）",
+      "model_ids": ["deepseek-v4-flash-vision-exp"],
+      "capabilities": {
+        "image_input": true,
+        "tool_image_projection": "native_function_output",
         "reasoning": {
           "enabled": true,
           "default_effort": "high",

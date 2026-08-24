@@ -26,6 +26,20 @@ pub enum RuntimeErrorCode {
     InputNotFound,
     /// 指定 Run 的状态不允许创建新的执行尝试。
     RunNotRetryable,
+    /// Session 已存在尚未清除的 Goal。
+    GoalAlreadyExists,
+    /// 指定 Session 没有可控制的 Goal。
+    GoalNotFound,
+    /// 客户端携带的 Goal ID 或 generation 已经过期。
+    GoalGenerationConflict,
+    /// Goal 当前状态不允许恢复。
+    GoalNotResumable,
+    /// Goal-bound Run 不能使用普通 Retry/Cancel，必须显式恢复或停止 Goal。
+    GoalRunRequiresResume,
+    /// 当前 Session 模型不支持 Goal 所需的 Tool Call。
+    GoalUnsupportedByModel,
+    /// WorkPlan revision 已变化。
+    WorkPlanRevisionConflict,
     /// Runtime 的权威存储当前不可用或拒绝了业务提交。
     StorageUnavailable,
     /// Runtime 已开始关闭，不再接受新的变更操作。
@@ -156,6 +170,25 @@ mod tests {
             (RuntimeErrorCode::ChildTaskNotFound, "child_task_not_found"),
             (RuntimeErrorCode::InputNotFound, "input_not_found"),
             (RuntimeErrorCode::RunNotRetryable, "run_not_retryable"),
+            (RuntimeErrorCode::GoalAlreadyExists, "goal_already_exists"),
+            (RuntimeErrorCode::GoalNotFound, "goal_not_found"),
+            (
+                RuntimeErrorCode::GoalGenerationConflict,
+                "goal_generation_conflict",
+            ),
+            (RuntimeErrorCode::GoalNotResumable, "goal_not_resumable"),
+            (
+                RuntimeErrorCode::GoalRunRequiresResume,
+                "goal_run_requires_resume",
+            ),
+            (
+                RuntimeErrorCode::GoalUnsupportedByModel,
+                "goal_unsupported_by_model",
+            ),
+            (
+                RuntimeErrorCode::WorkPlanRevisionConflict,
+                "work_plan_revision_conflict",
+            ),
             (RuntimeErrorCode::StorageUnavailable, "storage_unavailable"),
             (
                 RuntimeErrorCode::RuntimeShuttingDown,

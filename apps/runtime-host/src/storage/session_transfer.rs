@@ -7,13 +7,15 @@ use assistant_protocol::{ConversationOwner, DeleteSessionImpact, SessionId};
 use assistant_runtime::{
     SessionDeletion, SessionFork, StoreError, StoreErrorKind, StoredAttachment,
     StoredAttachmentState, StoredConversationState, StoredSession, StoredSessionFork,
-    StoredSessionLifecycle,
+    StoredSessionLifecycle, StoredWorkPlan,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
     StorageEngine, StorageResult, attachment_io, body_path, conflict, conversation,
-    database_write_error, internal_error, invalid_data,
+    database_write_error,
+    goal::insert_forked_goal,
+    internal_error, invalid_data,
     mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     session_resources::remove_created_session_directories,
     sync_directory, to_i64,
@@ -47,6 +49,48 @@ impl StorageEngine {
         if u64::try_from(source_generation).ok() != Some(fork.source_generation) {
             return Err(conflict("fork source generation changed"));
         }
+        if fork
+            .work_plan
+            .as_ref()
+            .is_some_and(|plan| plan.session_id != fork.source_session_id)
+        {
+            return Err(conflict("fork work plan belongs to a different session"));
+        }
+        if let Some(goal) = fork.goal.as_ref() {
+            let source_goal = self
+                .load_all_goals()?
+                .into_iter()
+                .find(|candidate| candidate.session_id == fork.source_session_id)
+                .ok_or_else(|| conflict("fork source Goal does not exist"))?;
+            if goal.session_id != fork.session.session_id
+                || goal.goal_id == source_goal.goal_id
+                || goal.objective != source_goal.objective
+                || goal.turn != source_goal.turn
+                || goal.budget != source_goal.budget
+                || goal.consecutive_failures != source_goal.consecutive_failures
+                || !fork.conversation.messages.iter().any(|message| {
+                    matches!(message, ConversationMessage::User(user)
+                        if user.id == goal.objective.source_message_id)
+                })
+            {
+                return Err(conflict("fork Goal projection is invalid"));
+            }
+        }
+        let work_plan = fork.work_plan.as_ref().map(|source| StoredWorkPlan {
+            session_id: fork.session.session_id.clone(),
+            revision: 1,
+            objective: source.objective.clone(),
+            items: source.items.clone(),
+            last_operation_id: format!("fork:{}", fork.source_session_id),
+            updated_at_ms: fork.session.created_at_ms,
+        });
+        let work_plan_items_json = work_plan
+            .as_ref()
+            .map(|plan| serde_json::to_string(&plan.items))
+            .transpose()
+            .map_err(|source| {
+                internal_error("fork work plan items could not be encoded", source)
+            })?;
         let paths = self.prepare_new_session_directories(&fork.session)?;
         let prepared = (|| -> StorageResult<_> {
             let source_attachments = self
@@ -173,6 +217,28 @@ impl StorageEngine {
                 .map_err(|source| {
                     database_write_error("fork session usage could not be initialized", source)
                 })?;
+            if let (Some(plan), Some(items_json)) = (&work_plan, &work_plan_items_json) {
+                transaction
+                    .execute(
+                        "INSERT INTO session_work_plans (
+                            session_id, revision, objective, items_json, last_operation_id,
+                            updated_at_ms
+                         ) VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+                        params![
+                            plan.session_id.as_str(),
+                            plan.objective,
+                            items_json,
+                            plan.last_operation_id,
+                            plan.updated_at_ms,
+                        ],
+                    )
+                    .map_err(|source| {
+                        database_write_error("fork work plan could not be created", source)
+                    })?;
+            }
+            if let Some(goal) = fork.goal.as_ref() {
+                insert_forked_goal(&transaction, goal)?;
+            }
             for attachment in &attachments {
                 transaction
                     .execute(
@@ -230,6 +296,8 @@ impl StorageEngine {
             },
             conversation: forked_conversation,
             attachments,
+            work_plan,
+            goal: fork.goal,
         };
         self.mark_recall_owner_dirty_now(
             &ConversationOwner::MainSession {

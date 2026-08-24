@@ -37,6 +37,8 @@ fn encode_plain_text_request_uses_streaming_wire() {
 fn encode_user_message_with_multiple_parts_uses_text_part_array() {
     let adapter = base_adapter();
     let message = ConversationMessage::User(UserMessage {
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
         id: message_id("message_1"),
         parts: vec![
             UserPart::Injected(TextPart {
@@ -52,6 +54,8 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
 
     let encoded = encode_request(&request(vec![message]), &adapter, MODEL).expect("encode request");
     let json = serde_json::to_value(&encoded).expect("serialize request");
+    assert!(json["messages"][0].get("origin").is_none());
+    assert!(json["messages"][0].get("transcript_visibility").is_none());
     // Injected 与 Text 在线上都是文本，多 parts 保序进入 text part 数组。
     assert_eq!(
         json["messages"][0]["content"],
@@ -66,6 +70,8 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
 fn encode_file_references_preserves_part_and_file_order_with_xml_text_escaping() {
     let adapter = base_adapter();
     let message = ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id("message_1"),
         parts: vec![
             UserPart::Text(TextPart {
@@ -112,6 +118,8 @@ fn encode_prepared_images_preserves_mixed_order_and_hides_readable_path() {
     let adapter = base_adapter();
     let image_path = "/stable/private/image.png";
     let message = ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id("message_image"),
         parts: vec![
             UserPart::Text(TextPart {

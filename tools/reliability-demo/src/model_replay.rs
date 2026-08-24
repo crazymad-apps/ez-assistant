@@ -248,6 +248,8 @@ mod tests {
                 let mut request = request();
                 request.conversation =
                     ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+                        origin: Default::default(),
+                        transcript_visibility: Default::default(),
                         id: MessageId::new("user-1").unwrap(),
                         parts: vec![UserPart::Text(TextPart {
                             id: PartId::new("user-part-1").unwrap(),

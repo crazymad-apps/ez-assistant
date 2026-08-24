@@ -171,9 +171,16 @@ impl AssistantRuntime {
                     state.is_faulted = true;
                     continue;
                 }
-                let snapshot =
+                let settlement =
                     settle_run(&session, &run_id, None, self.store.as_ref(), None).await?;
-                self.publish(finished_event(snapshot));
+                if let Some(goal) = settlement.goal {
+                    self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
+                        session_id: session.id().clone(),
+                        goal_id: goal.goal_id,
+                        generation: goal.generation,
+                    });
+                }
+                self.publish(finished_event(settlement.run));
                 let generation = session.lock_state()?.body_generation;
                 self.publish(assistant_protocol::RuntimeEvent::ConversationCommitted {
                     owner: assistant_protocol::ConversationOwner::MainSession {

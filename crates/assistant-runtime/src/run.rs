@@ -5,9 +5,11 @@ mod recorder;
 mod settlement;
 mod supervisor;
 
+use std::sync::Arc;
+
 pub(crate) use model_diagnostics::{ModelFailureDiagnostics, RunModelDiagnostics};
 pub(crate) use recorder::RuntimeRecorder;
-pub(crate) use settlement::{settle_run, settle_run_with_error};
+pub(crate) use settlement::{RunSettlementResult, settle_run, settle_run_with_error};
 pub(crate) use supervisor::observe_run_execution;
 
 use agent_types::{
@@ -174,6 +176,12 @@ impl RunRecord {
     pub(crate) fn attempt(&self) -> u32 {
         self.attempt
     }
+    pub(crate) fn variant(&self) -> AgentVariant {
+        self.variant
+    }
+    pub(crate) fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
+    }
     pub(crate) fn status(&self) -> RunStatus {
         self.status
     }
@@ -203,6 +211,7 @@ impl RunRecord {
 pub(crate) struct ActiveRun {
     pub(crate) run_id: RunId,
     pub(crate) cancellation: CancellationToken,
+    pub(crate) goal_signal_latch: Option<Arc<crate::goal::GoalRunSignalLatch>>,
 }
 
 /// 从已结算快照投影 Runtime 的唯一 RunFinished 事件。
@@ -256,6 +265,8 @@ pub(crate) fn create_user_message(
         text: crate::agent_variant::injection_text(variant).to_owned(),
     }));
     Ok(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id,
         parts,
     })

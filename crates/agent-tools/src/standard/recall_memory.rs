@@ -370,7 +370,7 @@ mod tests {
         let call = tool_call("recall_memory", arguments);
         let mut batch = Dispatcher::resolve_batch(&registry.snapshot(), &[call]);
         match batch.get(0) {
-            Some(ResolvedBatchItemRef::Invalid(result)) => result.clone(),
+            Some(ResolvedBatchItemRef::Invalid { result, .. }) => result.clone(),
             Some(ResolvedBatchItemRef::Valid(_)) => {
                 block_on(Dispatcher::execute(&mut batch, 0, context).expect("valid batch index"))
             }

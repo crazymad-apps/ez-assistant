@@ -331,6 +331,8 @@ fn execution_input(task: String) -> Result<ExecutionInput, RecordCommandError> {
         .map_err(|error| RecordCommandError::Provider(error.to_string()))?;
     Ok(ExecutionInput {
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: message_id,
             parts: vec![UserPart::Text(TextPart {
                 id: part_id,

@@ -242,7 +242,7 @@ fn search_defaults_are_visible_and_limits_are_validated_during_resolve() {
     );
     assert!(matches!(
         invalid.get(0),
-        Some(ResolvedBatchItemRef::Invalid(_))
+        Some(ResolvedBatchItemRef::Invalid { .. })
     ));
 }
 

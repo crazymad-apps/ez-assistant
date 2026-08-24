@@ -44,6 +44,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - User Message 的 `Text`、`Injected` 和 `FileReferences` 按规范 Part 顺序编码为
   原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
   不伪造 Tool Call、Tool Result 或已读取文件的事实。
+- Chat Completions 与 Responses 都不得把 `UserMessageOrigin`、`TranscriptVisibility` 编码到
+  Provider wire；隐藏 Runtime User Message 仍按普通 user role 及原有 Part 顺序发送。
 - `ModelRequest.system` 按 `SystemPromptSnapshot::parts()` 的冻结顺序逐条编码；透明快照
   不改变既有线上 JSON 和 system message 顺序。
 - 请求编码前复用 `ConversationSnapshot` 的严格 Tool Call/Result 双向校验，不在
@@ -83,9 +85,10 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   `output_index` 稳定完成；未知 item、缺失终态、坏参数、终态后额外数据和身份冲突均 fail-closed。
 - Responses 原生 `function_call_output` 是否可携带 content parts 由显式 `FunctionOutputShape`
   方言事实决定；String-only 路由使用已验证的批次聚合图片输入，不在运行期试错或切换投影。
-- Responses 精确具名方言包括 DeepSeek Flash/Pro、DashScope Qwen `qwen3.8-max` 和 Moonshot
-  Kimi `k3`；未知兼容端点仍使用保守通用方言。Qwen 工具图片固定使用批次聚合 User Image，
-  Kimi 固定使用原生 content-parts function output，DeepSeek 不启用图片；不得运行期试错切换。
+- Responses 精确具名方言包括 DeepSeek Flash/Pro/Vision、DashScope Qwen `qwen3.8-max` 和 Moonshot
+  Kimi `k3`；未知兼容端点仍使用保守通用方言。Qwen 工具图片固定使用批次聚合 User Image，Kimi
+  与 DeepSeek `deepseek-v4-flash-vision-exp` 固定使用原生 content-parts function output；DeepSeek
+  非视觉 Flash/Pro 不启用图片，不得运行期试错切换。
 - DeepSeek/OpenAI 类非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
   `ReasoningPart`。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
   完全相容的状态；相容 payload 损坏或与规范 reasoning 矛盾时 fail-closed，路由不相容时跳过

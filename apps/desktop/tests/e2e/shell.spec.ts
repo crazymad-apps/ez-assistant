@@ -104,6 +104,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByRole("menuitem", { name: "在此新建会话" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "打开工作目录" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "复制目录路径" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "移除工作空间…" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu", { name: /工作空间操作/ })).toBeHidden();
 
@@ -137,6 +138,30 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
 
   const composer = page.getByRole("textbox", { name: "输入消息" });
   await expect(composer).toBeVisible();
+  await expect(page.getByRole("button", { name: "添加附件" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "执行设置" })).toContainText("Build · Ask");
+  await expect(page.getByRole("button", { name: "模型设置" })).toBeVisible();
+  await expect(page.getByRole("img", { name: /上下文用量/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "执行设置" }).click();
+  await expect(page.getByRole("menuitem", { name: /执行模式.*Build/ })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /审批模式.*Ask/ })).toBeVisible();
+  await page.getByRole("menuitem", { name: /执行模式.*Build/ }).click();
+  await expect(page.getByRole("menuitemradio", { name: /Plan/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menuitemradio", { name: /Plan/ })).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menuitem", { name: /执行模式.*Build/ })).toBeHidden();
+
+  await composer.fill("/goal");
+  await composer.press("Enter");
+  const cancel_goal_tag = page.getByRole("button", { name: "取消 Goal 标记" });
+  await expect(cancel_goal_tag).toBeVisible();
+  await composer.press("Escape");
+  await expect(cancel_goal_tag).toBeVisible();
+  await cancel_goal_tag.click();
+  await expect(cancel_goal_tag).toBeHidden();
+
   await composer.fill("第一行");
   await composer.press("Shift+Enter");
   await composer.type("第二行");
@@ -146,7 +171,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(composer).toHaveValue("");
   await expect(page.getByText("FIRST_CASE", { exact: true })).toBeVisible();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "切换会话模型" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "模型设置" })).toBeEnabled();
 
   await navigation.getByRole("button", { name: "搜索会话" }).click();
   const title_search = navigation.getByRole("searchbox", { name: "搜索会话名称" });
@@ -163,6 +188,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByText("空闲", { exact: true })).toBeVisible({ timeout: 10_000 });
 
   const context_panel = page.getByRole("complementary", { name: "当前上下文" });
+  await expect(context_panel.getByText("图片理解").locator("xpath=following-sibling::*[1]")).toContainText("当前不可用");
   const workspace_section = context_panel.getByRole("button", { name: "Workspace", exact: true });
   await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeVisible();
   await workspace_section.click();
@@ -237,6 +263,24 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await delete_dialog.getByRole("button", { name: "永久删除" }).click();
   await expect(session_header.getByRole("button", { name: forked_title })).toBeHidden();
   await expect(navigation.getByRole("button", { name: new RegExp(forked_title) })).toHaveCount(0);
+
+  const added_workspace_name = basename(new_workspace);
+  page.once("dialog", (dialog) => dialog.accept());
+  await navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` }).click();
+  await page.getByRole("menuitem", { name: "移除工作空间…" }).click();
+  await expect(navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` })).toHaveCount(0);
+  await navigation.getByRole("button", { name: "新对话", exact: true }).click();
+  await expect(
+    page.getByRole("menu", { name: "选择新会话目录" }).getByRole("menuitem", { name: added_workspace_name }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await navigation.getByRole("button", { name: "添加工作空间" }).click();
+  await expect(navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` })).toBeVisible();
+  await navigation.getByRole("button", { name: "新对话", exact: true }).click();
+  await expect(
+    page.getByRole("menu", { name: "选择新会话目录" }).getByRole("menuitem", { name: added_workspace_name }),
+  ).toBeVisible();
 });
 
 async function expectModelCatalogForm(page: Page): Promise<void> {

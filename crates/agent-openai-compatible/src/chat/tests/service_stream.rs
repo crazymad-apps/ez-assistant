@@ -134,6 +134,8 @@ fn request() -> ModelRequest {
     ModelRequest {
         system: SystemPromptSnapshot::default(),
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: message_id("message_1"),
             parts: vec![UserPart::Text(TextPart {
                 id: part_id("text_1"),

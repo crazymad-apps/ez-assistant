@@ -3,11 +3,15 @@
 use assistant_protocol::{
     ChildTaskId, ChildTaskStatus, RunId, RunStatus, RuntimeErrorInfo, SessionId,
 };
+use assistant_runtime::StoredGoalSettlementEffect;
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    StorageResult, conflict, internal_error, invalid_data, invalid_data_with_source,
+    StorageResult, conflict,
+    goal::apply_goal_settlement,
+    input_state::insert_goal_continuation,
+    internal_error, invalid_data, invalid_data_with_source,
     run_projection::{error_code_value, run_status_value},
 };
 
@@ -29,6 +33,8 @@ pub(super) enum AppendPurpose {
         status: RunStatus,
         cancel_requested: bool,
         error: Option<RuntimeErrorInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_effect: Option<Box<StoredGoalSettlementEffect>>,
     },
     /// 子任务初始 User Message 已写入，切换到 running。
     ChildStart,
@@ -280,6 +286,7 @@ pub(super) fn apply_run_settlement(
         status,
         cancel_requested,
         error,
+        goal_effect,
     } = purpose
     else {
         return Err(invalid_data("run settlement purpose is invalid"));
@@ -304,6 +311,66 @@ pub(super) fn apply_run_settlement(
         .map_err(|source| internal_error("run could not be settled", source))?;
     if updated != 1 {
         return Err(conflict("run is not in a settleable state"));
+    }
+    if let Some(effect) = goal_effect.as_deref() {
+        match effect {
+            StoredGoalSettlementEffect::Continue {
+                expected_goal_id,
+                expected_generation,
+                goal,
+                next_input,
+            } => {
+                let binding = next_input
+                    .goal_binding
+                    .as_ref()
+                    .ok_or_else(|| invalid_data("Goal continuation has no binding"))?;
+                if goal.state != assistant_runtime::StoredGoalState::Running
+                    || goal.pause_reason.is_some()
+                    || goal.generation != *expected_generation
+                    || goal.turn == 0
+                    || next_input.session_id != *session_id
+                    || next_input.origin != assistant_runtime::InputOrigin::Runtime
+                    || next_input.new_goal.is_some()
+                    || next_input.resumed_goal.is_some()
+                    || next_input.accepted_at_ms != finished_at_ms
+                    || binding.goal_id != goal.goal_id
+                    || binding.generation != goal.generation
+                    || binding.turn != goal.turn
+                {
+                    return Err(invalid_data("Goal continuation projection is invalid"));
+                }
+                apply_goal_settlement(
+                    transaction,
+                    expected_goal_id,
+                    *expected_generation,
+                    goal,
+                    finished_at_ms,
+                )?;
+                insert_goal_continuation(transaction, next_input)?;
+            }
+            StoredGoalSettlementEffect::Transition {
+                expected_goal_id,
+                expected_generation,
+                goal,
+                ..
+            } => {
+                if goal.state == assistant_runtime::StoredGoalState::Running
+                    || goal.generation
+                        != expected_generation
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_data("Goal generation is exhausted"))?
+                {
+                    return Err(invalid_data("Goal transition projection is invalid"));
+                }
+                apply_goal_settlement(
+                    transaction,
+                    expected_goal_id,
+                    *expected_generation,
+                    goal,
+                    finished_at_ms,
+                )?;
+            }
+        }
     }
     let session_updated = transaction
         .execute(

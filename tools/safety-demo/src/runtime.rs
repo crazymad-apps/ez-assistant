@@ -569,6 +569,8 @@ impl DemoRuntime {
 
 fn user_message(run_id: &str, text: &str) -> Result<UserMessage, StartRunError> {
     Ok(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: MessageId::new(format!("{run_id}-user"))
             .map_err(|error| StartRunError::Identifier(error.to_string()))?,
         parts: vec![UserPart::Text(TextPart {

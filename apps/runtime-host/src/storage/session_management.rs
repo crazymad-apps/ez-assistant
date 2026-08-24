@@ -12,7 +12,9 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
     StorageEngine, StorageResult, body_path, child_task_directory, child_tasks_directory, conflict,
-    conversation, database_write_error, internal_error, invalid_data,
+    conversation, database_write_error,
+    goal::apply_goal_rewrite_pause,
+    internal_error, invalid_data,
     mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     recovery::ReplacementPlan,
     sync_directory, to_i64,
@@ -294,6 +296,9 @@ impl StorageEngine {
         if updated != 1 {
             return Err(conflict("session is not available for history replacement"));
         }
+        if let Some(effect) = rewrite.goal_effect.as_ref() {
+            apply_goal_rewrite_pause(&transaction, effect, rewrite.changed_at_ms)?;
+        }
         let removed_child_task_ids = {
             let mut statement = transaction
                 .prepare(
@@ -369,6 +374,8 @@ impl StorageEngine {
             session_id: rewrite.session_id.clone(),
             idempotency_key: rewrite.input.idempotency_key.clone(),
             agent_variant: rewrite.input.agent_variant,
+            origin: rewrite.input.origin,
+            goal_binding: rewrite.input.goal_binding.clone(),
             user_message_id: new_message_id.clone(),
             state: StoredInputState::Committed,
             queued_message: None,

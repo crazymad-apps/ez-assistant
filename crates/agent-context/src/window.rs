@@ -229,6 +229,8 @@ mod tests {
 
     fn user(id: &str) -> ConversationMessage {
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new(id).expect("valid message id"),
             parts: vec![],
         })

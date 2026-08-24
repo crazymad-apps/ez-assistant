@@ -276,20 +276,6 @@ pub(crate) fn ensure_thumbnail(readable_path: &Path) -> Result<PathBuf, ImageRes
     Ok(thumbnail)
 }
 
-/// 校验 Session Tool Image 后在内存中生成有界 JPEG；不得在 `tool-images/` 落缩略图副本。
-pub(crate) fn tool_image_thumbnail(
-    directory: &Path,
-    reference: &ToolImageReference,
-) -> Result<Vec<u8>, ImageResourceError> {
-    validate_tool_image_file(directory, reference)?;
-    let path = directory.join(reference.relative_path());
-    let Some(mut image) = decode_normalized(&path)? else {
-        return Err(ImageResourceError::Unsupported);
-    };
-    image = image.resize(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE, FilterType::Lanczos3);
-    encode_jpeg(&image, 82)
-}
-
 fn prepare_model_image(path: &Path) -> Result<Option<PreparedModelImage>, ImageResourceError> {
     let Some(mut image) = decode_normalized(path)? else {
         return Ok(None);
@@ -394,17 +380,37 @@ pub(crate) fn validate_tool_image_file(
     directory: &Path,
     reference: &ToolImageReference,
 ) -> Result<(), ImageResourceError> {
-    let path = directory.join(reference.relative_path());
-    let metadata = fs::symlink_metadata(&path).map_err(|_| ImageResourceError::Unavailable)?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_SOURCE_BYTES {
-        return Err(ImageResourceError::Unavailable);
-    }
-    let bytes = fs::read(&path).map_err(|_| ImageResourceError::Unavailable)?;
+    let bytes = read_tool_image_bytes(directory, reference)?;
     let actual = store_reference_for_bytes(&bytes)?;
     if &actual != reference {
         return Err(ImageResourceError::Conflict);
     }
     Ok(())
+}
+
+/// 为详情预览读取原始图片，只重验稳定内容身份，不重复执行首次写入时的完整图片解码。
+pub(crate) fn read_tool_image_for_preview(
+    directory: &Path,
+    reference: &ToolImageReference,
+) -> Result<Vec<u8>, ImageResourceError> {
+    let bytes = read_tool_image_bytes(directory, reference)?;
+    let actual = reference_for_encoded_bytes(&bytes)?;
+    if &actual != reference {
+        return Err(ImageResourceError::Conflict);
+    }
+    Ok(bytes)
+}
+
+fn read_tool_image_bytes(
+    directory: &Path,
+    reference: &ToolImageReference,
+) -> Result<Vec<u8>, ImageResourceError> {
+    let path = directory.join(reference.relative_path());
+    let metadata = fs::symlink_metadata(&path).map_err(|_| ImageResourceError::Unavailable)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SOURCE_BYTES {
+        return Err(ImageResourceError::Unavailable);
+    }
+    fs::read(&path).map_err(|_| ImageResourceError::Unavailable)
 }
 
 /// 将源 Session 的稳定图片复制到目标 Session，不建立跨 Session 链接或引用计数。
@@ -424,10 +430,14 @@ pub(crate) fn copy_tool_image(
 }
 
 fn store_reference_for_bytes(bytes: &[u8]) -> Result<ToolImageReference, ImageResourceError> {
-    let media_type = sniff_media_type_bytes(bytes);
     if decode_normalized_bytes(bytes)?.is_none() {
         return Err(ImageResourceError::Unsupported);
     }
+    reference_for_encoded_bytes(bytes)
+}
+
+fn reference_for_encoded_bytes(bytes: &[u8]) -> Result<ToolImageReference, ImageResourceError> {
+    let media_type = sniff_media_type_bytes(bytes);
     let digest = Sha256::digest(bytes);
     let hash = digest
         .iter()
@@ -590,34 +600,6 @@ mod tests {
         let path = directory.path().join("notes.txt");
         fs::write(&path, b"hello").expect("write text");
         assert_eq!(prepare_model_image(&path).expect("prepare"), None);
-    }
-
-    #[test]
-    fn tool_image_thumbnail_is_in_memory_and_revalidates_the_reference() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let image = image::RgbImage::from_pixel(640, 320, image::Rgb([15, 25, 35]));
-        let mut source = Vec::new();
-        DynamicImage::ImageRgb8(image)
-            .write_to(&mut Cursor::new(&mut source), ImageFormat::Png)
-            .expect("encode source");
-        let reference = store_tool_image_bytes(directory.path(), &source).expect("store image");
-
-        let thumbnail = tool_image_thumbnail(directory.path(), &reference).expect("thumbnail");
-        assert_eq!(&thumbnail[..2], &[0xff, 0xd8]);
-        let decoded = image::load_from_memory(&thumbnail).expect("decode thumbnail");
-        assert_eq!(decoded.dimensions(), (320, 160));
-        assert_eq!(
-            fs::read_dir(directory.path())
-                .expect("tool image entries")
-                .count(),
-            1
-        );
-
-        let stored_path = directory.path().join(reference.relative_path());
-        fs::set_permissions(&stored_path, fs::Permissions::from_mode(0o600))
-            .expect("make image writable for corruption fixture");
-        fs::write(stored_path, b"corrupt").expect("corrupt image");
-        assert!(tool_image_thumbnail(directory.path(), &reference).is_err());
     }
 
     #[test]

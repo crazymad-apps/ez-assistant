@@ -11,7 +11,8 @@ use assistant_runtime::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
-    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
+    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest, GoalClear,
+    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionFileLoad,
@@ -21,9 +22,10 @@ use assistant_runtime::{
     SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
     StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkspaceRemoval,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -41,6 +43,18 @@ enum Command {
     },
     LoadMemoryContext {
         reply: oneshot::Sender<Result<MemoryContextSnapshot, StoreError>>,
+    },
+    LoadWorkPlan {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<Option<StoredWorkPlan>, StoreError>>,
+    },
+    MutateWorkPlan {
+        mutation: WorkPlanMutation,
+        reply: oneshot::Sender<Result<WorkPlanMutationResult, StoreError>>,
+    },
+    ClearWorkPlan {
+        clear: WorkPlanClear,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
     GetPersona {
         reply: oneshot::Sender<Result<PersonaSnapshot, StoreError>>,
@@ -157,7 +171,19 @@ enum Command {
     },
     SettleRun {
         settlement: StoredRunSettlement,
+        reply: oneshot::Sender<Result<StoredRunSettlementResult, StoreError>>,
+    },
+    StopGoal {
+        stop: GoalStop,
+        reply: oneshot::Sender<Result<GoalStopResult, StoreError>>,
+    },
+    ClearGoal {
+        clear: GoalClear,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ResumeGoalWithHeldInput {
+        resume: GoalHeldInputResume,
+        reply: oneshot::Sender<Result<GoalHeldInputResumeResult, StoreError>>,
     },
     LoadConversation {
         session_id: SessionId,
@@ -220,7 +246,7 @@ enum Command {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     RewriteFromUser {
-        rewrite: ConversationRewrite,
+        rewrite: Box<ConversationRewrite>,
         reply: oneshot::Sender<Result<RewriteResult, StoreError>>,
     },
     LoadPermissionFile {
@@ -385,6 +411,37 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::LoadMemoryContext { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::LoadWorkPlan { session_id, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn mutate_work_plan(
+        &self,
+        mutation: WorkPlanMutation,
+    ) -> StoreFuture<'_, WorkPlanMutationResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::MutateWorkPlan { mutation, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn clear_work_plan(&self, clear: WorkPlanClear) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ClearWorkPlan { clear, reply })
+                .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -659,10 +716,41 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
-    fn settle_run(&self, settlement: StoredRunSettlement) -> StoreFuture<'_, ()> {
+    fn settle_run(
+        &self,
+        settlement: StoredRunSettlement,
+    ) -> StoreFuture<'_, StoredRunSettlementResult> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SettleRun { settlement, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn stop_goal(&self, stop: GoalStop) -> StoreFuture<'_, GoalStopResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::StopGoal { stop, reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn clear_goal(&self, clear: GoalClear) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ClearGoal { clear, reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn resume_goal_with_held_input(
+        &self,
+        resume: GoalHeldInputResume,
+    ) -> StoreFuture<'_, GoalHeldInputResumeResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ResumeGoalWithHeldInput { resume, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -854,8 +942,11 @@ impl RuntimeStore for LocalRuntimeStore {
     fn rewrite_from_user(&self, rewrite: ConversationRewrite) -> StoreFuture<'_, RewriteResult> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
-            self.enqueue(Command::RewriteFromUser { rewrite, reply })
-                .await?;
+            self.enqueue(Command::RewriteFromUser {
+                rewrite: Box::new(rewrite),
+                reply,
+            })
+            .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -905,6 +996,15 @@ fn run_worker(
             }
             Command::LoadMemoryContext { reply } => {
                 let _ = reply.send(engine.load_memory_context());
+            }
+            Command::LoadWorkPlan { session_id, reply } => {
+                let _ = reply.send(engine.load_work_plan(&session_id));
+            }
+            Command::MutateWorkPlan { mutation, reply } => {
+                let _ = reply.send(engine.mutate_work_plan(mutation));
+            }
+            Command::ClearWorkPlan { clear, reply } => {
+                let _ = reply.send(engine.clear_work_plan(clear));
             }
             Command::GetPersona { reply } => {
                 let _ = reply.send(engine.get_persona());
@@ -1009,6 +1109,15 @@ fn run_worker(
             Command::SettleRun { settlement, reply } => {
                 let _ = reply.send(engine.settle_run(settlement));
             }
+            Command::StopGoal { stop, reply } => {
+                let _ = reply.send(engine.stop_goal(stop));
+            }
+            Command::ClearGoal { clear, reply } => {
+                let _ = reply.send(engine.clear_goal(clear));
+            }
+            Command::ResumeGoalWithHeldInput { resume, reply } => {
+                let _ = reply.send(engine.resume_goal_with_held_input(resume));
+            }
             Command::LoadConversation { session_id, reply } => {
                 let _ = reply.send(engine.load_conversation(&session_id));
             }
@@ -1055,7 +1164,7 @@ fn run_worker(
                 let _ = reply.send(engine.set_session_approval_mode(change));
             }
             Command::RewriteFromUser { rewrite, reply } => {
-                let _ = reply.send(engine.rewrite_from_user(rewrite));
+                let _ = reply.send(engine.rewrite_from_user(*rewrite));
             }
             Command::LoadPermissionFile { scope, reply } => {
                 let _ = reply.send(engine.load_permission_file(&scope));

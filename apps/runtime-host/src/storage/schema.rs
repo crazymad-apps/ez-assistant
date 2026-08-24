@@ -67,6 +67,51 @@ CREATE TABLE IF NOT EXISTS message_feedback (
     PRIMARY KEY (session_id, message_id)
 );
 
+CREATE TABLE IF NOT EXISTS session_work_plans (
+    session_id          TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    revision            INTEGER NOT NULL CHECK (revision > 0),
+    objective           TEXT NOT NULL,
+    items_json          TEXT NOT NULL,
+    last_operation_id   TEXT NOT NULL,
+    updated_at_ms       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_plan_completion_receipts (
+    session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    operation_id        TEXT NOT NULL,
+    revision            INTEGER NOT NULL CHECK (revision > 0),
+    objective           TEXT NOT NULL,
+    items_json          TEXT NOT NULL,
+    updated_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (session_id, operation_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_goals (
+    goal_id                    TEXT PRIMARY KEY,
+    session_id                 TEXT NOT NULL UNIQUE REFERENCES sessions(session_id) ON DELETE CASCADE,
+    objective_message_id       TEXT NOT NULL,
+    objective_payload_json     TEXT NOT NULL,
+    objective_hash             TEXT NOT NULL,
+    state                      TEXT NOT NULL CHECK (state IN ('running', 'paused', 'completed')),
+    pause_reason_json          TEXT,
+    generation                 INTEGER NOT NULL CHECK (generation > 0),
+    turn                       INTEGER NOT NULL CHECK (turn > 0),
+    max_runs                   INTEGER NOT NULL CHECK (max_runs > 0),
+    max_total_tokens           INTEGER NOT NULL CHECK (max_total_tokens > 0),
+    max_consecutive_failures   INTEGER NOT NULL CHECK (max_consecutive_failures > 0),
+    used_runs                  INTEGER NOT NULL CHECK (used_runs >= 0),
+    used_total_tokens          INTEGER NOT NULL CHECK (used_total_tokens >= 0),
+    usage_complete             INTEGER NOT NULL CHECK (usage_complete IN (0, 1)),
+    consecutive_failures       INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+    created_at_ms              INTEGER NOT NULL,
+    updated_at_ms              INTEGER NOT NULL,
+    completed_at_ms            INTEGER,
+    CHECK ((state = 'paused' AND pause_reason_json IS NOT NULL)
+        OR (state IN ('running', 'completed') AND pause_reason_json IS NULL)),
+    CHECK ((state = 'completed' AND completed_at_ms IS NOT NULL)
+        OR (state != 'completed' AND completed_at_ms IS NULL))
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     workspace_id       TEXT PRIMARY KEY,
     user_directory     TEXT NOT NULL UNIQUE,
@@ -123,6 +168,13 @@ CREATE TABLE IF NOT EXISTS inputs (
     accepted_at_ms      INTEGER NOT NULL,
     agent_variant       TEXT NOT NULL DEFAULT 'build'
                             CHECK (agent_variant IN ('plan', 'build')),
+    origin              TEXT NOT NULL DEFAULT 'user'
+                            CHECK (origin IN ('user', 'runtime')),
+    goal_id             TEXT,
+    goal_generation     INTEGER CHECK (goal_generation IS NULL OR goal_generation > 0),
+    goal_turn           INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0),
+    CHECK ((goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL)
+        OR (goal_id IS NOT NULL AND goal_generation IS NOT NULL AND goal_turn IS NOT NULL)),
     UNIQUE (session_id, idempotency_key)
 );
 
@@ -340,11 +392,14 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
     "SELECT id, category, content, attributes_json, created_by_kind, created_by_session_id, revision, created_at_ms, updated_at_ms FROM pinned_memories LIMIT 0",
     "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
+    "SELECT session_id, revision, objective, items_json, last_operation_id, updated_at_ms FROM session_work_plans LIMIT 0",
+    "SELECT session_id, operation_id, revision, objective, items_json, updated_at_ms FROM work_plan_completion_receipts LIMIT 0",
+    "SELECT goal_id, session_id, objective_message_id, objective_payload_json, objective_hash, state, pause_reason_json, generation, turn, max_runs, max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens, usage_complete, consecutive_failures, created_at_ms, updated_at_ms, completed_at_ms FROM session_goals LIMIT 0",
     "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn FROM inputs LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id FROM run_message_refs LIMIT 0",
     "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
@@ -369,6 +424,20 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     transaction.execute_batch(SCHEMA).map_err(|source| {
         internal_error("runtime database schema could not be initialized", source)
     })?;
+    // v0.18.0 早期开发构建可能留下终态控制记录；正文与 Run 历史不在这些表中。
+    transaction
+        .execute_batch(
+            "DELETE FROM session_work_plans
+             WHERE json_array_length(items_json) > 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM json_each(session_work_plans.items_json)
+                   WHERE json_extract(value, '$.status') != 'completed'
+               );
+             DELETE FROM session_goals WHERE state = 'completed';",
+        )
+        .map_err(|source| {
+            internal_error("completed control state could not be migrated", source)
+        })?;
     ensure_column(
         &transaction,
         "attachment_blobs",
@@ -432,6 +501,40 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "agent_variant",
         "ALTER TABLE inputs ADD COLUMN agent_variant TEXT NOT NULL DEFAULT 'build' CHECK (agent_variant IN ('plan', 'build'))",
     )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "origin",
+        "ALTER TABLE inputs ADD COLUMN origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'runtime'))",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "goal_id",
+        "ALTER TABLE inputs ADD COLUMN goal_id TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "goal_generation",
+        "ALTER TABLE inputs ADD COLUMN goal_generation INTEGER CHECK (goal_generation IS NULL OR goal_generation > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "goal_turn",
+        "ALTER TABLE inputs ADD COLUMN goal_turn INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0)",
+    )?;
+    transaction
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS inputs_goal_turn
+             ON inputs(goal_id, goal_generation, goal_turn)
+             WHERE goal_id IS NOT NULL",
+            [],
+        )
+        .map_err(|source| {
+            internal_error("goal input uniqueness could not be initialized", source)
+        })?;
     ensure_column(
         &transaction,
         "runs",
@@ -639,6 +742,22 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .expect("empty pinned memories"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM session_work_plans", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("legacy sessions start without work plans"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM session_goals", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("legacy sessions start without goals"),
             0
         );
     }

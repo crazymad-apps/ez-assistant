@@ -57,6 +57,7 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
 
     let failed = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "fail once".to_owned(),
@@ -71,6 +72,7 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
 
     let compact = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "overflow once".to_owned(),
@@ -133,6 +135,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 
     let first_run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "first turn".to_owned(),
@@ -150,6 +153,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 
     let continued = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "continue".to_owned(),
@@ -208,6 +212,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "retry unavailable model".to_owned(),
@@ -313,6 +318,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "stream then fail".to_owned(),
@@ -349,6 +355,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
         .expect("session");
     let started = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "panic".to_owned(),
@@ -404,6 +411,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("session");
     let first = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
@@ -417,6 +425,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("first model entered");
     runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "must remain queued".to_owned(),
@@ -442,6 +451,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id,
                 message: "must be rejected".to_owned(),
@@ -463,6 +473,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
     assert!(matches!(
         runtime
             .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id.clone(),
                 message: " \n\t".to_owned(),

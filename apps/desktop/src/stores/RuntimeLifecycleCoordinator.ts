@@ -422,6 +422,8 @@ function sessionIdForRefresh(event: RuntimeEvent): SessionId | null {
     case "approval_requested":
       return event.approval.session_id;
     case "queue_changed":
+    case "work_plan_changed":
+    case "goal_changed":
     case "permission_reloaded":
     case "approval_resolved":
     case "approval_cancelled":

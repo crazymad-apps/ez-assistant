@@ -2,10 +2,11 @@
 
 - 记录日期：260726
 - 状态：上下文部分已纳入 v0.3.0，重复调用/连续失败 Guardrail 已纳入 v0.4.0；
-  Runtime drain/续跑部分仍待后续版本评估
+  Runtime drain/显式续跑与 Todo 主体已纳入已归档的
+  [`v0.18.0` 功能设计](../versions/v0.18.0/功能设计.md)
 - 来源：对 `~/github/opencode`（v1.18.3-dev, commit 08fb473735）的只读调研
 - 目标版本：v0.3.0（上下文压缩/overflow）、v0.4.0（重复调用/连续失败
-  Guardrail）及后续 Runtime 版本
+  Guardrail）及 `v0.18.0`（Runtime Goal/Todo 续跑）
 
 ## 原始内容
 
@@ -36,7 +37,7 @@
 
 1. instructions 纪律（主防线）：无人值守模式提示词压制疑问句收尾、禁止请求许可、用合理默认继续、真阻塞时说明原因。
 2. `ask_user`/`question` 类工具（参考 opencode 的 `question` 工具）：把"真正需要人拍板的提问"结构化为工具调用，挂起后由 Runtime 按有人/无人值守策略应答——与授权接缝（Ask 由 Runtime 代理）同构，引擎零改动。
-3. Runtime 显式续跑：引擎 `Completed` ≠ 任务完成；Runtime 持任务目标，未达成时显式开新执行注入"继续"指令（对应 opencode drain 循环的退出语义）。
+3. Runtime 显式续跑：引擎 `Completed` ≠ 任务完成；Runtime 持 Session 工作计划和 Goal 控制状态，未达成时显式开新执行注入“继续”指令（对应 opencode drain 循环的退出语义）。
 4. 目标可检验化：提示词中给出机器可判的完成判据（如"测试全绿"），配合第 3 层的续跑判定。
 
 ## 补充：长任务的核心约束——单轮撞上下文 limit（2026-07-26 讨论结论）
@@ -84,7 +85,7 @@ v0.2.0 预留的插入点：BuildingContext 显式步骤（v0.3.0 Context Prefli
 核心问题：用户给一个宽泛目标，系统自己拆成多轮跑完，全程无需介入。完整答案为四层机制栈：
 
 1. **引擎内自驱循环（v0.2.0）**：模型经 tool call 自发分解任务，一轮输入自动跑出多轮 assistant/tool 交替。
-2. **Runtime 的 Run 级 drain 循环（无感的核心）**：Runtime 持任务目标，执行结束评估"完成了吗"，未完成自动开新执行（快照承接 + 继续指令）；触发情形含 Length 截断续跑、上下文压缩续跑、疑问句收尾但判据未达成、重启后显式 resume。对应 opencode drain 循环退出语义（"最后一条 user 已被应答"）。
+2. **Runtime 的 Run 级 drain 循环（无感的核心）**：Runtime 持 Session 工作计划和 Goal 控制状态，执行结束评估“完成了吗”，未完成自动开新执行（快照承接 + 继续指令）；触发情形含 Length 截断续跑、上下文压缩续跑、疑问句收尾但判据未达成、重启后显式 resume。对应 opencode drain 循环退出语义（“最后一条 user 已被应答”）。
 3. **完成判据可机器检验（无感前提）**：测试命令、todo 全勾选、模型按判据声明完成；宽泛目标先转成可检验形式（提示词纪律或 plan 执行）。
 4. **硬性停止策略（安全边界）**：任务级次数/步数预算、无进展 Guardrail、连续失败上限、用户随时取消。
 

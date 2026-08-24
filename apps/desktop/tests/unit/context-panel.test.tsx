@@ -15,6 +15,7 @@ describe("ContextPanel", () => {
     const session_section = screen.getByRole("button", { name: "会话" });
     expect(session_section).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Fixture Model")).toBeVisible();
+    expect(screen.getByText("图片理解").nextElementSibling).toHaveTextContent("辅助视觉模型");
     fireEvent.click(session_section);
     expect(session_section).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("Fixture Model")).not.toBeInTheDocument();
@@ -173,6 +174,11 @@ function contextStore(): RootStore {
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
+      },
+      composer_capabilities: {
+        reasoning_effort_options: [],
+        image_handling: "tool",
+        goal_supported: true,
       },
       active_run: null,
       queue: { revision: 1, state: "automatic", items: [] },

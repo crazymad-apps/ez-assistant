@@ -4,15 +4,17 @@ mod approval;
 mod attachment;
 mod connection_validation;
 mod delegation;
+pub(crate) mod goal;
 mod input;
 mod memory;
 mod model;
 mod permission;
-mod product;
+pub(crate) mod product;
 mod recovery;
 mod session_management;
 mod shutdown;
 mod tasks;
+mod work_plan;
 mod workspace;
 
 pub use attachment::StagedAttachmentUpload;
@@ -682,6 +684,27 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
+        {
+            let state = session.lock_state()?;
+            if state
+                .runs
+                .get(&request.run_id)
+                .and_then(|run| state.inputs.get(run.input_id()))
+                .and_then(|input| input.stored.goal_binding.as_ref())
+                .is_some_and(|binding| {
+                    state.goal.as_ref().is_some_and(|goal| {
+                        matches!(goal.state, crate::goal::GoalState::Running)
+                            && goal.id == binding.goal_id
+                            && goal.generation == binding.generation
+                    })
+                })
+            {
+                return Err(RuntimeError::GoalRunRequiresResume {
+                    session_id: request.session_id.clone(),
+                    run_id: request.run_id.clone(),
+                });
+            }
+        }
         self.cancel_run_approvals(&request.session_id, &request.run_id)
             .await?;
         let (snapshot, cancellation) = {

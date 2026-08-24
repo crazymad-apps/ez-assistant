@@ -8,8 +8,11 @@ use agent_types::{AssistantMessage, AssistantPart, ConversationMessage};
 use assistant_protocol::{RunId, RunSnapshot, RunStatus, RuntimeErrorCode, RuntimeErrorInfo};
 
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, StoredRunSettlement, id, journal::InMemoryJournal,
-    session::SessionController,
+    RuntimeError, RuntimeResult, RuntimeStore, StoredRunSettlement,
+    goal::{GoalControl, GoalState},
+    id,
+    journal::InMemoryJournal,
+    session::{InputRecord, SessionController},
 };
 
 use super::{ModelFailureDiagnostics, RunModelDiagnostics, is_active_run};
@@ -21,6 +24,12 @@ pub(super) struct RunSettlement {
     pub(super) error: Option<RuntimeErrorInfo>,
 }
 
+pub(crate) struct RunSettlementResult {
+    pub(crate) run: RunSnapshot,
+    pub(crate) continuation: Option<RunSnapshot>,
+    pub(crate) goal: Option<assistant_protocol::GoalSnapshot>,
+}
+
 /// 先完成正文与 Run 的 Store 原子结算，再替换内存投影。
 pub(crate) async fn settle_run(
     session: &SessionController,
@@ -28,7 +37,7 @@ pub(crate) async fn settle_run(
     outcome: Option<ExecutionOutcome>,
     store: &dyn RuntimeStore,
     model_diagnostics: Option<&RunModelDiagnostics>,
-) -> RuntimeResult<RunSnapshot> {
+) -> RuntimeResult<RunSettlementResult> {
     settle_run_inner(session, run_id, outcome, store, model_diagnostics, None).await
 }
 
@@ -39,7 +48,7 @@ pub(crate) async fn settle_run_with_error(
     error: RuntimeErrorInfo,
     store: &dyn RuntimeStore,
     model_diagnostics: Option<&RunModelDiagnostics>,
-) -> RuntimeResult<RunSnapshot> {
+) -> RuntimeResult<RunSettlementResult> {
     settle_run_inner(session, run_id, None, store, model_diagnostics, Some(error)).await
 }
 
@@ -50,9 +59,10 @@ async fn settle_run_inner(
     store: &dyn RuntimeStore,
     model_diagnostics: Option<&RunModelDiagnostics>,
     forced_error: Option<RuntimeErrorInfo>,
-) -> RuntimeResult<RunSnapshot> {
+) -> RuntimeResult<RunSettlementResult> {
+    let finished_at_ms = system_time_ms()?;
     let _mutation = session.mutation().await;
-    let (candidate, messages, settlement, cancel_requested) = {
+    let (candidate, messages, settlement, cancel_requested, goal_effect) = {
         let mut state = session.lock_state()?;
         if !is_active_run(&state, run_id) {
             state.is_faulted = true;
@@ -78,11 +88,12 @@ async fn settle_run_inner(
             });
         };
         let (journal_snapshot, has_pending) = (journal.snapshot(), journal.has_pending());
-        let mut candidate = InMemoryJournal::from_snapshot(journal_snapshot).map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "run settlement conversation",
-            }
-        })?;
+        let mut candidate =
+            InMemoryJournal::from_snapshot(journal_snapshot.clone()).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "run settlement conversation",
+                }
+            })?;
         let mut settlement = if let Some(error) = forced_error {
             RunSettlement {
                 status: RunStatus::Failed,
@@ -125,15 +136,29 @@ async fn settle_run_inner(
                 component: "persisted conversation boundary",
             })?
             .to_vec();
-        (candidate, messages, settlement, cancel_requested)
+        let goal_effect = crate::runtime::goal::prepare_goal_run_settlement(
+            &state,
+            session.id(),
+            run_id,
+            settlement.status,
+            &journal_snapshot,
+            &messages,
+            finished_at_ms,
+        )?;
+        (
+            candidate,
+            messages,
+            settlement,
+            cancel_requested,
+            goal_effect,
+        )
     };
 
     let operation_id =
         id::generate("append").map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "storage operation id",
         })?;
-    let finished_at_ms = system_time_ms()?;
-    if let Err(source) = store
+    let stored_result = match store
         .settle_run(StoredRunSettlement {
             operation_id,
             run_id: run_id.clone(),
@@ -142,15 +167,19 @@ async fn settle_run_inner(
             cancel_requested,
             error: settlement.error.clone(),
             messages: messages.clone(),
+            goal_effect,
             finished_at_ms,
         })
         .await
     {
-        let mut state = session.lock_state()?;
-        state.is_faulted = true;
-        state.active_run = None;
-        return Err(RuntimeError::from_store("settle run", source));
-    }
+        Ok(result) => result,
+        Err(source) => {
+            let mut state = session.lock_state()?;
+            state.is_faulted = true;
+            state.active_run = None;
+            return Err(RuntimeError::from_store("settle run", source));
+        }
+    };
 
     let mut state = session.lock_state()?;
     let message_ids = messages.iter().map(message_id).cloned().collect::<Vec<_>>();
@@ -182,9 +211,44 @@ async fn settle_run_inner(
     record.extend_message_ids(message_ids);
     record.settle(settlement, finished_at_ms);
     let snapshot = record.snapshot();
+    let continuation = stored_result.continuation.map(|accepted| {
+        let record = super::RunRecord::accepted(&accepted.run, Vec::new());
+        let snapshot = record.snapshot();
+        state.goal_inputs.push_back(accepted.input.input_id.clone());
+        state.runs.insert(accepted.run.run_id.clone(), record);
+        state.inputs.insert(
+            accepted.input.input_id.clone(),
+            InputRecord {
+                stored: accepted.input,
+                first_run_id: accepted.run.run_id.clone(),
+                latest_run_id: accepted.run.run_id,
+            },
+        );
+        snapshot
+    });
+    let goal = if let Some(goal) = stored_result.goal {
+        let control =
+            GoalControl::try_from(goal).map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "settled Goal projection",
+            })?;
+        let snapshot = crate::runtime::product::project_goal(&control)?;
+        if control.state == GoalState::Completed {
+            state.goal = None;
+        } else {
+            state.goal = Some(control);
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
+    state.resume_required = stored_result.resume_required;
     state.updated_at_ms = finished_at_ms;
     state.active_run = None;
-    Ok(snapshot)
+    Ok(RunSettlementResult {
+        run: snapshot,
+        continuation,
+        goal,
+    })
 }
 
 impl RunSettlement {

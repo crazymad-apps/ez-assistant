@@ -187,6 +187,8 @@ fn model_identity() -> ModelIdentity {
 fn execution_input() -> ExecutionInput {
     ExecutionInput {
         conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new("baseline_user").expect("valid user message id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new("baseline_user_text").expect("valid user part id"),
@@ -222,6 +224,8 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
     let mut messages = Vec::with_capacity(turns * 3);
     for index in 0..turns {
         messages.push(ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new(format!("context_user_{index}")).expect("valid user id"),
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new(format!("context_user_text_{index}")).expect("valid user part id"),

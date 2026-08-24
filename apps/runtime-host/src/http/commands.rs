@@ -338,6 +338,22 @@ async fn dispatch_runtime(
             RuntimeCommandResult::SubmitInput(runtime.submit_input(request).await?),
             false,
         ),
+        RuntimeCommand::ClearWorkPlan(request) => (
+            RuntimeCommandResult::ClearWorkPlan(runtime.clear_work_plan(request).await?),
+            false,
+        ),
+        RuntimeCommand::StopGoal(request) => (
+            RuntimeCommandResult::StopGoal(runtime.stop_goal(request).await?),
+            false,
+        ),
+        RuntimeCommand::ResumeGoal(request) => (
+            RuntimeCommandResult::ResumeGoal(runtime.resume_goal(request).await?),
+            false,
+        ),
+        RuntimeCommand::ClearGoal(request) => (
+            RuntimeCommandResult::ClearGoal(runtime.clear_goal(request).await?),
+            false,
+        ),
         RuntimeCommand::CancelQueuedInput(request) => (
             RuntimeCommandResult::CancelQueuedInput(runtime.cancel_queued_input(request).await?),
             false,

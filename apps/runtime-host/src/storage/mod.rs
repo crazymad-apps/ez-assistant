@@ -15,6 +15,7 @@ mod context_replacement;
 mod conversation;
 mod engine;
 mod filesystem;
+mod goal;
 mod input_state;
 mod memory;
 mod mode;
@@ -30,6 +31,7 @@ mod session_transfer;
 mod tool_exchange;
 mod tool_images;
 mod usage;
+mod work_plan;
 mod worker;
 mod workspace;
 

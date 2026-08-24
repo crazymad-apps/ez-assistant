@@ -127,6 +127,16 @@ define_identifier!(
     "approval_id"
 );
 define_identifier!(
+    /// Session WorkPlan 中一个待办项的不透明稳定标识。
+    TodoItemId,
+    "todo_item_id"
+);
+define_identifier!(
+    /// Runtime 中一个 Session Goal 控制器的不透明稳定标识。
+    GoalId,
+    "goal_id"
+);
+define_identifier!(
     /// Runtime 为一次永久删除预检签发的短期、单次确认标识。
     DeleteConfirmationToken,
     "delete_confirmation_token"
@@ -335,6 +345,7 @@ mod tests {
         assert!(RunId::new("").is_err());
         assert!(ChildTaskId::new(" ").is_err());
         assert!(ApprovalId::new(" ").is_err());
+        assert!(TodoItemId::new(" ").is_err());
         assert!(WorkspaceId::new(" ").is_err());
         assert!(InputId::new(" ").is_err());
         assert!(MessageId::new("\n").is_err());
@@ -364,6 +375,11 @@ mod tests {
             serde_json::to_value(ApprovalId::new("approval-1").expect("approval id"))
                 .expect("serialize approval id"),
             "approval-1"
+        );
+        assert_eq!(
+            serde_json::to_value(TodoItemId::new("todo-1").expect("todo item id"))
+                .expect("serialize todo item id"),
+            "todo-1"
         );
         assert_eq!(
             serde_json::to_value(WorkspaceId::new("workspace-1").expect("workspace id"))

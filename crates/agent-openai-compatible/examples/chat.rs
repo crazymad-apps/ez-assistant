@@ -97,6 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         turn += 1;
         messages.push(ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: MessageId::new(format!("user_{turn}"))?,
             parts: vec![UserPart::Text(TextPart {
                 id: PartId::new(format!("user_{turn}_text"))?,

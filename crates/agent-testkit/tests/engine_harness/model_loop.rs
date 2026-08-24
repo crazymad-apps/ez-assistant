@@ -385,6 +385,8 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
 async fn later_execution_skips_tool_message_ids_already_used_by_the_conversation() {
     let log = OrderLog::new();
     let prior_user = UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: msg_id("message_u0"),
         parts: vec![UserPart::Text(TextPart {
             id: part_id("text_u0"),
@@ -489,6 +491,8 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     let definitions = tools.definitions().to_vec();
     // 输入快照含历史：投影起点 = 历史 + 本轮用户输入。
     let history = vec![ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: msg_id("message_0"),
         parts: vec![UserPart::Text(TextPart {
             id: part_id("text_0"),

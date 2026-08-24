@@ -323,11 +323,11 @@ fn assert_preview(
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .expect("content type"),
-        "image/jpeg"
+        "image/png"
     );
     let image =
         image::load_from_memory(&response.bytes().expect("preview bytes")).expect("decode preview");
-    assert_eq!(image.dimensions(), (320, 160));
+    assert_eq!(image.dimensions(), (640, 320));
 }
 
 fn assert_preview_unavailable(

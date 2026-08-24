@@ -398,6 +398,8 @@ mod tests {
     fn input() -> ExecutionInput {
         ExecutionInput {
             conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: MessageId::new("message_u1").expect("valid message id"),
                 parts: vec![UserPart::Text(TextPart {
                     id: PartId::new("text_u1").expect("valid part id"),

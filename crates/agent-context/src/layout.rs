@@ -239,7 +239,7 @@ mod tests {
         AssistantMessage, ContextSummaryMessage, FinishReason, MessageId, ModelIdentity,
         OpaqueProviderState, PartId, ProtocolId, ProviderId, SystemMessage, TextPart, ToolCall,
         ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
-        UserMessage,
+        TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
     };
 
     use super::*;
@@ -250,6 +250,8 @@ mod tests {
 
     fn user(value: &str) -> ConversationMessage {
         ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
             id: id(value),
             parts: vec![],
         })
@@ -365,6 +367,30 @@ mod tests {
         assert_eq!(partition.compressible_head().len(), 2);
         assert_eq!(partition.protected_tail().len(), 1);
         assert!(partition.has_compressible_head());
+    }
+
+    #[test]
+    fn hidden_runtime_user_message_remains_in_the_model_context_layout() {
+        let hidden = ConversationMessage::User(UserMessage {
+            id: id("runtime_user_1"),
+            origin: UserMessageOrigin::Runtime,
+            transcript_visibility: TranscriptVisibility::Hidden,
+            parts: vec![UserPart::Injected(TextPart {
+                id: PartId::new("runtime_user_1_injected").expect("valid part id"),
+                text: "continue the active goal".to_owned(),
+            })],
+        });
+        assert!(!hidden.is_transcript_visible());
+
+        let snapshot = ConversationSnapshot::new(vec![hidden.clone(), assistant("assistant_1")]);
+        let layout = ContextLayout::build(&snapshot).expect("valid layout");
+
+        assert_eq!(layout.blocks().len(), 1);
+        assert_eq!(layout.blocks()[0].kind(), ContextBlockKind::UserTurn);
+        assert_eq!(
+            layout.blocks()[0].messages(),
+            &[hidden, assistant("assistant_1")]
+        );
     }
 
     #[test]

@@ -120,6 +120,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
         .expect("session");
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
             message: "must not commit".to_owned(),

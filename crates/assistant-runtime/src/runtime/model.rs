@@ -26,12 +26,14 @@ use crate::{
     delegation::{
         ChildTaskRegistry, DelegateTaskTool, ParentDelegationController, ParentDelegationResources,
     },
+    goal::{GoalRunBinding, GoalRunSignalLatch, GoalState, UpdateGoalTool},
     observation::ObservationCoordinator,
     permission::{
         ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
         RuntimeToolAuthorizer,
     },
     session::SessionController,
+    work_plan::UpdatePlanTool,
 };
 
 /// 一次配置快照编译出的模型调用边界。
@@ -125,6 +127,8 @@ impl ImageInspector for AuxiliaryVisionInspector {
                 ]),
                 conversation: agent_types::ConversationSnapshot::new(vec![
                     agent_types::ConversationMessage::User(agent_types::UserMessage {
+                        origin: Default::default(),
+                        transcript_visibility: Default::default(),
                         id: agent_types::MessageId::new("auxiliary-vision-user")
                             .expect("static message id"),
                         parts: vec![
@@ -373,23 +377,26 @@ pub(super) struct CompiledRunAgent {
     authorizer: Arc<dyn ToolAuthorizer>,
     compactor: Arc<RuntimeContextCompactor>,
     reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
+    goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
+}
+
+pub(super) struct CompiledRunParts {
+    pub(super) agent: Agent,
+    pub(super) authorizer: Arc<dyn ToolAuthorizer>,
+    pub(super) compactor: Arc<RuntimeContextCompactor>,
+    pub(super) reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
+    pub(super) goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
 }
 
 impl CompiledRunAgent {
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        Agent,
-        Arc<dyn ToolAuthorizer>,
-        Arc<RuntimeContextCompactor>,
-        Option<assistant_protocol::ReasoningEffortKey>,
-    ) {
-        (
-            self.agent,
-            self.authorizer,
-            self.compactor,
-            self.reasoning_effort,
-        )
+    pub(super) fn into_parts(self) -> CompiledRunParts {
+        CompiledRunParts {
+            agent: self.agent,
+            authorizer: self.authorizer,
+            compactor: self.compactor,
+            reasoning_effort: self.reasoning_effort,
+            goal_signal_latch: self.goal_signal_latch,
+        }
     }
 }
 
@@ -401,6 +408,7 @@ pub(super) struct RunAuthorizationInput {
     pub(super) run_id: assistant_protocol::RunId,
     pub(super) cancellation: tokio_util::sync::CancellationToken,
     pub(super) events: ObservationCoordinator,
+    pub(super) goal_binding: Option<GoalRunBinding>,
 }
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
@@ -529,29 +537,53 @@ pub(super) fn compile_run_agent(
         compiled.model.clone(),
         session.system_prompt().clone(),
     ));
+    let goal_signal_latch = if let Some(binding) = authorization.goal_binding.as_ref() {
+        let state = session.lock_state()?;
+        let goal = state
+            .goal
+            .as_ref()
+            .ok_or(RuntimeError::InternalStateUnavailable {
+                component: "goal run binding",
+            })?;
+        if goal.id != binding.goal_id
+            || goal.generation != binding.generation
+            || binding.run_id != authorization.run_id
+            || !matches!(goal.state, GoalState::Running)
+        {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "goal run binding",
+            });
+        }
+        Some(Arc::new(GoalRunSignalLatch::new(binding.clone())))
+    } else {
+        None
+    };
     let session_id = session.id().clone();
     let run_id = authorization.run_id.clone();
-    let authorizer = Arc::new(RuntimeToolAuthorizer::new(
-        RunAuthorizationScope {
-            variant: authorization.variant,
-            approval_mode: authorization.approval_mode,
-        },
-        session.permission_scopes(),
-        authorization.permission_coordinator.clone(),
-        infrastructure_policies.clone(),
-        session.environment(),
-        Arc::new(RuntimeApprovalResolver {
-            registry: authorization.approval_registry.clone(),
-            session_id,
-            run_id,
-            child_task_id: None,
-            variant: authorization.variant,
-            approval_mode: authorization.approval_mode,
-            workspace_id: session.environment().workspace_id.clone(),
-            cancellation: authorization.cancellation.clone(),
-            events: authorization.events.clone(),
-        }),
-    )?);
+    let authorizer = Arc::new(
+        RuntimeToolAuthorizer::new(
+            RunAuthorizationScope {
+                variant: authorization.variant,
+                approval_mode: authorization.approval_mode,
+            },
+            session.permission_scopes(),
+            authorization.permission_coordinator.clone(),
+            infrastructure_policies.clone(),
+            session.environment(),
+            Arc::new(RuntimeApprovalResolver {
+                registry: authorization.approval_registry.clone(),
+                session_id,
+                run_id,
+                child_task_id: None,
+                variant: authorization.variant,
+                approval_mode: authorization.approval_mode,
+                workspace_id: session.environment().workspace_id.clone(),
+                cancellation: authorization.cancellation.clone(),
+                events: authorization.events.clone(),
+            }),
+        )?
+        .with_goal_signal_latch(goal_signal_latch.clone()),
+    );
 
     let model_request = agent_core::ModelRequestConfig {
         tool_choice: ToolChoice::Auto,
@@ -559,9 +591,23 @@ pub(super) fn compile_run_agent(
         reasoning,
         provider_options,
     };
-    // 不具备 Tool Call 能力的模型维持历史纯文本路径；一旦模型支持工具，父 Agent
-    // 才派生 delegate_task，而子 Agent 始终只拿到原始 Base ToolSet。
+    // 不具备 Tool Call 能力的模型维持历史纯文本路径；Runtime 派生工具只加入父 Agent，
+    // 子 Agent 始终只拿到 Host 提供的原始 Base ToolSet。
     let parent_tools = if compiled.model.capabilities().tool_calls {
+        let parent_tools = base_tools
+            .clone()
+            .try_with_tool(UpdatePlanTool::new(
+                session.clone(),
+                resources.store.clone(),
+                authorization.events.clone(),
+            ))
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "update plan tool definition",
+            })?
+            .try_with_tool(UpdateGoalTool::new(goal_signal_latch.clone()))
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "update goal tool definition",
+            })?;
         let delegation = active.delegation();
         let mut child_generation = model_request.generation.clone();
         child_generation.max_output_tokens = Some(
@@ -633,7 +679,7 @@ pub(super) fn compile_run_agent(
                 events: authorization.events,
                 limits: delegation,
             }));
-        base_tools
+        parent_tools
             .try_with_tool(DelegateTaskTool::new(delegation_controller))
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "delegate task tool definition",
@@ -663,6 +709,7 @@ pub(super) fn compile_run_agent(
         authorizer,
         compactor: parent_compactor,
         reasoning_effort: frozen_reasoning_effort,
+        goal_signal_latch,
     })
 }
 

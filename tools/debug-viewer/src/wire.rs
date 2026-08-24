@@ -175,6 +175,8 @@ mod tests {
             system: agent_model::SystemPromptSnapshot::default(),
             conversation: agent_types::ConversationSnapshot::new(vec![
                 agent_types::ConversationMessage::User(agent_types::UserMessage {
+                    origin: Default::default(),
+                    transcript_visibility: Default::default(),
                     id: MessageId::new("user_1").expect("valid message id"),
                     parts: vec![agent_types::UserPart::Text(agent_types::TextPart {
                         id: agent_types::PartId::new("user_1_text").expect("valid part id"),

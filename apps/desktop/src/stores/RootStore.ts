@@ -8,6 +8,7 @@ import type {
   ChildTaskId,
   ConversationOwner,
   ConversationHistoryHit,
+  GoalId,
   InputId,
   MessageId,
   MessageFeedback,
@@ -19,6 +20,7 @@ import type {
   ToolCallId,
   ToolDetailSnapshot,
   SystemContextSnapshot,
+  SubmitInputMode,
   WorkspaceId,
 } from "../generated/assistant-protocol";
 import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
@@ -137,6 +139,7 @@ export class RootStore {
       prepareDeleteSession: action,
       deleteSession: action,
       addWorkspace: action,
+      removeWorkspace: action,
       openWorkspace: action,
       copyWorkspacePath: action,
       submitInput: action,
@@ -154,6 +157,10 @@ export class RootStore {
       resumeQueuedInput: action,
       resumeAllQueuedInputs: action,
       interruptRun: action,
+      clearWorkPlan: action,
+      stopGoal: action,
+      resumeGoal: action,
+      clearGoal: action,
       decideApproval: action,
       rejectApprovalAndStopRun: action,
       restoreSession: action,
@@ -373,6 +380,10 @@ export class RootStore {
     await this.#session_management.addWorkspace();
   }
 
+  async removeWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+    return this.#session_management.removeWorkspace(workspace_id);
+  }
+
   async openWorkspace(workspace_id: WorkspaceId): Promise<void> {
     await this.#session_management.openWorkspace(workspace_id);
   }
@@ -394,8 +405,9 @@ export class RootStore {
     message: string,
     variant: AgentVariant,
     attachment_ids: readonly AttachmentId[] = [],
+    mode: SubmitInputMode = "normal",
   ): Promise<boolean> {
-    return this.#run_interaction.submitInput(session_id, message, variant, attachment_ids);
+    return this.#run_interaction.submitInput(session_id, message, variant, attachment_ids, mode);
   }
 
   async exportSession(session_id: SessionId, title: string): Promise<boolean> {
@@ -454,8 +466,29 @@ export class RootStore {
     await this.#run_interaction.interruptRun(session_id, run_id);
   }
 
-  async setSessionReasoningEffort(session_id: SessionId, effort: import("../generated/assistant-protocol").ReasoningEffortKey | null): Promise<void> {
-    await this.#run_interaction.setSessionReasoningEffort(session_id, effort);
+  async clearWorkPlan(session_id: SessionId, expected_revision: number): Promise<boolean> {
+    return this.#run_interaction.clearWorkPlan(session_id, expected_revision);
+  }
+
+  async stopGoal(session_id: SessionId, goal_id: GoalId, expected_generation: number): Promise<boolean> {
+    return this.#run_interaction.stopGoal(session_id, goal_id, expected_generation);
+  }
+
+  async resumeGoal(
+    session_id: SessionId,
+    goal_id: GoalId,
+    expected_generation: number,
+    input_id: InputId | null = null,
+  ): Promise<boolean> {
+    return this.#run_interaction.resumeGoal(session_id, goal_id, expected_generation, input_id);
+  }
+
+  async clearGoal(session_id: SessionId, goal_id: GoalId, expected_generation: number): Promise<boolean> {
+    return this.#run_interaction.clearGoal(session_id, goal_id, expected_generation);
+  }
+
+  async setSessionReasoningEffort(session_id: SessionId, effort: import("../generated/assistant-protocol").ReasoningEffortKey | null): Promise<boolean> {
+    return this.#run_interaction.setSessionReasoningEffort(session_id, effort);
   }
 
   async decideApproval(session_id: SessionId, approval_id: ApprovalId, decision: ApprovalDecision): Promise<void> {

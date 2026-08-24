@@ -171,6 +171,10 @@ export class SessionManagementController {
       await runtime.loadApplication();
       navigation.ensureWorkspaceExpanded(workspace_id);
       this.dependencies.save_preferences();
+      if (workspace_result.payload.restored) {
+        await runtime.selectInitialSession();
+        return;
+      }
       const session_result = await client.command({
         type: "create_session",
         payload: { title: null, model_key: null, workspace_id },
@@ -181,6 +185,31 @@ export class SessionManagementController {
       runInAction(() => {
         state.interaction_error = displayError(error);
       });
+    } finally {
+      runInAction(() => {
+        state.pending_workspace_action = false;
+      });
+    }
+  }
+
+  async removeWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+    const { connection, runtime, state } = this.dependencies;
+    const client = runtime.client;
+    if (!client || connection.state !== "connected" || state.pending_workspace_action || state.pending_session_action) {
+      return false;
+    }
+    state.pending_workspace_action = true;
+    state.interaction_error = null;
+    try {
+      await client.command({ type: "remove_workspace", payload: { workspace_id } });
+      await runtime.loadApplication();
+      await runtime.selectInitialSession();
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      return false;
     } finally {
       runInAction(() => {
         state.pending_workspace_action = false;

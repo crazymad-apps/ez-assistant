@@ -861,7 +861,7 @@ fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'st
     // Recall 只检索用户在正常会话中可见的语义内容。注入内容、Reasoning、工具协议状态、
     // Tool Result、System Prompt 和 Context Summary 都不能通过搜索结果重新进入上下文。
     match message {
-        ConversationMessage::User(message) => {
+        ConversationMessage::User(message) if message.transcript_visibility.is_visible() => {
             let mut parts = Vec::new();
             for part in &message.parts {
                 match part {
@@ -891,7 +891,8 @@ fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'st
                 .join("\n");
             Some((&message.id, "assistant", text))
         }
-        ConversationMessage::System(_)
+        ConversationMessage::User(_)
+        | ConversationMessage::System(_)
         | ConversationMessage::ContextSummary(_)
         | ConversationMessage::Tool(_) => None,
     }

@@ -10,7 +10,8 @@ use agent_types::{
     FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
     ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice,
     ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent,
-    ToolResultPart, ToolResultStatus, UserMessage, UserPart,
+    ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin,
+    UserPart,
 };
 use serde_json::{Value, json};
 
@@ -64,9 +65,23 @@ fn request(conversation: Vec<ConversationMessage>) -> ModelRequest {
 
 fn user(id: &str, text: &str) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id(id),
         parts: vec![UserPart::Text(TextPart {
             id: part_id(&format!("{id}-text")),
+            text: text.to_owned(),
+        })],
+    })
+}
+
+fn runtime_user(id: &str, text: &str) -> ConversationMessage {
+    ConversationMessage::User(UserMessage {
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        id: message_id(id),
+        parts: vec![UserPart::Injected(TextPart {
+            id: part_id(&format!("{id}-injected")),
             text: text.to_owned(),
         })],
     })
@@ -194,7 +209,7 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
                 metadata: None,
             },
         }),
-        user("user_2", "summarize"),
+        runtime_user("user_2", "summarize"),
     ]);
     request.system = SystemPromptSnapshot::new(vec!["one".to_owned(), "two".to_owned()]);
     let encoded = encode_request_with_images(
@@ -217,12 +232,18 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
     assert_eq!(value["input"][2]["call_id"], "call_1");
     assert_eq!(value["input"][3]["type"], "function_call_output");
     assert_eq!(value["input"][3]["output"], "sunny\n{\"temperature\":26}");
+    assert_eq!(value["input"][4]["role"], "user");
+    assert_eq!(value["input"][4]["content"][0]["text"], "summarize");
+    assert!(value["input"][4].get("origin").is_none());
+    assert!(value["input"][4].get("transcript_visibility").is_none());
 }
 
 #[test]
 fn user_images_keep_their_original_message_position() {
     let path = "/session/attachments/red.png";
     let request = request(vec![ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
         id: message_id("user_image"),
         parts: vec![UserPart::FileReferences(FileReferencesPart {
             id: part_id("files_1"),

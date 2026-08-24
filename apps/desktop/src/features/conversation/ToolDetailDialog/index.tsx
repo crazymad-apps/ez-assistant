@@ -60,17 +60,22 @@ export function ToolDetailDialog({
   const [file_loading, setFileLoading] = useState(false);
   const [unavailable_file_refs, setUnavailableFileRefs] = useState<ReadonlySet<string>>(new Set());
   const owner = detail?.owner;
+  const is_read_image = detail?.tool_name === "read_image";
 
   useEffect(() => {
-    setSelectedFile(null);
     setUnavailableFileRefs(new Set());
-  }, [detail?.call_id, detail?.message_id]);
-
-  useEffect(() => {
-    if (!detail || !initial_file_ref_id) {
+    if (!detail) {
+      setSelectedFile(null);
       return;
     }
-    setSelectedFile(detail.files.find((file) => file.resource_ref_id === initial_file_ref_id) ?? null);
+    const requested_file = initial_file_ref_id
+      ? detail.files.find((file) => file.resource_ref_id === initial_file_ref_id)
+      : null;
+    // read_image 的唯一主要产物就是图片，打开详情时直接加载，不再要求用户先经过文件列表。
+    const primary_image = detail.tool_name === "read_image"
+      ? detail.files.find((file) => file.origin === "session_tool_image")
+      : null;
+    setSelectedFile(requested_file ?? primary_image ?? null);
   }, [detail, initial_file_ref_id]);
 
   useEffect(() => {
@@ -151,7 +156,7 @@ export function ToolDetailDialog({
     <Dialog
       aria_labelledby="tool-detail-title"
       backdrop_class_name={styles.backdrop}
-      dialog_class_name={styles.dialog}
+      dialog_class_name={is_read_image ? styles.image_dialog : styles.dialog}
       on_close={on_close}
     >
         <header className={styles.header}>
@@ -168,7 +173,16 @@ export function ToolDetailDialog({
           {is_loading && <p className={styles.state}>正在读取工具详情…</p>}
           {error && <p className={styles.error}>{error}</p>}
           {detail && (
-            <>
+            is_read_image ? (
+              <ReadImageDetail
+                detail={detail}
+                file={selected_file}
+                file_error={file_error}
+                file_loading={file_loading}
+                file_preview={file_preview}
+                file_preview_fallback={file_preview_fallback}
+              />
+            ) : <>
               <DetailSection title="请求参数">
                 {detail.input.type !== "image_inspection" && detail.request_json
                   ? <JsonBlock text={detail.request_json} />
@@ -263,6 +277,61 @@ export function ToolDetailDialog({
   );
 }
 
+function ReadImageDetail({
+  detail,
+  file,
+  file_error,
+  file_loading,
+  file_preview,
+  file_preview_fallback,
+}: Readonly<{
+  detail: ToolDetailView;
+  file: ToolFileReference | null;
+  file_error: string | null;
+  file_loading: boolean;
+  file_preview: AttachmentPreview | null;
+  file_preview_fallback: "unsupported" | "too_large" | null;
+}>) {
+  const source_path = detail.input.type === "file" ? detail.input.path : null;
+  const unavailable = file?.state === "unavailable";
+  return (
+    <div className={styles.image_detail}>
+      <div className={styles.image_preview_stage}>
+        {file_loading && <p className={styles.muted}>正在读取图片…</p>}
+        {file_preview?.kind === "image" && file_preview.data_url && (
+          <img alt={source_path ?? file?.display_name ?? "工具读取的图片"} src={file_preview.data_url} />
+        )}
+        {file_error && <p className={styles.error}>{file_error}</p>}
+        {file_preview_fallback && (
+          <p className={styles.muted}>
+            {file_preview_fallback === "too_large" ? "图片较大，无法在应用内预览。" : "此图片暂不支持应用内预览。"}
+          </p>
+        )}
+        {!file_loading && !file_preview && !file_error && !file_preview_fallback && unavailable && (
+          <p className={styles.muted}>图片已不可用。</p>
+        )}
+        {!file_loading && !file && detail.status !== "running" && !detail.error && (
+          <p className={styles.muted}>本次工具调用没有可预览的图片。</p>
+        )}
+        {detail.status === "running" && !file && <p className={styles.muted}>正在等待图片结果…</p>}
+        {detail.error && <p className={styles.error}>{detail.error.message}</p>}
+      </div>
+      <dl className={styles.image_metadata}>
+        {source_path && <div><dt>路径</dt><dd title={source_path}>{source_path}</dd></div>}
+        {file?.media_type && <div><dt>格式</dt><dd>{file.media_type}</dd></div>}
+        {file?.size_bytes !== null && file?.size_bytes !== undefined && (
+          <div><dt>大小</dt><dd>{formatBytes(file.size_bytes)}</dd></div>
+        )}
+      </dl>
+      {(detail.output_truncated || detail.historical_fields_missing) && (
+        <p className={styles.notice}>
+          {detail.output_truncated ? "工具记录已截断。" : "较早记录缺少部分附属信息。"}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function DetailSection({ title, children }: Readonly<{ title: string; children: React.ReactNode }>) {
   return <section className={styles.section}><h3>{title}</h3>{children}</section>;
 }
@@ -305,6 +374,16 @@ function formatUsage(usage: TokenUsageSnapshot | null): string {
     return "Provider 未返回";
   }
   return `${usage.input_tokens} 输入 / ${usage.output_tokens} 输出 / ${usage.total_tokens} 总计`;
+}
+
+function formatBytes(size_bytes: number): string {
+  if (size_bytes < 1024) {
+    return `${size_bytes} B`;
+  }
+  if (size_bytes < 1024 * 1024) {
+    return `${(size_bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(size_bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function OutputBlock({ label, text }: Readonly<{ label: string; text: string }>) {

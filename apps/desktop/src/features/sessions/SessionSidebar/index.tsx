@@ -26,14 +26,21 @@ export const SessionSidebar = observer(function SessionSidebar() {
       : (application?.archived_sessions ?? []);
   const query = store.navigation.search_query.trim();
   const normalized_query = query.toLocaleLowerCase();
+  const workspaces = application?.workspaces ?? [];
+  const active_workspaces = workspaces.filter((workspace) => workspace.lifecycle === "active");
+  const active_workspace_ids = new Set(active_workspaces.map((workspace) => workspace.workspace_id));
+  const visible_sessions = sessions.filter((session) => (
+    !session.workspace_id || active_workspace_ids.has(session.workspace_id)
+  ));
   const filtered_sessions = normalized_query
-    ? sessions.filter((session) => session.title.toLocaleLowerCase().includes(normalized_query))
+    ? visible_sessions.filter((session) => session.title.toLocaleLowerCase().includes(normalized_query))
     : [];
-  const groups = (application?.workspaces ?? []).map((workspace) => ({
-    workspace,
-    sessions: sessions.filter((session) => session.workspace_id === workspace.workspace_id),
-  }));
-  const unbound = sessions.filter((session) => !session.workspace_id);
+  const groups = active_workspaces
+    .map((workspace) => ({
+      workspace,
+      sessions: visible_sessions.filter((session) => session.workspace_id === workspace.workspace_id),
+    }));
+  const unbound = visible_sessions.filter((session) => !session.workspace_id);
 
   useEffect(() => {
     if (search_open) {
@@ -106,7 +113,7 @@ export const SessionSidebar = observer(function SessionSidebar() {
                 aria-label="选择新会话目录"
                 className={styles.new_session_menu}
               >
-                {(application?.workspaces ?? []).map((workspace) => (
+                {active_workspaces.map((workspace) => (
                   <DropdownMenuItem
                     key={workspace.workspace_id}
                     onSelect={() => void store.createSession(workspace.workspace_id)}

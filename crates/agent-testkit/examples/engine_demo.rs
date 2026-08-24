@@ -106,6 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ExecutionInput {
             conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+                origin: Default::default(),
+                transcript_visibility: Default::default(),
                 id: MessageId::new("user_1")?,
                 parts: vec![UserPart::Text(TextPart {
                     id: PartId::new("user_text_1")?,

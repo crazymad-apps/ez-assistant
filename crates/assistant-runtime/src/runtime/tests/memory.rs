@@ -192,6 +192,7 @@ async fn agent_pinned_memory_tool_uses_approval_reliable_exchange_and_runtime_st
         .session_id;
     let run = runtime
         .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "remember this preference".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
