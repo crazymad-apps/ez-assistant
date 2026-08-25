@@ -129,7 +129,7 @@ async fn main() {
     let outcome = completion.await;
     let event_count = event_task.await.expect("event task joins");
     match outcome {
-        ExecutionOutcome::Completed(message) => println!(
+        ExecutionOutcome::Completed { message, .. } => println!(
             "completed: {message:?}; events={event_count}; recorded_deltas={}",
             recorder.deltas().len()
         ),

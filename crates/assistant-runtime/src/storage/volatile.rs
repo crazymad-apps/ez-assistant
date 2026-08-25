@@ -37,12 +37,14 @@ use super::{
 };
 use crate::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
-    PinnedMemoryMutationResult, StoredPinnedMemory,
+    PinnedMemoryMutationResult, SkillActivationOwner, SkillActivationTrigger, SkillName,
+    SkillNameState, SkillNameStateChange, StoredPinnedMemory, StoredSkillActivation,
 };
 
 struct VolatilePendingExchange {
     session_id: SessionId,
     run_id: RunId,
+    step: u32,
     assistant: AssistantMessage,
     started_calls: BTreeSet<String>,
 }
@@ -50,6 +52,7 @@ struct VolatilePendingExchange {
 struct VolatileChildPendingExchange {
     child_task_id: ChildTaskId,
     session_id: SessionId,
+    step: u32,
     assistant: AssistantMessage,
     started_calls: BTreeSet<String>,
 }
@@ -59,6 +62,7 @@ struct State {
     persona: PersonaSnapshot,
     pinned_collection_revision: u64,
     pinned_memories: BTreeMap<String, StoredPinnedMemory>,
+    skill_name_states: BTreeMap<SkillName, SkillNameState>,
     workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     attachments: BTreeMap<AttachmentId, StoredAttachment>,
     sessions: BTreeMap<SessionId, StoredSession>,
@@ -74,6 +78,7 @@ struct State {
     work_plans: BTreeMap<SessionId, StoredWorkPlan>,
     work_plan_completion_receipts: BTreeMap<(SessionId, String), StoredWorkPlan>,
     goals: BTreeMap<SessionId, StoredGoal>,
+    skill_activations: BTreeMap<String, StoredSkillActivation>,
     usage_request_ids: BTreeSet<(SessionId, String)>,
     next_queue_order: u64,
 }
@@ -120,6 +125,12 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .runs
                 .retain(|_, run| !stale_goal_inputs.contains(&run.input_id));
+            state.skill_activations.retain(|_, activation| {
+                activation
+                    .input_id
+                    .as_ref()
+                    .is_none_or(|input_id| !stale_goal_inputs.contains(input_id))
+            });
             Ok(RecoveredRuntime {
                 workspaces: state.workspaces.values().cloned().collect(),
                 attachments: state.attachments.values().cloned().collect(),
@@ -129,7 +140,26 @@ impl RuntimeStore for VolatileRuntimeStore {
                 child_tasks: state.child_tasks.values().cloned().collect(),
                 work_plans: state.work_plans.values().cloned().collect(),
                 goals: state.goals.values().cloned().collect(),
+                skill_activations: state.skill_activations.values().cloned().collect(),
             })
+        })
+    }
+
+    fn list_skill_name_states(&self) -> StoreFuture<'_, Vec<SkillNameState>> {
+        Box::pin(async move { Ok(self.lock()?.skill_name_states.values().cloned().collect()) })
+    }
+
+    fn set_skill_enabled(&self, change: SkillNameStateChange) -> StoreFuture<'_, SkillNameState> {
+        Box::pin(async move {
+            let state = SkillNameState {
+                name: change.name,
+                enabled: change.enabled,
+                updated_at_ms: change.updated_at_ms,
+            };
+            self.lock()?
+                .skill_name_states
+                .insert(state.name.clone(), state.clone());
+            Ok(state)
         })
     }
 
@@ -459,6 +489,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             validate_input_message(input.origin, input.goal_binding.as_ref(), &input.message)
                 .map_err(|_| conflict("input message origin or Goal binding is invalid"))?;
+            validate_volatile_input_activation(&state, &input)?;
             if input.new_goal.is_some() && input.resumed_goal.is_some() {
                 return Err(conflict("input cannot start and resume a Goal together"));
             }
@@ -527,6 +558,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 agent_variant: input.agent_variant,
                 origin: input.origin,
                 goal_binding: input.goal_binding,
+                skill_activation: input.skill_activation.clone(),
                 user_message_id: input.message.id.clone(),
                 state: StoredInputState::Queued,
                 queued_message: Some(input.message),
@@ -544,6 +576,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 cancel_requested: false,
                 error: None,
                 message_ids: Vec::new(),
+                message_steps: std::collections::HashMap::new(),
                 created_at_ms: input.accepted_at_ms,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -569,6 +602,12 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             state.inputs.insert(input.input_id, stored.clone());
             state.runs.insert(run.run_id.clone(), run.clone());
+            if let Some(activation) = input.skill_activation {
+                let previous = state
+                    .skill_activations
+                    .insert(activation.activation_id.clone(), activation);
+                debug_assert!(previous.is_none(), "activation was prevalidated");
+            }
             Ok(AcceptedInput {
                 input: stored,
                 run,
@@ -599,6 +638,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             state.inputs.remove(&input_id);
             state.runs.retain(|_, run| run.input_id != input_id);
+            state
+                .skill_activations
+                .retain(|_, activation| activation.input_id.as_ref() != Some(&input_id));
             Ok(())
         })
     }
@@ -670,6 +712,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 cancel_requested: false,
                 error: None,
                 message_ids: Vec::new(),
+                message_steps: std::collections::HashMap::new(),
                 created_at_ms: attempt.created_at_ms,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -692,6 +735,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 model_key: session.model_key,
                 reasoning_effort: session.reasoning_effort,
                 system_prompt: session.system_prompt,
+                skill_catalog: session.skill_catalog,
                 environment: session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: session.current_variant,
@@ -770,6 +814,32 @@ impl RuntimeStore for VolatileRuntimeStore {
                     return Err(conflict("fork attachment already exists"));
                 }
             }
+            let message_ids = fork
+                .conversation
+                .messages
+                .iter()
+                .map(|message| message_id(message).as_str().to_owned())
+                .collect::<BTreeSet<_>>();
+            let mut activation_ids = BTreeSet::new();
+            for activation in &fork.skill_activations {
+                if !activation_ids.insert(activation.activation_id.clone())
+                    || state
+                        .skill_activations
+                        .contains_key(&activation.activation_id)
+                    || activation.session_id != fork.session.session_id
+                    || !matches!(
+                        &activation.owner,
+                        SkillActivationOwner::Session(session_id)
+                            if session_id == &fork.session.session_id
+                    )
+                    || activation.run_id.is_some()
+                    || activation.input_id.is_some()
+                    || !message_ids.contains(activation.message_id.as_str())
+                    || activation.catalog_revision != fork.session.skill_catalog.revision
+                {
+                    return Err(conflict("fork skill activation is invalid"));
+                }
+            }
 
             let mut path_rewrites = BTreeMap::new();
             let mut attachments = Vec::with_capacity(fork.attachments.len());
@@ -807,6 +877,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 model_key: fork.session.model_key,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
+                skill_catalog: fork.session.skill_catalog,
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,
@@ -850,10 +921,16 @@ impl RuntimeStore for VolatileRuntimeStore {
             if let Some(goal) = &goal {
                 state.goals.insert(stored.session_id.clone(), goal.clone());
             }
+            for activation in &fork.skill_activations {
+                state
+                    .skill_activations
+                    .insert(activation.activation_id.clone(), activation.clone());
+            }
             Ok(StoredSessionFork {
                 session: stored,
                 conversation,
                 attachments,
+                skill_activations: fork.skill_activations,
                 work_plan,
                 goal,
             })
@@ -970,6 +1047,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .message_feedback
                 .retain(|(session_id, _), _| session_id != &deletion.session_id);
+            state
+                .skill_activations
+                .retain(|_, activation| activation.session_id != deletion.session_id);
             state
                 .pending_tool_exchanges
                 .retain(|_, exchange| exchange.session_id != deletion.session_id);
@@ -1101,6 +1181,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 VolatileChildPendingExchange {
                     child_task_id: pending.child_task_id,
                     session_id: pending.session_id,
+                    step: pending.step,
                     assistant: pending.assistant,
                     started_calls: BTreeSet::new(),
                 },
@@ -1149,6 +1230,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .ok_or_else(|| conflict("pending child tool exchange does not exist"))?;
             if pending.child_task_id != completed.child_task_id
                 || pending.session_id != completed.session_id
+                || pending.step != completed.step
             {
                 return Err(conflict(
                     "pending child tool exchange ownership does not match",
@@ -1162,7 +1244,27 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .cloned()
                     .map(ConversationMessage::Tool),
             );
+            if let Some(message) = completed.activation_message.clone() {
+                messages.push(ConversationMessage::User(message));
+            }
+            validate_model_activations(
+                &state,
+                &completed.session_id,
+                &SkillActivationOwner::ChildTask(completed.child_task_id.as_str().to_owned()),
+                &state
+                    .child_tasks
+                    .get(&completed.child_task_id)
+                    .ok_or_else(|| conflict("child task does not exist"))?
+                    .parent_run_id,
+                completed.activation_message.as_ref(),
+                &completed.skill_activations,
+            )?;
             append_child(&mut state, &completed.child_task_id, &messages)?;
+            for activation in completed.skill_activations {
+                state
+                    .skill_activations
+                    .insert(activation.activation_id.clone(), activation);
+            }
             state
                 .pending_child_tool_exchanges
                 .remove(completed.receipt.as_str());
@@ -1431,6 +1533,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 VolatilePendingExchange {
                     session_id: pending.session_id,
                     run_id: pending.run_id,
+                    step: pending.step,
                     assistant: pending.assistant,
                     started_calls: BTreeSet::new(),
                 },
@@ -1473,7 +1576,10 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .pending_tool_exchanges
                 .get(completed.receipt.as_str())
                 .ok_or_else(|| conflict("pending tool exchange does not exist"))?;
-            if pending.session_id != completed.session_id || pending.run_id != completed.run_id {
+            if pending.session_id != completed.session_id
+                || pending.run_id != completed.run_id
+                || pending.step != completed.step
+            {
                 return Err(conflict("pending tool exchange ownership does not match"));
             }
             let mut messages = vec![ConversationMessage::Assistant(pending.assistant.clone())];
@@ -1484,6 +1590,17 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .cloned()
                     .map(ConversationMessage::Tool),
             );
+            if let Some(message) = completed.activation_message.clone() {
+                messages.push(ConversationMessage::User(message));
+            }
+            validate_model_activations(
+                &state,
+                &completed.session_id,
+                &SkillActivationOwner::Session(completed.session_id.clone()),
+                &completed.run_id,
+                completed.activation_message.as_ref(),
+                &completed.skill_activations,
+            )?;
             append(&mut state, &completed.session_id, &messages)?;
             let run = state
                 .runs
@@ -1491,6 +1608,15 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .ok_or_else(|| conflict("run does not exist in runtime storage"))?;
             run.message_ids
                 .extend(messages.iter().map(message_id).cloned());
+            for message in &messages {
+                run.message_steps
+                    .insert(message_id(message).clone(), completed.step);
+            }
+            for activation in completed.skill_activations {
+                state
+                    .skill_activations
+                    .insert(activation.activation_id.clone(), activation);
+            }
             state
                 .pending_tool_exchanges
                 .remove(completed.receipt.as_str());
@@ -1529,6 +1655,11 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             run.message_ids
                 .extend(settlement.messages.iter().map(message_id).cloned());
+            if let Some(step) = settlement.message_step {
+                for message in &settlement.messages {
+                    run.message_steps.insert(message_id(message).clone(), step);
+                }
+            }
             run.status = settlement.status;
             run.cancel_requested = settlement.cancel_requested;
             run.error = settlement.error;
@@ -2214,10 +2345,21 @@ impl RuntimeStore for VolatileRuntimeStore {
                 })
                 .map(|input| input.input_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
+            let retained_message_ids = rewrite
+                .conversation
+                .messages
+                .iter()
+                .map(message_id)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             state
                 .inputs
                 .retain(|_, input| !removed.contains(&input.input_id));
             state.runs.retain(|_, run| !removed.contains(&run.input_id));
+            state.skill_activations.retain(|_, activation| {
+                activation.session_id != rewrite.session_id
+                    || retained_message_ids.contains(&activation.message_id)
+            });
             if let Some(effect) = rewrite.goal_effect.as_ref() {
                 state
                     .goals
@@ -2232,6 +2374,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 agent_variant: rewrite.input.agent_variant,
                 origin: rewrite.input.origin,
                 goal_binding: rewrite.input.goal_binding,
+                skill_activation: rewrite.input.skill_activation,
                 user_message_id: new_message.id.clone(),
                 state: StoredInputState::Committed,
                 queued_message: None,
@@ -2249,6 +2392,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 cancel_requested: false,
                 error: None,
                 message_ids: vec![new_message.id],
+                message_steps: std::collections::HashMap::new(),
                 created_at_ms: rewrite.input.accepted_at_ms,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -2462,6 +2606,7 @@ fn apply_volatile_goal_effect(
                 agent_variant: next_input.agent_variant,
                 origin: next_input.origin,
                 goal_binding: next_input.goal_binding,
+                skill_activation: next_input.skill_activation,
                 user_message_id: next_input.message.id.clone(),
                 state: StoredInputState::Queued,
                 queued_message: Some(next_input.message),
@@ -2479,6 +2624,7 @@ fn apply_volatile_goal_effect(
                 cancel_requested: false,
                 error: None,
                 message_ids: Vec::new(),
+                message_steps: std::collections::HashMap::new(),
                 created_at_ms: next_input.accepted_at_ms,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -2744,7 +2890,7 @@ fn collect_volatile_hits(
                                 .iter()
                                 .map(|file| file.original_name.clone()),
                         ),
-                        UserPart::Injected(_) => {}
+                        UserPart::Injected(_) | UserPart::InternalContext(_) => {}
                     }
                 }
                 let text = parts.join("\n");
@@ -2820,6 +2966,109 @@ fn count_u64(value: usize) -> Result<u64, StoreError> {
 
 fn conflict(message: &'static str) -> StoreError {
     StoreError::new(StoreErrorKind::Conflict, message)
+}
+
+fn validate_volatile_input_activation(
+    state: &State,
+    input: &NewStoredInput,
+) -> Result<(), StoreError> {
+    let skill_parts = input
+        .message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            UserPart::InternalContext(part) if part.kind == "skill_activation" => Some(part),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(activation) = input.skill_activation.as_ref() else {
+        return if skill_parts.is_empty() {
+            Ok(())
+        } else {
+            Err(conflict("input has an unbound skill activation context"))
+        };
+    };
+    if state
+        .skill_activations
+        .contains_key(&activation.activation_id)
+        || input.origin != InputOrigin::User
+        || activation.trigger != SkillActivationTrigger::User
+        || activation.session_id != input.session_id
+        || activation.run_id.as_ref() != Some(&input.run_id)
+        || activation.input_id.as_ref() != Some(&input.input_id)
+        || activation.message_id != input.message.id
+        || !matches!(
+            &activation.owner,
+            SkillActivationOwner::Session(session_id) if session_id == &input.session_id
+        )
+        || skill_parts.len() != 1
+        || skill_parts[0].retention_key.as_deref()
+            != Some(&format!("skill:{}", activation.name.as_str()))
+    {
+        return Err(conflict("input skill activation is inconsistent"));
+    }
+    Ok(())
+}
+
+fn validate_model_activations(
+    state: &State,
+    session_id: &SessionId,
+    expected_owner: &SkillActivationOwner,
+    expected_run_id: &RunId,
+    message: Option<&agent_types::UserMessage>,
+    activations: &[StoredSkillActivation],
+) -> Result<(), StoreError> {
+    if activations.is_empty() {
+        return if message.is_none() {
+            Ok(())
+        } else {
+            Err(conflict(
+                "tool exchange has an unbound skill activation message",
+            ))
+        };
+    }
+    let message = message.ok_or_else(|| conflict("model skill activation message is missing"))?;
+    let activation_ids = activations
+        .iter()
+        .map(|activation| activation.activation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let names = activations
+        .iter()
+        .map(|activation| &activation.name)
+        .collect::<BTreeSet<_>>();
+    if message.origin != agent_types::UserMessageOrigin::Runtime
+        || message.transcript_visibility != agent_types::TranscriptVisibility::Hidden
+        || activation_ids.len() != activations.len()
+        || names.len() != activations.len()
+        || activations.iter().any(|activation| {
+            state
+                .skill_activations
+                .contains_key(&activation.activation_id)
+                || activation.session_id != *session_id
+                || &activation.owner != expected_owner
+                || activation.trigger != SkillActivationTrigger::Model
+                || activation.run_id.as_ref() != Some(expected_run_id)
+                || activation.input_id.is_some()
+                || activation.message_id != message.id
+        })
+    {
+        return Err(conflict("model skill activation is inconsistent"));
+    }
+    for activation in activations {
+        let matches = message.parts.iter().filter(|part| {
+            matches!(
+                part,
+                UserPart::InternalContext(part)
+                    if part.kind == "skill_activation"
+                        && part.retention_key.as_deref()
+                            == Some(&format!("skill:{}", activation.name.as_str()))
+            )
+        });
+        if matches.count() != 1 {
+            return Err(conflict("model skill activation boundary is inconsistent"));
+        }
+    }
+    Ok(())
 }
 
 fn pause_running_goals_for_recovery(
@@ -2974,5 +3223,42 @@ mod tests {
         assert_eq!(first.goals[0].generation, 2);
         let second = store.load_runtime().await.expect("second recovery");
         assert_eq!(second.goals[0].generation, 2);
+    }
+
+    #[tokio::test]
+    async fn volatile_skill_name_states_are_default_enabled_and_keyed_only_by_name() {
+        let store = VolatileRuntimeStore::default();
+        assert!(
+            store
+                .list_skill_name_states()
+                .await
+                .expect("initial states")
+                .is_empty()
+        );
+        let name = SkillName::parse("review-pr").expect("name");
+        store
+            .set_skill_enabled(SkillNameStateChange {
+                name: name.clone(),
+                enabled: false,
+                updated_at_ms: 10,
+            })
+            .await
+            .expect("disable");
+        store
+            .set_skill_enabled(SkillNameStateChange {
+                name,
+                enabled: true,
+                updated_at_ms: 20,
+            })
+            .await
+            .expect("enable");
+        assert_eq!(
+            store.list_skill_name_states().await.expect("stored states"),
+            vec![SkillNameState {
+                name: SkillName::parse("review-pr").expect("name"),
+                enabled: true,
+                updated_at_ms: 20,
+            }]
+        );
     }
 }

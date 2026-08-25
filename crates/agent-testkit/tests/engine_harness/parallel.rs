@@ -48,7 +48,7 @@ async fn default_serial_tools_do_not_overlap() {
     second_gate.release();
 
     let (outcome, _) = finish(execution).await;
-    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn explicit_parallel_group_authorizes_and_executes_concurrently_in_origina
     execution_gate.release();
 
     let (outcome, _) = finish(execution).await;
-    assert_eq!(outcome, ExecutionOutcome::Completed(final_message));
+    assert_completed(outcome, final_message);
     assert_eq!(
         recorder.deltas(),
         vec![
@@ -167,7 +167,7 @@ async fn serial_tool_is_a_barrier_between_parallel_groups() {
     second_group.wait_for_entered(2).await;
     second_group.release();
     let (outcome, _) = finish(execution).await;
-    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
 }
 
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn one_parallel_eligible_call_still_finishes_before_the_next_serial_call()
 
     assert!(matches!(
         finish(execution).await.0,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
 }
 
@@ -262,7 +262,7 @@ async fn invalid_call_is_a_barrier_between_parallel_groups() {
 
     assert!(matches!(
         finish(execution).await.0,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
 }
 
@@ -308,7 +308,7 @@ async fn denied_call_in_parallel_group_does_not_block_allowed_sibling() {
     execution_gate.release();
     assert!(matches!(
         finish(execution).await.0,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
     assert!(denied.executed_inputs().is_empty());
     assert_eq!(
@@ -361,10 +361,7 @@ async fn started_record_failure_in_parallel_group_blocks_every_tool_side_effect(
         ),
     );
 
-    assert_eq!(
-        finish(execution).await.0,
-        ExecutionOutcome::Completed(final_message)
-    );
+    assert_completed(finish(execution).await.0, final_message);
     assert!(first.executed_inputs().is_empty());
     assert!(second.executed_inputs().is_empty());
     assert_eq!(
@@ -421,12 +418,12 @@ async fn parallel_group_reserves_budget_before_starting_excess_calls() {
     execution_gate.wait_for_entered(1).await;
     execution_gate.release();
     let (outcome, _) = finish(execution).await;
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
+        ExecutionError::BudgetExceeded {
             kind: BudgetKind::ToolCalls,
             limit: 1,
-        })
+        },
     );
     assert!(second.executed_inputs().is_empty());
     assert_eq!(
@@ -492,7 +489,7 @@ async fn cancellation_waits_for_every_parallel_tool_cleanup_and_settles_the_grou
     first_entered.notified().await;
     second_entered.notified().await;
     control.cancel();
-    assert_eq!(completion.await, ExecutionOutcome::Cancelled);
+    assert_cancelled(completion.await);
     first_cleanup.notified().await;
     second_cleanup.notified().await;
     let events = collector.await.expect("event collector");
@@ -548,12 +545,12 @@ async fn repeated_guardrail_blocks_parallel_group_before_authorization_or_execut
         make_context(recorder, authorizer.clone()),
     ))
     .await;
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
+        ExecutionError::GuardrailTriggered {
             kind: GuardrailKind::RepeatedInvocation,
             threshold: NonZeroU32::new(2).expect("non-zero"),
-        })
+        },
     );
     assert!(authorizer.observations().is_empty());
     assert!(executed.executed_inputs().is_empty());

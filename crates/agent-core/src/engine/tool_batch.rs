@@ -18,9 +18,9 @@ use futures_util::future::join_all;
 
 use super::Engine;
 use crate::{
-    ActiveGuardrailMode, AgentEvent, BudgetKind, ExchangeReceipt, ExecutionError, ExecutionOutcome,
-    GuardrailKind, RecordError, ToolAuthorization, ToolCompletionStatus,
-    guardrail::GuardrailTrigger,
+    ActiveGuardrailMode, AgentEvent, BudgetKind, ExchangeCompletion, ExchangeReceipt,
+    ExecutionError, ExecutionOutcome, GuardrailKind, RecordError, ToolAuthorization,
+    ToolCompletionStatus, guardrail::GuardrailTrigger,
 };
 
 /// 取消收敛时为未结算调用补记的模型可读错误文本。
@@ -191,6 +191,7 @@ impl Engine {
 
         self.dispatched += 1;
         self.events.send(AgentEvent::ToolStarted {
+            step: self.current_step(),
             call_id: call.id.clone(),
         });
         let context = ToolContext::new(self.cancellation.clone(), self.output_sink(&call.id))
@@ -302,6 +303,7 @@ impl Engine {
                     // Future 在这里只被构造，尚未 poll；先完成整组预算和 started 边界。
                     self.dispatched += 1;
                     self.events.send(AgentEvent::ToolStarted {
+                        step: self.current_step(),
                         call_id: call.id.clone(),
                     });
                     let context =
@@ -345,10 +347,6 @@ impl Engine {
                     "parallel tool call did not produce a result".to_owned(),
                 )
             });
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: completion_status(&result),
-            });
             ordered.push(result);
         }
         results.extend(ordered.iter().cloned());
@@ -389,10 +387,6 @@ impl Engine {
         result: ToolResult,
     ) -> Option<ExecutionOutcome> {
         let call_id = result.call_id.clone();
-        self.events.send(AgentEvent::ToolCompleted {
-            call_id: call_id.clone(),
-            status: completion_status(&result),
-        });
         let status = result.status.clone();
         results.push(result);
         let trigger = self.observe_result(status)?;
@@ -430,6 +424,7 @@ impl Engine {
 
     fn emit_guardrail_trigger(&self, trigger: GuardrailTrigger, call_id: &ToolCallId) {
         self.events.send(AgentEvent::GuardrailTriggered {
+            step: self.current_step(),
             kind: trigger.kind,
             mode: trigger.mode,
             threshold: trigger.threshold,
@@ -453,10 +448,6 @@ impl Engine {
                 trigger.kind,
                 trigger.threshold,
             ));
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: ToolCompletionStatus::Failed,
-            });
         }
         if let Err(error) = self.complete_tool_results(exchange, results).await {
             return self.fail(ExecutionError::Record(error));
@@ -476,10 +467,6 @@ impl Engine {
     ) -> ExecutionOutcome {
         for call in unsettled {
             results.push(error_result(&call.id, INTERRUPTED_TEXT.to_owned()));
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: ToolCompletionStatus::Failed,
-            });
         }
         if let Err(error) = self.complete_tool_results(exchange, results).await {
             return self.fail(ExecutionError::Record(error));
@@ -501,10 +488,6 @@ impl Engine {
                 &call.id,
                 format!("tool call budget exceeded (limit {limit})"),
             ));
-            self.events.send(AgentEvent::ToolCompleted {
-                call_id: call.id.clone(),
-                status: ToolCompletionStatus::Failed,
-            });
         }
         if let Err(error) = self.complete_tool_results(exchange, results).await {
             return self.fail(ExecutionError::Record(error));
@@ -520,7 +503,7 @@ impl Engine {
         &mut self,
         exchange: &ExchangeReceipt,
         results: Vec<ToolResult>,
-    ) -> Result<(), RecordError> {
+    ) -> Result<ExchangeCompletion, RecordError> {
         let mut messages = Vec::with_capacity(results.len());
         for result in results {
             messages.push(ToolMessage {
@@ -528,14 +511,20 @@ impl Engine {
                 result,
             });
         }
-        self.context
+        let completion = self
+            .context
             .recorder
             .complete_tool_exchange(exchange, messages.clone())
             .await?;
         for message in messages {
+            self.events.send(AgentEvent::ToolCompleted {
+                step: self.current_step(),
+                call_id: message.result.call_id.clone(),
+                status: completion_status(&message.result),
+            });
             self.projection.push(ConversationMessage::Tool(message));
         }
-        Ok(())
+        Ok(completion)
     }
 
     fn next_tool_message_id(&mut self) -> Result<MessageId, RecordError> {
@@ -566,8 +555,10 @@ impl Engine {
     fn output_sink(&self, call_id: &ToolCallId) -> ToolOutputSink {
         let events = self.events.clone();
         let call_id = call_id.clone();
+        let step = self.current_step();
         Arc::new(move |chunk: ToolOutputChunk| {
             events.send(AgentEvent::ToolOutput {
+                step,
                 call_id: call_id.clone(),
                 channel: chunk.channel,
                 chunk: chunk.delta,

@@ -298,6 +298,30 @@ fn assert_lifecycle(events: &[AgentEvent]) {
     );
 }
 
+fn assert_completed(outcome: ExecutionOutcome, expected: AssistantMessage) {
+    let ExecutionOutcome::Completed {
+        message,
+        consumption,
+        ..
+    } = outcome
+    else {
+        panic!("expected completed outcome, got {outcome:?}");
+    };
+    assert_eq!(message, expected);
+    assert!(consumption.steps > 0);
+}
+
+fn assert_failed(outcome: ExecutionOutcome, expected: ExecutionError) {
+    let ExecutionOutcome::Failed { error, .. } = outcome else {
+        panic!("expected failed outcome, got {outcome:?}");
+    };
+    assert_eq!(error, expected);
+}
+
+fn assert_cancelled(outcome: ExecutionOutcome) {
+    assert!(matches!(outcome, ExecutionOutcome::Cancelled { .. }));
+}
+
 /// 输入 + 落账增量重建"取消/终止后的新 ConversationSnapshot"。
 fn reconstruct(user_input: &UserMessage, deltas: &[ConversationDelta]) -> Vec<ConversationMessage> {
     let mut messages = vec![ConversationMessage::User(user_input.clone())];

@@ -23,11 +23,11 @@ export function formatBytes(value: number): string {
 }
 
 export function formatVariant(variant: string | null | undefined): string {
-  return variant === "plan" ? "Plan" : variant === "build" ? "Build" : "未记录";
+  return variant === "plan" ? "规划" : variant === "build" ? "构建" : "未记录";
 }
 
 export function formatApprovalMode(mode: string | null | undefined): string {
-  return mode === "ask" ? "Ask" : mode === "auto" ? "Auto" : "未记录";
+  return mode === "ask" ? "询问" : mode === "auto" ? "自动" : "未记录";
 }
 
 export function formatModelIdentity(display_name: string | undefined, model_key: string | null | undefined): string {

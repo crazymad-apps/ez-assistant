@@ -11,7 +11,7 @@
 //! - 取消控制：只取消本次执行（`start` 内创建 `context.cancellation` 的
 //!   子令牌，父级取消自动传播到本执行，反向不成立）。
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, num::NonZeroU32, pin::Pin};
 
 use agent_types::AssistantMessage;
 use tokio::sync::oneshot;
@@ -37,23 +37,48 @@ pub enum CompactionReason {
     ProviderOverflow,
 }
 
-/// 一次执行的最终结果；与四个终态事件镜像。
+/// 当前 AgentExecution 可靠结束、但业务执行仍需由上层续跑的原因。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationReason {
+    /// Recorder 已可靠提交一项会改变下一模型请求上下文的事实。
+    ContextChanged,
+}
+
+/// 一次执行的最终结果；与五个终态事件镜像。
 ///
 /// `ExecutionCompleted{message}` ↔ [`ExecutionOutcome::Completed`]、
 /// `ExecutionFailed{error}` ↔ [`ExecutionOutcome::Failed`]、
 /// `ExecutionCancelled` ↔ [`ExecutionOutcome::Cancelled`]、
 /// `ExecutionCompactionRequired{reason,step,consumption}` ↔
-/// [`ExecutionOutcome::CompactionRequired`]。每次执行恰好收敛到一个终态，
+/// [`ExecutionOutcome::CompactionRequired`]、
+/// `ExecutionContinuationRequired{reason,consumption}` ↔
+/// [`ExecutionOutcome::ContinuationRequired`]。每次执行恰好收敛到一个终态，
 /// 完成结果与终态事件承载同一事实。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ExecutionOutcome {
     /// 正常完成，携带最终聚合的规范响应（最终消息 Core 不落账，经此交 Runtime）。
-    Completed(AssistantMessage),
+    Completed {
+        /// 最终 AssistantMessage 所属的 Runtime Run step。
+        step: u32,
+        /// 最终 AssistantMessage。
+        message: AssistantMessage,
+        /// 本段 execution 已可靠消费的硬预算。
+        consumption: ExecutionConsumption,
+    },
     /// 受控失败（模型失败、落账失败、预算到达）。
-    Failed(ExecutionError),
+    Failed {
+        /// 已脱敏的失败原因。
+        error: ExecutionError,
+        /// 本段 execution 已可靠消费的硬预算。
+        consumption: ExecutionConsumption,
+    },
     /// 已取消；收敛前所有未结算 Tool Call 已补记 interrupted 错误 `ToolResult`。
-    Cancelled,
+    Cancelled {
+        /// 本段 execution 已可靠消费的硬预算。
+        consumption: ExecutionConsumption,
+    },
     /// 当前执行在指定 Model Step 前或期间需要由 Runtime 压缩上下文。
     CompactionRequired {
         /// 触发压缩交接的原因。
@@ -62,6 +87,13 @@ pub enum ExecutionOutcome {
         step: u32,
         /// 本段 execution 在交接前已经可靠消费的硬预算。
         #[serde(default)]
+        consumption: ExecutionConsumption,
+    },
+    /// 当前执行因上下文已可靠改变而结束；Runtime 应在同一业务 Run 中续跑。
+    ContinuationRequired {
+        /// 上层续跑原因；Core 不解释具体业务领域。
+        reason: ContinuationReason,
+        /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,
     },
 }
@@ -116,6 +148,19 @@ impl AgentExecution {
         input: ExecutionInput,
         context: ExecutionContext,
     ) -> AgentExecution {
+        Self::start_at_step(spec, input, context, NonZeroU32::MIN)
+    }
+
+    /// 从调用方冻结的 Run 全局 step 启动一次 Agent 执行。
+    ///
+    /// Core 直接把该值作为本段第一个 Model Turn 的序号；后续 Turn 单调递增，
+    /// 不通过 Runtime offset 或 Desktop 映射修正。
+    pub fn start_at_step(
+        spec: ExecutionSpec,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        starting_step: NonZeroU32,
+    ) -> AgentExecution {
         let (sender, events) = agent_event_channel();
         // 子令牌：父级取消自动传播；ExecutionControl 只取消本执行。
         let cancellation = context.cancellation.child_token();
@@ -125,8 +170,9 @@ impl AgentExecution {
         // 观察任务是有意独立于 completion receiver 的：调用方即使只消费事件并 drop
         // completion，engine panic 仍会产生终态事件，且 engine JoinHandle 始终被观察。
         let failure_events = sender.clone();
-        let engine_task =
-            tokio::spawn(Engine::new(spec, input, context, cancellation, sender).run());
+        let engine_task = tokio::spawn(
+            Engine::new(spec, input, context, cancellation, sender, starting_step).run(),
+        );
         let (completion_tx, completion_rx) = oneshot::channel();
         tokio::spawn(async move {
             let outcome = match engine_task.await {
@@ -137,16 +183,20 @@ impl AgentExecution {
                         error: error.clone(),
                         dropped_events: failure_events.dropped_events(),
                     });
-                    ExecutionOutcome::Failed(error)
+                    ExecutionOutcome::Failed {
+                        error,
+                        consumption: ExecutionConsumption::default(),
+                    }
                 }
             };
             // receiver 被 drop 只表示调用方不再查询结果；事件与执行仍已完整收敛。
             let _ = completion_tx.send(outcome);
         });
         let completion = Box::pin(async move {
-            completion_rx
-                .await
-                .unwrap_or(ExecutionOutcome::Failed(ExecutionError::Internal))
+            completion_rx.await.unwrap_or(ExecutionOutcome::Failed {
+                error: ExecutionError::Internal,
+                consumption: ExecutionConsumption::default(),
+            })
         });
         AgentExecution {
             events,
@@ -209,6 +259,7 @@ mod tests {
     impl ExecutionRecorder for ListRecorder {
         fn begin_tool_exchange<'a>(
             &'a self,
+            _step: u32,
             assistant: AssistantMessage,
         ) -> RecordFuture<'a, ExchangeReceipt> {
             Box::pin(async move {
@@ -229,7 +280,7 @@ mod tests {
             &'a self,
             _receipt: &'a ExchangeReceipt,
             results: Vec<agent_types::ToolMessage>,
-        ) -> RecordFuture<'a, ()> {
+        ) -> RecordFuture<'a, crate::ExchangeCompletion> {
             Box::pin(async move {
                 let assistant = self
                     .pending
@@ -242,7 +293,7 @@ mod tests {
                 let mut deltas = self.deltas.lock().expect("lock deltas");
                 deltas.push(ConversationDelta::Assistant(assistant));
                 deltas.extend(results.into_iter().map(ConversationDelta::Tool));
-                Ok(())
+                Ok(crate::ExchangeCompletion::default())
             })
         }
     }
@@ -425,19 +476,42 @@ mod tests {
         stream.collect().await
     }
 
+    fn used_steps(steps: u32) -> ExecutionConsumption {
+        ExecutionConsumption {
+            steps,
+            tool_calls: 0,
+        }
+    }
+
+    fn completed(message: AssistantMessage) -> ExecutionOutcome {
+        ExecutionOutcome::Completed {
+            step: 1,
+            message,
+            consumption: used_steps(1),
+        }
+    }
+
     #[test]
     fn outcome_round_trips_serde() {
         let outcomes = vec![
-            ExecutionOutcome::Completed(text_message("done")),
-            ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
-                kind: BudgetKind::Steps,
-                limit: 4,
-            }),
-            ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
-                kind: crate::GuardrailKind::RepeatedInvocation,
-                threshold: NonZeroU32::new(3).expect("non-zero threshold"),
-            }),
-            ExecutionOutcome::Cancelled,
+            completed(text_message("done")),
+            ExecutionOutcome::Failed {
+                error: ExecutionError::BudgetExceeded {
+                    kind: BudgetKind::Steps,
+                    limit: 4,
+                },
+                consumption: ExecutionConsumption::default(),
+            },
+            ExecutionOutcome::Failed {
+                error: ExecutionError::GuardrailTriggered {
+                    kind: crate::GuardrailKind::RepeatedInvocation,
+                    threshold: NonZeroU32::new(3).expect("non-zero threshold"),
+                },
+                consumption: ExecutionConsumption::default(),
+            },
+            ExecutionOutcome::Cancelled {
+                consumption: ExecutionConsumption::default(),
+            },
             ExecutionOutcome::CompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 2,
@@ -471,8 +545,11 @@ mod tests {
             }
         );
         // 稳定 tag：蛇形命名。
-        let json = serde_json::to_value(ExecutionOutcome::Cancelled).expect("serialize to value");
-        assert_eq!(json, serde_json::json!({"type": "cancelled"}));
+        let json = serde_json::to_value(ExecutionOutcome::Cancelled {
+            consumption: ExecutionConsumption::default(),
+        })
+        .expect("serialize to value");
+        assert_eq!(json["type"], "cancelled");
     }
 
     #[tokio::test]
@@ -485,7 +562,7 @@ mod tests {
         let execution = AgentExecution::start(spec(model), input(), context);
 
         let outcome = execution.completion.await;
-        let ExecutionOutcome::Completed(message) = outcome else {
+        let ExecutionOutcome::Completed { message, .. } = outcome else {
             panic!("expected Completed, got {outcome:?}");
         };
         assert_eq!(message, text_message("Hi there."));
@@ -497,6 +574,7 @@ mod tests {
                 AgentEvent::ExecutionStarted,
                 AgentEvent::StepStarted { step: 1 },
                 AgentEvent::ExecutionCompleted {
+                    step: 1,
                     message: text_message("Hi there."),
                     dropped_events: 0,
                 },
@@ -504,6 +582,42 @@ mod tests {
         );
         // 纯文本路径不产生任何落账增量（最终消息 Core 不落账）。
         assert!(recorder.deltas.lock().expect("lock deltas").is_empty());
+    }
+
+    #[tokio::test]
+    async fn execution_uses_the_frozen_run_global_starting_step() {
+        let model = StubModel {
+            capabilities: capabilities(),
+            behavior: StubBehavior::Complete(text_message("continued")),
+        };
+        let (context, _) = context(CancellationToken::new());
+        let execution = AgentExecution::start_at_step(
+            spec(model),
+            input(),
+            context,
+            NonZeroU32::new(7).expect("non-zero starting step"),
+        );
+
+        assert_eq!(
+            execution.completion.await,
+            ExecutionOutcome::Completed {
+                step: 7,
+                message: text_message("continued"),
+                consumption: used_steps(1),
+            }
+        );
+        assert_eq!(
+            collect_events(execution.events).await,
+            vec![
+                AgentEvent::ExecutionStarted,
+                AgentEvent::StepStarted { step: 7 },
+                AgentEvent::ExecutionCompleted {
+                    step: 7,
+                    message: text_message("continued"),
+                    dropped_events: 0,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -525,10 +639,7 @@ mod tests {
         let execution = AgentExecution::start(spec(retrying), input(), context);
 
         let outcome = execution.completion.await;
-        assert_eq!(
-            outcome,
-            ExecutionOutcome::Completed(text_message("recovered"))
-        );
+        assert_eq!(outcome, completed(text_message("recovered")));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             collect_events(execution.events).await,
@@ -536,6 +647,7 @@ mod tests {
                 AgentEvent::ExecutionStarted,
                 AgentEvent::StepStarted { step: 1 },
                 AgentEvent::ExecutionCompleted {
+                    step: 1,
                     message: text_message("recovered"),
                     dropped_events: 0,
                 },
@@ -556,9 +668,10 @@ mod tests {
         let outcome = execution.completion.await;
         assert_eq!(
             outcome,
-            ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Auth(
-                "bad key".to_owned()
-            )))
+            ExecutionOutcome::Failed {
+                error: ExecutionError::Model(ModelError::Auth("bad key".to_owned())),
+                consumption: used_steps(1),
+            }
         );
         let events = collect_events(execution.events).await;
         assert_eq!(
@@ -585,7 +698,10 @@ mod tests {
 
         assert_eq!(
             execution.completion.await,
-            ExecutionOutcome::Failed(ExecutionError::Internal)
+            ExecutionOutcome::Failed {
+                error: ExecutionError::Internal,
+                consumption: ExecutionConsumption::default(),
+            }
         );
         assert_eq!(
             collect_events(execution.events).await,
@@ -633,7 +749,12 @@ mod tests {
 
         // 父级取消经子令牌传播：建立前取消，收敛为唯一取消终态。
         let outcome = execution.completion.await;
-        assert_eq!(outcome, ExecutionOutcome::Cancelled);
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::Cancelled {
+                consumption: used_steps(1),
+            }
+        );
         let events = collect_events(execution.events).await;
         assert_eq!(
             events,
@@ -674,6 +795,6 @@ mod tests {
         drop(execution.events);
 
         let outcome = execution.completion.await;
-        assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+        assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
     }
 }

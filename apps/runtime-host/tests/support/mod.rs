@@ -79,7 +79,9 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
     {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let response = if body.get("model").and_then(Value::as_str) == Some("qwen3.8-max")
+    let response = if case == "VLLM_REASONING_CASE" {
+        vllm_reasoning_response()
+    } else if body.get("model").and_then(Value::as_str) == Some("qwen3.8-max")
         && body
             .get("tools")
             .and_then(Value::as_array)
@@ -130,6 +132,16 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
                 json!({"status":"complete","summary":"recovered safely"}),
             )
         }
+    } else if case == "SKILL_AGENT_CASE"
+        && has_tool_definition(&body, "load_skill")
+        && !has_tool_call_result(&body, "call-load-review-skill")
+    {
+        named_tool_response(
+            "load-review-skill",
+            "call-load-review-skill",
+            "load_skill",
+            json!({"name":"review"}),
+        )
     } else if case == "TOOL_CASE" && !current_turn_has_tool_result {
         directory_list_tool_response(tool_exchange_number(&body))
     } else if case == "WRITE_CASE" && !current_turn_has_tool_result {
@@ -175,6 +187,13 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
             "local inspect answer"
         } else if case == "INSPECT_LOCAL_CASE" {
             "local inspect result missing"
+        } else if case == "SKILL_AGENT_CASE"
+            && has_tool_call_result(&body, "call-load-review-skill")
+            && body_text.contains("Use the frozen review instructions.")
+        {
+            "agent skill applied"
+        } else if case == "SKILL_AGENT_CASE" {
+            "agent skill missing"
         } else {
             "offline answer"
         };
@@ -189,6 +208,17 @@ fn chat_text_response(response_id: &str, text: &str) -> String {
     format!(
         "data: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{text:?}}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":{response_id:?},\"model\":\"offline-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":20,\"completion_tokens\":4,\"total_tokens\":24}}}}\n\ndata: [DONE]\n\n"
     )
+}
+
+fn vllm_reasoning_response() -> String {
+    concat!(
+        "data: {\"id\":\"vllm-reasoning\",\"model\":\"offline-vllm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"vllm-reasoning\",\"model\":\"offline-vllm\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"offline vLLM thought\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"vllm-reasoning\",\"model\":\"offline-vllm\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"offline vLLM answer\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"vllm-reasoning\",\"model\":\"offline-vllm\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":8,\"total_tokens\":28,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned()
 }
 
 fn goal_long_response(body: &Value, body_text: &str) -> String {
@@ -808,6 +838,8 @@ fn latest_case(body: &str) -> &'static str {
         "GOAL_BLOCK_CASE",
         "GOAL_STOP_CASE",
         "GOAL_RECOVERY_CASE",
+        "SKILL_AGENT_CASE",
+        "VLLM_REASONING_CASE",
     ]
     .into_iter()
     .filter_map(|marker| body.rfind(marker).map(|position| (position, marker)))
@@ -966,6 +998,37 @@ max_output_tokens = 4096
 "#
     );
     fs::write(runtime_home.join("config.toml"), document).expect("write test config");
+}
+
+pub fn write_vllm_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
+    fs::create_dir_all(runtime_home).expect("create runtime home");
+    let document = format!(
+        r#"schema_version = 1
+default_model = "vllm-fixture"
+
+[runtime.model_transport]
+connect_timeout_ms = 1000
+request_timeout_ms = 10000
+
+[models.vllm-fixture]
+protocol = "openai_chat_completions"
+provider = "vllm"
+endpoint = "{endpoint}"
+model = "offline-vllm"
+api_key = "{api_key}"
+context_window_tokens = 8192
+max_output_tokens = 4096
+
+[models.vllm-fixture.capabilities]
+image_input = false
+tool_calls = true
+streaming = true
+
+[models.vllm-fixture.capabilities.reasoning]
+enabled = true
+"#
+    );
+    fs::write(runtime_home.join("config.toml"), document).expect("write vLLM test config");
 }
 
 pub fn write_responses_config(runtime_home: &Path, endpoint: &str, api_key: &str) {

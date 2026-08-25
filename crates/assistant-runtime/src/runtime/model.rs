@@ -33,6 +33,7 @@ use crate::{
         RuntimeToolAuthorizer,
     },
     session::SessionController,
+    skill::{LoadSkillTool, SkillActivationLatch, SkillActivationOwner},
     work_plan::UpdatePlanTool,
 };
 
@@ -270,8 +271,7 @@ impl ModelService for ImagePreparingModelService {
                         _ => {}
                     }
                 }
-                let mut seen = std::collections::BTreeMap::new();
-                let mut image_count = 0_usize;
+                let mut seen = std::collections::BTreeSet::new();
                 for resource in resources {
                     let key = match &resource {
                         ModelImageResource::FileReference(reference) => {
@@ -282,15 +282,7 @@ impl ModelService for ImagePreparingModelService {
                             (1_u8, reference.relative_path().to_owned())
                         }
                     };
-                    if let Some(is_image) = seen.get(&key) {
-                        if *is_image {
-                            image_count += 1;
-                        }
-                        if image_count > 10 {
-                            return Err(ModelError::Resource(
-                                "a model request cannot contain more than 10 images".to_owned(),
-                            ));
-                        }
+                    if !seen.insert(key) {
                         continue;
                     }
                     match self
@@ -298,29 +290,18 @@ impl ModelService for ImagePreparingModelService {
                         .prepare(&resource, &context.cancellation)
                         .await?
                     {
-                        ModelImagePreparation::Image(image) => {
-                            image_count += 1;
-                            if image_count > 10 {
-                                return Err(ModelError::Resource(
-                                    "a model request cannot contain more than 10 images".to_owned(),
-                                ));
+                        ModelImagePreparation::Image(image) => match resource {
+                            ModelImageResource::FileReference(reference) => context
+                                .prepared_images
+                                .insert_file_reference(reference.readable_path, image),
+                            ModelImageResource::LocalFile { path } => {
+                                context.prepared_images.insert_file_reference(path, image)
                             }
-                            match resource {
-                                ModelImageResource::FileReference(reference) => context
-                                    .prepared_images
-                                    .insert_file_reference(reference.readable_path, image),
-                                ModelImageResource::LocalFile { path } => {
-                                    context.prepared_images.insert_file_reference(path, image)
-                                }
-                                ModelImageResource::ToolImage { reference, .. } => context
-                                    .prepared_images
-                                    .insert_tool_image(reference.relative_path().to_owned(), image),
-                            }
-                            seen.insert(key, true);
-                        }
-                        ModelImagePreparation::NotImage => {
-                            seen.insert(key, false);
-                        }
+                            ModelImageResource::ToolImage { reference, .. } => context
+                                .prepared_images
+                                .insert_tool_image(reference.relative_path().to_owned(), image),
+                        },
+                        ModelImagePreparation::NotImage => {}
                     }
                 }
             }
@@ -378,6 +359,7 @@ pub(super) struct CompiledRunAgent {
     compactor: Arc<RuntimeContextCompactor>,
     reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
+    skill_activation_latch: Arc<SkillActivationLatch>,
 }
 
 pub(super) struct CompiledRunParts {
@@ -386,6 +368,7 @@ pub(super) struct CompiledRunParts {
     pub(super) compactor: Arc<RuntimeContextCompactor>,
     pub(super) reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     pub(super) goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
+    pub(super) skill_activation_latch: Arc<SkillActivationLatch>,
 }
 
 impl CompiledRunAgent {
@@ -396,6 +379,7 @@ impl CompiledRunAgent {
             compactor: self.compactor,
             reasoning_effort: self.reasoning_effort,
             goal_signal_latch: self.goal_signal_latch,
+            skill_activation_latch: self.skill_activation_latch,
         }
     }
 }
@@ -533,6 +517,21 @@ pub(super) fn compile_run_agent(
             RuntimeError::RunToolsBuildFailed { source }
         })?;
     let (base_tools, infrastructure_policies) = bundle.into_parts();
+    let active_skill_names = {
+        let state = session.lock_state()?;
+        state
+            .skill_activations
+            .iter()
+            .filter(|activation| {
+                matches!(
+                    &activation.owner,
+                    SkillActivationOwner::Session(owner) if owner == session.id()
+                )
+            })
+            .map(|activation| activation.name.clone())
+            .collect::<Vec<_>>()
+    };
+    let skill_activation_latch = Arc::new(SkillActivationLatch::new(active_skill_names));
     let parent_compactor = Arc::new(RuntimeContextCompactor::for_parent(
         compiled.model.clone(),
         session.system_prompt().clone(),
@@ -591,11 +590,19 @@ pub(super) fn compile_run_agent(
         reasoning,
         provider_options,
     };
-    // 不具备 Tool Call 能力的模型维持历史纯文本路径；Runtime 派生工具只加入父 Agent，
-    // 子 Agent 始终只拿到 Host 提供的原始 Base ToolSet。
+    // 不具备 Tool Call 能力的模型维持历史纯文本路径。父 Agent 在这里加入 Run 级
+    // Runtime 工具；child 保留 Base ToolSet，并在具体 child execution 创建后追加绑定
+    // 独立 ActivationLatch 的 load_skill，避免 sibling 共享激活状态。
     let parent_tools = if compiled.model.capabilities().tool_calls {
         let parent_tools = base_tools
             .clone()
+            .try_with_tool(LoadSkillTool::new(
+                session.skill_catalog().clone(),
+                skill_activation_latch.clone(),
+            ))
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "load skill tool definition",
+            })?
             .try_with_tool(UpdatePlanTool::new(
                 session.clone(),
                 resources.store.clone(),
@@ -678,6 +685,7 @@ pub(super) fn compile_run_agent(
                 infrastructure_policies,
                 events: authorization.events,
                 limits: delegation,
+                skill_catalog: session.skill_catalog().clone(),
             }));
         parent_tools
             .try_with_tool(DelegateTaskTool::new(delegation_controller))
@@ -710,6 +718,7 @@ pub(super) fn compile_run_agent(
         compactor: parent_compactor,
         reasoning_effort: frozen_reasoning_effort,
         goal_signal_latch,
+        skill_activation_latch,
     })
 }
 
@@ -884,5 +893,105 @@ fn resolve_model<'a>(
         Err(RuntimeError::ModelNotFound {
             model_key: key.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_model::{
+        GenerationConfig, ModelCallContext, ModelCapabilities, ModelImagePreparationFuture,
+        ModelRequest, PreparedModelImage,
+    };
+    use agent_types::{
+        ConversationMessage, ConversationSnapshot, FileReference, FileReferencesPart, MessageId,
+        PartId, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    };
+
+    use super::*;
+
+    struct AlwaysImagePreprocessor;
+
+    impl ModelImagePreprocessor for AlwaysImagePreprocessor {
+        fn prepare<'a>(
+            &'a self,
+            _resource: &'a ModelImageResource,
+            _cancellation: &'a tokio_util::sync::CancellationToken,
+        ) -> ModelImagePreparationFuture<'a> {
+            Box::pin(async {
+                Ok(ModelImagePreparation::Image(PreparedModelImage {
+                    media_type: "image/jpeg".to_owned(),
+                    bytes: Arc::from([1_u8]),
+                }))
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct ProviderReachedModel {
+        capabilities: ModelCapabilities,
+    }
+
+    impl ModelService for ProviderReachedModel {
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        fn context_window_tokens(&self) -> u64 {
+            8_192
+        }
+
+        fn stream(
+            &self,
+            _request: ModelRequest,
+            context: ModelCallContext,
+        ) -> ModelStreamFuture<'_> {
+            Box::pin(async move {
+                assert_eq!(context.prepared_images.len(), 11);
+                Err(ModelError::Provider {
+                    message: "provider image limit".to_owned(),
+                    status: Some(400),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn image_preparation_does_not_impose_a_global_image_count_limit() {
+        let files = (0..11)
+            .map(|index| FileReference {
+                original_name: format!("image-{index}.jpg"),
+                readable_path: format!("attachments/image-{index}.jpg"),
+            })
+            .collect();
+        let request = ModelRequest {
+            system: SystemPromptSnapshot::default(),
+            conversation: ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
+                id: MessageId::new("user-images").expect("message id"),
+                origin: UserMessageOrigin::User,
+                transcript_visibility: TranscriptVisibility::Visible,
+                parts: vec![UserPart::FileReferences(FileReferencesPart {
+                    id: PartId::new("user-images-files").expect("part id"),
+                    files,
+                })],
+            })]),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::None,
+            generation: GenerationConfig::default(),
+            reasoning: None,
+            provider_options: ProviderOptions::new(),
+        };
+        let service = ImagePreparingModelService {
+            inner: Arc::new(ProviderReachedModel::default()),
+            preprocessor: Arc::new(AlwaysImagePreprocessor),
+            tool_image_directory: String::new(),
+        };
+
+        let result = service.stream(request, ModelCallContext::default()).await;
+
+        assert!(matches!(
+            result,
+            Err(ModelError::Provider { message, status: Some(400) })
+                if message == "provider image limit"
+        ));
     }
 }

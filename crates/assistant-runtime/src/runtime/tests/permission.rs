@@ -581,6 +581,7 @@ async fn saving_an_exact_file_rule_drains_matching_approvals_from_the_queue_head
             message: "read twice".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -658,6 +659,7 @@ async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
             message: "read once".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await

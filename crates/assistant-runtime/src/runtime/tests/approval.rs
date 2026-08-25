@@ -59,6 +59,7 @@ async fn allow_once_resumes_exactly_one_waiting_call_and_emits_lifecycle_events(
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -141,6 +142,7 @@ async fn session_allow_is_persisted_before_resume_and_matches_the_next_run() {
             message: "first".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -183,6 +185,7 @@ async fn session_allow_is_persisted_before_resume_and_matches_the_next_run() {
             message: "second".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -247,6 +250,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
             message: "first".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -280,6 +284,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
             message: "second".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -334,6 +339,7 @@ async fn unavailable_workspace_scope_keeps_the_approval_pending_until_a_valid_de
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -412,6 +418,7 @@ async fn permission_write_failure_keeps_the_call_pending_and_never_executes_it()
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -487,6 +494,7 @@ async fn one_permission_revision_conflict_is_reloaded_and_retried_before_resume(
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -541,6 +549,7 @@ async fn a_deny_reloaded_while_pending_overrides_the_older_allow_once_decision()
             message: "use the tool".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -603,6 +612,7 @@ async fn runtime_shutdown_cancels_and_removes_pending_approvals() {
             message: "wait for approval".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -653,6 +663,7 @@ async fn cancelling_a_run_drops_its_pending_approval_without_executing_the_tool(
             message: "wait for approval".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await

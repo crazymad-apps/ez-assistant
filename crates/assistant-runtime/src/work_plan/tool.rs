@@ -18,6 +18,8 @@ const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePlanInput {
+    /// 模型侧每次都提交完整目标；Option 只用于兼容已进入历史的缺省调用。
+    #[schemars(required)]
     objective: Option<String>,
     items: Vec<UpdatePlanItemInput>,
 }
@@ -80,7 +82,7 @@ impl Tool for UpdatePlanTool {
     }
 
     fn description(&self) -> String {
-        "Replace the current session work plan with the complete ordered item list. Item ids are Runtime-managed and must not be supplied. Objective is required when creating a plan and may be omitted on later updates to preserve it. Keep at most one item in_progress. This records progress but does not enable automatic continuation."
+        "Replace the current session work plan with the complete objective and ordered item list. Always provide objective; when only updating items, repeat the current objective unchanged. Item ids are Runtime-managed and must not be supplied. Keep at most one item in_progress. This records progress but does not enable automatic continuation."
             .to_owned()
     }
 
@@ -221,14 +223,15 @@ mod tests {
     use crate::work_plan::WorkPlanItem;
 
     #[test]
-    fn model_schema_omits_runtime_ids_and_allows_omitted_objective() {
+    fn model_schema_requires_objective_and_omits_runtime_ids() {
         let schema = serde_json::to_value(schemars::schema_for!(UpdatePlanInput))
             .expect("encode update plan schema");
         let required = schema["required"].as_array().expect("root required fields");
-        assert!(!required.iter().any(|field| field == "objective"));
+        assert!(required.iter().any(|field| field == "objective"));
         let encoded = serde_json::to_string(&schema).expect("schema json");
         assert!(!encoded.contains("\"id\":"));
 
+        // Serde 仍接受已进入历史的旧调用；只有新的模型工具定义要求完整提交。
         let legacy = serde_json::from_value::<UpdatePlanInput>(json!({
             "items": [{
                 "id": "todo-no-longer-current",

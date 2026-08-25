@@ -38,6 +38,14 @@ pub enum RuntimeErrorCode {
     GoalRunRequiresResume,
     /// 当前 Session 模型不支持 Goal 所需的 Tool Call。
     GoalUnsupportedByModel,
+    /// 用户提交的 Skill 名称格式无效。
+    SkillNameInvalid,
+    /// 当前 Session 没有可用于激活的冻结 Skill Catalog。
+    SkillCatalogUnavailable,
+    /// 当前 Session Catalog 中不存在指定 Skill。
+    SkillNotFound,
+    /// 指定 Skill 不允许用户显式激活。
+    SkillNotUserInvocable,
     /// WorkPlan revision 已变化。
     WorkPlanRevisionConflict,
     /// Runtime 的权威存储当前不可用或拒绝了业务提交。
@@ -184,6 +192,16 @@ mod tests {
             (
                 RuntimeErrorCode::GoalUnsupportedByModel,
                 "goal_unsupported_by_model",
+            ),
+            (RuntimeErrorCode::SkillNameInvalid, "skill_name_invalid"),
+            (
+                RuntimeErrorCode::SkillCatalogUnavailable,
+                "skill_catalog_unavailable",
+            ),
+            (RuntimeErrorCode::SkillNotFound, "skill_not_found"),
+            (
+                RuntimeErrorCode::SkillNotUserInvocable,
+                "skill_not_user_invocable",
             ),
             (
                 RuntimeErrorCode::WorkPlanRevisionConflict,

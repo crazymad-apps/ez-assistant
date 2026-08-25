@@ -11,7 +11,8 @@
 //! 纯协议 Codec（M4）：
 //!
 //! - [`ChatProtocolAdapter`]：显式描述 Chat Completions Provider 方言差异（reasoning 字段名、generation 参数支持、
-//!   max tokens 字段名），Codec 不判断 Provider 名称。
+//!   max tokens 字段名），Codec 不判断 Provider 名称。DeepSeek 使用 `reasoning_content`；vLLM
+//!   具名方言优先使用当前 `reasoning`，并兼容读取旧版 `reasoning_content`。
 //! - [`encode_request`]：把规范 [`agent_model::ModelRequest`] 编码为原生
 //!   [`ChatRequest`]。
 //! - [`ChunkAssembler`]：把流式 [`ChatChunk`] 聚合为规范事件序列。

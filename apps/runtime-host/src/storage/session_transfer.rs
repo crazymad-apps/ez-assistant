@@ -1,6 +1,10 @@
 //! Session Fork 与永久删除的跨 SQLite/JSONL/Attachment 介质提交边界。
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
 use assistant_protocol::{ConversationOwner, DeleteSessionImpact, SessionId};
@@ -18,6 +22,7 @@ use super::{
     internal_error, invalid_data,
     mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     session_resources::remove_created_session_directories,
+    skill::insert_skill_activation,
     sync_directory, to_i64,
 };
 
@@ -74,6 +79,29 @@ impl StorageEngine {
                 })
             {
                 return Err(conflict("fork Goal projection is invalid"));
+            }
+        }
+        let message_ids = fork
+            .conversation
+            .messages
+            .iter()
+            .map(|message| conversation::message_id(message).as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        let mut activation_ids = BTreeSet::new();
+        for activation in &fork.skill_activations {
+            if !activation_ids.insert(activation.activation_id.clone())
+                || activation.session_id != fork.session.session_id
+                || !matches!(
+                    &activation.owner,
+                    assistant_runtime::SkillActivationOwner::Session(session_id)
+                        if session_id == &fork.session.session_id
+                )
+                || activation.run_id.is_some()
+                || activation.input_id.is_some()
+                || !message_ids.contains(activation.message_id.as_str())
+                || activation.catalog_revision != fork.session.skill_catalog.revision
+            {
+                return Err(conflict("fork skill activation is invalid"));
             }
         }
         let work_plan = fork.work_plan.as_ref().map(|source| StoredWorkPlan {
@@ -154,6 +182,10 @@ impl StorageEngine {
                 serde_json::to_string(&fork.session.system_prompt).map_err(|source| {
                     internal_error("fork system prompt could not be encoded", source)
                 })?;
+            let skill_catalog_json =
+                serde_json::to_string(&fork.session.skill_catalog).map_err(|source| {
+                    internal_error("fork skill catalog could not be encoded", source)
+                })?;
             let message_count =
                 u64::try_from(forked_conversation.messages.len()).map_err(|source| {
                     StoreError::with_source(
@@ -162,15 +194,22 @@ impl StorageEngine {
                         source,
                     )
                 })?;
-            Ok((forked_conversation, attachments, prompt_json, message_count))
+            Ok((
+                forked_conversation,
+                attachments,
+                prompt_json,
+                skill_catalog_json,
+                message_count,
+            ))
         })();
-        let (forked_conversation, attachments, prompt_json, message_count) = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                remove_created_session_directories(&paths);
-                return Err(error);
-            }
-        };
+        let (forked_conversation, attachments, prompt_json, skill_catalog_json, message_count) =
+            match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    remove_created_session_directories(&paths);
+                    return Err(error);
+                }
+            };
         // Session 目录及其中的 Conversation/Attachment 视图必须先持久化，再提交
         // SQLite 中对这些文件的引用。提交成功后不再执行可能导致“已提交但返回失败”的步骤。
         sync_directory(&self.sessions_directory)?;
@@ -184,16 +223,17 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
+                        session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', 1, ?8, ?9, ?9, NULL, 0, ?10)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 1, ?9, ?10, ?10, NULL, 0, ?11)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
                         fork.session.model_key.as_str(),
                         fork.session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
+                        skill_catalog_json,
                         agent_variant_value(fork.session.current_variant),
                         approval_mode_value(fork.session.approval_mode),
                         to_i64(message_count, "fork message count exceeds SQLite range")?,
@@ -239,6 +279,9 @@ impl StorageEngine {
             if let Some(goal) = fork.goal.as_ref() {
                 insert_forked_goal(&transaction, goal)?;
             }
+            for activation in &fork.skill_activations {
+                insert_skill_activation(&transaction, activation)?;
+            }
             for attachment in &attachments {
                 transaction
                     .execute(
@@ -281,6 +324,7 @@ impl StorageEngine {
                 model_key: fork.session.model_key,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
+                skill_catalog: fork.session.skill_catalog,
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,
@@ -296,6 +340,7 @@ impl StorageEngine {
             },
             conversation: forked_conversation,
             attachments,
+            skill_activations: fork.skill_activations,
             work_plan,
             goal: fork.goal,
         };

@@ -5,7 +5,7 @@
 //! - 普通观察事件使用 bounded `tokio::sync::mpsc`，容量
 //!   [`AGENT_EVENT_CHANNEL_CAPACITY`]；
 //! - 普通事件经 `try_send`：通道满即丢弃并用原子计数器计数；
-//! - 唯一终态使用独立 oneshot，排在已入队普通事件之后可靠交付，四种终态都携带
+//! - 唯一终态使用独立 oneshot，排在已入队普通事件之后可靠交付，五种终态都携带
 //!   `dropped_events`；
 //! - 订阅断开（receiver dropped）不影响执行，发送方不阻塞、不 panic。
 
@@ -26,7 +26,8 @@ use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    ActiveGuardrailMode, CompactionReason, ExecutionConsumption, ExecutionError, GuardrailKind,
+    ActiveGuardrailMode, CompactionReason, ContinuationReason, ExecutionConsumption,
+    ExecutionError, GuardrailKind,
 };
 
 /// 事件通道容量；超出后新事件丢弃并计数。
@@ -36,7 +37,7 @@ pub(crate) const AGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
 ///
 /// 生命周期：首个事件为 `ExecutionStarted`，恰好以一个终态事件
 /// （`ExecutionCompleted` / `ExecutionFailed` / `ExecutionCancelled` /
-/// `ExecutionCompactionRequired`）结束。
+/// `ExecutionCompactionRequired` / `ExecutionContinuationRequired`）结束。
 /// 事件只面向 UI/诊断观察，规范对话以 Recorder 落账为准。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -57,6 +58,8 @@ pub enum AgentEvent {
     },
     /// 正文文本增量。
     TextDelta {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 片段 ID。
         id: PartId,
         /// 本次到达的正文文本片段。
@@ -64,6 +67,8 @@ pub enum AgentEvent {
     },
     /// reasoning 文本增量。
     ReasoningDelta {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 片段 ID。
         id: PartId,
         /// 本次到达的 reasoning 文本片段。
@@ -71,16 +76,22 @@ pub enum AgentEvent {
     },
     /// 模型请求执行一个工具（进入授权闸前）。
     ToolProposed {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 完整组装出的规范 Tool Call。
         call: ToolCall,
     },
     /// 一个工具调用开始执行（已过闸）。
     ToolStarted {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 调用 ID。
         call_id: ToolCallId,
     },
     /// 工具执行过程中的流式输出片段。
     ToolOutput {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 调用 ID。
         call_id: ToolCallId,
         /// 输出通道。
@@ -90,6 +101,8 @@ pub enum AgentEvent {
     },
     /// 一个工具调用完成（成功或失败）。
     ToolCompleted {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 调用 ID。
         call_id: ToolCallId,
         /// 完成状态。
@@ -97,6 +110,8 @@ pub enum AgentEvent {
     },
     /// 一个 Guardrail 检测器首次达到当前连续序列阈值。
     GuardrailTriggered {
+        /// 所属 Runtime Run 的最终模型 Turn 序号。
+        step: u32,
         /// 触发的检测器类别。
         kind: GuardrailKind,
         /// 本次触发只观察还是强制终止。
@@ -110,6 +125,8 @@ pub enum AgentEvent {
     },
     /// 唯一正常终态，携带最终聚合的规范响应。
     ExecutionCompleted {
+        /// 最终 AssistantMessage 所属的 Runtime Run step。
+        step: u32,
         /// 最终 AssistantMessage。
         message: AssistantMessage,
         /// 本次执行因普通队列背压丢弃的观察事件数。
@@ -139,6 +156,15 @@ pub enum AgentEvent {
         /// 本次执行因背压或订阅断开丢弃的事件数。
         dropped_events: u64,
     },
+    /// 上下文改变交接终态；Core 不在本次执行内解释或发起续跑。
+    ExecutionContinuationRequired {
+        /// 上层续跑原因；不包含具体业务领域。
+        reason: ContinuationReason,
+        /// 本段 execution 已可靠消费的硬预算。
+        consumption: ExecutionConsumption,
+        /// 本次执行因背压或订阅断开丢弃的事件数。
+        dropped_events: u64,
+    },
 }
 
 /// 一次工具调用的完成状态；与 `agent_types::ToolResultStatus` 的成败语义对齐。
@@ -160,6 +186,7 @@ impl AgentEvent {
                 | Self::ExecutionFailed { .. }
                 | Self::ExecutionCancelled { .. }
                 | Self::ExecutionCompactionRequired { .. }
+                | Self::ExecutionContinuationRequired { .. }
         )
     }
 }
@@ -312,25 +339,36 @@ mod tests {
                 usage: token_usage(),
             },
             AgentEvent::TextDelta {
+                step: 1,
                 id: part_id(),
                 delta: "hello".to_owned(),
             },
             AgentEvent::ReasoningDelta {
+                step: 1,
                 id: part_id(),
                 delta: "thinking".to_owned(),
             },
-            AgentEvent::ToolProposed { call: tool_call() },
-            AgentEvent::ToolStarted { call_id: call_id() },
+            AgentEvent::ToolProposed {
+                step: 1,
+                call: tool_call(),
+            },
+            AgentEvent::ToolStarted {
+                step: 1,
+                call_id: call_id(),
+            },
             AgentEvent::ToolOutput {
+                step: 1,
                 call_id: call_id(),
                 channel: ToolOutputChannel::Stderr,
                 chunk: "chunk".to_owned(),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id(),
                 status: ToolCompletionStatus::Failed,
             },
             AgentEvent::GuardrailTriggered {
+                step: 1,
                 kind: GuardrailKind::RepeatedInvocation,
                 mode: ActiveGuardrailMode::Observe,
                 threshold: NonZeroU32::new(3).expect("non-zero threshold"),
@@ -338,6 +376,7 @@ mod tests {
                 call_id: call_id(),
             },
             AgentEvent::ExecutionCompleted {
+                step: 1,
                 message: assistant_message(),
                 dropped_events: 2,
             },
@@ -358,6 +397,14 @@ mod tests {
                 },
                 dropped_events: 1,
             },
+            AgentEvent::ExecutionContinuationRequired {
+                reason: ContinuationReason::ContextChanged,
+                consumption: ExecutionConsumption {
+                    steps: 1,
+                    tool_calls: 1,
+                },
+                dropped_events: 0,
+            },
         ];
         for event in events {
             let json = serde_json::to_string(&event).expect("serialize event");
@@ -377,6 +424,7 @@ mod tests {
         .expect("serialize event to value");
         assert_eq!(json["type"], "usage_updated");
         let json = serde_json::to_value(AgentEvent::ToolOutput {
+            step: 1,
             call_id: call_id(),
             channel: ToolOutputChannel::Stdout,
             chunk: "out".to_owned(),
@@ -385,6 +433,7 @@ mod tests {
         assert_eq!(json["type"], "tool_output");
         assert_eq!(json["channel"], "stdout");
         let json = serde_json::to_value(AgentEvent::ToolCompleted {
+            step: 1,
             call_id: call_id(),
             status: ToolCompletionStatus::Success,
         })
@@ -393,9 +442,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_are_exactly_the_four_end_states() {
+    fn terminal_events_are_exactly_the_five_end_states() {
         let terminals = vec![
             AgentEvent::ExecutionCompleted {
+                step: 1,
                 message: assistant_message(),
                 dropped_events: 0,
             },
@@ -416,6 +466,14 @@ mod tests {
                 },
                 dropped_events: 0,
             },
+            AgentEvent::ExecutionContinuationRequired {
+                reason: ContinuationReason::ContextChanged,
+                consumption: ExecutionConsumption {
+                    steps: 1,
+                    tool_calls: 1,
+                },
+                dropped_events: 0,
+            },
         ];
         for event in terminals {
             assert!(event.is_terminal());
@@ -427,8 +485,12 @@ mod tests {
                 usage: token_usage(),
             },
             AgentEvent::StepStarted { step: 1 },
-            AgentEvent::ToolStarted { call_id: call_id() },
+            AgentEvent::ToolStarted {
+                step: 1,
+                call_id: call_id(),
+            },
             AgentEvent::GuardrailTriggered {
+                step: 1,
                 kind: GuardrailKind::ConsecutiveFailures,
                 mode: ActiveGuardrailMode::Enforce,
                 threshold: NonZeroU32::new(2).expect("non-zero threshold"),
@@ -480,6 +542,7 @@ mod tests {
         sender.send(AgentEvent::StepStarted { step: 99 });
         assert_eq!(sender.dropped_events(), 1);
         sender.send(AgentEvent::ExecutionCompleted {
+            step: 1,
             message: assistant_message(),
             dropped_events: sender.dropped_events(),
         });
@@ -491,6 +554,7 @@ mod tests {
         assert_eq!(
             next(&mut stream),
             Some(AgentEvent::ExecutionCompleted {
+                step: 1,
                 message: assistant_message(),
                 dropped_events: 1,
             })

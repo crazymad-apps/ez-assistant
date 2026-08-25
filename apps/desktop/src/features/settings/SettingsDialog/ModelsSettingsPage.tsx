@@ -18,6 +18,7 @@ import type {
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ConflictDialog, DeleteModelDialog } from "./ModelSettingsDialogs";
 import { SettingsMessages } from "./RuntimeSettingsPage";
+import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
 type ModelDraft = {
@@ -128,7 +129,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
       return null;
     }
     if (!isSafeEndpoint(draft.endpoint.trim())) {
-      settings.showError("Endpoint 必须是无凭据、查询参数和片段的 HTTPS 地址。");
+      settings.showError("Endpoint 必须是无凭据、查询参数和片段的 HTTP 或 HTTPS 地址。");
       return null;
     }
     const is_new = editing === "new";
@@ -261,15 +262,11 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
     const model_options = catalogModelOptions(catalog_entries, draft.protocol, draft.provider);
     const visible_protocol_options = includeCurrentOption(protocol_options, draft.protocol, "当前配置");
     return (
-      <section>
-        <div className={styles.page_header}>
-          <div className={styles.form_heading}>
-            <button aria-label="返回模型列表" className={styles.back_button} onClick={cancelEdit} type="button">
-              <Icon name="chevron-left" size={16} />
-            </button>
-            <h3>{is_new ? "添加模型" : "编辑模型"}</h3>
-          </div>
-        </div>
+      <SettingsPageContainer
+        back_label="返回模型列表"
+        on_back={cancelEdit}
+        title={is_new ? "添加模型" : "编辑模型"}
+      >
         <div className={styles.model_form}>
           <label>显示名称<input onChange={(event) => update("display_name", event.currentTarget.value)} placeholder="例如：DeepSeek V4 Pro" value={draft.display_name} /></label>
           <label>模型 Key<input disabled={!is_new} onChange={(event) => update("model_key", event.currentTarget.value)} placeholder="应用内唯一标识，例如：deepseek-v4-pro" value={draft.model_key} /></label>
@@ -316,7 +313,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
               trigger_variant="field"
             />
           </div>
-          <label className={styles.full_field}>Endpoint<input onChange={(event) => update("endpoint", event.currentTarget.value)} placeholder="接口地址，例如：https://api.deepseek.com/v1" value={draft.endpoint} /></label>
+          <label className={styles.full_field}>Endpoint<input onChange={(event) => update("endpoint", event.currentTarget.value)} placeholder="接口地址，例如：http://127.0.0.1:8000/v1" value={draft.endpoint} /></label>
           <label className={`${styles.full_field} ${styles.secret_field}`}>API Key<span><input autoComplete="new-password" onChange={(event) => update("api_key", event.currentTarget.value)} placeholder={is_new ? "输入 API Key" : "留空则保持现有凭据"} type={show_secret ? "text" : "password"} value={draft.api_key} /><button aria-label={show_secret ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowSecret((visible) => !visible)} type="button">{show_secret ? "隐藏" : "显示"}</button></span></label>
           <label>上下文窗口<input inputMode="numeric" onChange={(event) => update("context_window_tokens", event.currentTarget.value)} placeholder="模型支持的 Token 数，例如：128000" value={draft.context_window_tokens} /></label>
           <label>单轮输出上限<input inputMode="numeric" onChange={(event) => update("max_output_tokens", event.currentTarget.value)} placeholder="单次最多输出的 Token 数，例如：8192" value={draft.max_output_tokens} /></label>
@@ -335,16 +332,17 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
             onReload={() => void reloadAfterConflict()}
           />
         )}
-      </section>
+      </SettingsPageContainer>
     );
   }
 
   return (
-    <section>
-      <div className={styles.page_header}>
-        <h3>模型</h3>
+    <SettingsPageContainer
+      actions={(
         <button className={styles.primary_button} onClick={beginCreate} type="button"><Icon name="plus" size={14} />添加模型</button>
-      </div>
+      )}
+      title="模型"
+    >
       <div className={styles.vision_model_setting}>
         <div className={styles.model_icon}><Icon name="bot" size={17} /></div>
         <div className={styles.vision_model_summary}>
@@ -419,13 +417,16 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
           replacements={replacementCandidates(deleting)}
         />
       )}
-    </section>
+    </SettingsPageContainer>
   );
 });
 
 function deletionBlockers(model: ModelConfiguration, sessions: readonly SessionSummary[]): readonly SessionSummary[] {
   if (!model.model_key) return [];
-  return sessions.filter((session) => session.model_key === model.model_key && session.lifecycle === "active");
+  return sessions.filter((session) => (
+    session.model_key === model.model_key
+    && (session.active_run_id !== null || session.queued_input_count > 0)
+  ));
 }
 
 function formatTokens(tokens: number | null): string {
@@ -436,7 +437,7 @@ function formatTokens(tokens: number | null): string {
 function isSafeEndpoint(value: string): boolean {
   try {
     const endpoint = new URL(value);
-    return endpoint.protocol === "https:"
+    return (endpoint.protocol === "http:" || endpoint.protocol === "https:")
       && endpoint.username === ""
       && endpoint.password === ""
       && endpoint.search === ""

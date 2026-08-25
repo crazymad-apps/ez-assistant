@@ -8,14 +8,17 @@ use std::collections::HashSet;
 use agent_core::ExchangeReceipt;
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, MessageId,
-    ToolMessage, ToolResult, ToolResultContent, ToolResultStatus,
+    ToolMessage, ToolResult, ToolResultContent, ToolResultStatus, TranscriptVisibility,
+    UserMessage, UserMessageOrigin, UserPart,
 };
 use assistant_protocol::{ChildTaskId, ChildTaskStatus, RunId, SessionId};
 use assistant_runtime::{
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange,
-    PendingChildToolExchange, PendingToolExchange, ToolExecutionStart,
+    PendingChildToolExchange, PendingToolExchange, SkillActivationOwner, SkillActivationTrigger,
+    StoredSkillActivation, ToolExecutionStart,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 
 use super::{
     StorageEngine, StorageResult, append_effect::AppendPurpose, conflict, database_write_error,
@@ -41,10 +44,21 @@ enum PendingTarget {
 struct StoredPendingExchange {
     receipt: ExchangeReceipt,
     target: PendingTarget,
+    step: Option<u32>,
     assistant: AssistantMessage,
-    results: Option<Vec<ToolMessage>>,
+    ready: Option<ReadyExchangePayload>,
     started_calls: HashSet<String>,
     state: PendingState,
+}
+
+/// ready 状态必须同时冻结 Tool Results 与可选 Activation，保证崩溃恢复不拆分两者。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ReadyExchangePayload {
+    results: Vec<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_message: Option<UserMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skill_activations: Vec<StoredSkillActivation>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +73,18 @@ enum PendingTable {
     ChildTask,
 }
 
+struct CompleteExchangeRequest {
+    operation_id: String,
+    receipt: ExchangeReceipt,
+    target: PendingTarget,
+    expected_step: Option<u32>,
+    results: Vec<ToolMessage>,
+    activation_message: Option<UserMessage>,
+    skill_activations: Vec<StoredSkillActivation>,
+    completed_at_ms: i64,
+    table: PendingTable,
+}
+
 impl StorageEngine {
     pub(super) fn begin_tool_exchange(
         &mut self,
@@ -70,6 +96,7 @@ impl StorageEngine {
                 session_id: pending.session_id,
                 run_id: pending.run_id,
             },
+            Some(pending.step),
             pending.assistant,
             pending.created_at_ms,
         )
@@ -85,6 +112,7 @@ impl StorageEngine {
                 session_id: pending.session_id,
                 child_task_id: pending.child_task_id,
             },
+            Some(pending.step),
             pending.assistant,
             pending.created_at_ms,
         )
@@ -126,34 +154,40 @@ impl StorageEngine {
         &mut self,
         completed: CompletedToolExchange,
     ) -> StorageResult<()> {
-        self.complete_exchange(
-            completed.operation_id,
-            completed.receipt,
-            PendingTarget::Run {
+        self.complete_exchange(CompleteExchangeRequest {
+            operation_id: completed.operation_id,
+            receipt: completed.receipt,
+            target: PendingTarget::Run {
                 session_id: completed.session_id,
                 run_id: completed.run_id,
             },
-            completed.results,
-            completed.completed_at_ms,
-            PendingTable::Run,
-        )
+            expected_step: Some(completed.step),
+            results: completed.results,
+            activation_message: completed.activation_message,
+            skill_activations: completed.skill_activations,
+            completed_at_ms: completed.completed_at_ms,
+            table: PendingTable::Run,
+        })
     }
 
     pub(super) fn complete_child_tool_exchange(
         &mut self,
         completed: CompletedChildToolExchange,
     ) -> StorageResult<()> {
-        self.complete_exchange(
-            completed.operation_id,
-            completed.receipt,
-            PendingTarget::ChildTask {
+        self.complete_exchange(CompleteExchangeRequest {
+            operation_id: completed.operation_id,
+            receipt: completed.receipt,
+            target: PendingTarget::ChildTask {
                 session_id: completed.session_id,
                 child_task_id: completed.child_task_id,
             },
-            completed.results,
-            completed.completed_at_ms,
-            PendingTable::ChildTask,
-        )
+            expected_step: Some(completed.step),
+            results: completed.results,
+            activation_message: completed.activation_message,
+            skill_activations: completed.skill_activations,
+            completed_at_ms: completed.completed_at_ms,
+            table: PendingTable::ChildTask,
+        })
     }
 
     pub(super) fn recover_pending_tool_exchanges(&mut self) -> StorageResult<HashSet<String>> {
@@ -170,6 +204,7 @@ impl StorageEngine {
         &mut self,
         receipt: ExchangeReceipt,
         target: PendingTarget,
+        step: Option<u32>,
         assistant: AssistantMessage,
         created_at_ms: i64,
     ) -> StorageResult<()> {
@@ -181,19 +216,19 @@ impl StorageEngine {
         match &target {
             PendingTarget::Run { session_id, run_id } => self.connection.execute(
                 "INSERT INTO pending_tool_exchanges (
-                    receipt_id, session_id, run_id, assistant_json, results_json, state, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, 'begun', ?5)",
-                params![receipt.as_str(), session_id.as_str(), run_id.as_str(), assistant_json, created_at_ms],
+                    receipt_id, session_id, run_id, step, assistant_json, results_json, state, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'begun', ?6)",
+                params![receipt.as_str(), session_id.as_str(), run_id.as_str(), step, assistant_json, created_at_ms],
             ),
             PendingTarget::ChildTask {
                 session_id,
                 child_task_id,
             } => self.connection.execute(
                 "INSERT INTO child_pending_tool_exchanges (
-                    receipt_id, child_task_id, session_id, assistant_json, results_json, state,
+                    receipt_id, child_task_id, session_id, step, assistant_json, results_json, state,
                     created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, 'begun', ?5)",
-                params![receipt.as_str(), child_task_id.as_str(), session_id.as_str(), assistant_json, created_at_ms],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'begun', ?6)",
+                params![receipt.as_str(), child_task_id.as_str(), session_id.as_str(), step, assistant_json, created_at_ms],
             ),
         }
         .map_err(|source| database_write_error("pending tool exchange could not be created", source))?;
@@ -245,25 +280,33 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn complete_exchange(
-        &mut self,
-        operation_id: String,
-        receipt: ExchangeReceipt,
-        target: PendingTarget,
-        results: Vec<ToolMessage>,
-        completed_at_ms: i64,
-        table: PendingTable,
-    ) -> StorageResult<()> {
-        let pending = self.load_pending_exchange(receipt.as_str(), table)?;
-        if pending.target != target {
+    fn complete_exchange(&mut self, request: CompleteExchangeRequest) -> StorageResult<()> {
+        let pending = self.load_pending_exchange(request.receipt.as_str(), request.table)?;
+        if pending.target != request.target || pending.step != request.expected_step {
             return Err(conflict("pending tool exchange ownership does not match"));
         }
         if !matches!(pending.state, PendingState::Begun) {
             return Err(conflict("pending tool exchange is already ready"));
         }
-        validate_exchange(&pending.assistant, &results)?;
-        self.mark_exchange_ready(&pending, &results, table)?;
-        self.commit_ready_exchange(operation_id, pending, results, completed_at_ms)
+        validate_exchange(&pending.assistant, &request.results)?;
+        validate_model_activations(
+            &pending.target,
+            request.activation_message.as_ref(),
+            &request.skill_activations,
+        )?;
+        self.ensure_activation_runs_match(&pending.target, &request.skill_activations)?;
+        let ready = ReadyExchangePayload {
+            results: request.results,
+            activation_message: request.activation_message,
+            skill_activations: request.skill_activations,
+        };
+        self.mark_exchange_ready(&pending, &ready, request.table)?;
+        self.commit_ready_exchange(
+            request.operation_id,
+            pending,
+            ready,
+            request.completed_at_ms,
+        )
     }
 
     fn recover_pending_exchanges(&mut self, table: PendingTable) -> StorageResult<HashSet<String>> {
@@ -307,22 +350,33 @@ impl StorageEngine {
         table: PendingTable,
     ) -> StorageResult<()> {
         let pending = self.load_pending_exchange(receipt_id, table)?;
-        let results = match pending.state {
+        let ready = match pending.state {
             PendingState::Begun => {
                 let results = self.recovered_results(&pending)?;
-                self.mark_exchange_ready(&pending, &results, table)?;
-                results
+                let ready = ReadyExchangePayload {
+                    results,
+                    activation_message: None,
+                    skill_activations: Vec::new(),
+                };
+                self.mark_exchange_ready(&pending, &ready, table)?;
+                ready
             }
             PendingState::Ready => pending
-                .results
+                .ready
                 .clone()
-                .ok_or_else(|| invalid_data("ready tool exchange has no results"))?,
+                .ok_or_else(|| invalid_data("ready tool exchange has no payload"))?,
         };
-        validate_exchange(&pending.assistant, &results)?;
+        validate_exchange(&pending.assistant, &ready.results)?;
+        validate_model_activations(
+            &pending.target,
+            ready.activation_message.as_ref(),
+            &ready.skill_activations,
+        )?;
+        self.ensure_activation_runs_match(&pending.target, &ready.skill_activations)?;
         self.commit_ready_exchange(
             format!("recover-{}", pending.receipt.as_str()),
             pending,
-            results,
+            ready,
             system_time_ms()?,
         )
     }
@@ -458,11 +512,12 @@ impl StorageEngine {
     fn mark_exchange_ready(
         &mut self,
         pending: &StoredPendingExchange,
-        results: &[ToolMessage],
+        ready: &ReadyExchangePayload,
         table: PendingTable,
     ) -> StorageResult<()> {
-        let results_json = serde_json::to_string(results)
-            .map_err(|source| internal_error("tool results could not be encoded", source))?;
+        let results_json = serde_json::to_string(ready).map_err(|source| {
+            internal_error("tool exchange payload could not be encoded", source)
+        })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -500,11 +555,14 @@ impl StorageEngine {
         &mut self,
         operation_id: String,
         pending: StoredPendingExchange,
-        results: Vec<ToolMessage>,
+        ready: ReadyExchangePayload,
         completed_at_ms: i64,
     ) -> StorageResult<()> {
         let mut messages = vec![ConversationMessage::Assistant(pending.assistant)];
-        messages.extend(results.into_iter().map(ConversationMessage::Tool));
+        messages.extend(ready.results.into_iter().map(ConversationMessage::Tool));
+        if let Some(message) = ready.activation_message {
+            messages.push(ConversationMessage::User(message));
+        }
         match pending.target {
             PendingTarget::Run { session_id, run_id } => {
                 let operation = operation_id.clone();
@@ -514,10 +572,12 @@ impl StorageEngine {
                         session_id,
                         run_id,
                         messages,
+                        message_step: pending.step,
                         created_at_ms: completed_at_ms,
                     },
                     AppendPurpose::ToolExchange {
                         receipt_id: pending.receipt.as_str().to_owned(),
+                        skill_activations: ready.skill_activations,
                     },
                 )?;
                 self.complete_staged_append(&operation)
@@ -525,16 +585,18 @@ impl StorageEngine {
             PendingTarget::ChildTask {
                 session_id,
                 child_task_id,
-            } => self.append_child_messages(
+            } => self.append_child_messages(super::recovery::ChildAppendRequest {
                 operation_id,
                 child_task_id,
                 session_id,
                 messages,
-                completed_at_ms,
-                AppendPurpose::ChildToolExchange {
+                message_step: pending.step,
+                created_at_ms: completed_at_ms,
+                purpose: AppendPurpose::ChildToolExchange {
                     receipt_id: pending.receipt.as_str().to_owned(),
+                    skill_activations: ready.skill_activations,
                 },
-            ),
+            }),
         }
     }
 
@@ -545,11 +607,11 @@ impl StorageEngine {
     ) -> StorageResult<StoredPendingExchange> {
         let query = match table {
             PendingTable::Run => {
-                "SELECT receipt_id, session_id, run_id, assistant_json, results_json, state
+                "SELECT receipt_id, session_id, run_id, step, assistant_json, results_json, state
                  FROM pending_tool_exchanges WHERE receipt_id = ?1"
             }
             PendingTable::ChildTask => {
-                "SELECT receipt_id, session_id, child_task_id, assistant_json, results_json, state
+                "SELECT receipt_id, session_id, child_task_id, step, assistant_json, results_json, state
                  FROM child_pending_tool_exchanges WHERE receipt_id = ?1"
             }
         };
@@ -560,9 +622,10 @@ impl StorageEngine {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })
             .optional()
@@ -586,18 +649,37 @@ impl StorageEngine {
                 })?,
             },
         };
-        let assistant = serde_json::from_str::<AssistantMessage>(&row.3).map_err(|source| {
-            invalid_data_with_source("pending assistant message is invalid", source)
-        })?;
-        let results = row
-            .4
-            .map(|json| {
-                serde_json::from_str::<Vec<ToolMessage>>(&json).map_err(|source| {
-                    invalid_data_with_source("pending tool results are invalid", source)
-                })
+        let step = row
+            .3
+            .map(|value| {
+                u32::try_from(value)
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| invalid_data("pending tool exchange step is invalid"))
             })
             .transpose()?;
-        let state = match row.5.as_str() {
+        let assistant = serde_json::from_str::<AssistantMessage>(&row.4).map_err(|source| {
+            invalid_data_with_source("pending assistant message is invalid", source)
+        })?;
+        let ready = row
+            .5
+            .map(|json| {
+                serde_json::from_str::<ReadyExchangePayload>(&json)
+                    .or_else(|_| {
+                        serde_json::from_str::<Vec<ToolMessage>>(&json).map(|results| {
+                            ReadyExchangePayload {
+                                results,
+                                activation_message: None,
+                                skill_activations: Vec::new(),
+                            }
+                        })
+                    })
+                    .map_err(|source| {
+                        invalid_data_with_source("pending tool exchange payload is invalid", source)
+                    })
+            })
+            .transpose()?;
+        let state = match row.6.as_str() {
             "begun" => PendingState::Begun,
             "ready" => PendingState::Ready,
             _ => return Err(invalid_data("pending tool exchange state is invalid")),
@@ -638,8 +720,9 @@ impl StorageEngine {
                 invalid_data_with_source("pending tool exchange receipt is invalid", source)
             })?,
             target,
+            step,
             assistant,
-            results,
+            ready,
             started_calls,
             state,
         })
@@ -674,6 +757,47 @@ impl StorageEngine {
                 assistant_protocol::ChildTaskStatus::Running,
             ),
         }
+    }
+
+    fn ensure_activation_runs_match(
+        &self,
+        target: &PendingTarget,
+        activations: &[StoredSkillActivation],
+    ) -> StorageResult<()> {
+        if activations.is_empty() {
+            return Ok(());
+        }
+        let expected_run_id = match target {
+            PendingTarget::Run { run_id, .. } => run_id.clone(),
+            PendingTarget::ChildTask {
+                session_id,
+                child_task_id,
+            } => self
+                .connection
+                .query_row(
+                    "SELECT parent_run_id FROM child_tasks \
+                     WHERE child_task_id = ?1 AND session_id = ?2",
+                    params![child_task_id.as_str(), session_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|source| {
+                    internal_error("child activation run could not be queried", source)
+                })?
+                .ok_or_else(|| invalid_data("child activation owner is unavailable"))
+                .and_then(|value| {
+                    RunId::new(value).map_err(|source| {
+                        invalid_data_with_source("child activation run id is invalid", source)
+                    })
+                })?,
+        };
+        if activations
+            .iter()
+            .any(|activation| activation.run_id.as_ref() != Some(&expected_run_id))
+        {
+            return Err(invalid_data("model skill activation run is inconsistent"));
+        }
+        Ok(())
     }
 }
 
@@ -720,6 +844,83 @@ fn validate_exchange(assistant: &AssistantMessage, results: &[ToolMessage]) -> S
             source,
         )
     })
+}
+
+fn validate_model_activations(
+    target: &PendingTarget,
+    message: Option<&UserMessage>,
+    activations: &[StoredSkillActivation],
+) -> StorageResult<()> {
+    if activations.is_empty() {
+        return if message.is_none() {
+            Ok(())
+        } else {
+            Err(invalid_data(
+                "tool exchange has an unbound skill activation message",
+            ))
+        };
+    }
+    let message =
+        message.ok_or_else(|| invalid_data("model skill activation message is missing"))?;
+    let activation_ids = activations
+        .iter()
+        .map(|activation| activation.activation_id.as_str())
+        .collect::<HashSet<_>>();
+    let names = activations
+        .iter()
+        .map(|activation| activation.name.as_str())
+        .collect::<HashSet<_>>();
+    if message.origin != UserMessageOrigin::Runtime
+        || message.transcript_visibility != TranscriptVisibility::Hidden
+        || activation_ids.len() != activations.len()
+        || names.len() != activations.len()
+    {
+        return Err(invalid_data("model skill activation message is invalid"));
+    }
+    let (session_id, expected_owner) = match target {
+        PendingTarget::Run { session_id, .. } => (
+            session_id,
+            SkillActivationOwner::Session(session_id.clone()),
+        ),
+        PendingTarget::ChildTask {
+            session_id,
+            child_task_id,
+        } => (
+            session_id,
+            SkillActivationOwner::ChildTask(child_task_id.as_str().to_owned()),
+        ),
+    };
+    if activations.iter().any(|activation| {
+        activation.session_id != *session_id
+            || activation.owner != expected_owner
+            || activation.trigger != SkillActivationTrigger::Model
+            || activation.run_id.is_none()
+            || activation.input_id.is_some()
+            || activation.message_id != message.id
+    }) {
+        return Err(invalid_data("model skill activation is inconsistent"));
+    }
+    for activation in activations {
+        let count = message
+            .parts
+            .iter()
+            .filter(|part| {
+                matches!(
+                    part,
+                    UserPart::InternalContext(part)
+                        if part.kind == "skill_activation"
+                            && part.retention_key.as_deref()
+                                == Some(&format!("skill:{}", activation.name.as_str()))
+                )
+            })
+            .count();
+        if count != 1 {
+            return Err(invalid_data(
+                "model skill activation boundary is inconsistent",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn recovered_unknown_result(

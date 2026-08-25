@@ -149,6 +149,9 @@ impl AssistantRuntime {
             let mut state = session.lock_state()?;
             for input_id in &result.removed_input_ids {
                 state.goal_inputs.retain(|candidate| candidate != input_id);
+                state
+                    .skill_activations
+                    .retain(|activation| activation.input_id.as_ref() != Some(input_id));
                 if let Some(input) = state.inputs.remove(input_id) {
                     state
                         .runs
@@ -335,6 +338,7 @@ impl AssistantRuntime {
                     generation: resumed.generation,
                     turn: resumed.turn,
                 }),
+                skill_activation: None,
                 approval_mode,
                 message,
                 new_goal: None,

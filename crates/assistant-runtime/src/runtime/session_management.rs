@@ -60,6 +60,7 @@ impl AssistantRuntime {
             approval_mode,
             work_plan,
             source_goal,
+            source_skill_activations,
         ) = {
             let state = source.lock_state()?;
             (
@@ -82,6 +83,7 @@ impl AssistantRuntime {
                     updated_at_ms: plan.updated_at_ms,
                 }),
                 state.goal.clone(),
+                state.skill_activations.clone(),
             )
         };
         if source_generation != request.expected_generation {
@@ -111,6 +113,11 @@ impl AssistantRuntime {
             .map_err(|_| RuntimeError::InvalidRequest {
                 reason: "fork point would split a tool exchange",
             })?;
+        let fork_message_ids = conversation
+            .messages
+            .iter()
+            .map(|message| conversation_message_id(message).as_str().to_owned())
+            .collect::<BTreeSet<_>>();
 
         let session_id = {
             let sessions =
@@ -129,6 +136,8 @@ impl AssistantRuntime {
                 source_environment: source.environment(),
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
+        // Skill 包由四个共享 Root 持有；Fork 只继承已经冻结的 Catalog 事实。
+        let skill_catalog = source.skill_catalog().clone();
 
         let attachments_by_path = self
             .attachments
@@ -198,6 +207,29 @@ impl AssistantRuntime {
             .into_iter()
             .collect();
         let created_at_ms = now_ms()?;
+        let skill_activations = source_skill_activations
+            .into_iter()
+            .filter(|activation| fork_message_ids.contains(activation.message_id.as_str()))
+            .map(|activation| {
+                Ok(crate::StoredSkillActivation {
+                    activation_id: crate::id::generate("skill-activation").map_err(|_| {
+                        RuntimeError::InternalStateUnavailable {
+                            component: "fork skill activation id random source",
+                        }
+                    })?,
+                    session_id: session_id.clone(),
+                    owner: crate::SkillActivationOwner::Session(session_id.clone()),
+                    run_id: None,
+                    input_id: None,
+                    message_id: activation.message_id,
+                    name: activation.name,
+                    catalog_revision: activation.catalog_revision,
+                    definition_digest: activation.definition_digest,
+                    trigger: activation.trigger,
+                    created_at_ms: activation.created_at_ms,
+                })
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
         let forked_goal = source_goal
             .filter(|goal| {
                 conversation.messages.iter().any(|message| {
@@ -223,6 +255,7 @@ impl AssistantRuntime {
                     model_key,
                     reasoning_effort,
                     system_prompt: prepared.system_prompt,
+                    skill_catalog,
                     environment: prepared.environment,
                     current_variant,
                     approval_mode,
@@ -231,6 +264,7 @@ impl AssistantRuntime {
                 conversation,
                 attachments,
                 tool_images,
+                skill_activations,
                 work_plan,
                 goal: forked_goal,
             })
@@ -259,6 +293,7 @@ impl AssistantRuntime {
             Vec::new(),
             work_plan,
             goal,
+            stored.skill_activations,
         ));
         self.sessions
             .write()
@@ -957,6 +992,7 @@ impl AssistantRuntime {
                     agent_variant: request.variant,
                     origin: crate::InputOrigin::User,
                     goal_binding: None,
+                    skill_activation: None,
                     approval_mode,
                     message: new_message.clone(),
                     new_goal: None,
@@ -980,6 +1016,9 @@ impl AssistantRuntime {
             state
                 .inputs
                 .retain(|_, input| !removed_inputs.contains(&input.stored.input_id));
+            state
+                .skill_activations
+                .retain(|activation| !removed_user_ids.contains(&activation.message_id));
             state.user_inputs.clear();
             state.goal_inputs.clear();
             state.goal = rewritten_goal.map(|(goal, _)| goal);
@@ -1018,6 +1057,16 @@ impl AssistantRuntime {
             input_id,
             run: run_snapshot,
         })
+    }
+}
+
+fn conversation_message_id(message: &ConversationMessage) -> &agent_types::MessageId {
+    match message {
+        ConversationMessage::System(message) => &message.id,
+        ConversationMessage::ContextSummary(message) => &message.id,
+        ConversationMessage::User(message) => &message.id,
+        ConversationMessage::Assistant(message) => &message.id,
+        ConversationMessage::Tool(message) => &message.id,
     }
 }
 

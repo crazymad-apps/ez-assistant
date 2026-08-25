@@ -11,6 +11,7 @@ use std::{
 use agent_core::ExchangeReceipt;
 use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry, PinnedMemoryId};
 use agent_model::SystemPromptSnapshot;
+use agent_types::InternalContextPart;
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
     FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
@@ -34,14 +35,16 @@ use assistant_runtime::{
     PermissionEffect, PermissionFileOperation, PermissionFileRevision, PermissionFileScope,
     PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy, PinnedMemoryMutation,
     QueuePriorityChange, RuntimeStore, SessionDeletion, SessionExecutionEnvironment, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoreErrorKind, StoredAttachmentState,
-    StoredChildTaskSettlement, StoredConversationState, StoredGoal, StoredGoalBudget,
-    StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredRunSettlement, StoredSession,
-    StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkspaceRemoval,
+    SessionPinnedChange, SessionSkillCatalog, SessionTitleChange, SkillCandidate, SkillDiscovery,
+    SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameState, SkillNameStateChange,
+    SkillSource, StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement,
+    StoredConversationState, StoredGoal, StoredGoalBudget, StoredGoalObjective,
+    StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
+    StoredRunSettlement, StoredSession, StoredSessionLifecycle, StoredTodoItemStatus,
+    StoredWorkPlanItem, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkspaceRemoval,
 };
+use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -79,6 +82,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         model_key: ModelKey::new("fixture-model").expect("model key"),
         reasoning_effort: None,
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
+        skill_catalog: assistant_runtime::SessionSkillCatalog::legacy_unavailable(),
         environment: SessionExecutionEnvironment {
             workspace_id: None,
             working_directory: private_directory.to_string_lossy().into_owned(),
@@ -193,6 +197,317 @@ fn assert_default_session_permissions(session: &StoredSession) {
     );
 }
 
+#[tokio::test]
+async fn skill_name_state_is_durable_and_uses_one_validated_name_key() {
+    let temporary = TempDir::new().expect("temporary runtime home");
+    let store = LocalRuntimeStore::open(temporary.path(), 4)
+        .await
+        .expect("open store");
+    assert!(
+        store
+            .list_skill_name_states()
+            .await
+            .expect("initial states")
+            .is_empty()
+    );
+    let disabled = SkillNameStateChange {
+        name: SkillName::parse("review-pr").expect("name"),
+        enabled: false,
+        updated_at_ms: 10,
+    };
+    assert_eq!(
+        store
+            .set_skill_enabled(disabled)
+            .await
+            .expect("disable skill"),
+        SkillNameState {
+            name: SkillName::parse("review-pr").expect("name"),
+            enabled: false,
+            updated_at_ms: 10,
+        }
+    );
+    store.shutdown().await.expect("close store");
+
+    let reopened = LocalRuntimeStore::open(temporary.path(), 4)
+        .await
+        .expect("reopen store");
+    assert_eq!(
+        reopened
+            .list_skill_name_states()
+            .await
+            .expect("recovered state"),
+        vec![SkillNameState {
+            name: SkillName::parse("review-pr").expect("name"),
+            enabled: false,
+            updated_at_ms: 10,
+        }]
+    );
+    reopened.shutdown().await.expect("close reopened store");
+}
+
+#[test]
+fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies() {
+    let temporary = TempDir::new().expect("tempdir");
+    let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
+    let shared_skill = temporary.path().join("workspace/.agents/skills/review");
+    fs::create_dir_all(&shared_skill).expect("shared skill directory");
+    fs::write(shared_skill.join("SKILL.md"), b"shared definition").expect("shared definition");
+    let shared_resource = shared_skill.join("references/guide.md");
+    fs::create_dir_all(shared_resource.parent().expect("resource parent"))
+        .expect("shared resource directory");
+    fs::write(&shared_resource, b"shared resource v1").expect("shared resource");
+    let source_id = session_id("s-skill-source");
+    let discovery = SkillDiscovery {
+        status: SkillDiscoveryStatus::Available,
+        candidates: Vec::new(),
+        winners: vec![SkillCandidate {
+            name: SkillName::parse("review").expect("name"),
+            description: "Review changes".to_owned(),
+            source: SkillSource::WorkspaceAgents,
+            source_path: shared_skill.to_string_lossy().into_owned(),
+            definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
+            body: "Review carefully.".to_owned(),
+            metadata: SkillMetadata::default(),
+            model_invocable: true,
+            user_invocable: true,
+        }],
+        diagnostics: Vec::new(),
+    };
+    let source_catalog = SessionSkillCatalog::from_discovery(discovery).expect("source catalog");
+    let mut source = new_session(source_id.as_str(), &engine.sessions_directory);
+    source.system_prompt = source_catalog.augment_system_prompt(source.system_prompt);
+    source.skill_catalog = source_catalog.clone();
+    let stored = engine.create_session(source).expect("create skill session");
+    assert_eq!(stored.skill_catalog, source_catalog);
+    assert!(
+        !engine
+            .sessions_directory
+            .join(source_id.as_str())
+            .join("private/skills")
+            .exists()
+    );
+    fs::write(&shared_resource, b"shared resource v2").expect("update shared resource");
+
+    let target_id = session_id("s-skill-fork");
+    let mut target = new_session(target_id.as_str(), &engine.sessions_directory);
+    target.skill_catalog = source_catalog.clone();
+    target.system_prompt = stored.system_prompt.clone();
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: source_id,
+            source_generation: 1,
+            session: target,
+            conversation: ConversationSnapshot::new(Vec::new()),
+            attachments: Vec::new(),
+            tool_images: Vec::new(),
+            skill_activations: Vec::new(),
+            work_plan: None,
+            goal: None,
+        })
+        .expect("fork skill session");
+    assert_eq!(
+        forked.session.skill_catalog.revision,
+        source_catalog.revision
+    );
+    assert_eq!(forked.session.skill_catalog, source_catalog);
+    assert!(
+        !engine
+            .sessions_directory
+            .join(target_id.as_str())
+            .join("private/skills")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(&shared_resource).expect("read current shared resource"),
+        b"shared resource v2"
+    );
+    drop(engine);
+    let mut reopened = StorageEngine::open(temporary.path()).expect("reopen engine");
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.sessions.len(), 2);
+    assert!(
+        recovered
+            .sessions
+            .iter()
+            .all(|session| session.skill_catalog.revision == source_catalog.revision)
+    );
+    assert!(shared_skill.join("SKILL.md").exists());
+}
+
+#[test]
+fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
+    let temporary = TempDir::new().expect("tempdir");
+    let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
+    let source_id = session_id("s-skill-activation-source");
+    let catalog = SessionSkillCatalog::from_discovery(SkillDiscovery {
+        status: SkillDiscoveryStatus::Available,
+        candidates: Vec::new(),
+        winners: vec![SkillCandidate {
+            name: SkillName::parse("review").expect("name"),
+            description: "Review changes".to_owned(),
+            source: SkillSource::WorkspaceAgents,
+            source_path: "/fixture/review".to_owned(),
+            definition_digest: format!("sha256-v1:{}", "2".repeat(64)),
+            body: "Review carefully.".to_owned(),
+            metadata: SkillMetadata::default(),
+            model_invocable: true,
+            user_invocable: true,
+        }],
+        diagnostics: Vec::new(),
+    })
+    .expect("catalog");
+    let mut session = new_session(source_id.as_str(), &engine.sessions_directory);
+    session.skill_catalog = catalog.clone();
+    engine.create_session(session).expect("create source");
+
+    let input_id = InputId::new("input-skill-activation").expect("input id");
+    let run_id = run_id("run-skill-activation");
+    let mut message = raw_user_message("user-skill-activation", "review this");
+    message.parts.push(UserPart::InternalContext(
+        InternalContextPart::new(
+            PartId::new("part-skill-activation").expect("part id"),
+            "boundary-skill-activation".to_owned(),
+            "skill_activation".to_owned(),
+            Some("skill:review".to_owned()),
+            "SKILL_ACTIVATION_V1\nReview carefully.".to_owned(),
+        )
+        .expect("internal context"),
+    ));
+    let activation = StoredSkillActivation {
+        activation_id: "activation-source".to_owned(),
+        session_id: source_id.clone(),
+        owner: SkillActivationOwner::Session(source_id.clone()),
+        run_id: Some(run_id.clone()),
+        input_id: Some(input_id.clone()),
+        message_id: message.id.clone(),
+        name: SkillName::parse("review").expect("name"),
+        catalog_revision: catalog.revision.clone(),
+        definition_digest: catalog.definitions[0].definition_digest.clone(),
+        trigger: SkillActivationTrigger::User,
+        created_at_ms: 10,
+    };
+    engine
+        .accept_input(NewStoredInput {
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+            session_id: source_id.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            skill_activation: Some(activation.clone()),
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: message.clone(),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 10,
+        })
+        .expect("accept skill input");
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "commit-skill-activation".to_owned(),
+            input_id,
+            run_id: run_id.clone(),
+            session_id: source_id.clone(),
+            message: Some(message),
+            reasoning_effort: None,
+            created_at_ms: 11,
+        })
+        .expect("commit user message");
+    engine
+        .settle_run(StoredRunSettlement {
+            message_step: None,
+            operation_id: "settle-skill-activation".to_owned(),
+            run_id,
+            session_id: source_id.clone(),
+            status: RunStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            messages: vec![assistant_message("assistant-skill-activation", "done")],
+            goal_effect: None,
+            finished_at_ms: 12,
+        })
+        .expect("settle skill run");
+    assert_eq!(
+        engine.load_skill_activations().expect("ledger"),
+        vec![activation.clone()]
+    );
+
+    let target_id = session_id("s-skill-activation-fork");
+    let mut target = new_session(target_id.as_str(), &engine.sessions_directory);
+    target.skill_catalog = catalog;
+    let conversation = engine.load_conversation(&source_id).expect("conversation");
+    let fork_activation = StoredSkillActivation {
+        activation_id: "activation-fork".to_owned(),
+        session_id: target_id.clone(),
+        owner: SkillActivationOwner::Session(target_id.clone()),
+        run_id: None,
+        input_id: None,
+        ..activation
+    };
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: source_id,
+            source_generation: 1,
+            session: target,
+            conversation,
+            attachments: Vec::new(),
+            tool_images: Vec::new(),
+            skill_activations: vec![fork_activation.clone()],
+            work_plan: None,
+            goal: None,
+        })
+        .expect("fork with activation");
+    assert_eq!(forked.skill_activations, vec![fork_activation.clone()]);
+    drop(engine);
+    let mut reopened = StorageEngine::open(temporary.path()).expect("reopen engine");
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert!(recovered.skill_activations.contains(&fork_activation));
+    assert_eq!(recovered.skill_activations.len(), 2);
+}
+
+#[test]
+fn skill_name_state_transaction_rolls_back_on_sqlite_failure() {
+    let temporary = TempDir::new().expect("temporary runtime home");
+    let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
+    engine
+        .set_skill_enabled(SkillNameStateChange {
+            name: SkillName::parse("review-pr").expect("name"),
+            enabled: false,
+            updated_at_ms: 10,
+        })
+        .expect("initial state");
+    engine
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER fail_skill_name_update
+             BEFORE UPDATE ON skill_name_states
+             BEGIN
+                 SELECT RAISE(ABORT, 'fixture failure');
+             END;",
+        )
+        .expect("failure trigger");
+    let error = engine
+        .set_skill_enabled(SkillNameStateChange {
+            name: SkillName::parse("review-pr").expect("name"),
+            enabled: true,
+            updated_at_ms: 20,
+        })
+        .expect_err("update must fail");
+    assert_eq!(error.kind(), StoreErrorKind::Conflict);
+    assert_eq!(
+        engine
+            .list_skill_name_states()
+            .expect("state after rollback"),
+        vec![SkillNameState {
+            name: SkillName::parse("review-pr").expect("name"),
+            enabled: false,
+            updated_at_ms: 10,
+        }]
+    );
+}
+
 fn user_message(value: &str, text: &str) -> ConversationMessage {
     ConversationMessage::User(UserMessage {
         origin: Default::default(),
@@ -255,6 +570,7 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
     seed_session_and_run(&mut engine, source.as_str(), "r-usage");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "usage-one".to_owned(),
             session_id: source.clone(),
             run_id: run_id("r-usage"),
@@ -264,6 +580,7 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
         .expect("append first usage");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "usage-two".to_owned(),
             session_id: source.clone(),
             run_id: run_id("r-usage"),
@@ -300,6 +617,7 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
             conversation: source_conversation,
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            skill_activations: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -318,6 +636,7 @@ fn pending_legacy_usage_is_backfilled_once_from_the_authoritative_conversation()
     seed_session_and_run(&mut engine, session.as_str(), "r-usage-backfill");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "usage-backfill-append".to_owned(),
             session_id: session.clone(),
             run_id: run_id("r-usage-backfill"),
@@ -476,6 +795,7 @@ fn fork_copies_tool_images_without_cross_session_links() {
             conversation,
             attachments: Vec::new(),
             tool_images: vec![reference.clone()],
+            skill_activations: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -543,6 +863,7 @@ fn failed_tool_image_fork_rolls_back_target_session_directory() {
         conversation: tool_image_exchange(reference.clone()),
         attachments: Vec::new(),
         tool_images: vec![reference],
+        skill_activations: Vec::new(),
         work_plan: None,
         goal: None,
     });
@@ -846,6 +1167,7 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
+            skill_activation: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -961,6 +1283,7 @@ fn pending_tool_exchange(session: &str, run: &str, receipt: &str) -> PendingTool
         unreachable!("fixture starts with assistant")
     };
     PendingToolExchange {
+        step: 1,
         receipt: ExchangeReceipt::new(receipt).expect("receipt"),
         session_id: session_id(session),
         run_id: run_id(run),
@@ -971,6 +1294,7 @@ fn pending_tool_exchange(session: &str, run: &str, receipt: &str) -> PendingTool
 
 fn pending_delegate_exchange(session: &str, run: &str, receipt: &str) -> PendingToolExchange {
     PendingToolExchange {
+        step: 1,
         receipt: ExchangeReceipt::new(receipt).expect("receipt"),
         session_id: session_id(session),
         run_id: run_id(run),
@@ -1176,6 +1500,7 @@ fn commit_completed_turn(
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
+            skill_activation: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -1201,6 +1526,7 @@ fn commit_completed_turn(
         .expect("commit fixture user message");
     engine
         .settle_run(StoredRunSettlement {
+            message_step: None,
             operation_id: format!("settle-{suffix}"),
             run_id,
             session_id: session.clone(),
@@ -1245,6 +1571,7 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            skill_activations: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1339,6 +1666,7 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
                 attachment_id: forked_attachment_id.clone(),
             }],
             tool_images: Vec::new(),
+            skill_activations: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1505,6 +1833,7 @@ fn model_execution_failure_code_round_trips_without_schema_changes() {
 
 fn append_request(operation: &str, session: &str, run: &str) -> AppendRequest {
     AppendRequest {
+        message_step: None,
         operation_id: operation.to_owned(),
         session_id: session_id(session),
         run_id: run_id(run),
@@ -1634,6 +1963,36 @@ fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
         .expect("count rows after compatible schema initialization");
     assert_eq!((after.0, after.1), before);
     assert_eq!(after.2, 0);
+}
+
+#[test]
+fn legacy_run_message_ref_without_step_remains_readable_and_uninferred() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-legacy-step", "r-legacy-step");
+    engine
+        .connection
+        .execute(
+            "INSERT INTO run_message_refs (run_id, message_id)
+             VALUES ('r-legacy-step', 'assistant-legacy-step')",
+            [],
+        )
+        .expect("insert legacy ref without step");
+
+    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization");
+
+    let runs = engine.load_runs().expect("load legacy run");
+    assert_eq!(runs[0].message_ids[0].as_str(), "assistant-legacy-step");
+    assert!(runs[0].message_steps.is_empty());
+    let stored_step: Option<i64> = engine
+        .connection
+        .query_row(
+            "SELECT step FROM run_message_refs WHERE message_id = 'assistant-legacy-step'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read legacy nullable step");
+    assert_eq!(stored_step, None);
 }
 
 #[test]
@@ -1861,6 +2220,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
             generation: 1,
             turn: 1,
         }),
+        skill_activation: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: message.clone(),
         new_goal: Some(goal.clone()),
@@ -1973,6 +2333,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
                 generation: 1,
                 turn: 1,
             }),
+            skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: first_message,
             new_goal: Some(goal.clone()),
@@ -2018,6 +2379,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
             generation: 1,
             turn: 2,
         }),
+        skill_activation: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: continuation_message,
         new_goal: None,
@@ -2034,6 +2396,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
     assert!(
         engine
             .settle_run(StoredRunSettlement {
+                message_step: None,
                 operation_id: "reject-invalid-goal-continuation".to_owned(),
                 run_id: first.run.run_id.clone(),
                 session_id: session.clone(),
@@ -2073,6 +2436,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
     );
     let result = engine
         .settle_run(StoredRunSettlement {
+            message_step: None,
             operation_id: "settle-goal-and-continue".to_owned(),
             run_id: first.run.run_id,
             session_id: session.clone(),
@@ -2110,6 +2474,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
+            skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: held_message.clone(),
             new_goal: None,
@@ -2176,6 +2541,7 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
     completed_goal.completed_at_ms = Some(6_000);
     let completed_result = engine
         .settle_run(StoredRunSettlement {
+            message_step: None,
             operation_id: "complete-resumed-goal".to_owned(),
             run_id: resumed.run.run_id,
             session_id: session.clone(),
@@ -2253,6 +2619,7 @@ fn running_goal_is_durably_paused_once_during_recovery() {
                 generation: 1,
                 turn: 2,
             }),
+            skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: UserMessage {
                 id: MessageId::new("recovery-continuation-message").expect("message id"),
@@ -2335,6 +2702,7 @@ fn work_plan_fork_is_independent_and_session_delete_cascades() {
             conversation: ConversationSnapshot::default(),
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            skill_activations: Vec::new(),
             work_plan: Some(source_plan.clone()),
             goal: None,
         })
@@ -2447,6 +2815,7 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
             conversation: source_conversation.clone(),
             attachments: Vec::new(),
             tool_images: Vec::new(),
+            skill_activations: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -2615,6 +2984,7 @@ fn child_task_body_is_independent_and_round_trips_all_reliable_steps() {
     };
     engine
         .begin_child_tool_exchange(PendingChildToolExchange {
+            step: 1,
             receipt: ExchangeReceipt::new("child-receipt").expect("receipt"),
             child_task_id: child_id.clone(),
             session_id: session_id("s-child"),
@@ -2633,11 +3003,14 @@ fn child_task_body_is_independent_and_round_trips_all_reliable_steps() {
         .expect("mark child tool started");
     engine
         .complete_child_tool_exchange(CompletedChildToolExchange {
+            step: 1,
             operation_id: "complete-child-tool".to_owned(),
             receipt: ExchangeReceipt::new("child-receipt").expect("receipt"),
             child_task_id: child_id.clone(),
             session_id: session_id("s-child"),
             results: tool_results(),
+            activation_message: None,
+            skill_activations: Vec::new(),
             completed_at_ms: 2_400,
         })
         .expect("complete child tool exchange");
@@ -2824,6 +3197,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     };
     engine
         .begin_child_tool_exchange(PendingChildToolExchange {
+            step: 1,
             receipt: ExchangeReceipt::new("child-recovery-receipt").expect("receipt"),
             child_task_id: child_id.clone(),
             session_id: session_id("s-child-recovery"),
@@ -3241,6 +3615,7 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
+                skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -3339,6 +3714,7 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
     let hidden_id = MessageId::new("runtime-hidden-window").expect("message id");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-runtime-hidden-window".to_owned(),
             session_id: session.clone(),
             run_id: run_id("run-four"),
@@ -3548,6 +3924,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
+            skill_activation: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -3737,11 +4114,14 @@ fn completed_tool_exchange_enters_body_as_one_batch_and_clears_pending() {
 
     engine
         .complete_tool_exchange(CompletedToolExchange {
+            step: 1,
             operation_id: "append-tool".to_owned(),
             receipt: ExchangeReceipt::new("receipt-tool").expect("receipt"),
             session_id: session_id("s-tool"),
             run_id: run_id("r-tool"),
             results: tool_results(),
+            activation_message: None,
+            skill_activations: Vec::new(),
             completed_at_ms: 2_500,
         })
         .expect("complete tool exchange");
@@ -3771,6 +4151,112 @@ fn completed_tool_exchange_enters_body_as_one_batch_and_clears_pending() {
                 .get::<_, i64>(0))
             .expect("count refs"),
         2
+    );
+    let steps = engine
+        .connection
+        .prepare("SELECT step FROM run_message_refs ORDER BY rowid")
+        .expect("prepare ref step query")
+        .query_map([], |row| row.get::<_, i64>(0))
+        .expect("query ref steps")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read ref steps");
+    assert_eq!(steps, vec![1, 1]);
+}
+
+#[test]
+fn model_skill_activation_commits_with_tool_results_and_recovers_as_one_fact() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-model-skill", "r-model-skill");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_500 \
+             WHERE run_id = 'r-model-skill'",
+            [],
+        )
+        .expect("mark run running");
+    engine
+        .begin_tool_exchange(pending_tool_exchange(
+            "s-model-skill",
+            "r-model-skill",
+            "receipt-model-skill",
+        ))
+        .expect("begin tool exchange");
+    start_tool(
+        &mut engine,
+        "s-model-skill",
+        "r-model-skill",
+        "receipt-model-skill",
+    );
+    let activation_message = UserMessage {
+        id: MessageId::new("message-model-skill").expect("message id"),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        parts: vec![UserPart::InternalContext(
+            InternalContextPart::new(
+                PartId::new("part-model-skill").expect("part id"),
+                "boundary-model-skill".to_owned(),
+                "skill_activation".to_owned(),
+                Some("skill:review".to_owned()),
+                "SKILL_ACTIVATION_V1\ntrigger: model".to_owned(),
+            )
+            .expect("internal context"),
+        )],
+    };
+    let activation = StoredSkillActivation {
+        activation_id: "activation-model-skill".to_owned(),
+        session_id: session_id("s-model-skill"),
+        owner: SkillActivationOwner::Session(session_id("s-model-skill")),
+        run_id: Some(run_id("r-model-skill")),
+        input_id: None,
+        message_id: activation_message.id.clone(),
+        name: SkillName::parse("review").expect("name"),
+        catalog_revision: "catalog-revision".to_owned(),
+        definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
+        trigger: SkillActivationTrigger::Model,
+        created_at_ms: 2_500,
+    };
+    engine
+        .complete_tool_exchange(CompletedToolExchange {
+            step: 1,
+            operation_id: "append-model-skill".to_owned(),
+            receipt: ExchangeReceipt::new("receipt-model-skill").expect("receipt"),
+            session_id: session_id("s-model-skill"),
+            run_id: run_id("r-model-skill"),
+            results: tool_results(),
+            activation_message: Some(activation_message.clone()),
+            skill_activations: vec![activation.clone()],
+            completed_at_ms: 2_500,
+        })
+        .expect("complete model activation exchange");
+
+    let conversation = engine
+        .load_conversation(&session_id("s-model-skill"))
+        .expect("load conversation");
+    assert_eq!(conversation.messages.len(), 3);
+    assert_eq!(
+        conversation.messages.last(),
+        Some(&ConversationMessage::User(activation_message))
+    );
+    assert_eq!(
+        engine
+            .connection
+            .query_row("SELECT COUNT(*) FROM skill_activations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count activations"),
+        1
+    );
+    drop(engine);
+
+    let mut reopened = StorageEngine::open(root.path()).expect("reopen engine");
+    assert_eq!(
+        reopened
+            .load_runtime()
+            .expect("recover runtime")
+            .skill_activations,
+        vec![activation]
     );
 }
 
@@ -3832,6 +4318,7 @@ fn pending_tool_exchange_prevents_run_terminal_settlement() {
 
     let error = engine
         .settle_run(StoredRunSettlement {
+            message_step: None,
             operation_id: "settle-pending".to_owned(),
             run_id: run_id("r-pending"),
             session_id: session_id("s-pending"),
@@ -4162,6 +4649,7 @@ fn startup_finishes_staged_run_start_before_marking_it_interrupted() {
     engine
         .stage_append_for(
             AppendRequest {
+                message_step: None,
                 operation_id: "operation-start".to_owned(),
                 session_id: session_id("s-start"),
                 run_id: run_id("r-start"),
@@ -4201,6 +4689,7 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
     seed_session_and_run(&mut engine, "s-settle", "r-settle");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "operation-user".to_owned(),
             session_id: session_id("s-settle"),
             run_id: run_id("r-settle"),
@@ -4219,6 +4708,7 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
     engine
         .stage_append_for(
             AppendRequest {
+                message_step: None,
                 operation_id: "operation-settle".to_owned(),
                 session_id: session_id("s-settle"),
                 run_id: run_id("r-settle"),
@@ -4560,6 +5050,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
+                skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -4585,6 +5076,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             .expect("commit user");
         engine
             .settle_run(StoredRunSettlement {
+                message_step: None,
                 operation_id: format!("settle-{run}"),
                 run_id: run_id(run),
                 session_id: session.clone(),
@@ -4632,6 +5124,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
+                skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -4721,6 +5214,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
+            skill_activation: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -5095,6 +5589,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
     ];
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-visible".to_owned(),
             session_id: session_id("s-recall-visible"),
             run_id: run_id("r-recall-visible"),
@@ -5271,6 +5766,7 @@ fn recall_index_filters_old_generations_and_cascades_session_deletion() {
     seed_session_and_run(&mut engine, "s-recall-generation", "r-recall-generation");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-generation".to_owned(),
             session_id: session_id("s-recall-generation"),
             run_id: run_id("r-recall-generation"),
@@ -5363,6 +5859,7 @@ fn recall_index_rebuilds_dirty_owners_in_bounded_batches_after_reopen() {
         .collect();
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-rebuild".to_owned(),
             session_id: session_id("s-recall-rebuild"),
             run_id: run_id("r-recall-rebuild"),
@@ -5441,6 +5938,7 @@ fn recall_index_recovers_interrupted_rebuild_without_scanning_at_startup() {
     seed_session_and_run(&mut engine, "s-recall-interrupted", "r-recall-interrupted");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-interrupted".to_owned(),
             session_id: session_id("s-recall-interrupted"),
             run_id: run_id("r-recall-interrupted"),
@@ -5548,6 +6046,7 @@ fn missing_fts_is_recreated_as_dirty_without_eager_history_rebuild() {
     seed_session_and_run(&mut engine, "s-recall-missing-fts", "r-recall-missing-fts");
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-missing-fts".to_owned(),
             session_id: session_id("s-recall-missing-fts"),
             run_id: run_id("r-recall-missing-fts"),
@@ -5607,6 +6106,7 @@ fn recall_index_failure_never_blocks_authoritative_conversation_commit() {
 
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-index-failure".to_owned(),
             session_id: session_id("s-recall-index-failure"),
             run_id: run_id("r-recall-index-failure"),
@@ -5647,6 +6147,7 @@ fn recall_index_enforces_result_limit_and_deterministic_order() {
         .collect();
     engine
         .append_messages(AppendRequest {
+            message_step: None,
             operation_id: "append-recall-limit".to_owned(),
             session_id: session_id("s-recall-limit"),
             run_id: run_id("r-recall-limit"),
@@ -5867,6 +6368,7 @@ fn recall_index_never_exposes_old_generation_while_rebuild_budget_is_exhausted()
         seed_session_and_run(&mut engine, &session, &run);
         engine
             .append_messages(AppendRequest {
+                message_step: None,
                 operation_id: format!("append-recall-stale-{index}"),
                 session_id: session_id(&session),
                 run_id: run_id(&run),

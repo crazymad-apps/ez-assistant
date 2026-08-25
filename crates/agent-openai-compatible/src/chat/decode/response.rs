@@ -28,9 +28,11 @@ pub fn decode_assistant_message(
         PartId::new(format!("part_{part_seq}")).expect("generated part ids are never empty")
     };
 
-    if let Some(field) = &adapter.reasoning_content_field
-        && let Some(text) = reasoning_field_text(&message.extra, field, "assistant message")?
-        && !text.is_empty()
+    if let Some(text) = reasoning_field_text(
+        &message.extra,
+        &adapter.reasoning_response_fields,
+        "assistant message",
+    )? && !text.is_empty()
     {
         parts.push(AssistantPart::Reasoning(ReasoningPart {
             id: next_part_id(),

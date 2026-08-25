@@ -330,6 +330,18 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ListSessions(runtime.list_sessions(request)?),
             false,
         ),
+        RuntimeCommand::ListSkills(request) => (
+            RuntimeCommandResult::ListSkills(runtime.list_skills(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetSkillDetail(request) => (
+            RuntimeCommandResult::GetSkillDetail(runtime.get_skill_detail(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSkillEnabled(request) => (
+            RuntimeCommandResult::SetSkillEnabled(runtime.set_skill_enabled(request).await?),
+            false,
+        ),
         RuntimeCommand::GetSession(request) => (
             RuntimeCommandResult::GetSession(runtime.get_session(request)?),
             false,

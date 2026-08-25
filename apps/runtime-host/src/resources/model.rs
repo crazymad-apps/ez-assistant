@@ -47,21 +47,20 @@ impl ModelServiceFactory for HostModelServiceFactory {
         let effort_values = compile_effort_values(request.capabilities);
         let service: Arc<dyn ModelService> = match request.protocol {
             ModelProtocol::OpenAiChatCompletions => {
-                let mut adapter = if request.provider.as_str() == "deepseek"
-                    && request.capabilities.reasoning_enabled()
-                {
-                    ChatProtocolAdapter::deepseek()
-                } else {
-                    ChatProtocolAdapter::openai_compatible(request.provider.clone())
-                };
+                let mut adapter =
+                    chat_adapter(request.provider, request.capabilities.reasoning_enabled());
                 if request.capabilities.reasoning.is_some() {
                     let effort_field = (!effort_values.is_empty())
                         .then_some(reasoning_effort_field(request.provider, request.model));
-                    adapter = adapter.with_reasoning(
-                        Some("reasoning_content"),
-                        effort_field,
-                        effort_values,
-                    );
+                    adapter = if adapter.supports_reasoning() {
+                        adapter.with_reasoning_efforts(effort_field, effort_values)
+                    } else {
+                        adapter.with_reasoning(
+                            Some("reasoning_content"),
+                            effort_field,
+                            effort_values,
+                        )
+                    };
                     if let Some(policy) = reasoning_replay_policy(request.provider, request.model) {
                         adapter = adapter.with_reasoning_replay(policy);
                     }
@@ -113,6 +112,21 @@ impl ModelServiceFactory for HostModelServiceFactory {
         } else {
             Ok(ModelServiceBundle::text_only(service))
         }
+    }
+}
+
+/// 根据显式 Provider 身份选择 Chat Completions wire 方言。
+///
+/// `local` 仍是普通 OpenAI-compatible；只有 `provider = "vllm"` 才启用 vLLM 当前
+/// `reasoning` 字段及旧 `reasoning_content` 响应兼容，不能根据 loopback endpoint 猜测。
+fn chat_adapter(
+    provider: &agent_types::ProviderId,
+    reasoning_enabled: bool,
+) -> ChatProtocolAdapter {
+    match (provider.as_str(), reasoning_enabled) {
+        ("deepseek", true) => ChatProtocolAdapter::deepseek(),
+        ("vllm", true) => ChatProtocolAdapter::vllm(),
+        _ => ChatProtocolAdapter::openai_compatible(provider.clone()),
     }
 }
 
@@ -435,6 +449,24 @@ mod tests {
         assert_eq!(
             super::responses_adapter(&deepseek, "deepseek-v4-flash-vision-exp"),
             agent_openai_compatible::ResponsesProtocolAdapter::deepseek()
+        );
+    }
+
+    #[test]
+    fn vllm_chat_dialect_requires_explicit_provider_and_reasoning() {
+        let vllm = ProviderId::new("vllm").expect("provider id");
+        let local = ProviderId::new("local").expect("provider id");
+        assert_eq!(
+            super::chat_adapter(&vllm, true),
+            agent_openai_compatible::ChatProtocolAdapter::vllm()
+        );
+        assert_eq!(
+            super::chat_adapter(&vllm, false),
+            agent_openai_compatible::ChatProtocolAdapter::openai_compatible(vllm)
+        );
+        assert_eq!(
+            super::chat_adapter(&local, true),
+            agent_openai_compatible::ChatProtocolAdapter::openai_compatible(local)
         );
     }
 }

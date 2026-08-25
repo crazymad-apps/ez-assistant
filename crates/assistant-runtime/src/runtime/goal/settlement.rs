@@ -150,6 +150,7 @@ pub(crate) fn prepare_goal_run_settlement(
             generation: goal.generation,
             turn: goal.turn,
         }),
+        skill_activation: None,
         approval_mode: run.approval_mode(),
         message,
         new_goal: None,

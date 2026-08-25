@@ -37,6 +37,7 @@ use crate::{
     },
     run::RuntimeRecorder,
     session::SessionController,
+    skill::{LoadSkillTool, SessionSkillCatalog, SkillActivationLatch},
 };
 
 /// 父 Run 冻结的一组子执行资源与委派配额。
@@ -57,6 +58,7 @@ pub(crate) struct ParentDelegationController {
     limits: crate::DelegationConfig,
     execution_permits: Arc<Semaphore>,
     created_tasks: Mutex<u32>,
+    skill_catalog: SessionSkillCatalog,
 }
 
 pub(crate) struct ParentDelegationResources {
@@ -74,6 +76,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
+    pub(crate) skill_catalog: SessionSkillCatalog,
 }
 
 impl ParentDelegationController {
@@ -99,6 +102,7 @@ impl ParentDelegationController {
             limits: resources.limits,
             execution_permits,
             created_tasks: Mutex::new(0),
+            skill_catalog: resources.skill_catalog,
         }
     }
 
@@ -317,7 +321,14 @@ impl ParentDelegationController {
             .and_then(|authorizer| authorizer.with_additional_private_root(workspace.path()))
             .map_err(internal_tool_error)?,
         );
-        let recorder = Arc::new(RuntimeRecorder::for_child(task.clone(), self.store.clone()));
+        let skill_activation_latch = Arc::new(SkillActivationLatch::new(Vec::new()));
+        let recorder = Arc::new(RuntimeRecorder::for_child(
+            task.clone(),
+            self.session.clone(),
+            self.store.clone(),
+            self.events.clone(),
+            skill_activation_latch.clone(),
+        ));
         let conversation = task
             .lock_state()
             .map_err(|_| ToolError::execution("child task journal is unavailable"))?
@@ -327,9 +338,17 @@ impl ParentDelegationController {
             .snapshot();
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
-        let mut remaining_budget = self.child_agent.execution_budget().clone();
+        let child_agent = self
+            .child_agent
+            .try_with_tool(LoadSkillTool::new(
+                self.skill_catalog.clone(),
+                skill_activation_latch,
+            ))
+            .map_err(|_| ToolError::execution("child load_skill tool could not be created"))?;
+        let mut remaining_budget = child_agent.execution_budget().clone();
+        let mut next_step = std::num::NonZeroU32::MIN;
         let (outcome, forced_error) = loop {
-            let execution = self.child_agent.start_with_budget(
+            let execution = child_agent.start_with_budget_at_step(
                 input.clone(),
                 ExecutionContext {
                     cancellation: child_token.clone(),
@@ -337,6 +356,7 @@ impl ParentDelegationController {
                     authorizer: authorizer.clone(),
                 },
                 remaining_budget.clone(),
+                next_step,
             );
             let mut events = execution.events;
             let event_sender = self.events.clone();
@@ -357,19 +377,45 @@ impl ParentDelegationController {
             });
             let outcome = execution.completion.await;
             let _ = event_drain.await;
-            let agent_core::ExecutionOutcome::CompactionRequired {
-                reason,
-                consumption,
-                ..
-            } = outcome
-            else {
-                break (Some(outcome), None);
+            let (consumption, compaction_reason) = match &outcome {
+                agent_core::ExecutionOutcome::CompactionRequired {
+                    reason,
+                    consumption,
+                    ..
+                } => (consumption, Some(*reason)),
+                agent_core::ExecutionOutcome::ContinuationRequired { consumption, .. } => {
+                    (consumption, None)
+                }
+                _ => break (Some(outcome), None),
             };
             consume_execution_budget(
                 &mut remaining_budget,
                 consumption.steps,
                 consumption.tool_calls,
             );
+            let Some(advanced_step) = next_step.get().checked_add(consumption.steps) else {
+                break (
+                    None,
+                    Some(RuntimeErrorInfo::new(
+                        RuntimeErrorCode::Internal,
+                        "child step sequence overflowed",
+                    )),
+                );
+            };
+            next_step = std::num::NonZeroU32::new(advanced_step)
+                .expect("a non-zero step plus consumption stays non-zero");
+            let Some(reason) = compaction_reason else {
+                input = ExecutionInput {
+                    conversation: task
+                        .lock_state()
+                        .map_err(|_| ToolError::execution("child task journal is unavailable"))?
+                        .journal
+                        .as_ref()
+                        .ok_or_else(|| ToolError::execution("child task journal is unavailable"))?
+                        .snapshot(),
+                };
+                continue;
+            };
             if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
                 break (
                     None,
@@ -403,7 +449,12 @@ impl ParentDelegationController {
                     };
                 }
                 Err(error) if error.is_cancelled() || child_token.is_cancelled() => {
-                    break (Some(agent_core::ExecutionOutcome::Cancelled), None);
+                    break (
+                        Some(agent_core::ExecutionOutcome::Cancelled {
+                            consumption: agent_core::ExecutionConsumption::default(),
+                        }),
+                        None,
+                    );
                 }
                 Err(_) => {
                     break (
@@ -457,6 +508,21 @@ impl ParentDelegationController {
         self.registry
             .upsert(stored.clone())
             .map_err(internal_tool_error)?;
+        let owner = assistant_protocol::ConversationOwner::ChildTask {
+            session_id: stored.session_id.clone(),
+            child_task_id: stored.child_task_id.clone(),
+        };
+        let _ = self.events.send(RuntimeEvent::ConversationCommitted {
+            owner: owner.clone(),
+            generation: stored.body_generation,
+        });
+        if let Some(step) = terminal.final_step {
+            let _ = self.events.send(RuntimeEvent::StepCommitted {
+                owner,
+                step,
+                generation: stored.body_generation,
+            });
+        }
         let _ = self.events.send(RuntimeEvent::ChildTaskEvent {
             session_id: stored.session_id.clone(),
             parent_run_id: stored.parent_run_id.clone(),

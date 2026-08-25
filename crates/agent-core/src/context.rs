@@ -79,6 +79,7 @@ mod tests {
     impl ExecutionRecorder for ListRecorder {
         fn begin_tool_exchange<'a>(
             &'a self,
+            _step: u32,
             assistant: AssistantMessage,
         ) -> RecordFuture<'a, ExchangeReceipt> {
             Box::pin(async move {
@@ -99,7 +100,7 @@ mod tests {
             &'a self,
             _receipt: &'a ExchangeReceipt,
             results: Vec<agent_types::ToolMessage>,
-        ) -> RecordFuture<'a, ()> {
+        ) -> RecordFuture<'a, crate::ExchangeCompletion> {
             Box::pin(async move {
                 let assistant = self
                     .pending
@@ -112,7 +113,7 @@ mod tests {
                 let mut deltas = self.deltas.lock().expect("lock deltas");
                 deltas.push(ConversationDelta::Assistant(assistant));
                 deltas.extend(results.into_iter().map(ConversationDelta::Tool));
-                Ok(())
+                Ok(crate::ExchangeCompletion::default())
             })
         }
     }
@@ -146,7 +147,7 @@ mod tests {
         let receipt = block_on(
             context
                 .recorder
-                .begin_tool_exchange(sample_assistant_message()),
+                .begin_tool_exchange(1, sample_assistant_message()),
         )
         .expect("begin succeeds");
         assert_eq!(receipt.as_str(), "exchange_1");

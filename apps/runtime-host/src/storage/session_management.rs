@@ -1,6 +1,6 @@
 //! Session 归档、模型切换与历史重新输入的业务原子操作。
 
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
 use assistant_runtime::{
@@ -327,6 +327,53 @@ impl StorageEngine {
             })
             .collect::<StorageResult<Vec<_>>>()?
         };
+        let retained_message_ids = rewrite
+            .conversation
+            .messages
+            .iter()
+            .map(conversation::message_id)
+            .map(agent_types::MessageId::as_str)
+            .collect::<BTreeSet<_>>();
+        let removed_activation_ids = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT activation_id, message_id FROM skill_activations
+                     WHERE session_id = ?1 AND owner_kind = 'session'",
+                )
+                .map_err(|source| {
+                    internal_error("replaced skill activations could not be queried", source)
+                })?;
+            let rows = statement
+                .query_map([rewrite.session_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| {
+                    internal_error("replaced skill activations could not be queried", source)
+                })?;
+            rows.filter_map(|row| match row {
+                Ok((activation_id, message_id))
+                    if !retained_message_ids.contains(message_id.as_str()) =>
+                {
+                    Some(Ok(activation_id))
+                }
+                Ok(_) => None,
+                Err(source) => Some(Err(internal_error(
+                    "replaced skill activation could not be read",
+                    source,
+                ))),
+            })
+            .collect::<StorageResult<Vec<_>>>()?
+        };
+        for activation_id in removed_activation_ids {
+            transaction
+                .execute(
+                    "DELETE FROM skill_activations WHERE activation_id = ?1",
+                    [activation_id],
+                )
+                .map_err(|source| {
+                    database_write_error("replaced skill activation could not be removed", source)
+                })?;
+        }
         transaction
             .execute(
                 "DELETE FROM inputs WHERE session_id = ?1 AND queue_order >= ?2",
@@ -376,6 +423,7 @@ impl StorageEngine {
             agent_variant: rewrite.input.agent_variant,
             origin: rewrite.input.origin,
             goal_binding: rewrite.input.goal_binding.clone(),
+            skill_activation: None,
             user_message_id: new_message_id.clone(),
             state: StoredInputState::Committed,
             queued_message: None,
@@ -393,6 +441,7 @@ impl StorageEngine {
             cancel_requested: false,
             error: None,
             message_ids: vec![new_message_id.clone()],
+            message_steps: std::collections::HashMap::new(),
             created_at_ms: rewrite.input.accepted_at_ms,
             started_at_ms: None,
             finished_at_ms: None,

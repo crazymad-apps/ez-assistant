@@ -73,7 +73,7 @@ async fn main() {
         .await;
 
     match outcome {
-        ExecutionOutcome::Completed(message) => println!("completed: {message:?}"),
+        ExecutionOutcome::Completed { message, .. } => println!("completed: {message:?}"),
         other => println!("unexpected outcome: {other:?}"),
     }
 }

@@ -624,3 +624,33 @@ Agent Core 必须可以在不启动 Tauri、数据库和真实网络的情况下
 
 测试优先使用 scripted model、fake tool、scripted RecallSource、in-memory recorder、
 fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。
+
+## 十五、v0.19.0 统一内插边界
+
+- 新的规范内部 user-role 上下文统一使用 `InternalContext` Part，并通过 Provider-neutral
+  `ContextInsertionPlan` 表达位置、持久化和产品可见性；旧 `Injected` 只承担兼容读取。
+- Runtime 领域协调器负责规范 boundary 身份和消息构造；功能模块保留自己的状态机和事务入口，
+  Provider Adapter 不得创建 Runtime boundary、产品消息、Run 或 step。
+- Tool Result 图片的聚合 user-role 信封是由已落账 ToolMessage/Part 确定性派生的 request-only
+  计划，只进入当次 Provider wire。Chat/Responses 必须共用批次顺序规划，不写回 Conversation。
+- 普通压缩原样保护每个 retention key 的最新内部上下文；活动 Turn continuation 允许摘要时，
+  最新冻结正文必须原样重挂到隐藏锚点，确保后续执行不依赖摘要猜测控制事实。
+
+## 十六、v0.19.0 Skill 发现与启停
+
+- 本地 Skill 文件事实由 Host 有界扫描和 YAML 解析，来源归并、同名 Winner、冲突和名称启停由
+  Runtime 领域决定；Host 不持有第二份 Catalog 状态机。
+- 四个 Root 的优先级固定为工作区 `.ez-assistant`、工作区 `.agents`、用户 `.ez-assistant`、
+  用户 `.agents`。目录枚举和诊断排序必须确定，扫描不完整不得以部分结果继续构造 Catalog。
+- SQLite 开关只以格式有效的 Skill `name` 为键，不区分来源或层级；禁用不会回退同名低优先级包。
+- Skill 是指令来源而不是权限来源；启用本身无需额外权限，包内文件、Shell 等能力仍由现有工具
+  Authorizer 决定，`allowed-tools` 不转换为放行规则。
+- 新 Session 在创建边界冻结完整 Catalog、Winner 的精确 `SKILL.md` 正文与 digest、共享源目录、
+  确定性 revision 和模型可见 System Prompt Part；以后执行、归档恢复与重启均不重新扫描当前定义。
+  旧 Session 使用版本化 `legacy_unavailable` 空 Catalog，不因升级获得当前技能。
+- 普通资源始终保留在四个共享 Skill Root，按 Skill 指令通过既有文件/Shell 工具访问；Host 不枚举、
+  复制或建立 Session 私有 Skill 包。Fork 只复制 Catalog 结构化事实，不改写共享路径或复制文件。
+- 用户每次提交最多携带一个 Skill 名称；输入区再次选择属于客户端草稿替换，发送后由该 Input 独立冻结，
+  不形成会话级“当前选择”。Runtime 从 Session Catalog 解析正文并经统一 `InternalContext` 边界附加。
+- Activation ledger 与 Input/Run/消息原子提交，是 Queue 标签、历史消息标签和当前上下文的唯一来源；
+  文件或开关变化不改写已冻结事实。Fork 只继承所选 Conversation 前缀内的 Activation。

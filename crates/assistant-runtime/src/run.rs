@@ -5,7 +5,7 @@ mod recorder;
 mod settlement;
 mod supervisor;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub(crate) use model_diagnostics::{ModelFailureDiagnostics, RunModelDiagnostics};
 pub(crate) use recorder::RuntimeRecorder;
@@ -22,7 +22,13 @@ use assistant_protocol::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{RuntimeError, RuntimeResult, StoredRun, id, session::SessionState};
+use crate::{
+    RuntimeError, RuntimeResult, StoredRun, id,
+    internal_boundary::{
+        InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+    },
+    session::SessionState,
+};
 
 use self::settlement::RunSettlement;
 
@@ -38,11 +44,13 @@ pub(crate) struct RunRecord {
     approval_mode: ApprovalMode,
     reasoning_effort: Option<ReasoningEffortKey>,
     cancel_requested: bool,
+    active_step: Option<u32>,
     reasoning: String,
     text: String,
     tools: Vec<ToolActivitySnapshot>,
     error: Option<RuntimeErrorInfo>,
     message_ids: Vec<MessageId>,
+    message_steps: HashMap<MessageId, u32>,
     finished_at_ms: Option<i64>,
 }
 
@@ -59,11 +67,13 @@ impl RunRecord {
             approval_mode: run.approval_mode,
             reasoning_effort: run.reasoning_effort,
             cancel_requested: false,
+            active_step: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,
             message_ids,
+            message_steps: run.message_steps.clone(),
             finished_at_ms: None,
         }
     }
@@ -80,11 +90,13 @@ impl RunRecord {
             approval_mode: run.approval_mode,
             reasoning_effort: run.reasoning_effort,
             cancel_requested: run.cancel_requested,
+            active_step: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
             error: run.error,
             message_ids: run.message_ids,
+            message_steps: run.message_steps,
             finished_at_ms: run.finished_at_ms,
         }
     }
@@ -118,6 +130,17 @@ impl RunRecord {
         self.message_ids.extend(messages);
     }
 
+    pub(crate) fn extend_message_ids_at_step(
+        &mut self,
+        messages: impl IntoIterator<Item = MessageId>,
+        step: u32,
+    ) {
+        for message_id in messages {
+            self.message_steps.insert(message_id.clone(), step);
+            self.message_ids.push(message_id);
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> RunSnapshot {
         RunSnapshot {
             run_id: self.run_id.clone(),
@@ -131,6 +154,7 @@ impl RunRecord {
             approval_mode: self.approval_mode,
             reasoning_effort: self.reasoning_effort,
             cancel_requested: self.cancel_requested,
+            active_step: self.active_step,
             reasoning: self.reasoning.clone(),
             text: self.text.clone(),
             tools: self.tools.clone(),
@@ -162,9 +186,25 @@ impl RunRecord {
     }
 
     /// 开始新的模型 Step 时只保留该 Step 的流式可见正文；可靠历史由 Conversation 承载。
-    pub(crate) fn start_step(&mut self) {
+    pub(crate) fn start_step(&mut self, step: u32) {
+        if self.active_step == Some(step) {
+            return;
+        }
+        self.active_step = Some(step);
         self.reasoning.clear();
         self.text.clear();
+    }
+
+    /// 即使 `StepStarted` 被背压丢弃，delta 自身也能建立正确 step 边界。
+    pub(crate) fn append_reasoning(&mut self, step: u32, delta: &str) {
+        self.start_step(step);
+        self.reasoning.push_str(delta);
+    }
+
+    /// 即使 `StepStarted` 被背压丢弃，delta 自身也能建立正确 step 边界。
+    pub(crate) fn append_text(&mut self, step: u32, delta: &str) {
+        self.start_step(step);
+        self.text.push_str(delta);
     }
 
     pub(crate) fn input_id(&self) -> &InputId {
@@ -172,6 +212,9 @@ impl RunRecord {
     }
     pub(crate) fn message_ids(&self) -> &[MessageId] {
         &self.message_ids
+    }
+    pub(crate) fn message_step(&self, message_id: &MessageId) -> Option<u32> {
+        self.message_steps.get(message_id).copied()
     }
     pub(crate) fn attempt(&self) -> u32 {
         self.attempt
@@ -259,17 +302,22 @@ pub(crate) fn create_user_message(
             files,
         }));
     }
-    // 注入作为规范 Part 落盘；恢复和重试必须复用历史文本，不能按当前模板重算。
-    parts.push(UserPart::Injected(TextPart {
-        id: allocate_part_id()?,
-        text: crate::agent_variant::injection_text(variant).to_owned(),
-    }));
-    Ok(UserMessage {
+    let mut message = UserMessage {
         origin: Default::default(),
         transcript_visibility: Default::default(),
         id: message_id,
         parts,
-    })
+    };
+    // 变体上下文作为规范 Part 落盘；恢复和重试复用冻结正文，不能按当前模板重算。
+    InternalBoundaryCoordinator::append(
+        &mut message,
+        InternalBoundaryRequest {
+            source: InternalBoundarySource::AgentVariant,
+            retention_key: Some("agent_variant".to_owned()),
+            text: crate::agent_variant::injection_text(variant).to_owned(),
+        },
+    )?;
+    Ok(message)
 }
 
 pub(crate) fn allocate_message_id() -> RuntimeResult<MessageId> {

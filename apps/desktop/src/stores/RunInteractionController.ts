@@ -62,6 +62,7 @@ export class RunInteractionController {
     variant: AgentVariant,
     attachment_ids: readonly AttachmentId[] = [],
     mode: SubmitInputMode = "normal",
+    skill_name: string | null = null,
   ): Promise<boolean> {
     const { connection, runtime, state } = this.dependencies;
     const client = runtime.client;
@@ -79,6 +80,7 @@ export class RunInteractionController {
           variant,
           mode,
           attachment_ids: [...attachment_ids],
+          skill_name: skill_name ?? undefined,
           idempotency_key: createIdempotencyKey(),
         },
       });

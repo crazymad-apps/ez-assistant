@@ -86,11 +86,11 @@ export function ensureStep(
   return steps.some((item) => item.step === step) ? steps : [...steps, { step, segments: [] }];
 }
 
-export function updateCurrentStep(
+export function updateStep(
   run: LiveRunProjection,
+  active_step: number,
   update: (segments: readonly LiveExecutionSegment[]) => readonly LiveExecutionSegment[],
 ): LiveRunProjection {
-  const active_step = run.active_step || 1;
   return {
     ...run,
     active_step,
@@ -102,27 +102,30 @@ export function updateCurrentStep(
 
 export function updateRunTools(
   run: LiveRunProjection,
+  step: number,
   call_id: ToolCallId,
   patch: Partial<LiveToolSnapshot>,
 ): LiveRunProjection {
   return {
     ...run,
-    steps: run.steps.map((step) => ({ ...step, segments: updateTool(step.segments, call_id, patch) })),
+    steps: run.steps.map((item) => item.step === step
+      ? { ...item, segments: updateTool(item.segments, call_id, patch) }
+      : item),
   };
 }
 
 export function updateRunToolOutput(
   run: LiveRunProjection,
+  step: number,
   call_id: ToolCallId,
   channel: "stdout" | "stderr",
   chunk: string,
 ): LiveRunProjection {
   return {
     ...run,
-    steps: run.steps.map((step) => ({
-      ...step,
-      segments: updateToolOutput(step.segments, call_id, channel, chunk),
-    })),
+    steps: run.steps.map((item) => item.step === step
+      ? { ...item, segments: updateToolOutput(item.segments, call_id, channel, chunk) }
+      : item),
   };
 }
 

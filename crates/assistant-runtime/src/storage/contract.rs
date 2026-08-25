@@ -3,7 +3,8 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 
 use crate::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
-    PinnedMemoryMutationResult, StoredPinnedMemory,
+    PinnedMemoryMutationResult, SkillNameState, SkillNameStateChange, StoredPinnedMemory,
+    StoredSkillActivation,
 };
 
 use super::{
@@ -35,6 +36,7 @@ pub struct RecoveredRuntime {
     pub child_tasks: Vec<StoredChildTask>,
     pub work_plans: Vec<StoredWorkPlan>,
     pub goals: Vec<StoredGoal>,
+    pub skill_activations: Vec<StoredSkillActivation>,
 }
 
 /// Assistant Runtime 使用的持久化能力端口。
@@ -46,6 +48,12 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 为新 Session 一致读取当前 Persona 与 Pinned Memory。
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot>;
+
+    /// 读取用户显式保存的全局 Skill 名称开关；缺少记录的名称默认启用。
+    fn list_skill_name_states(&self) -> StoreFuture<'_, Vec<SkillNameState>>;
+
+    /// 以通过格式校验的名称为唯一键原子写入一个全局 Skill 开关。
+    fn set_skill_enabled(&self, change: SkillNameStateChange) -> StoreFuture<'_, SkillNameState>;
 
     /// 读取一个 Session 的当前 WorkPlan；不存在时返回 `None`。
     fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>>;

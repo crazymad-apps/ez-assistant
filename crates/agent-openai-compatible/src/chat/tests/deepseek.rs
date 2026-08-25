@@ -481,8 +481,9 @@ async fn adapter_declares_deepseek_dialect_and_derives_capabilities() {
     let adapter = ChatProtocolAdapter::deepseek();
     assert_eq!(adapter.provider, provider_id("deepseek"));
     assert_eq!(adapter.protocol, protocol_id("openai.chat_completions"));
+    assert_eq!(adapter.reasoning_response_fields, vec!["reasoning_content"]);
     assert_eq!(
-        adapter.reasoning_content_field.as_deref(),
+        adapter.reasoning_replay_field.as_deref(),
         Some("reasoning_content")
     );
     // DeepSeek thinking 无强度档位映射（依据见 ChatProtocolAdapter::deepseek 文档注释）。

@@ -40,21 +40,14 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         .await
         .expect("new session");
 
-    let reload_runtime = runtime.clone();
-    let reload = tokio::spawn(async move {
-        reload_runtime
-            .reload_config(ReloadConfigRequest::default())
-            .await
-    });
-    entered.notified().await;
-
     let old_run = runtime
         .submit_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: before_reload.session.session_id.clone(),
-            message: "race before swap".to_owned(),
+            message: "before swap".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -70,6 +63,30 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         assistant_protocol::RunStatus::Completed
     );
 
+    let reload_runtime = runtime.clone();
+    let reload = tokio::spawn(async move {
+        reload_runtime
+            .reload_config(ReloadConfigRequest::default())
+            .await
+    });
+    entered.notified().await;
+
+    let start_runtime = runtime.clone();
+    let start_session_id = after_reload.session.session_id.clone();
+    let new_run = tokio::spawn(async move {
+        start_runtime
+            .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
+                variant: assistant_protocol::AgentVariant::Build,
+                session_id: start_session_id,
+                message: "race after swap".to_owned(),
+                attachment_ids: Vec::new(),
+                skill_name: None,
+                idempotency_key: None,
+            })
+            .await
+    });
+
     release.notify_one();
     assert_eq!(
         reload
@@ -80,16 +97,9 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
             .state,
         assistant_protocol::ConfigurationState::Ready
     );
-    let new_run = runtime
-        .submit_input(SubmitInputRequest {
-            mode: assistant_protocol::SubmitInputMode::Normal,
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: after_reload.session.session_id.clone(),
-            message: "run after swap".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: None,
-        })
+    let new_run = new_run
         .await
+        .expect("start task")
         .expect("run from new snapshot");
     assert_eq!(
         wait_for_terminal(
@@ -167,6 +177,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -192,6 +203,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -215,22 +227,29 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             .state,
         assistant_protocol::ConfigurationState::Missing
     );
-    let rejected = runtime
-        .submit_input(SubmitInputRequest {
-            mode: assistant_protocol::SubmitInputMode::Normal,
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: second.session.session_id.clone(),
-            message: "must not use stale key".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: None,
-        })
-        .await
-        .expect("input acceptance does not require an active model configuration");
+    assert!(matches!(
+        runtime
+            .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
+                variant: assistant_protocol::AgentVariant::Build,
+                session_id: second.session.session_id.clone(),
+                message: "must not use stale key".to_owned(),
+                attachment_ids: Vec::new(),
+                skill_name: None,
+                idempotency_key: None,
+            })
+            .await,
+        Err(RuntimeError::ModelUnavailable { .. })
+    ));
     assert_eq!(
-        wait_for_terminal(&runtime, &second.session.session_id, &rejected.run.run_id)
-            .await
-            .status,
-        assistant_protocol::RunStatus::Failed
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: second.session.session_id.clone(),
+            })
+            .expect("session after rejected input")
+            .session
+            .queued_input_count,
+        0
     );
     assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
 
@@ -477,6 +496,190 @@ async fn model_mutations_use_revision_cas_and_never_publish_invalid_candidates()
             .status
             .revision,
         Some(test_config_revision(&external))
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_idle_session_model_preserves_history_and_requires_reselection() {
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source,
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    let loaded = runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .expect("reload");
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    let created = runtime
+        .create_model(CreateModelRequest {
+            model: model_input(
+                "secondary",
+                "https://api.example.test/v1",
+                assistant_protocol::ModelCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
+                ),
+            ),
+            expected_revision: loaded.status.revision,
+            set_default: false,
+        })
+        .await
+        .expect("create replacement");
+
+    runtime
+        .delete_model(DeleteModelRequest {
+            model_key: assistant_protocol::ModelKey::new("fixture").expect("fixture key"),
+            expected_revision: created.status.revision.expect("created revision"),
+            replacement_default: Some(
+                assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
+            ),
+        })
+        .await
+        .expect("idle session does not block deletion");
+
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session.session.session_id.clone(),
+        })
+        .await
+        .expect("history remains readable")
+        .snapshot
+        .value;
+    assert_eq!(view.session.model_key.as_str(), "fixture");
+    assert!(view.composer_capabilities.selected_model_key.is_none());
+    assert!(matches!(
+        runtime
+            .submit_input(SubmitInputRequest {
+                mode: assistant_protocol::SubmitInputMode::Normal,
+                variant: assistant_protocol::AgentVariant::Build,
+                session_id: session.session.session_id.clone(),
+                message: "must not be accepted".to_owned(),
+                attachment_ids: Vec::new(),
+                skill_name: None,
+                idempotency_key: None,
+            })
+            .await,
+        Err(RuntimeError::ModelUnavailable { .. })
+    ));
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session.session_id.clone(),
+            })
+            .expect("session after rejected input")
+            .session
+            .queued_input_count,
+        0
+    );
+
+    runtime
+        .set_session_model(SetSessionModelRequest {
+            session_id: session.session.session_id.clone(),
+            model_key: assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
+        })
+        .await
+        .expect("select replacement model");
+    let selected = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session.session.session_id,
+        })
+        .await
+        .expect("selected session view")
+        .snapshot
+        .value
+        .composer_capabilities
+        .selected_model_key;
+    assert_eq!(
+        selected.as_ref().map(assistant_protocol::ModelKey::as_str),
+        Some("secondary")
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_model_used_by_a_running_run_is_rejected() {
+    let entered = Arc::new(Notify::new());
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source,
+        Arc::new(StaticModelFactory::new(Arc::new(CancellationAwareModel {
+            capabilities: model_capabilities(false),
+            entered: entered.clone(),
+        }))),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    let loaded = runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .expect("reload");
+    let created = runtime
+        .create_model(CreateModelRequest {
+            model: model_input(
+                "secondary",
+                "https://api.example.test/v1",
+                assistant_protocol::ModelCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
+                ),
+            ),
+            expected_revision: loaded.status.revision,
+            set_default: false,
+        })
+        .await
+        .expect("create replacement");
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "running".to_owned(),
+            attachment_ids: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("run");
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("model entered");
+
+    assert!(matches!(
+        runtime
+            .delete_model(DeleteModelRequest {
+                model_key: assistant_protocol::ModelKey::new("fixture").expect("fixture key"),
+                expected_revision: created.status.revision.expect("created revision"),
+                replacement_default: Some(
+                    assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
+                ),
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
+
+    runtime
+        .interrupt_run(InterruptRunRequest {
+            session_id: session.session.session_id.clone(),
+            run_id: run.run.run_id.clone(),
+        })
+        .await
+        .expect("interrupt");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session.session_id, &run.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Cancelled
     );
 }
 

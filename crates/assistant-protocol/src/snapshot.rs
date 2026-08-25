@@ -473,6 +473,10 @@ pub struct SessionSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ToolActivitySnapshot {
+    /// 所属 Run step；旧快照缺失时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step: Option<u32>,
     /// 工具调用的不透明标识。
     pub call_id: ToolCallId,
     /// 模型可见的工具名称。
@@ -531,6 +535,10 @@ pub struct RunSnapshot {
     pub reasoning_effort: Option<ReasoningEffortKey>,
     /// 是否已经接受过取消请求。
     pub cancel_requested: bool,
+    /// 当前流式观察内容所属的 Run step；尚未开始或旧快照缺失时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_step: Option<u32>,
     /// 截至快照时观察到的 reasoning；运行中可能因事件丢失而不完整。
     pub reasoning: String,
     /// 截至快照时观察到的正文；正常完成时由最终 AssistantMessage 校准。
@@ -660,9 +668,11 @@ mod tests {
             approval_mode: ApprovalMode::Auto,
             reasoning_effort: None,
             cancel_requested: false,
+            active_step: Some(1),
             reasoning: "checked".to_owned(),
             text: "partial".to_owned(),
             tools: vec![ToolActivitySnapshot {
+                step: Some(1),
                 call_id: ToolCallId::new("call-1").expect("call id"),
                 tool_name: "echo_text".to_owned(),
                 status: ToolActivityStatus::Completed,

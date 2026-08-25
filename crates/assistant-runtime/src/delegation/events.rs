@@ -8,11 +8,13 @@ use assistant_protocol::{
 
 pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
     match event {
-        AgentEvent::TextDelta { id, delta } => Some(ChildTaskEvent::TextDelta {
+        AgentEvent::TextDelta { step, id, delta } => Some(ChildTaskEvent::TextDelta {
+            step,
             part_id: PartId::new(id.as_str()).ok()?,
             delta,
         }),
-        AgentEvent::ReasoningDelta { id, delta } => Some(ChildTaskEvent::ReasoningDelta {
+        AgentEvent::ReasoningDelta { step, id, delta } => Some(ChildTaskEvent::ReasoningDelta {
+            step,
             part_id: PartId::new(id.as_str()).ok()?,
             delta,
         }),
@@ -25,18 +27,22 @@ pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
                 cached_input_tokens: usage.cached_input_tokens,
             },
         }),
-        AgentEvent::ToolProposed { call } => Some(ChildTaskEvent::ToolProposed {
+        AgentEvent::ToolProposed { step, call } => Some(ChildTaskEvent::ToolProposed {
+            step,
             call_id: ToolCallId::new(call.id.as_str()).ok()?,
             tool_name: call.name.as_str().to_owned(),
         }),
-        AgentEvent::ToolStarted { call_id } => Some(ChildTaskEvent::ToolStarted {
+        AgentEvent::ToolStarted { step, call_id } => Some(ChildTaskEvent::ToolStarted {
+            step,
             call_id: ToolCallId::new(call_id.as_str()).ok()?,
         }),
         AgentEvent::ToolOutput {
+            step,
             call_id,
             channel,
             chunk,
         } => Some(ChildTaskEvent::ToolOutput {
+            step,
             call_id: ToolCallId::new(call_id.as_str()).ok()?,
             channel: match channel {
                 AgentOutputChannel::Stdout => ToolOutputChannel::Stdout,
@@ -44,7 +50,12 @@ pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
             },
             chunk,
         }),
-        AgentEvent::ToolCompleted { call_id, status } => Some(ChildTaskEvent::ToolCompleted {
+        AgentEvent::ToolCompleted {
+            step,
+            call_id,
+            status,
+        } => Some(ChildTaskEvent::ToolCompleted {
+            step,
             call_id: ToolCallId::new(call_id.as_str()).ok()?,
             status: match status {
                 ToolCompletionStatus::Success => ToolActivityStatus::Completed,
@@ -57,6 +68,7 @@ pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
         | AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }
         | AgentEvent::ExecutionCancelled { .. }
-        | AgentEvent::ExecutionCompactionRequired { .. } => None,
+        | AgentEvent::ExecutionCompactionRequired { .. }
+        | AgentEvent::ExecutionContinuationRequired { .. } => None,
     }
 }

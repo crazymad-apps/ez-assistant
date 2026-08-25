@@ -1,10 +1,15 @@
 //! WorkPlan 到模型隐藏上下文的投影。
 
-use agent_types::{PartId, TextPart, UserMessage, UserPart};
+use agent_types::UserMessage;
 use serde::Serialize;
 
 use super::{TodoItemStatus, WorkPlan};
-use crate::{RuntimeError, RuntimeResult, id};
+use crate::{
+    RuntimeError, RuntimeResult,
+    internal_boundary::{
+        InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+    },
+};
 
 pub(crate) const WORK_PLAN_CONTEXT_V1: &str = "WORK_PLAN_CONTEXT_V1";
 
@@ -19,18 +24,17 @@ pub(crate) fn inject_claimed_context(
     let Some(claimed_message) = message.as_mut() else {
         return Ok(None);
     };
-    let id = id::generate("part").map_err(|_| RuntimeError::InternalStateUnavailable {
-        component: "work plan context part id source",
-    })?;
-    let id = PartId::new(id).map_err(|_| RuntimeError::InternalStateUnavailable {
-        component: "work plan context part id",
-    })?;
     let text = context_text(plan).map_err(|_| RuntimeError::InternalStateUnavailable {
         component: "work plan context projection",
     })?;
-    claimed_message
-        .parts
-        .push(UserPart::Injected(TextPart { id, text }));
+    InternalBoundaryCoordinator::append(
+        claimed_message,
+        InternalBoundaryRequest {
+            source: InternalBoundarySource::WorkPlan,
+            retention_key: Some("work_plan".to_owned()),
+            text,
+        },
+    )?;
     Ok(message)
 }
 
@@ -60,7 +64,7 @@ fn context_text(plan: &WorkPlan) -> Result<String, serde_json::Error> {
     };
     serde_json::to_string(&context).map(|json| {
         format!(
-            "{WORK_PLAN_CONTEXT_V1}\nThis is the Runtime-maintained session work plan. Its items intentionally have no ids. Use update_plan with the complete ordered item list to record material changes; omit objective to preserve the current one. The plan does not enable automatic continuation.\n{json}"
+            "{WORK_PLAN_CONTEXT_V1}\nThis is the Runtime-maintained session work plan. Its items intentionally have no ids. Use update_plan with the complete objective and ordered item list to record material changes. Always provide objective; when only updating items, repeat the current objective unchanged. The plan does not enable automatic continuation.\n{json}"
         )
     })
 }

@@ -32,6 +32,9 @@ pub enum ImageHandlingMode {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ComposerCapabilitiesSnapshot {
+    /// 当前 Session 历史模型键仍能解析为可用配置时返回该键；否则前端必须视为未选择模型。
+    #[serde(default)]
+    pub selected_model_key: Option<ModelKey>,
     pub reasoning_effort_options: Vec<ReasoningEffortOptionSnapshot>,
     pub image_handling: ImageHandlingMode,
     /// 当前冻结模型是否支持 Goal 所需的 Tool Call。
@@ -203,6 +206,10 @@ pub struct UserMessageSnapshot {
     pub input_id: Option<InputId>,
     pub text: String,
     pub attachment_ids: Vec<AttachmentId>,
+    /// 用户接受输入时冻结的单个 Skill 标签。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skill: Option<crate::SkillActivationTagSnapshot>,
     pub created_at_ms: Option<i64>,
 }
 
@@ -222,6 +229,10 @@ pub struct AssistantMessageSnapshot {
     pub message_id: MessageId,
     pub run_id: Option<RunId>,
     pub attempt: Option<u32>,
+    /// 所属 Run 的可靠 step；旧记录缺失时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step: Option<u32>,
     pub created_at_ms: Option<i64>,
     /// 所属 Run 的可靠结束时间；Turn 工具栏只在 Run 终结后展示该时间。
     pub finished_at_ms: Option<i64>,
@@ -487,6 +498,10 @@ pub struct QueuedInputSnapshot {
     /// Goal 存在时该用户输入只暂存于 Queue，必须由用户显式选择恢复或退出 Goal 后处理。
     #[serde(default)]
     pub held_by_goal: bool,
+    /// 与 Input 一起冻结且不会被当前文件或开关替换的 Skill 标签。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skill: Option<crate::SkillActivationTagSnapshot>,
 }
 
 /// Session 的有序输入队列。
@@ -526,6 +541,10 @@ pub struct SessionViewSnapshot {
     pub runs: Vec<RunSnapshot>,
     pub usage: SessionUsageSnapshot,
     pub child_tasks: Vec<ChildTaskTreeItemSnapshot>,
+    #[serde(default)]
+    pub skill_catalog: crate::SessionSkillCatalogSnapshot,
+    #[serde(default)]
+    pub active_skills: Vec<crate::ActiveSkillSnapshot>,
     pub conversation: ConversationPage,
 }
 
@@ -795,6 +814,7 @@ mod tests {
             message_id: MessageId::new("message-1").expect("message id"),
             run_id: None,
             attempt: None,
+            step: None,
             created_at_ms: None,
             finished_at_ms: None,
             status: None,

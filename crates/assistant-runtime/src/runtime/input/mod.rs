@@ -210,6 +210,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     compactor,
                     reasoning_effort,
                     goal_signal_latch,
+                    skill_activation_latch,
                 } = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     let plan = match session.lock_state() {
@@ -347,12 +348,15 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     session.clone(),
                     next.2.run_id.clone(),
                     context.store.clone(),
+                    context.events.clone(),
+                    skill_activation_latch,
                 ));
                 let mut compaction_count = 0_u32;
                 let mut remaining_budget = agent.execution_budget().clone();
+                let mut next_step = std::num::NonZeroU32::MIN;
                 let (outcome, forced_error) = loop {
                     let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        agent.start_with_budget(
+                        agent.start_with_budget_at_step(
                             input.clone(),
                             ExecutionContext {
                                 cancellation: cancellation.clone(),
@@ -360,6 +364,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 authorizer: authorizer.clone(),
                             },
                             remaining_budget.clone(),
+                            next_step,
                         )
                     }));
                     let Ok(AgentExecution {
@@ -379,19 +384,53 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         model_diagnostics.clone(),
                     )
                     .await;
-                    let Some(agent_core::ExecutionOutcome::CompactionRequired {
-                        reason,
-                        consumption,
-                        ..
-                    }) = observed.outcome.as_ref()
-                    else {
-                        break (observed.outcome, None);
+                    let (consumption, compaction_reason) = match observed.outcome.as_ref() {
+                        Some(agent_core::ExecutionOutcome::CompactionRequired {
+                            reason,
+                            consumption,
+                            ..
+                        }) => (consumption, Some(*reason)),
+                        Some(agent_core::ExecutionOutcome::ContinuationRequired {
+                            consumption,
+                            ..
+                        }) => (consumption, None),
+                        _ => break (observed.outcome, None),
                     };
                     consume_execution_budget(
                         &mut remaining_budget,
                         consumption.steps,
                         consumption.tool_calls,
                     );
+                    let Some(advanced_step) = next_step.get().checked_add(consumption.steps) else {
+                        break (
+                            None,
+                            Some(RuntimeErrorInfo::new(
+                                assistant_protocol::RuntimeErrorCode::Internal,
+                                "run step sequence overflowed",
+                            )),
+                        );
+                    };
+                    next_step = std::num::NonZeroU32::new(advanced_step)
+                        .expect("a non-zero step plus consumption stays non-zero");
+                    let Some(reason) = compaction_reason else {
+                        input = match session.lock_state().ok().and_then(|state| {
+                            state.journal.as_ref().map(|journal| ExecutionInput {
+                                conversation: journal.snapshot(),
+                            })
+                        }) {
+                            Some(input) => input,
+                            None => {
+                                break (
+                                    None,
+                                    Some(RuntimeErrorInfo::new(
+                                        assistant_protocol::RuntimeErrorCode::Internal,
+                                        "continued run conversation is unavailable",
+                                    )),
+                                );
+                            }
+                        };
+                        continue;
+                    };
                     if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
                         break (
                             None,
@@ -399,7 +438,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
                                 format!(
                                     "context compaction recovery limit reached (reason={})",
-                                    compaction_reason_label(*reason)
+                                    compaction_reason_label(reason)
                                 ),
                             )),
                         );
@@ -420,7 +459,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             };
                         }
                         Err(error) if error.is_cancelled() || cancellation.is_cancelled() => {
-                            break (Some(agent_core::ExecutionOutcome::Cancelled), None);
+                            break (
+                                Some(agent_core::ExecutionOutcome::Cancelled {
+                                    consumption: agent_core::ExecutionConsumption::default(),
+                                }),
+                                None,
+                            );
                         }
                         Err(_) => {
                             break (
@@ -429,7 +473,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                     assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
                                     format!(
                                         "context compaction failed (reason={})",
-                                        compaction_reason_label(*reason)
+                                        compaction_reason_label(reason)
                                     ),
                                 )),
                             );
@@ -486,6 +530,26 @@ fn publish_settlement_events(
     session: &SessionController,
     settlement: crate::run::RunSettlementResult,
 ) {
+    let committed_step = settlement.committed_step;
+    if let Ok(state) = session.lock_state() {
+        let generation = state.body_generation;
+        drop(state);
+        let _ = events.send(RuntimeEvent::ConversationCommitted {
+            owner: ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+            generation,
+        });
+        if let Some(step) = committed_step {
+            let _ = events.send(RuntimeEvent::StepCommitted {
+                owner: ConversationOwner::MainSession {
+                    session_id: session.id().clone(),
+                },
+                step,
+                generation,
+            });
+        }
+    }
     let _ = events.send(crate::run::finished_event(settlement.run));
     if let Some(goal) = settlement.goal {
         let _ = events.send(RuntimeEvent::GoalChanged {
@@ -498,16 +562,6 @@ fn publish_settlement_events(
         let _ = events.send(RuntimeEvent::RunAccepted {
             session_id: continuation.session_id,
             run_id: continuation.run_id,
-        });
-    }
-    if let Ok(state) = session.lock_state() {
-        let generation = state.body_generation;
-        drop(state);
-        let _ = events.send(RuntimeEvent::ConversationCommitted {
-            owner: ConversationOwner::MainSession {
-                session_id: session.id().clone(),
-            },
-            generation,
         });
     }
 }
@@ -536,6 +590,7 @@ async fn fail_before_start(
             cancel_requested: false,
             error: Some(error.clone()),
             messages: Vec::new(),
+            message_step: None,
             goal_effect: None,
             finished_at_ms: finished_at,
         })

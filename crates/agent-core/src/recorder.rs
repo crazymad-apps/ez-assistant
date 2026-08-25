@@ -57,6 +57,13 @@ impl ExchangeReceipt {
     }
 }
 
+/// Recorder 完整提交一个 Tool Exchange 后交回 Core 的通用控制结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExchangeCompletion {
+    /// 可靠提交同时改变了后续模型上下文，当前执行应结束并交由上层续跑。
+    pub continuation_required: bool,
+}
+
 /// 规范对话的两阶段落账 SPI；实现归 Runtime（持久化会话/日志等）。
 ///
 /// 对象安全，沿用 `ModelService` 的手写 boxed-future 模式（无 async-trait）。
@@ -67,6 +74,7 @@ pub trait ExecutionRecorder: Send + Sync {
     /// 快照可见的 AssistantMessage。
     fn begin_tool_exchange<'a>(
         &'a self,
+        step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt>;
 
@@ -87,7 +95,7 @@ pub trait ExecutionRecorder: Send + Sync {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()>;
+    ) -> RecordFuture<'a, ExchangeCompletion>;
 }
 
 /// completed exchange 的规范投影视图。

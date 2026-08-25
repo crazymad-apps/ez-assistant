@@ -247,7 +247,7 @@ export const ConversationView = observer(function ConversationView() {
               <div className={styles.message_list}>
                 {live_run
                   ? <LiveAssistantMessage onToolClick={openLiveToolDetail} run={live_run} />
-                  : <EmptyConversation title="正在读取子任务" detail="正在从 Runtime 获取可靠消息投影。" />}
+                  : <EmptyConversation title="正在读取子任务" detail="正在从运行时获取可靠消息投影。" />}
               </div>
             </div>
           </div>
@@ -266,7 +266,7 @@ export const ConversationView = observer(function ConversationView() {
         </>
       );
     }
-    return <EmptyConversation title="正在读取会话" detail="正在从 Runtime 获取可靠消息投影。" />;
+    return <EmptyConversation title="正在读取会话" detail="正在从运行时获取可靠消息投影。" />;
   }
   if (history.items.length === 0 && !live_run) {
     if (!child_view) {
@@ -279,7 +279,7 @@ export const ConversationView = observer(function ConversationView() {
       <div aria-label="消息列表" className={styles.scroll} onScroll={handleScroll} ref={scroll_ref}>
         <div className={styles.message_list} ref={message_list_ref}>
           {child_view && history.items.length === 0 && !live_run && (
-            <EmptyConversation title={child_view.task.task.title} detail="子 Agent 尚未产生可展示的消息。" />
+            <EmptyConversation title={child_view.task.task.title} detail="子智能体尚未产生可展示的消息。" />
           )}
           {history.has_more && (
             <button className={styles.load_previous} disabled={history.is_loading_previous} onClick={() => void loadPrevious()} type="button">

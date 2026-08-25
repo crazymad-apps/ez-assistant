@@ -13,6 +13,7 @@ mod error;
 mod factory;
 mod goal;
 mod id;
+mod internal_boundary;
 mod journal;
 mod memory;
 mod observation;
@@ -20,6 +21,7 @@ mod permission;
 mod run;
 mod runtime;
 mod session;
+mod skill;
 mod storage;
 mod work_plan;
 mod workspace;
@@ -60,6 +62,15 @@ pub use permission::{
     ShellPermissionMatcher,
 };
 pub use runtime::{AssistantRuntime, ResolvedToolFileResource, StagedAttachmentUpload};
+pub use skill::{
+    MAX_CATALOG_SKILLS, SessionSkillCatalog, SessionSkillDefinition, SkillActivationOwner,
+    SkillActivationResolveError, SkillActivationTrigger, SkillCandidate, SkillCatalogStatus,
+    SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscovery,
+    SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameError, SkillNameState,
+    SkillNameStateChange, SkillPackageSource, SkillPackageSourceError, SkillScanFuture,
+    SkillScanRequest, SkillScanResult, SkillSource, StoredSkillActivation, compile_skill_discovery,
+    explicit_skill_states, sort_diagnostics,
+};
 pub use storage::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,

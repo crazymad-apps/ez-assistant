@@ -24,11 +24,9 @@ async fn model_establishment_failure_converges_to_failed() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Auth(
-            "bad key".to_owned()
-        )))
+        ExecutionError::Model(ModelError::Auth("bad key".to_owned())),
     );
     assert_eq!(
         events,
@@ -86,12 +84,12 @@ async fn model_in_stream_failure_converges_to_failed() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Provider {
+        ExecutionError::Model(ModelError::Provider {
             message: "upstream exploded".to_owned(),
             status: Some(500),
-        }))
+        }),
     );
     // 流中失败：已到达的 delta 照常桥接，随后受控终止。
     assert_eq!(
@@ -100,6 +98,7 @@ async fn model_in_stream_failure_converges_to_failed() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::TextDelta {
+                step: 1,
                 id: part_id("text_1"),
                 delta: "partial".to_owned(),
             },
@@ -316,10 +315,12 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
         }
     );
     assert!(events.contains(&AgentEvent::ReasoningDelta {
+        step: 1,
         id: part_id("reasoning_overflow"),
         delta: "partial reasoning".to_owned(),
     }));
     assert!(events.contains(&AgentEvent::TextDelta {
+        step: 1,
         id: part_id("text_overflow"),
         delta: "partial text".to_owned(),
     }));

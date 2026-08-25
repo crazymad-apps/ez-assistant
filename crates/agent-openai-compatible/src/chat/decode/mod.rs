@@ -16,26 +16,30 @@ use super::{ChatProtocolAdapter, schema::ChatUsage};
 
 /// 把原生 assistant 消息解码为规范 parts。
 ///
-/// 按 ChatProtocolAdapter 字段名从 extra map 读取 reasoning 文本。
+/// 按 ChatProtocolAdapter 的有序字段从 extra map 读取 reasoning 文本。
 ///
 /// 显式 `null` 等价于字段缺席：DeepSeek 会在没有 reasoning 增量的 chunk 里下发
-/// `"reasoning_content": null`。其余非字符串值属于协议违反。
+/// `"reasoning_content": null`。vLLM 当前字段 `reasoning` 优先于旧版
+/// `reasoning_content`；只读取首个存在字段，避免兼容别名重复追加。其余非字符串值属于协议违反。
 fn reasoning_field_text<'a>(
     extra: &'a BTreeMap<String, Value>,
-    field: &str,
+    fields: &[String],
     context: &str,
 ) -> Result<Option<&'a str>, ModelError> {
-    match extra.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let text = value.as_str().ok_or_else(|| {
-                ModelError::Protocol(format!(
-                    "reasoning field `{field}` in {context} is not a string"
-                ))
-            })?;
-            Ok(Some(text))
+    for field in fields {
+        match extra.get(field) {
+            None | Some(Value::Null) => {}
+            Some(value) => {
+                let text = value.as_str().ok_or_else(|| {
+                    ModelError::Protocol(format!(
+                        "reasoning field `{field}` in {context} is not a string"
+                    ))
+                })?;
+                return Ok(Some(text));
+            }
         }
     }
+    Ok(None)
 }
 
 /// 把原生 finish reason 字符串映射为规范 [`FinishReason`]。

@@ -11,12 +11,14 @@ import type {
   PermissionDocumentScope,
   PermissionDocumentSnapshot,
   SessionId,
+  SkillDetailSnapshot,
+  SkillManagementSnapshot,
   ValidateModelConnectionResult,
   WorkspaceId,
 } from "../generated/assistant-protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
-export type SettingsPage = "runtime" | "models" | "permissions" | "memory";
+export type SettingsPage = "runtime" | "models" | "permissions" | "memory" | "skills";
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;
@@ -28,6 +30,9 @@ type SettingsDependencies = Readonly<{
 }>;
 
 export class SettingsStore {
+  #skill_scope_initialized_for_open = false;
+  #skill_detail_request = 0;
+  #skill_request = 0;
   is_open = false;
   page: SettingsPage = "runtime";
   loading = false;
@@ -40,6 +45,12 @@ export class SettingsStore {
   configuration_conflict = false;
   permission_documents: readonly PermissionDocumentSnapshot[] = [];
   permission_conflict = false;
+  skill_workspace_id: WorkspaceId | null = null;
+  skill_management: SkillManagementSnapshot | null = null;
+  skill_detail: SkillDetailSnapshot | null = null;
+  skill_detail_loading = false;
+  skills_loading = false;
+  pending_skill_name: string | null = null;
 
   constructor(private readonly dependencies: SettingsDependencies) {
     makeObservable(this, {
@@ -55,6 +66,12 @@ export class SettingsStore {
       configuration_conflict: observable,
       permission_documents: observableRef,
       permission_conflict: observable,
+      skill_workspace_id: observable,
+      skill_management: observableRef,
+      skill_detail: observableRef,
+      skill_detail_loading: observable,
+      skills_loading: observable,
+      pending_skill_name: observable,
       open: action,
       close: action,
       selectPage: action,
@@ -62,6 +79,11 @@ export class SettingsStore {
       reloadConfiguration: action,
       loadPermissions: action,
       reloadPermissions: action,
+      loadSkills: action,
+      loadSkillDetail: action,
+      clearSkillDetail: action,
+      selectSkillWorkspace: action,
+      setSkillEnabled: action,
       replacePermissionDocument: action,
       createModel: action,
       updateModel: action,
@@ -79,8 +101,15 @@ export class SettingsStore {
   open(page: SettingsPage = "runtime"): void {
     this.is_open = true;
     this.page = page;
+    this.#skill_scope_initialized_for_open = false;
+    this.clearSkillDetail();
     void this.load();
     if (page === "permissions") void this.loadPermissions();
+    if (page === "skills") {
+      this.skill_workspace_id = this.dependencies.get_permission_context().workspace_id;
+      this.#skill_scope_initialized_for_open = true;
+      void this.loadSkills();
+    }
   }
 
   close(): void {
@@ -89,12 +118,128 @@ export class SettingsStore {
     this.notice_message = null;
     this.configuration_conflict = false;
     this.permission_conflict = false;
+    this.#skill_scope_initialized_for_open = false;
+    this.clearSkillDetail();
   }
 
   selectPage(page: SettingsPage): void {
     this.page = page;
     this.clearMessages();
+    if (page !== "skills") this.clearSkillDetail();
     if (page === "permissions") void this.loadPermissions();
+    if (page === "skills") {
+      if (!this.#skill_scope_initialized_for_open) {
+        this.skill_workspace_id = this.dependencies.get_permission_context().workspace_id;
+        this.#skill_scope_initialized_for_open = true;
+      }
+      void this.loadSkills();
+    }
+  }
+
+  selectSkillWorkspace(workspace_id: WorkspaceId | null): void {
+    if (this.skill_workspace_id === workspace_id) return;
+    this.skill_workspace_id = workspace_id;
+    void this.loadSkills();
+  }
+
+  async loadSkills(): Promise<void> {
+    const client = this.requireClient();
+    if (!client) return;
+    this.clearSkillDetail();
+    const workspace_id = this.skill_workspace_id;
+    const request = ++this.#skill_request;
+    this.skills_loading = true;
+    this.clearMessages();
+    try {
+      const result = await client.command({
+        type: "list_skills",
+        payload: { workspace_id: workspace_id ?? undefined },
+      });
+      runInAction(() => {
+        if (this.skill_workspace_id === workspace_id && this.#skill_request === request) {
+          this.skill_management = result.payload.snapshot;
+        }
+      });
+    } catch (error: unknown) {
+      runInAction(() => {
+        if (this.skill_workspace_id === workspace_id && this.#skill_request === request) {
+          this.error_message = displayError(error);
+        }
+      });
+    } finally {
+      runInAction(() => {
+        if (this.#skill_request === request) this.skills_loading = false;
+      });
+    }
+  }
+
+  async loadSkillDetail(name: string): Promise<void> {
+    const client = this.requireClient();
+    if (!client) return;
+    const workspace_id = this.skill_workspace_id;
+    const request = ++this.#skill_detail_request;
+    this.skill_detail = null;
+    this.skill_detail_loading = true;
+    this.clearMessages();
+    try {
+      const result = await client.command({
+        type: "get_skill_detail",
+        payload: { workspace_id: workspace_id ?? undefined, name },
+      });
+      runInAction(() => {
+        if (this.skill_workspace_id !== workspace_id || this.#skill_detail_request !== request) return;
+        this.skill_detail = result.payload.detail ?? null;
+        if (!result.payload.detail) {
+          this.error_message = "技能已发生变化，请返回列表重新选择。";
+        }
+      });
+    } catch (error: unknown) {
+      runInAction(() => {
+        if (this.skill_workspace_id === workspace_id && this.#skill_detail_request === request) {
+          this.error_message = displayError(error);
+        }
+      });
+    } finally {
+      runInAction(() => {
+        if (this.#skill_detail_request === request) this.skill_detail_loading = false;
+      });
+    }
+  }
+
+  clearSkillDetail(): void {
+    this.#skill_detail_request += 1;
+    this.skill_detail = null;
+    this.skill_detail_loading = false;
+  }
+
+  async setSkillEnabled(name: string, enabled: boolean): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client || this.pending_skill_name) return false;
+    const workspace_id = this.skill_workspace_id;
+    this.pending_skill_name = name;
+    this.clearMessages();
+    try {
+      const result = await client.command({
+        type: "set_skill_enabled",
+        payload: { workspace_id: workspace_id ?? undefined, name, enabled },
+      });
+      runInAction(() => {
+        if (this.skill_workspace_id === workspace_id) {
+          this.skill_management = result.payload.snapshot;
+          this.notice_message = enabled ? `已启用技能“${name}”。` : `已禁用技能“${name}”。`;
+        }
+      });
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => {
+        this.error_message = displayError(error);
+      });
+      return false;
+    } finally {
+      runInAction(() => {
+        this.pending_skill_name = null;
+      });
+    }
   }
 
   clearMessages(): void {
@@ -117,7 +262,7 @@ export class SettingsStore {
   async load(): Promise<void> {
     const client = this.dependencies.get_client();
     if (!client) {
-      this.error_message = "Runtime 尚未连接。";
+      this.error_message = "运行时尚未连接。";
       return;
     }
     this.loading = true;
@@ -358,7 +503,7 @@ export class SettingsStore {
 
   private requireClient(): RuntimeClient | null {
     const client = this.dependencies.get_client();
-    if (!client) this.error_message = "Runtime 尚未连接。";
+    if (!client) this.error_message = "运行时尚未连接。";
     return client;
   }
 

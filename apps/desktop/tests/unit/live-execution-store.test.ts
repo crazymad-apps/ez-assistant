@@ -24,6 +24,7 @@ describe("LiveExecutionStore", () => {
         type: "text_delta" as const,
         session_id: "session-1",
         run_id: "run-1",
+        step: 1,
         part_id: "part-1",
         delta: "hello",
       },
@@ -94,6 +95,7 @@ describe("LiveExecutionStore", () => {
       type: "reasoning_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "reasoning-1",
       delta: "先检查",
     }));
@@ -101,6 +103,7 @@ describe("LiveExecutionStore", () => {
       type: "text_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "text-1",
       delta: "开始读取。",
     }));
@@ -108,6 +111,7 @@ describe("LiveExecutionStore", () => {
       type: "tool_proposed",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       call_id: "call-1",
       tool_name: "read_file",
     }));
@@ -115,6 +119,7 @@ describe("LiveExecutionStore", () => {
       type: "reasoning_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "reasoning-2",
       delta: "继续核对",
     }));
@@ -149,6 +154,7 @@ describe("LiveExecutionStore", () => {
       type: "reasoning_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "part-1",
       delta: "第一步",
     }));
@@ -162,6 +168,7 @@ describe("LiveExecutionStore", () => {
       type: "reasoning_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 2,
       part_id: "part-1",
       delta: "第二步",
     }));
@@ -172,6 +179,98 @@ describe("LiveExecutionStore", () => {
     expect(run?.steps.map((step) => step.segments)).toEqual([
       [{ type: "reasoning", part_id: "part-1", text: "第一步" }],
       [{ type: "reasoning", part_id: "part-1", text: "第二步" }],
+    ]);
+  });
+
+  it("keeps the read_image follow-up step isolated when StepStarted is dropped", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+
+    store.buffer(envelope(1, {
+      type: "step_started",
+      session_id: "session-1",
+      run_id: "run-image",
+      step: 1,
+    }));
+    store.buffer(envelope(2, {
+      type: "reasoning_delta",
+      session_id: "session-1",
+      run_id: "run-image",
+      part_id: "reasoning-1",
+      delta: "先读取图片",
+      step: 1,
+    }));
+    store.buffer(envelope(3, {
+      type: "tool_proposed",
+      session_id: "session-1",
+      run_id: "run-image",
+      call_id: "call-read-image",
+      tool_name: "read_image",
+      step: 1,
+    }));
+
+    // 模拟允许丢弃的 StepStarted 未送达。后续事件必须能仅凭自身 step 定位，
+    // 不能依赖工具名、当前活动容器或可靠 Assistant 消息数量猜测归属。
+    store.buffer(envelope(4, {
+      type: "reasoning_delta",
+      session_id: "session-1",
+      run_id: "run-image",
+      part_id: "reasoning-1",
+      delta: "图片中存在一张表格",
+      step: 2,
+    }));
+    store.buffer(envelope(5, {
+      type: "tool_proposed",
+      session_id: "session-1",
+      run_id: "run-image",
+      call_id: "call-next",
+      tool_name: "read_file",
+      step: 2,
+    }));
+
+    const callback = frame as FrameRequestCallback | null;
+    callback?.(0);
+
+    expect(store.runForSession("session-1")?.steps).toEqual([
+      {
+        step: 1,
+        segments: [
+          { type: "reasoning", part_id: "reasoning-1", text: "先读取图片" },
+          {
+            type: "tool_group",
+            group_id: "live-tools:call-read-image",
+            tools: [{
+              call_id: "call-read-image",
+              tool_name: "read_image",
+              status: "proposed",
+              stdout: "",
+              stderr: "",
+            }],
+          },
+        ],
+      },
+      {
+        step: 2,
+        segments: [
+          { type: "reasoning", part_id: "reasoning-1", text: "图片中存在一张表格" },
+          {
+            type: "tool_group",
+            group_id: "live-tools:call-next",
+            tools: [{
+              call_id: "call-next",
+              tool_name: "read_file",
+              status: "proposed",
+              stdout: "",
+              stderr: "",
+            }],
+          },
+        ],
+      },
     ]);
   });
 
@@ -194,6 +293,7 @@ describe("LiveExecutionStore", () => {
       type: "tool_proposed",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       call_id: "call-1",
       tool_name: "read_file",
     }));
@@ -201,6 +301,7 @@ describe("LiveExecutionStore", () => {
       type: "tool_proposed",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       call_id: "call-2",
       tool_name: "search_content",
     }));
@@ -243,6 +344,7 @@ describe("LiveExecutionStore", () => {
       type: "tool_proposed",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       call_id: "call-1",
       tool_name: "read_file",
     }));
@@ -256,6 +358,7 @@ describe("LiveExecutionStore", () => {
       type: "reasoning_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 2,
       part_id: "part-1",
       delta: "继续",
     }));
@@ -268,9 +371,11 @@ describe("LiveExecutionStore", () => {
         run_id: "run-1",
         session_id: "session-1",
         status: "running",
+        active_step: 2,
         reasoning: "继续",
         text: "",
         tools: [{
+          step: 1,
           call_id: "call-1",
           tool_name: "read_file",
           status: "completed",
@@ -282,6 +387,7 @@ describe("LiveExecutionStore", () => {
         items: [{
           type: "assistant",
           run_id: "run-1",
+          step: 1,
           segments: [{
             type: "tool_group",
             tools: [{ call_id: "call-1", tool_name: "read_file", status: "completed", summary: null }],
@@ -306,6 +412,7 @@ describe("LiveExecutionStore", () => {
       type: "text_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "text-1",
       delta: "done",
     }));
@@ -358,6 +465,7 @@ describe("LiveExecutionStore", () => {
       type: "text_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "text-1",
       delta: "done",
     }));

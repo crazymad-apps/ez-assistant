@@ -334,7 +334,8 @@ Runtime Host 进程
   任一 Deny 拒绝整次调用，任一 Ask 进入审批，全部路径被 Allow 才直接执行；交互式持久批准把
   每条 exact Read 规则作为一次权限文件 CAS 原子写入，不能折叠为共同父目录。
 - 图片准备包装器在主/child Run 和辅助识图调用构造时绑定当前 Session Environment；连接验证
-  不绑定会话资源。它按图片 Part 出现次数执行 10 张上限，并按附件/Tool Image 来源身份去重预处理。
+  不绑定会话资源。它按附件/Tool Image 来源身份去重预处理，不在 Provider 请求前另设全局图片
+  数量上限；具体模型或服务商拒绝请求时沿既有模型错误链路返回。
 - `openai_responses` 与 Chat 一样使用本地 Conversation 作为唯一历史事实；Runtime 不保存
   `previous_response_id` 或服务端 Conversation ID。目录未命中的 Responses 路由采用本协议的
   保守能力基线，不能因 endpoint 或模型名称自动启用图片、reasoning 或工具选择能力。
@@ -355,9 +356,10 @@ Runtime Host 进程
   但 Tool Call/Result 仍按普通可靠 Tool Exchange 保存。
 - `update_plan` 使用完整替换语义，但 `TodoItemId` 只属于 Runtime 持久化与产品投影，不进入模型
   输入、隐藏上下文或工具结果。Runtime 在内部按文本、原位置和剩余项依次调和 ID，新项才分配；
-  旧 Conversation 按兼容字段接受并忽略模型提交的 `id`。已有计划可省略 objective 并沿用当前值，
-  首次创建仍必须提供。Runtime 以当前 revision 做 CAS，并以模型 ToolCallId 作为 Store operation
-  幂等身份；Store 成功后才替换 Session 内存投影，真实 revision conflict 不做容错覆盖。
+  模型侧每次必须提交完整 objective；只更新事项时原样重复当前 objective。旧 Conversation 仍兼容
+  缺省 objective，并按兼容字段接受及忽略模型提交的 `id`。Runtime 以当前 revision 做 CAS，并以模型
+  ToolCallId 作为 Store operation 幂等身份；Store 成功后才替换 Session 内存投影，真实 revision
+  conflict 不做容错覆盖。
 - WorkPlan 通过 `RuntimeStore` 的 load/mutate/clear 业务操作持久化。易失 Store 与正式 Store 必须保持
   相同的 revision、幂等、归档、Fork 和删除约束；非法恢复内容令 Runtime 启动 fail-closed。
 - `update_plan` 提交至少一个且全部 Completed 的 item 时，Store 必须在同一事务保存 ToolCallId
@@ -457,3 +459,58 @@ Runtime Host 进程
 cargo test -p assistant-runtime
 cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 ```
+
+## v0.19.0 统一内部上下文边界
+
+- `InternalBoundaryCoordinator` 是 Runtime 新建内部上下文 Part 和隐藏 UserMessage 的唯一构造入口；
+  Goal、WorkPlan、Plan/Build 变体和委派只提供冻结正文、来源与 retention key，不自行分配 boundary。
+- 新写入统一使用 `UserPart::InternalContext`；旧 `Injected` 继续安全读取、进入模型上下文并在产品
+  转录、搜索、导出和 Goal objective 中排除，不批量重写历史。
+- 规范内部消息继续由既有 Input、Goal settlement、Context replacement 和 child 事务可靠提交；
+  request-only Provider 信封不进入 Store、Conversation、RuntimeEvent、Run step 或产品消息。
+- 压缩时每个 retention key 的最新冻结正文必须可恢复；活动 Turn 整体摘要时由共享 Context 能力
+  原样重挂到新的隐藏 continuation 锚点，Runtime 不从摘要文本猜测恢复。
+
+## v0.19.0 Skill 发现与 Session Catalog 边界
+
+- Runtime 定义通过格式校验的 `SkillName`、四级 `SkillSource`、只保留源目录的候选项、诊断、
+  名称开关和文件实现无关 `SkillPackageSource`；Runtime 不解析 YAML、枚举用户 Home 或读取文件。
+- 当前管理投影按“工作区 `.ez-assistant`、工作区 `.agents`、用户 `.ez-assistant`、用户
+  `.agents`”固定顺序选 Winner；同来源同名冲突不任选，扫描不完整时不暴露部分 Winner。
+- 名称开关只以 `SkillName` 为键；没有 Store 记录表示启用，禁用屏蔽全部同名候选且不回退下层。
+  Skill 启用与 `allowed-tools` 均不形成 Authorizer 规则。
+- 新 Session 创建时，Runtime 读取名称开关、扫描并编译 Winner；扫描整体不可用时冻结
+  `unavailable` 空 Catalog，不把部分 Winner 当作可调用事实。
+- `SessionSkillCatalog` 保存完整 `SKILL.md` 定义、definition digest、共享源目录、确定性 revision、
+  状态和诊断，不保存普通资源索引或字节；模型目录作为独立 `SystemPromptSnapshot` Part 冻结，
+  绝对源路径不进入模型文本或 revision。
+- Catalog 随正式/易失 Session Store 持久化并由 `SessionController` 只读持有。Runtime 重启、归档恢复
+  和后续执行只消费该快照；Fork 原样继承相同内容身份和共享源目录，不重扫、不改写路径或复制文件。
+- 用户显式激活只接收一个 `skill_name`，并只查询目标 Session 的冻结 Catalog；当前 Root 文件和
+  名称开关的变化不能替换已接受 Input。用户激活直接随 Input 落账，不额外执行 `load_skill`。
+- 用户 Activation 与可见 UserMessage 的 `InternalContext` Part、queued Input、首次 Run 和 ledger
+  由同一 Store 操作原子保存。Queue、Conversation 和 Active Skill 投影都读取结构化 Activation，
+  不解析内部正文；取消、held Goal 恢复、历史重入和 Session 删除同步维护 ledger 所有权。
+- Goal objective 在附加 Skill Part 前冻结，且只接收真实用户正文/附件；held Input 后补 Goal 上下文时，
+  统一边界协调器把 Goal Part 插到 Skill Part 之前，不由功能模块直接拆装内部 Part。
+- Fork 只复制 Conversation 前缀内的 Activation，分配新的 ledger 身份并改绑目标 Session；历史消息 ID、
+  Catalog revision、definition digest 和触发来源保持不变，Input/Run 归属置空表示继承历史。
+- `ListSkills` 每次显式调用都重新扫描当前管理范围；`SetSkillEnabled` 只按名称保存全局开关并发布失效
+  事件，不刷新既有 Session Catalog 或 Activation。
+
+## v0.19.0 模型 Skill 激活与同 Run continuation
+
+- Runtime 对支持 Tool Call 的模型始终注册稳定 `load_skill`；`name` 是普通字符串且不生成动态 enum，
+  空或不可用 Catalog 也由执行结果表达，不因扫描变化替换 ToolSet 定义。
+- 工具只读取 Session 冻结 Catalog 并校验 `model_invocable`。Skill 启用状态不形成额外权限审批；
+  `load_skill` 自身直接放行，激活后执行的文件、Shell 等真实工具继续走各自 Authorizer。
+- 每个主 Run 和每个 child execution 都持有独立 `SkillActivationLatch`。成功调用先按 ToolCallId 暂存，
+  同批重复或历史已激活名称返回 `already_active`，不会提前修改 Session/child 的权威 ledger。
+- Recorder 按 Tool Result 原顺序收集已成功暂存的定义，通过 `InternalBoundaryCoordinator` 构造一条隐藏
+  Runtime UserMessage；Tool Results、该消息和 Activation ledger 必须由 Store 作为同一完成事实提交，
+  Store/Journal 成功后才提交 latch。
+- 只有上述完成事实可靠落账后，Recorder 才向 Core 返回通用 ContextChanged continuation。Runtime
+  保持原业务 RunId，扣减可靠 consumption，并使用单调递增的下一全局 step 和最新 Journal 建立新的
+  AgentExecution；Core 不感知 Skill、Session 或 Run。
+- main Session 的活动技能投影只读取 main owner ledger；child activation 只进入对应 child conversation，
+  父子及兄弟之间不共享 latch，也不把模型激活伪装成真实用户输入。

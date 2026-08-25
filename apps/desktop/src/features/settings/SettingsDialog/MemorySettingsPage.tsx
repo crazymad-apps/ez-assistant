@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { PinnedMemorySnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
 type Props = Readonly<{ onDirtyChange: (dirty: boolean) => void }>;
@@ -72,13 +73,14 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
   const persona_limit = memory_store.capabilities?.max_persona_bytes ?? 0;
 
   return (
-    <section>
-      <div className={styles.page_header}>
-        <h3>记忆</h3>
+    <SettingsPageContainer
+      actions={(
         <button disabled={memory_store.loading} onClick={() => void memory_store.load()} type="button">
           <Icon name="refresh" size={14} />重新加载
         </button>
-      </div>
+      )}
+      title="记忆"
+    >
 
       <article className={styles.memory_persona}>
         <div className={styles.memory_section_header}>
@@ -177,7 +179,7 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
       {memory_store.conflict_message && <p className={styles.memory_conflict}>{memory_store.conflict_message}</p>}
       {memory_store.error_message && <p className={styles.error_message}>{memory_store.error_message}</p>}
       {memory_store.notice_message && <p className={styles.notice_message}>{memory_store.notice_message}</p>}
-    </section>
+    </SettingsPageContainer>
   );
 });
 
@@ -216,7 +218,7 @@ function PinnedMemoryEditor(props: Readonly<{
 }
 
 function createdByLabel(memory: PinnedMemorySnapshot): string {
-  return memory.created_by.type === "user" ? "用户添加" : "Agent 添加";
+  return memory.created_by.type === "user" ? "用户添加" : "智能体添加";
 }
 
 function formatTime(timestamp_ms: number): string {

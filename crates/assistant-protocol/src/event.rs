@@ -34,10 +34,12 @@ pub enum ChildTaskEvent {
         step: u32,
     },
     TextDelta {
+        step: u32,
         part_id: PartId,
         delta: String,
     },
     ReasoningDelta {
+        step: u32,
         part_id: PartId,
         delta: String,
     },
@@ -46,18 +48,22 @@ pub enum ChildTaskEvent {
         usage: TokenUsageSnapshot,
     },
     ToolProposed {
+        step: u32,
         call_id: ToolCallId,
         tool_name: String,
     },
     ToolStarted {
+        step: u32,
         call_id: ToolCallId,
     },
     ToolOutput {
+        step: u32,
         call_id: ToolCallId,
         channel: ToolOutputChannel,
         chunk: String,
     },
     ToolCompleted {
+        step: u32,
         call_id: ToolCallId,
         status: ToolActivityStatus,
     },
@@ -78,6 +84,11 @@ pub enum RuntimeEvent {
     RuntimeShuttingDown,
     /// 应用配置投影已经变化；客户端应重新获取 ApplicationSnapshot。
     ConfigChanged,
+    /// 全局 Skill 名称状态已经变化；设置页应重新读取当前管理投影。
+    SkillSettingsChanged {
+        name: String,
+        enabled: bool,
+    },
     /// Workspace Registry 已经变化；客户端应重新获取 ApplicationSnapshot。
     WorkspaceChanged {
         workspace_id: WorkspaceId,
@@ -105,6 +116,12 @@ pub enum RuntimeEvent {
     /// 规范 Conversation 已经可靠提交；客户端应按 owner/generation 失效历史页。
     ConversationCommitted {
         owner: ConversationOwner,
+        generation: u64,
+    },
+    /// 一个模型 step 的规范消息已可靠提交；可与 ConversationCommitted 一起失效历史页。
+    StepCommitted {
+        owner: ConversationOwner,
+        step: u32,
         generation: u64,
     },
     /// 权限 Registry 已经完成原子替换。
@@ -217,6 +234,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 产生增量的 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// 文本片段的不透明标识。
         part_id: PartId,
         /// 本次增量内容。
@@ -228,6 +247,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 产生增量的 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// reasoning 片段的不透明标识。
         part_id: PartId,
         /// 本次增量内容。
@@ -250,6 +271,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 工具调用所属 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// 工具调用的不透明标识。
         call_id: ToolCallId,
         /// 模型可见工具名；不携带原始参数。
@@ -261,6 +284,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 工具调用所属 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// 工具调用的不透明标识。
         call_id: ToolCallId,
     },
@@ -270,6 +295,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 工具调用所属 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// 工具调用的不透明标识。
         call_id: ToolCallId,
         /// 输出通道。
@@ -283,6 +310,8 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         /// 工具调用所属 Run。
         run_id: RunId,
+        /// 所属 Run 的模型 Turn 序号。
+        step: u32,
         /// 工具调用的不透明标识。
         call_id: ToolCallId,
         /// 完成后的工具活动状态。
@@ -292,6 +321,7 @@ pub enum RuntimeEvent {
     GuardrailTriggered {
         session_id: SessionId,
         run_id: RunId,
+        step: u32,
         call_id: ToolCallId,
         kind: GuardrailKind,
         mode: GuardrailMode,
@@ -394,6 +424,7 @@ mod tests {
         let event = RuntimeEvent::TextDelta {
             session_id: session_id(),
             run_id: run_id(),
+            step: 1,
             part_id: PartId::new("part-1").expect("part id"),
             delta: "hello".to_owned(),
         };
@@ -405,6 +436,7 @@ mod tests {
                 "type": "text_delta",
                 "session_id": "session-1",
                 "run_id": "run-1",
+                "step": 1,
                 "part_id": "part-1",
                 "delta": "hello"
             })
@@ -592,6 +624,7 @@ mod tests {
                 RuntimeEvent::TextDelta {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     part_id: PartId::new("part-1").expect("part id"),
                     delta: "text".to_owned(),
                 },
@@ -601,6 +634,7 @@ mod tests {
                 RuntimeEvent::ReasoningDelta {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     part_id: PartId::new("part-2").expect("part id"),
                     delta: "reasoning".to_owned(),
                 },
@@ -624,6 +658,7 @@ mod tests {
                 RuntimeEvent::ToolProposed {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                     tool_name: "echo_text".to_owned(),
                 },
@@ -633,6 +668,7 @@ mod tests {
                 RuntimeEvent::ToolStarted {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                 },
                 "tool_started",
@@ -641,6 +677,7 @@ mod tests {
                 RuntimeEvent::ToolOutput {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                     channel: ToolOutputChannel::Stdout,
                     chunk: "hello".to_owned(),
@@ -651,6 +688,7 @@ mod tests {
                 RuntimeEvent::ToolCompleted {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                     status: ToolActivityStatus::Completed,
                 },
@@ -660,6 +698,7 @@ mod tests {
                 RuntimeEvent::GuardrailTriggered {
                     session_id: session_id(),
                     run_id: run_id(),
+                    step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                     kind: GuardrailKind::RepeatedInvocation,
                     mode: GuardrailMode::Enforce,

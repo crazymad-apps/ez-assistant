@@ -94,7 +94,7 @@ async fn run_context_short_path() -> Result<ScenarioReport, HarnessError> {
     let evidence =
         execute_prepared(&mut runtime, prepared, service, ToolSetSnapshot::default()).await?;
     ensure(
-        matches!(evidence.outcome, ExecutionOutcome::Completed(_)),
+        matches!(evidence.outcome, ExecutionOutcome::Completed { .. }),
         "short path did not complete",
     )?;
     ensure(

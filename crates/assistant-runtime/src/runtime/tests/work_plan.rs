@@ -79,6 +79,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             message: "make a plan".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -110,6 +111,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             message: "continue from the plan".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -141,7 +143,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
         })
         .expect("first user");
     assert!(!first_user.parts.iter().any(|part| {
-        matches!(part, UserPart::Injected(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
+        matches!(part, UserPart::InternalContext(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
     }));
     let last_user = requests[2]
         .conversation
@@ -157,7 +159,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
         .parts
         .iter()
         .find_map(|part| match part {
-            UserPart::Injected(text)
+            UserPart::InternalContext(text)
                 if text
                     .text
                     .starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1) =>
@@ -185,10 +187,10 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
         .collect::<Vec<_>>();
     assert_eq!(users.len(), 2);
     assert!(!users[0].parts.iter().any(|part| {
-        matches!(part, UserPart::Injected(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
+        matches!(part, UserPart::InternalContext(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
     }));
     assert!(users[1].parts.iter().any(|part| {
-        matches!(part, UserPart::Injected(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
+        matches!(part, UserPart::InternalContext(text) if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1))
     }));
 
     let updated_plan = store
@@ -318,6 +320,7 @@ async fn completing_every_todo_clears_the_current_work_plan_automatically() {
             message: "finish everything".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -414,6 +417,7 @@ async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
             message: "continue".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -431,7 +435,7 @@ async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
         .expect("captured request");
     assert!(request.conversation.messages.iter().any(|message| {
         matches!(message, ConversationMessage::User(user) if user.parts.iter().any(|part| {
-            matches!(part, UserPart::Injected(text)
+            matches!(part, UserPart::InternalContext(text)
                 if text.text.starts_with(crate::work_plan::WORK_PLAN_CONTEXT_V1)
                     && text.text.contains("resume after restart"))
         }))

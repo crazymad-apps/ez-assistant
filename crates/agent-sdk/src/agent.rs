@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use agent_core::{
     AgentExecution, ExecutionBudget, ExecutionContext, ExecutionInput, ExecutionSpec,
     ToolAuthorizer,
 };
 use agent_model::SystemPromptSnapshot;
+use agent_tools::{RegisterToolError, Tool};
 use agent_types::ToolDefinition;
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +49,19 @@ impl Agent {
         AgentExecution::start(spec, input, context)
     }
 
+    /// 使用剩余预算并从冻结的 Run 全局 step 启动 continuation。
+    pub fn start_with_budget_at_step(
+        &self,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        budget: ExecutionBudget,
+        starting_step: NonZeroU32,
+    ) -> AgentExecution {
+        let mut spec = self.spec.clone();
+        spec.budget = budget;
+        AgentExecution::start_at_step(spec, input, context, starting_step)
+    }
+
     /// 使用一次执行独享的不可恢复 Recorder 启动一次执行。
     ///
     /// 临时 Recorder 仍严格执行 tool exchange 的 begin/complete 协议，但完成后立即
@@ -85,5 +99,15 @@ impl Agent {
     /// 只读访问冻结的完整业务执行预算。
     pub fn execution_budget(&self) -> &ExecutionBudget {
         &self.spec.budget
+    }
+
+    /// 从当前冻结规格派生一个只追加单个工具的新 Agent。
+    ///
+    /// 模型、Prompt、请求配置、预算与 Guardrail 均保持不变；新工具仍经过标准注册
+    /// 冻结与重名校验。该入口供上层为一次独立执行绑定专属 Runtime 工具状态。
+    pub fn try_with_tool<T: Tool>(&self, tool: T) -> Result<Self, RegisterToolError> {
+        let mut spec = self.spec.clone();
+        spec.tools = spec.tools.try_with_tool(tool)?;
+        Ok(Self { spec })
     }
 }

@@ -28,6 +28,7 @@ mod context;
 mod error;
 mod event;
 mod image;
+mod insertion;
 mod lifecycle;
 mod request;
 mod retry;
@@ -43,6 +44,9 @@ pub use event::ModelEvent;
 pub use image::{
     ModelImagePreparation, ModelImagePreparationFuture, ModelImagePreprocessor, ModelImageResource,
     ModelServiceBundle, PreparedModelImage, PreparedModelImages,
+};
+pub use insertion::{
+    ToolResultImageBatchIdentity, plan_tool_result_image_envelope, tool_result_image_label,
 };
 pub use lifecycle::LifecycleValidator;
 pub use request::{

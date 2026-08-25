@@ -1,11 +1,13 @@
 //! Goal 首次消息的版本化 Runtime 注入。
 
-use agent_types::{TextPart, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart};
+use agent_types::UserMessage;
 use assistant_protocol::GoalId;
 
 use crate::{
     RuntimeError, RuntimeResult,
-    run::{allocate_message_id, allocate_part_id},
+    internal_boundary::{
+        InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+    },
 };
 
 use super::GoalControl;
@@ -19,14 +21,19 @@ pub(crate) fn inject_start_context(
     message: &mut UserMessage,
     goal_id: &GoalId,
 ) -> RuntimeResult<()> {
-    let goal_id = escape_xml(goal_id.as_str());
+    let escaped_goal_id = escape_xml(goal_id.as_str());
     let text = format!(
-        "{GOAL_START_INJECTION_V1}\n<goal_context version=\"1\"><goal_id>{goal_id}</goal_id><generation>1</generation><turn>1</turn><instructions>This user message starts an automatically continued Goal. Work toward its complete objective across Runs. A normal final answer does not end the Goal. When the objective is complete or progress requires user input, call update_goal as the only tool call in that assistant turn and then provide the final user-facing response.</instructions></goal_context>"
+        "{GOAL_START_INJECTION_V1}\n<goal_context version=\"1\"><goal_id>{escaped_goal_id}</goal_id><generation>1</generation><turn>1</turn><instructions>This user message starts an automatically continued Goal. Work toward its complete objective across Runs. A normal final answer does not end the Goal. When the objective is complete or progress requires user input, call update_goal as the only tool call in that assistant turn and then provide the final user-facing response.</instructions></goal_context>"
     );
-    message.parts.push(UserPart::Injected(TextPart {
-        id: allocate_part_id()?,
-        text,
-    }));
+    InternalBoundaryCoordinator::insert_before(
+        message,
+        InternalBoundarySource::SkillActivation,
+        InternalBoundaryRequest {
+            source: InternalBoundarySource::GoalStart,
+            retention_key: Some(format!("goal:{}", goal_id.as_str())),
+            text,
+        },
+    )?;
     Ok(())
 }
 
@@ -51,12 +58,17 @@ pub(crate) fn inject_resume_context(
     .map_err(|_| RuntimeError::InternalStateUnavailable {
         component: "Goal resume context projection",
     })?;
-    message.parts.push(UserPart::Injected(TextPart {
-        id: allocate_part_id()?,
-        text: format!(
-            "{GOAL_RESUME_INJECTION_V1}\nResume autonomous work toward the frozen Goal objective. Treat this visible user message as additional guidance, not as a replacement objective. A normal final answer does not end the Goal.\n{json}"
-        ),
-    }));
+    InternalBoundaryCoordinator::insert_before(
+        message,
+        InternalBoundarySource::SkillActivation,
+        InternalBoundaryRequest {
+            source: InternalBoundarySource::GoalResume,
+            retention_key: Some(format!("goal:{}", goal.id.as_str())),
+            text: format!(
+                "{GOAL_RESUME_INJECTION_V1}\nResume autonomous work toward the frozen Goal objective. Treat this visible user message as additional guidance, not as a replacement objective. A normal final answer does not end the Goal.\n{json}"
+            ),
+        },
+    )?;
     Ok(())
 }
 
@@ -96,15 +108,12 @@ pub(crate) fn create_continuation_message(
     let text = format!(
         "{GOAL_CONTINUATION_V1}\nContinue working autonomously toward the frozen Goal objective. A normal final answer does not end the Goal. Call update_goal alone only when the objective is complete or progress requires user input.\n{json}"
     );
-    Ok(UserMessage {
-        id: allocate_message_id()?,
-        origin: UserMessageOrigin::Runtime,
-        transcript_visibility: TranscriptVisibility::Hidden,
-        parts: vec![UserPart::Injected(TextPart {
-            id: allocate_part_id()?,
-            text,
-        })],
+    InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
+        source: InternalBoundarySource::GoalContinuation,
+        retention_key: Some(format!("goal:{}", goal.id.as_str())),
+        text,
     })
+    .map(|(message, _)| message)
 }
 
 fn escape_xml(value: &str) -> String {
@@ -118,7 +127,7 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agent_types::{MessageId, TranscriptVisibility, UserMessageOrigin};
+    use agent_types::{MessageId, TranscriptVisibility, UserMessageOrigin, UserPart};
 
     use super::*;
 
@@ -135,8 +144,8 @@ mod tests {
             &GoalId::new("goal<&").expect("opaque goal id"),
         )
         .expect("inject");
-        let UserPart::Injected(part) = message.parts.last().expect("injected part") else {
-            panic!("expected injected part");
+        let UserPart::InternalContext(part) = message.parts.last().expect("internal part") else {
+            panic!("expected internal context part");
         };
         assert!(part.text.starts_with(GOAL_START_INJECTION_V1));
         assert!(part.text.contains("goal&lt;&amp;"));

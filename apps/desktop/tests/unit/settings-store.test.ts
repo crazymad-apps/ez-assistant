@@ -99,6 +99,74 @@ describe("SettingsStore permission management", () => {
   });
 });
 
+describe("SettingsStore skill management", () => {
+  it("loads the current body only when a named detail is opened", async () => {
+    const commands: RuntimeCommand[] = [];
+    const skill = {
+      name: "review",
+      description: "检查",
+      source: "workspace_ez_assistant",
+      model_invocable: true,
+      user_invocable: true,
+      enabled: true,
+      health: "ready",
+    } as const;
+    const client = {
+      command: async (command: RuntimeCommand) => {
+        commands.push(command);
+        if (command.type === "get_skill_detail") {
+          return {
+            type: command.type,
+            payload: { detail: { skill, body: "# 检查步骤", diagnostics: [] } },
+          };
+        }
+        throw new Error("unexpected command");
+      },
+    } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    store.skill_workspace_id = "workspace-1";
+
+    await store.loadSkillDetail("review");
+
+    expect(commands[0]).toMatchObject({
+      type: "get_skill_detail",
+      payload: { workspace_id: "workspace-1", name: "review" },
+    });
+    expect(store.skill_detail?.body).toBe("# 检查步骤");
+  });
+
+  it("reads the selected scope and replaces the projection returned by a name toggle", async () => {
+    const commands: RuntimeCommand[] = [];
+    const ready = {
+      available: true,
+      skills: [{ name: "review", description: "检查", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" }],
+      diagnostics: [],
+    } as const;
+    const disabled = {
+      ...ready,
+      skills: [{ ...ready.skills[0], enabled: false, health: "disabled" }],
+    } as const;
+    const client = {
+      command: async (command: RuntimeCommand) => {
+        commands.push(command);
+        if (command.type === "list_skills") return { type: command.type, payload: { snapshot: ready } };
+        if (command.type === "set_skill_enabled") return { type: command.type, payload: { snapshot: disabled } };
+        throw new Error("unexpected command");
+      },
+    } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    store.skill_workspace_id = "workspace-1";
+
+    await store.loadSkills();
+    expect(commands[0]).toMatchObject({ type: "list_skills", payload: { workspace_id: "workspace-1" } });
+    expect(store.skill_management?.skills[0]?.enabled).toBe(true);
+
+    await store.setSkillEnabled("review", false);
+    expect(commands[1]).toMatchObject({ type: "set_skill_enabled", payload: { workspace_id: "workspace-1", name: "review", enabled: false } });
+    expect(store.skill_management?.skills[0]?.enabled).toBe(false);
+  });
+});
+
 function permissionStore(client: RuntimeClient): SettingsStore {
   return new SettingsStore({
     get_client: () => client,

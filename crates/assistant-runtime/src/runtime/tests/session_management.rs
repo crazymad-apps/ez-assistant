@@ -34,6 +34,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
             session_id: source.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -172,6 +173,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
             session_id: source.session_id.clone(),
             message: "persist a reliable turn".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -243,6 +245,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             session_id: generated.session_id.clone(),
             message: "\n  首行作为会话标题  \n后续正文".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -278,6 +281,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             session_id: renamed.session_id.clone(),
             message: "不应覆盖标题".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -439,6 +443,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
                 session_id: session_id.clone(),
                 message: "not allowed".to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,
@@ -528,6 +533,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
             session_id: session_id.clone(),
             message: "active input".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -668,6 +674,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message: "first question".to_owned(),
             attachment_ids: vec![old_attachment.attachment_id.clone()],
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -680,6 +687,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message: "second question".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -738,7 +746,9 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .filter_map(|message| match message {
             ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
                 UserPart::Text(text) => Some(text.text.as_str()),
-                UserPart::Injected(_) | UserPart::FileReferences(_) => None,
+                UserPart::Injected(_)
+                | UserPart::InternalContext(_)
+                | UserPart::FileReferences(_) => None,
             }),
             ConversationMessage::Assistant(assistant) => {
                 assistant.parts.iter().find_map(|part| match part {
@@ -756,7 +766,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .find_map(|message| match message {
             ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
                 UserPart::FileReferences(files) => Some(&files.files),
-                UserPart::Text(_) | UserPart::Injected(_) => None,
+                UserPart::Text(_) | UserPart::Injected(_) | UserPart::InternalContext(_) => None,
             }),
             _ => None,
         })

@@ -26,17 +26,19 @@ async fn plain_text_completes_with_empty_tool_set() {
     let (outcome, events) = finish(execution).await;
 
     let expected = text_message("message_1", "Hi there.");
-    assert_eq!(outcome, ExecutionOutcome::Completed(expected.clone()));
+    assert_completed(outcome, expected.clone());
     assert_eq!(
         events,
         vec![
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::TextDelta {
+                step: 1,
                 id: part_id("text_1"),
                 delta: "Hi there.".to_owned(),
             },
             AgentEvent::ExecutionCompleted {
+                step: 1,
                 message: expected,
                 dropped_events: 0,
             },
@@ -111,7 +113,7 @@ async fn model_request_config_is_reused_across_every_tool_loop_step() {
         make_context(recorder, authorizer),
     ))
     .await;
-    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
 
     let requests = model.take_requests();
     assert_eq!(requests.len(), 2);
@@ -173,7 +175,7 @@ async fn successful_step_emits_only_one_final_usage_update() {
     );
 
     let (outcome, events) = finish(execution).await;
-    assert_eq!(outcome, ExecutionOutcome::Completed(message));
+    assert_completed(outcome, message);
     let usage_events = events
         .iter()
         .filter_map(|event| match event {
@@ -212,28 +214,33 @@ async fn single_tool_round_trip_in_strict_side_effect_order() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2.clone()));
+    assert_completed(outcome, turn2.clone());
     assert_eq!(
         events,
         vec![
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "get_date", json!({})),
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_1"),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Success,
             },
             AgentEvent::StepStarted { step: 2 },
             AgentEvent::TextDelta {
+                step: 2,
                 id: part_id("text_1"),
                 delta: "Today is 2026-07-27.".to_owned(),
             },
             AgentEvent::ExecutionCompleted {
+                step: 2,
                 message: turn2.clone(),
                 dropped_events: 0,
             },
@@ -322,7 +329,7 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     // 顺序：begin(Assistant) → policy(read, Continue) → fallback authorize
     // → execute(read) → policy(write, Deny，不进 fallback/不 execute) → complete。
     assert_eq!(
@@ -360,9 +367,11 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
     );
     // 事件：被拒绝的调用无 ToolStarted，只有 ToolCompleted{Failed}。
     assert!(!events.contains(&AgentEvent::ToolStarted {
+        step: 1,
         call_id: call_id("call_2"),
     }));
     assert!(events.contains(&AgentEvent::ToolCompleted {
+        step: 1,
         call_id: call_id("call_2"),
         status: ToolCompletionStatus::Failed,
     }));
@@ -432,7 +441,7 @@ async fn later_execution_skips_tool_message_ids_already_used_by_the_conversation
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(final_assistant));
+    assert_completed(outcome, final_assistant);
     assert_eq!(
         recorder.deltas(),
         vec![
@@ -508,9 +517,10 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn3));
+    assert_completed(outcome, turn3);
     // reasoning delta 桥接为同名 AgentEvent。
     assert!(events.contains(&AgentEvent::ReasoningDelta {
+        step: 1,
         id: part_id("reasoning_1"),
         delta: "Need the date first".to_owned(),
     }));
@@ -613,7 +623,7 @@ async fn memory_tools_use_the_ordinary_loop_and_keep_the_system_prompt_frozen() 
         make_context(recorder.clone(), authorizer.clone()),
     ))
     .await;
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn3));
+    assert_completed(outcome, turn3);
 
     assert_eq!(store.entries().len(), 1);
     assert_eq!(store.entries()[0].content, "Use dark mode");
@@ -740,7 +750,7 @@ async fn denied_memory_tools_do_not_touch_store_or_recall_capabilities() {
         make_context(recorder.clone(), authorizer.clone()),
     ))
     .await;
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(store.entries().is_empty());
     assert!(store.observations().is_empty());
     assert!(recall.requests().is_empty());

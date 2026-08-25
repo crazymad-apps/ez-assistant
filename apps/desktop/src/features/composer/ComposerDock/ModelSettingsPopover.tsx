@@ -21,7 +21,7 @@ type ModelSettingsPopoverProps = Readonly<{
   effort_options: readonly ReasoningEffortOptionSnapshot[];
   initial_category: "model" | "effort" | null;
   model_display_name: string;
-  model_key: ModelKey;
+  model_key: ModelKey | null;
   model_options: readonly ModelOption[];
   model_switch_disabled_reason?: string;
   on_effort_change: (effort: ReasoningEffortKey | null) => Promise<boolean>;
@@ -35,7 +35,7 @@ export function ModelSettingsPopover(props: ModelSettingsPopoverProps) {
   const categories: SettingsCascadeCategory[] = [{
     id: "model",
     label: "模型",
-    selected: props.model_key,
+    selected: props.model_key ?? "",
     value_label: props.model_display_name,
     disabled_reason: props.model_switch_disabled_reason,
     options: props.model_options,
@@ -66,7 +66,9 @@ export function ModelSettingsPopover(props: ModelSettingsPopoverProps) {
       on_open_change={props.on_open_change}
       open={props.open}
       trigger_class_name={props.trigger_class_name}
-      trigger_content={`${props.model_display_name} · ${effortLabel(props.effort, props.effort_options)}`}
+      trigger_content={props.model_key
+        ? `${props.model_display_name} · ${effortLabel(props.effort, props.effort_options)}`
+        : props.model_display_name}
     />
   );
 }

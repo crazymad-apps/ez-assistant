@@ -8,8 +8,10 @@ use assistant_protocol::{
     RunStatus, RuntimeErrorInfo, SessionId, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::StoredGoal;
+use crate::StoredSkillActivation;
 
 /// 队列执行器领取一次 Run 时提交的 User Message 与结构化关联。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +32,7 @@ pub struct PendingToolExchange {
     pub receipt: ExchangeReceipt,
     pub session_id: SessionId,
     pub run_id: RunId,
+    pub step: u32,
     pub assistant: AssistantMessage,
     pub created_at_ms: i64,
 }
@@ -41,7 +44,12 @@ pub struct CompletedToolExchange {
     pub receipt: ExchangeReceipt,
     pub session_id: SessionId,
     pub run_id: RunId,
+    pub step: u32,
     pub results: Vec<ToolMessage>,
+    /// 与结果同一可靠提交追加的隐藏 Runtime Skill 上下文。
+    pub activation_message: Option<UserMessage>,
+    /// 与隐藏消息同一事务写入的模型 Activation ledger。
+    pub skill_activations: Vec<StoredSkillActivation>,
     pub completed_at_ms: i64,
 }
 
@@ -90,6 +98,8 @@ pub struct StoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
+    /// 用户接受输入时冻结的单个 Skill；Runtime continuation 恒为空。
+    pub skill_activation: Option<StoredSkillActivation>,
     pub user_message_id: MessageId,
     pub state: StoredInputState,
     pub queued_message: Option<UserMessage>,
@@ -106,6 +116,8 @@ pub struct NewStoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
+    /// 与 Input、首次 Run 和 queued message 同事务写入的用户 Skill Activation。
+    pub skill_activation: Option<StoredSkillActivation>,
     pub approval_mode: ApprovalMode,
     pub message: UserMessage,
     /// 仅首次 start_goal 提供；Store 必须与 Input/Run 在同一事务中创建。
@@ -147,10 +159,9 @@ pub fn validate_input_message(
                 || message.origin != UserMessageOrigin::Runtime
                 || message.transcript_visibility != TranscriptVisibility::Hidden
                 || message.parts.is_empty()
-                || message
-                    .parts
-                    .iter()
-                    .any(|part| !matches!(part, UserPart::Injected(_)))
+                || message.parts.iter().any(|part| {
+                    !matches!(part, UserPart::Injected(_) | UserPart::InternalContext(_))
+                })
             {
                 return Err(InputMessageValidationError);
             }
@@ -194,6 +205,8 @@ pub struct StoredRunSettlement {
     pub cancel_requested: bool,
     pub error: Option<RuntimeErrorInfo>,
     pub messages: Vec<ConversationMessage>,
+    /// 本批最终 AssistantMessage 的可靠 step；旧调用方或无消息结算时为空。
+    pub message_step: Option<u32>,
     pub goal_effect: Option<StoredGoalSettlementEffect>,
     pub finished_at_ms: i64,
 }
@@ -238,6 +251,8 @@ pub struct StoredRun {
     pub cancel_requested: bool,
     pub error: Option<RuntimeErrorInfo>,
     pub message_ids: Vec<MessageId>,
+    /// 新记录保存可靠消息所属 step；旧行缺失时不回填。
+    pub message_steps: HashMap<MessageId, u32>,
     pub created_at_ms: i64,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,

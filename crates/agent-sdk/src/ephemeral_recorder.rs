@@ -3,7 +3,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
+use agent_core::{
+    ExchangeCompletion, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
+};
 use agent_types::{AssistantMessage, AssistantPart, ToolCallId, ToolMessage};
 
 /// 一个执行内尚未结算的工具交换。
@@ -38,6 +40,7 @@ impl EphemeralExecutionRecorder {
 impl ExecutionRecorder for EphemeralExecutionRecorder {
     fn begin_tool_exchange<'a>(
         &'a self,
+        _step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
@@ -86,7 +89,7 @@ impl ExecutionRecorder for EphemeralExecutionRecorder {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let mut pending = self.lock_pending()?;
             let Some(exchange) = pending.as_ref() else {
@@ -106,7 +109,7 @@ impl ExecutionRecorder for EphemeralExecutionRecorder {
             })?;
             // 临时路径只校验两阶段协议；完整消息和结果在结算后有意丢弃。
             drop((completed.assistant, results));
-            Ok(())
+            Ok(ExchangeCompletion::default())
         })
     }
 }
@@ -134,12 +137,12 @@ mod tests {
     async fn rejects_pending_reentry_and_accepts_next_exchange_after_complete() {
         let recorder = EphemeralExecutionRecorder::new();
         let first = recorder
-            .begin_tool_exchange(assistant("message_1"))
+            .begin_tool_exchange(1, assistant("message_1"))
             .await
             .expect("first begin succeeds");
         assert!(
             recorder
-                .begin_tool_exchange(assistant("message_2"))
+                .begin_tool_exchange(2, assistant("message_2"))
                 .await
                 .expect_err("pending reentry must fail")
                 .message
@@ -150,7 +153,7 @@ mod tests {
             .await
             .expect("matching complete succeeds");
         let second = recorder
-            .begin_tool_exchange(assistant("message_3"))
+            .begin_tool_exchange(3, assistant("message_3"))
             .await
             .expect("begin after complete succeeds");
         assert_ne!(first, second);
@@ -160,7 +163,7 @@ mod tests {
     async fn receipt_mismatch_keeps_pending_exchange() {
         let recorder = EphemeralExecutionRecorder::new();
         let receipt = recorder
-            .begin_tool_exchange(assistant("message_1"))
+            .begin_tool_exchange(1, assistant("message_1"))
             .await
             .expect("begin succeeds");
         let other = ExchangeReceipt::new("other_exchange").expect("valid receipt");

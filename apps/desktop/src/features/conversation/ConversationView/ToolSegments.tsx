@@ -9,12 +9,12 @@ import type {
   ToolInputSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { MarkdownContent } from "../../../components/MarkdownContent";
 import type {
   LiveExecutionSegment,
   LiveRunProjection,
   LiveToolSnapshot,
 } from "../../../stores/LiveExecutionStore";
-import { MarkdownContent } from "../MarkdownContent";
 import { ChildTaskTree } from "./ChildTaskTree";
 import {
   humanizeToolName,
@@ -160,13 +160,24 @@ function ToolRow(props: Readonly<{
 }>) {
   const visible_summary = visibleToolSummary(props.summary);
   const input_label = props.input ? toolInputLabel(props.input) : null;
+  const skill_name = props.name === "load_skill" ? loadSkillName(props.input) : null;
   const content = <>
-    <strong data-status={props.status}>{humanizeToolName(props.name)}</strong>
+    <strong data-status={props.status}>{humanizeToolName(props.name)}{skill_name ? ` · ${skill_name}` : ""}</strong>
     <span className={styles.tool_status} data-status={props.status}>{toolStatusLabel(props.status)}</span>
-    {input_label && <span className={styles.tool_input}>{input_label}</span>}
+    {input_label && !skill_name && props.name !== "load_skill" && <span className={styles.tool_input}>{input_label}</span>}
     {visible_summary && <span className={styles.tool_summary}>· {visible_summary}</span>}
   </>;
   return props.on_click
     ? <button className={styles.tool_row} onClick={props.on_click} type="button">{content}</button>
     : <div className={styles.tool_row}>{content}</div>;
+}
+
+function loadSkillName(input: ToolInputSnapshot | undefined): string | null {
+  if (input?.type !== "general") return null;
+  try {
+    const value = JSON.parse(input.summary) as { name?: unknown };
+    return typeof value.name === "string" ? value.name : null;
+  } catch {
+    return null;
+  }
 }

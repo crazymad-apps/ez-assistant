@@ -5,9 +5,10 @@ use agent_model::{
     ProviderOptions,
 };
 use agent_types::{
-    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
-    ConversationSnapshot, FinishReason, MessageId, PartId, TextPart, ToolChoice, UserMessage,
-    UserPart,
+    AssistantMessage, AssistantPart, ContextInsertionPayload, ContextInsertionPlan,
+    ContextSummaryMessage, ConversationMessage, ConversationSnapshot, FinishReason,
+    InternalContextPart, MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 use futures_util::StreamExt;
 use thiserror::Error;
@@ -118,6 +119,11 @@ impl CompressionStrategy for RollingSummarySameModel {
                 system_prompt,
                 layout,
             } = input;
+            let retained_internal_contexts = if policy.protect_active_turn {
+                Vec::new()
+            } else {
+                layout.latest_internal_contexts()
+            };
             let partition = layout.partition_for_continuation(
                 policy.minimum_recent_user_turns(),
                 policy.protect_active_turn,
@@ -182,6 +188,7 @@ impl CompressionStrategy for RollingSummarySameModel {
                 summary_text,
                 compacted_usage,
                 !policy.protect_active_turn,
+                &retained_internal_contexts,
             );
             validate_replacement(&replacement)?;
 
@@ -214,15 +221,24 @@ fn build_compression_conversation(
 }
 
 fn compression_instruction_message() -> ConversationMessage {
+    let part = InternalContextPart::new(
+        PartId::new(COMPRESSION_PART_ID).expect("static compression part id must be valid"),
+        "context_compaction_request",
+        "context_compaction_instruction",
+        None,
+        COMPRESSION_INSTRUCTIONS,
+    )
+    .expect("static compression context must be valid");
+    let plan = ContextInsertionPlan::request_only_internal("context_compaction_request", part);
+    let ContextInsertionPayload::InternalContext(part) = plan.payload else {
+        unreachable!("request-only internal plan carries internal context")
+    };
     ConversationMessage::User(UserMessage {
-        origin: Default::default(),
-        transcript_visibility: Default::default(),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
         id: MessageId::new(COMPRESSION_MESSAGE_ID)
             .expect("static compression message id must be valid"),
-        parts: vec![UserPart::Injected(TextPart {
-            id: PartId::new(COMPRESSION_PART_ID).expect("static compression part id must be valid"),
-            text: COMPRESSION_INSTRUCTIONS.to_owned(),
-        })],
+        parts: vec![UserPart::InternalContext(part)],
     })
 }
 
@@ -278,6 +294,7 @@ fn build_replacement(
     summary_text: String,
     compacted_usage: Option<agent_types::TokenUsage>,
     ensure_continuation_anchor: bool,
+    retained_internal_contexts: &[InternalContextPart],
 ) -> ConversationSnapshot {
     let mut messages = protected_prefix.to_vec();
     messages.push(ConversationMessage::ContextSummary(ContextSummaryMessage {
@@ -298,28 +315,61 @@ fn build_replacement(
             .iter()
             .any(|message| matches!(message, ConversationMessage::User(_)))
     {
-        messages.push(continuation_anchor(&message.id));
+        messages.push(continuation_anchor(&message.id, retained_internal_contexts));
     }
     ConversationSnapshot::new(messages)
 }
 
-fn continuation_anchor(summary_id: &MessageId) -> ConversationMessage {
-    ConversationMessage::User(UserMessage {
-        origin: Default::default(),
-        transcript_visibility: Default::default(),
-        id: MessageId::new(format!(
-            "{}{CONTINUATION_MESSAGE_ID_SUFFIX}",
+fn continuation_anchor(
+    summary_id: &MessageId,
+    retained_internal_contexts: &[InternalContextPart],
+) -> ConversationMessage {
+    let message_id = MessageId::new(format!(
+        "{}{CONTINUATION_MESSAGE_ID_SUFFIX}",
+        summary_id.as_str()
+    ))
+    .expect("non-empty summary id forms a valid continuation message id");
+    let mut parts = retained_internal_contexts
+        .iter()
+        .enumerate()
+        .map(|(index, context)| {
+            InternalContextPart::new(
+                PartId::new(format!(
+                    "{}{CONTINUATION_PART_ID_SUFFIX}_{index}",
+                    summary_id.as_str()
+                ))
+                .expect("summary identity forms a valid retained context part id"),
+                context.boundary_id.clone(),
+                context.kind.clone(),
+                context.retention_key.clone(),
+                context.text.clone(),
+            )
+            .expect("previously validated internal context remains valid")
+        })
+        .map(UserPart::InternalContext)
+        .collect::<Vec<_>>();
+    let part = InternalContextPart::new(
+        PartId::new(format!(
+            "{}{CONTINUATION_PART_ID_SUFFIX}",
             summary_id.as_str()
         ))
-        .expect("non-empty summary id forms a valid continuation message id"),
-        parts: vec![UserPart::Injected(TextPart {
-            id: PartId::new(format!(
-                "{}{CONTINUATION_PART_ID_SUFFIX}",
-                summary_id.as_str()
-            ))
-            .expect("non-empty summary id forms a valid continuation part id"),
-            text: CONTINUATION_INSTRUCTION.to_owned(),
-        })],
+        .expect("non-empty summary id forms a valid continuation part id"),
+        format!("context_compaction:{}", summary_id.as_str()),
+        "context_continuation",
+        Some("context:continuation".to_owned()),
+        CONTINUATION_INSTRUCTION,
+    )
+    .expect("summary identity forms a valid continuation context");
+    let plan = ContextInsertionPlan::canonical_internal(summary_id.clone(), part);
+    let ContextInsertionPayload::InternalContext(part) = plan.payload else {
+        unreachable!("canonical internal plan carries internal context")
+    };
+    parts.push(UserPart::InternalContext(part));
+    ConversationMessage::User(UserMessage {
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        id: message_id,
+        parts,
     })
 }
 
@@ -862,7 +912,21 @@ mod tests {
     async fn active_turn_compaction_persists_a_user_anchor_for_the_continuation_result() {
         let call_id = ToolCallId::new("call_active").expect("valid call id");
         let snapshot = ConversationSnapshot::new(vec![
-            user("user_active"),
+            ConversationMessage::User(UserMessage {
+                id: id("user_active"),
+                origin: UserMessageOrigin::Runtime,
+                transcript_visibility: TranscriptVisibility::Hidden,
+                parts: vec![UserPart::InternalContext(
+                    InternalContextPart::new(
+                        part_id("active_goal_context"),
+                        "boundary_active_goal",
+                        "goal_continuation",
+                        Some("goal:active".to_owned()),
+                        "frozen active goal",
+                    )
+                    .expect("internal context"),
+                )],
+            }),
             ConversationMessage::Assistant(AssistantMessage {
                 id: id("assistant_active"),
                 model: model_identity(),
@@ -906,12 +970,22 @@ mod tests {
         else {
             panic!("expected candidate");
         };
+        let [
+            ConversationMessage::ContextSummary(_),
+            ConversationMessage::User(anchor),
+        ] = candidate.replacement.messages.as_slice()
+        else {
+            panic!("replacement must contain a summary and hidden anchor")
+        };
+        assert_eq!(anchor.origin, UserMessageOrigin::Runtime);
+        assert_eq!(anchor.transcript_visibility, TranscriptVisibility::Hidden);
         assert!(matches!(
-            candidate.replacement.messages.as_slice(),
-            [ConversationMessage::ContextSummary(_), ConversationMessage::User(UserMessage {
-                parts,
-                ..
-            })] if matches!(parts.as_slice(), [UserPart::Injected(part)] if part.text == CONTINUATION_INSTRUCTION)
+            anchor.parts.as_slice(),
+            [UserPart::InternalContext(retained), UserPart::InternalContext(continuation)]
+                if retained.boundary_id == "boundary_active_goal"
+                    && retained.retention_key.as_deref() == Some("goal:active")
+                    && retained.text == "frozen active goal"
+                    && continuation.text == CONTINUATION_INSTRUCTION
         ));
 
         candidate

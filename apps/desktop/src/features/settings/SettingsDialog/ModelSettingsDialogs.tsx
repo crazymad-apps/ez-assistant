@@ -35,11 +35,11 @@ export function DeleteModelDialog(props: DeleteModelDialogProps) {
       <header><h4>删除“{props.model.display_name}”？</h4></header>
       {props.blockers.length ? (
         <div className={styles.blocker_list}>
-          <p>该模型仍被以下活动会话引用，暂时不能删除：</p>
+          <p>该模型仍被以下正在执行或存在排队输入的会话使用，暂时不能删除：</p>
           <ul>{props.blockers.map((session) => <li key={session.session_id}>{session.title}</li>)}</ul>
         </div>
       ) : (
-        <p>删除只影响后续选择，不会改写历史 Run 中已保存的模型信息。</p>
+        <p>删除不会改写历史运行。引用该模型的空闲会话将变为未选择模型，需要用户重新选择后才能发送消息。</p>
       )}
       {props.model.is_default && !props.blockers.length && (
         <div className={styles.replacement_field}>
@@ -86,7 +86,7 @@ export function ConflictDialog(props: ConflictDialogProps) {
       dialog_class_name={styles.confirm_dialog}
       on_close={props.onReload}
     >
-      <header><h4>Runtime 配置已变化</h4></header>
+      <header><h4>运行时配置已变化</h4></header>
       <p>当前表单基于旧修订，系统没有覆盖磁盘上的新配置。你可以先复制本次输入，再重新加载最新配置。</p>
       <footer>
         <button onClick={props.onCopy} type="button">复制本次输入</button>

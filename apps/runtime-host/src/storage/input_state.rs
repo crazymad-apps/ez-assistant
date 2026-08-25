@@ -4,7 +4,8 @@ use agent_types::MessageId;
 use assistant_protocol::{GoalId, IdempotencyKey, InputId, RunStatus, SessionId};
 use assistant_runtime::{
     AcceptedInput, GoalHeldInputResume, GoalHeldInputResumeResult, GoalInputBinding, InputOrigin,
-    NewStoredInput, StoredInput, StoredInputState, StoredRun, validate_input_message,
+    NewStoredInput, SkillActivationOwner, SkillActivationTrigger, StoredInput, StoredInputState,
+    StoredRun, StoredSkillActivation, validate_input_message,
 };
 use rusqlite::Transaction;
 use rusqlite::{TransactionBehavior, params};
@@ -14,6 +15,7 @@ use super::{
     goal::{apply_goal_resume, insert_new_goal},
     internal_error, invalid_data, invalid_data_with_source,
     mode::{agent_variant_value, approval_mode_value, parse_agent_variant},
+    skill::insert_skill_activation,
 };
 
 impl StorageEngine {
@@ -155,6 +157,7 @@ impl StorageEngine {
         }
         validate_input_message(input.origin, input.goal_binding.as_ref(), &input.message)
             .map_err(|_| invalid_data("input message origin or Goal binding is invalid"))?;
+        validate_new_input_activation(&input)?;
         if input.new_goal.is_some() && input.resumed_goal.is_some() {
             return Err(invalid_data(
                 "input cannot start and resume a Goal together",
@@ -177,6 +180,14 @@ impl StorageEngine {
         }
         let message_json = serde_json::to_string(&input.message)
             .map_err(|source| internal_error("queued user message could not be encoded", source))?;
+        let skill_activation_json = input
+            .skill_activation
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|source| {
+                internal_error("input skill activation could not be encoded", source)
+            })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -210,10 +221,13 @@ impl StorageEngine {
             }
             apply_goal_resume(&transaction, goal)?;
         }
-        transaction.execute("INSERT INTO inputs (priority_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?12)", params![priority_order, input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant), input_origin_value(input.origin), input.goal_binding.as_ref().map(|binding| binding.goal_id.as_str()), input.goal_binding.as_ref().map(|binding| i64::try_from(binding.generation)).transpose().map_err(|source| internal_error("Goal input generation exceeds storage range", source))?, input.goal_binding.as_ref().map(|binding| i64::from(binding.turn))]).map_err(|source| database_write_error("input could not be accepted", source))?;
+        transaction.execute("INSERT INTO inputs (priority_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", params![priority_order, input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant), input_origin_value(input.origin), input.goal_binding.as_ref().map(|binding| binding.goal_id.as_str()), input.goal_binding.as_ref().map(|binding| i64::try_from(binding.generation)).transpose().map_err(|source| internal_error("Goal input generation exceeds storage range", source))?, input.goal_binding.as_ref().map(|binding| i64::from(binding.turn)), skill_activation_json]).map_err(|source| database_write_error("input could not be accepted", source))?;
         let queue_order = u64::try_from(priority_order)
             .map_err(|source| internal_error("queue order exceeds storage range", source))?;
         transaction.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, 1, 'accepted', 0, ?4, NULL, NULL, ?5, NULL, NULL)", params![input.run_id.as_str(), input.session_id.as_str(), input.input_id.as_str(), approval_mode_value(input.approval_mode), input.accepted_at_ms]).map_err(|source| database_write_error("run could not be accepted", source))?;
+        if let Some(activation) = input.skill_activation.as_ref() {
+            insert_skill_activation(&transaction, activation)?;
+        }
         let changed = transaction
             .execute(
                 "UPDATE sessions
@@ -246,6 +260,7 @@ impl StorageEngine {
             agent_variant: input.agent_variant,
             origin: input.origin,
             goal_binding: input.goal_binding,
+            skill_activation: input.skill_activation,
             user_message_id: input.message.id.clone(),
             state: StoredInputState::Queued,
             queued_message: Some(input.message),
@@ -263,6 +278,7 @@ impl StorageEngine {
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),
+            message_steps: std::collections::HashMap::new(),
             created_at_ms: input.accepted_at_ms,
             started_at_ms: None,
             finished_at_ms: None,
@@ -297,7 +313,7 @@ impl StorageEngine {
     }
 
     pub(super) fn load_inputs(&self) -> StorageResult<Vec<StoredInput>> {
-        let mut statement = self.connection.prepare("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn FROM inputs ORDER BY COALESCE(priority_order, queue_order), queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
+        let mut statement = self.connection.prepare("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json FROM inputs ORDER BY COALESCE(priority_order, queue_order), queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -314,6 +330,7 @@ impl StorageEngine {
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<i64>>(11)?,
                     row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
                 ))
             })
             .map_err(|source| internal_error("runtime inputs could not be read", source))?;
@@ -332,6 +349,7 @@ impl StorageEngine {
                 goal_id,
                 goal_generation,
                 goal_turn,
+                skill_activation_json,
             ) = row
                 .map_err(|source| internal_error("runtime input row could not be read", source))?;
             let state = match state.as_str() {
@@ -350,6 +368,29 @@ impl StorageEngine {
                 return Err(invalid_data("stored queued message state is inconsistent"));
             }
             let origin = parse_input_origin(&origin)?;
+            let parsed_input_id = InputId::new(input_id)
+                .map_err(|source| invalid_data_with_source("stored input id is invalid", source))?;
+            let parsed_session_id = SessionId::new(session_id).map_err(|source| {
+                invalid_data_with_source("stored input session id is invalid", source)
+            })?;
+            let parsed_message_id = MessageId::new(message_id).map_err(|source| {
+                invalid_data_with_source("stored user message id is invalid", source)
+            })?;
+            let skill_activation: Option<StoredSkillActivation> = skill_activation_json
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(|source| {
+                        invalid_data_with_source("stored input skill activation is invalid", source)
+                    })
+                })
+                .transpose()?;
+            validate_stored_input_activation(
+                origin,
+                &parsed_session_id,
+                &parsed_input_id,
+                &parsed_message_id,
+                queued_message.as_ref(),
+                skill_activation.as_ref(),
+            )?;
             let goal_binding = match (goal_id, goal_generation, goal_turn) {
                 (None, None, None) => None,
                 (Some(goal_id), Some(generation), Some(turn)) => Some(GoalInputBinding {
@@ -376,21 +417,16 @@ impl StorageEngine {
                 queue_order: u64::try_from(queue_order).map_err(|source| {
                     invalid_data_with_source("stored queue order is invalid", source)
                 })?,
-                input_id: InputId::new(input_id).map_err(|source| {
-                    invalid_data_with_source("stored input id is invalid", source)
-                })?,
-                session_id: SessionId::new(session_id).map_err(|source| {
-                    invalid_data_with_source("stored input session id is invalid", source)
-                })?,
+                input_id: parsed_input_id,
+                session_id: parsed_session_id,
                 idempotency_key: key.map(IdempotencyKey::new).transpose().map_err(|source| {
                     invalid_data_with_source("stored idempotency key is invalid", source)
                 })?,
                 agent_variant: parse_agent_variant(&agent_variant)?,
                 origin,
                 goal_binding,
-                user_message_id: MessageId::new(message_id).map_err(|source| {
-                    invalid_data_with_source("stored user message id is invalid", source)
-                })?,
+                skill_activation,
+                user_message_id: parsed_message_id,
                 state,
                 queued_message,
                 accepted_at_ms,
@@ -398,6 +434,71 @@ impl StorageEngine {
         })
         .collect()
     }
+}
+
+fn validate_new_input_activation(input: &NewStoredInput) -> StorageResult<()> {
+    validate_stored_input_activation(
+        input.origin,
+        &input.session_id,
+        &input.input_id,
+        &input.message.id,
+        Some(&input.message),
+        input.skill_activation.as_ref(),
+    )?;
+    if input
+        .skill_activation
+        .as_ref()
+        .is_some_and(|activation| activation.run_id.as_ref() != Some(&input.run_id))
+    {
+        return Err(invalid_data("input skill activation Run is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_stored_input_activation(
+    origin: InputOrigin,
+    session_id: &SessionId,
+    input_id: &InputId,
+    message_id: &MessageId,
+    message: Option<&agent_types::UserMessage>,
+    activation: Option<&StoredSkillActivation>,
+) -> StorageResult<()> {
+    let skill_parts = message
+        .into_iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            agent_types::UserPart::InternalContext(part) if part.kind == "skill_activation" => {
+                Some(part)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(activation) = activation else {
+        if !skill_parts.is_empty() {
+            return Err(invalid_data(
+                "input has an unbound skill activation context",
+            ));
+        }
+        return Ok(());
+    };
+    let owner_matches = matches!(
+        &activation.owner,
+        SkillActivationOwner::Session(owner_session_id) if owner_session_id == session_id
+    );
+    if origin != InputOrigin::User
+        || activation.trigger != SkillActivationTrigger::User
+        || &activation.session_id != session_id
+        || activation.input_id.as_ref() != Some(input_id)
+        || &activation.message_id != message_id
+        || !owner_matches
+        || message.is_some()
+            && (skill_parts.len() != 1
+                || skill_parts[0].retention_key.as_deref()
+                    != Some(&format!("skill:{}", activation.name.as_str())))
+    {
+        return Err(invalid_data("input skill activation is inconsistent"));
+    }
+    Ok(())
 }
 
 fn input_origin_value(origin: InputOrigin) -> &'static str {
@@ -417,6 +518,7 @@ pub(super) fn insert_goal_continuation(
         || input.goal_binding.is_none()
         || input.new_goal.is_some()
         || input.resumed_goal.is_some()
+        || input.skill_activation.is_some()
         || input.idempotency_key.is_some()
         || input.generated_title.is_some()
     {
@@ -488,6 +590,7 @@ pub(super) fn insert_goal_continuation(
         agent_variant: input.agent_variant,
         origin: input.origin,
         goal_binding: input.goal_binding.clone(),
+        skill_activation: None,
         user_message_id: input.message.id.clone(),
         state: StoredInputState::Queued,
         queued_message: Some(input.message.clone()),
@@ -505,6 +608,7 @@ pub(super) fn insert_goal_continuation(
         cancel_requested: false,
         error: None,
         message_ids: Vec::new(),
+        message_steps: std::collections::HashMap::new(),
         created_at_ms: input.accepted_at_ms,
         started_at_ms: None,
         finished_at_ms: None,

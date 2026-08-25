@@ -76,6 +76,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             message: "ship the complete release".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: vec![attachment.attachment_id],
+            skill_name: None,
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -87,6 +88,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             message: "this duplicate payload must be ignored".to_owned(),
             variant: assistant_protocol::AgentVariant::Plan,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: Some(key),
         })
         .await
@@ -161,14 +163,14 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
         agent_types::TranscriptVisibility::Visible
     );
     assert!(goal_user.parts.iter().any(|part| {
-        matches!(part, UserPart::Injected(text)
+        matches!(part, UserPart::InternalContext(text)
             if text.text.starts_with("GOAL_START_INJECTION_V1"))
     }));
     assert!(requests[1].conversation.messages.iter().any(|message| {
         matches!(message, ConversationMessage::User(user)
             if user.origin == agent_types::UserMessageOrigin::Runtime
                 && user.transcript_visibility == agent_types::TranscriptVisibility::Hidden
-                && user.parts.iter().any(|part| matches!(part, UserPart::Injected(text)
+                && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_CONTINUATION_V1"))))
     }));
     let view = runtime
@@ -208,6 +210,7 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
                 message: "unsupported Goal".to_owned(),
                 variant: assistant_protocol::AgentVariant::Build,
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,
@@ -236,6 +239,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
             message: "keep running until stopped".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -382,6 +386,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             message: "ship release".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -404,6 +409,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             message: "Use the stable release channel".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -419,7 +425,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         matches!(message, ConversationMessage::User(user)
             if user.origin == agent_types::UserMessageOrigin::User
                 && user.transcript_visibility == agent_types::TranscriptVisibility::Visible
-                && user.parts.iter().any(|part| matches!(part, UserPart::Injected(text)
+                && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_RESUME_INJECTION_V1"))))
     }));
     let resume_message_id = runtime
@@ -500,6 +506,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             message: "baseline turn".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -512,6 +519,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             message: "forkable Goal".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -604,6 +612,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
             message: "retry across Goal Runs".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -695,6 +704,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
             message: "resume without guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -716,7 +726,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
         matches!(message, ConversationMessage::User(user)
             if user.origin == agent_types::UserMessageOrigin::Runtime
                 && user.transcript_visibility == agent_types::TranscriptVisibility::Hidden
-                && user.parts.iter().any(|part| matches!(part, UserPart::Injected(text)
+                && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_CONTINUATION_V1"))))
     }));
     let controller = runtime.session(&session_id).expect("session");
@@ -778,6 +788,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             message: "wait for held guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -790,6 +801,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             message: "Use this exact held guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -812,7 +824,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             if user.origin == agent_types::UserMessageOrigin::User
                 && user.parts.iter().any(|part| matches!(part, UserPart::Text(text)
                     if text.text == "Use this exact held guidance"))
-                && user.parts.iter().any(|part| matches!(part, UserPart::Injected(text)
+                && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_RESUME_INJECTION_V1"))))
     }));
     let controller = runtime.session(&session_id).expect("session");
@@ -862,6 +874,7 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
             message: "bounded Goal".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await

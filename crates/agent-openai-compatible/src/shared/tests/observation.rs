@@ -209,6 +209,31 @@ fn service_rejects_base_url_userinfo_query_and_fragment_without_echoing_input() 
     }
 }
 
+#[test]
+fn service_accepts_remote_http_and_rejects_non_http_schemes() {
+    OpenAiChatCompletionsService::with_transport(
+        "http://api.openai.test/v1",
+        BearerCredential::new(TOKEN),
+        "gpt-test",
+        128_000,
+        base_adapter(),
+        Arc::new(RecordedTransport::new([])),
+    )
+    .expect("remote HTTP base URL should be valid");
+
+    let error = OpenAiChatCompletionsService::with_transport(
+        "ftp://api.openai.test/v1",
+        BearerCredential::new(TOKEN),
+        "gpt-test",
+        128_000,
+        base_adapter(),
+        Arc::new(RecordedTransport::new([])),
+    )
+    .err()
+    .expect("non-HTTP base URL must be rejected");
+    assert!(error.to_string().contains("scheme must be http or https"));
+}
+
 #[tokio::test]
 async fn observed_transport_preserves_request_response_headers_and_chunk_boundaries() {
     let response_headers = vec![

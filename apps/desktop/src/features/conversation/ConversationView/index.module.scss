@@ -14,6 +14,10 @@
   scrollbar-color: auto;
   scrollbar-width: auto;
   overflow-anchor: none;
+  // WKWebView 会把跨块级消息的选区边界绘制成整行高亮。会话结构默认不参与
+  // 文本选择，正文区域再显式开放，避免从标签、工具行或空白处误拖出大块选区。
+  -webkit-user-select: none;
+  user-select: none;
 
   &::-webkit-scrollbar {
     width: 4px;
@@ -88,7 +92,12 @@
   line-height: 1.65;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
 }
+
+.user_skill { display: flex; max-width: min(74%, 620px); align-items: center; gap: 6px; margin-top: 5px; }
+.user_skill span { max-width: 220px; overflow: hidden; padding: 2px 7px; border-radius: 999px; color: var(--ez-primary); background: var(--ez-primary-soft); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 
 .user_attachments {
   display: flex;
@@ -152,7 +161,20 @@
 .turn_with_tasks { min-width: 0; }
 .assistant_segments { display: grid; min-width: 0; max-width: 100%; gap: 12px; }
 .assistant_step { display: grid; min-width: 0; gap: 12px; }
-.assistant_text { min-width: 0; max-width: 100%; color: var(--ez-text); font-size: var(--ez-font-base); line-height: 1.72; }
+.assistant_text {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--ez-text);
+  font-size: var(--ez-font-base);
+  line-height: 1.72;
+  -webkit-user-select: text;
+  user-select: text;
+
+  button {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
 
 .reasoning {
   color: var(--ez-text-muted);
@@ -195,6 +217,8 @@
   font-size: var(--ez-font-base);
   line-height: 1.7;
   white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .tool_group {

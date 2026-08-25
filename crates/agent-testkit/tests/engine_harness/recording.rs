@@ -28,7 +28,7 @@ async fn hallucinated_tool_with_empty_snapshot_feeds_error_result() {
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     let deltas = recorder.deltas();
     let ConversationDelta::Tool(message) = &deltas[1] else {
         panic!("second delta must be the tool result, got {deltas:?}");
@@ -80,7 +80,7 @@ async fn tool_output_chunks_bridge_to_agent_events() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2.clone()));
+    assert_completed(outcome, turn2.clone());
     // ToolOutputChunk{channel, delta} → AgentEvent::ToolOutput{call_id, channel, chunk}。
     assert_eq!(
         events,
@@ -88,31 +88,38 @@ async fn tool_output_chunks_bridge_to_agent_events() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "chatty", json!({})),
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_1"),
             },
             AgentEvent::ToolOutput {
+                step: 1,
                 call_id: call_id("call_1"),
                 channel: ToolOutputChannel::Stdout,
                 chunk: "line 1".to_owned(),
             },
             AgentEvent::ToolOutput {
+                step: 1,
                 call_id: call_id("call_1"),
                 channel: ToolOutputChannel::Stderr,
                 chunk: "warn".to_owned(),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Success,
             },
             AgentEvent::StepStarted { step: 2 },
             AgentEvent::TextDelta {
+                step: 2,
                 id: part_id("text_1"),
                 delta: "Done chatting.".to_owned(),
             },
             AgentEvent::ExecutionCompleted {
+                step: 2,
                 message: turn2,
                 dropped_events: 0,
             },
@@ -159,9 +166,10 @@ async fn terminal_event_survives_real_engine_event_queue_overflow() {
     let outcome = completion.await;
     let events = events.collect::<Vec<_>>().await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2.clone()));
+    assert_completed(outcome, turn2.clone());
     assert_lifecycle(&events);
     let Some(AgentEvent::ExecutionCompleted {
+        step: _,
         message,
         dropped_events,
     }) = events.last()
@@ -203,15 +211,21 @@ async fn recorder_failure_blocks_all_side_effects() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::Record(RecordError {
+        ExecutionError::Record(RecordError {
             message: "injected record failure at call 1".to_owned(),
-        }))
+        }),
     );
     // begin(Assistant) 失败阻断后续一切副作用：无任何工具执行与授权。
     assert_eq!(log.entries(), vec![LogEntry::RecordAssistant]);
     assert!(recorder.deltas().is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCompleted { .. })),
+        "ToolCompleted must not be published before recorder commit succeeds"
+    );
     assert_eq!(
         events,
         vec![
@@ -255,7 +269,7 @@ async fn recorder_failure_at_started_blocks_tool_execution_and_settles_result() 
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(recorder.started_calls().is_empty());
     assert!(
         !log.entries()
@@ -296,13 +310,13 @@ async fn recorder_failure_at_tool_record_fails_controlled() {
         input,
         make_context(recorder.clone(), authorizer),
     );
-    let (outcome, _) = finish(execution).await;
+    let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::Record(RecordError {
+        ExecutionError::Record(RecordError {
             message: "injected record failure at call 2".to_owned(),
-        }))
+        }),
     );
     assert_eq!(
         log.entries(),
@@ -320,6 +334,12 @@ async fn recorder_failure_at_tool_record_fails_controlled() {
     );
     // complete 失败不暴露部分规范对话；pending exchange 保持可恢复。
     assert!(recorder.deltas().is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCompleted { .. })),
+        "ToolCompleted must not be published before recorder commit succeeds"
+    );
     let pending = recorder.pending_exchanges();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].1, turn1);
@@ -336,6 +356,54 @@ async fn recorder_failure_at_tool_record_fails_controlled() {
         .await
         .expect("recover pending exchange");
     assert_tool_pairing(&reconstruct(&user_input, &recorder.deltas()));
+}
+
+#[tokio::test]
+async fn recorder_context_change_ends_the_execution_with_reliable_consumption() {
+    let log = OrderLog::new();
+    let turn = calls_message("message_1", vec![call("call_1", "load_context", json!({}))]);
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::Events(message_events(&turn))],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()).with_continuation_required());
+    let execution = AgentExecution::start(
+        make_spec(
+            model,
+            snapshot_of(vec![ScriptedTool::succeed(
+                "load_context",
+                json!({"status": "staged"}),
+                log.clone(),
+            )]),
+            ExecutionBudget::default(),
+        ),
+        make_input(vec![]).0,
+        make_context(
+            recorder.clone(),
+            Arc::new(ScriptedAuthorizer::allow_all(log)),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::ContinuationRequired {
+            reason: agent_core::ContinuationReason::ContextChanged,
+            consumption: ExecutionConsumption {
+                steps: 1,
+                tool_calls: 1,
+            },
+        }
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::ExecutionContinuationRequired {
+            reason: agent_core::ContinuationReason::ContextChanged,
+            ..
+        })
+    ));
+    assert_eq!(recorder.deltas().len(), 2);
 }
 
 // ---------- 预算边界（0 / 刚好等于上限 / 同批跨越 / None 见多轮测试） ----------

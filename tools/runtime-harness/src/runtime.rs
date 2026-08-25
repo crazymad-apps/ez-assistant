@@ -229,13 +229,16 @@ impl HarnessRun {
 
     fn finish(&mut self, outcome: ExecutionOutcome) -> Result<(), HarnessError> {
         let (status, terminal) = match &outcome {
-            ExecutionOutcome::Completed(_) => (RunStatus::Completed, TerminalKind::Completed),
-            ExecutionOutcome::Failed(_) => (RunStatus::Failed, TerminalKind::Failed),
-            ExecutionOutcome::Cancelled => (RunStatus::Cancelled, TerminalKind::Cancelled),
+            ExecutionOutcome::Completed { .. } => (RunStatus::Completed, TerminalKind::Completed),
+            ExecutionOutcome::Failed { .. } => (RunStatus::Failed, TerminalKind::Failed),
+            ExecutionOutcome::Cancelled { .. } => (RunStatus::Cancelled, TerminalKind::Cancelled),
             ExecutionOutcome::CompactionRequired { .. } => (
                 RunStatus::CompactionRequired,
                 TerminalKind::CompactionRequired,
             ),
+            ExecutionOutcome::ContinuationRequired { .. } => {
+                (RunStatus::Failed, TerminalKind::Failed)
+            }
         };
         self.transition(status)?;
         self.finished_at = Some(SystemTime::now());
@@ -264,6 +267,10 @@ impl HarnessRun {
             }
             AgentEvent::ExecutionCompactionRequired { dropped_events, .. } => {
                 self.events.terminal = Some(TerminalKind::CompactionRequired);
+                self.events.dropped_events = *dropped_events;
+            }
+            AgentEvent::ExecutionContinuationRequired { dropped_events, .. } => {
+                self.events.terminal = Some(TerminalKind::Failed);
                 self.events.dropped_events = *dropped_events;
             }
             _ => {}
@@ -556,7 +563,7 @@ impl HarnessRuntime {
                 ));
             }
         }
-        if let ExecutionOutcome::Completed(message) = &outcome {
+        if let ExecutionOutcome::Completed { message, .. } = &outcome {
             self.journal.append_assistant(message.clone())?;
         }
         self.active_run_mut(run_id)?.finish(outcome)?;
@@ -748,10 +755,13 @@ mod tests {
     }
 
     fn failure() -> ExecutionOutcome {
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
-            kind: BudgetKind::Steps,
-            limit: 1,
-        })
+        ExecutionOutcome::Failed {
+            error: ExecutionError::BudgetExceeded {
+                kind: BudgetKind::Steps,
+                limit: 1,
+            },
+            consumption: Default::default(),
+        }
     }
 
     fn tool_message(id: &str) -> AssistantMessage {
@@ -827,7 +837,12 @@ mod tests {
         assert_eq!(runtime.correlation_id(&first.run_id), "session_test/run_1");
         runtime.mark_running(&first.run_id).expect("start first");
         runtime
-            .finish_run(&first.run_id, ExecutionOutcome::Cancelled)
+            .finish_run(
+                &first.run_id,
+                ExecutionOutcome::Cancelled {
+                    consumption: Default::default(),
+                },
+            )
             .expect("finish first");
         runtime.reset().expect("reset");
 
@@ -842,7 +857,12 @@ mod tests {
         assert!(runtime.prepare_run("parallel").is_err());
         assert!(
             runtime
-                .finish_run(&prepared.run_id, ExecutionOutcome::Cancelled)
+                .finish_run(
+                    &prepared.run_id,
+                    ExecutionOutcome::Cancelled {
+                        consumption: Default::default(),
+                    },
+                )
                 .is_err()
         );
         runtime.mark_running(&prepared.run_id).expect("start");
@@ -857,7 +877,7 @@ mod tests {
         runtime.mark_running(&prepared.run_id).expect("start");
         prepared
             .recorder
-            .begin_tool_exchange(assistant("assistant_tool"))
+            .begin_tool_exchange(1, assistant("assistant_tool"))
             .await
             .expect("begin pending");
         runtime
@@ -889,7 +909,11 @@ mod tests {
         runtime
             .finish_run(
                 &completed.run_id,
-                ExecutionOutcome::Completed(assistant("assistant_final")),
+                ExecutionOutcome::Completed {
+                    step: 1,
+                    message: assistant("assistant_final"),
+                    consumption: Default::default(),
+                },
             )
             .expect("finish completed");
         let snapshot = runtime.snapshot().expect("snapshot");
@@ -908,7 +932,12 @@ mod tests {
         let cancelled = runtime.prepare_run("cancel").expect("prepare cancelled");
         runtime.mark_running(&cancelled.run_id).expect("start");
         runtime
-            .finish_run(&cancelled.run_id, ExecutionOutcome::Cancelled)
+            .finish_run(
+                &cancelled.run_id,
+                ExecutionOutcome::Cancelled {
+                    consumption: Default::default(),
+                },
+            )
             .expect("finish cancelled");
         let snapshot = runtime.snapshot().expect("snapshot");
         assert_eq!(
@@ -937,7 +966,12 @@ mod tests {
             )
             .expect("observe terminal");
         runtime
-            .finish_run(&prepared.run_id, ExecutionOutcome::Cancelled)
+            .finish_run(
+                &prepared.run_id,
+                ExecutionOutcome::Cancelled {
+                    consumption: Default::default(),
+                },
+            )
             .expect("finish");
         let run = runtime
             .snapshot()

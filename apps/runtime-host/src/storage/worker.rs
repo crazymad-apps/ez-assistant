@@ -19,13 +19,14 @@ use assistant_runtime::{
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionStoreFuture,
     PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
     QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
-    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
-    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, SkillNameState,
+    SkillNameStateChange, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
+    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
+    StoredConversationRawWindow, StoredConversationWindow, StoredMessageFeedback,
+    StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -43,6 +44,13 @@ enum Command {
     },
     LoadMemoryContext {
         reply: oneshot::Sender<Result<MemoryContextSnapshot, StoreError>>,
+    },
+    ListSkillNameStates {
+        reply: oneshot::Sender<Result<Vec<SkillNameState>, StoreError>>,
+    },
+    SetSkillEnabled {
+        change: SkillNameStateChange,
+        reply: oneshot::Sender<Result<SkillNameState, StoreError>>,
     },
     LoadWorkPlan {
         session_id: SessionId,
@@ -411,6 +419,23 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::LoadMemoryContext { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn list_skill_name_states(&self) -> StoreFuture<'_, Vec<SkillNameState>> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ListSkillNameStates { reply }).await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_skill_enabled(&self, change: SkillNameStateChange) -> StoreFuture<'_, SkillNameState> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSkillEnabled { change, reply })
+                .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -996,6 +1021,12 @@ fn run_worker(
             }
             Command::LoadMemoryContext { reply } => {
                 let _ = reply.send(engine.load_memory_context());
+            }
+            Command::ListSkillNameStates { reply } => {
+                let _ = reply.send(engine.list_skill_name_states());
+            }
+            Command::SetSkillEnabled { change, reply } => {
+                let _ = reply.send(engine.set_skill_enabled(change));
             }
             Command::LoadWorkPlan { session_id, reply } => {
                 let _ = reply.send(engine.load_work_plan(&session_id));

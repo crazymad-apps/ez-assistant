@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use agent_model::{ModelError, ModelRequest, ReasoningEffort, ToolImageProjection};
+use agent_model::{
+    ModelError, ModelRequest, ReasoningEffort, ToolImageProjection,
+    plan_tool_result_image_envelope, tool_result_image_label,
+};
 use agent_types::{
-    AssistantPart, ConversationMessage, MAX_PROVIDER_STATE_TURN_BYTES, PartId, ToolChoice,
-    ToolResultPart, UserPart,
+    AssistantPart, ContextInsertionPayload, ConversationMessage, MAX_PROVIDER_STATE_TURN_BYTES,
+    PartId, ToolChoice, ToolResultPart, UserPart,
 };
 use serde_json::Value;
 
@@ -20,7 +23,6 @@ use super::{
 };
 
 const CONTEXT_SUMMARY_PREFIX: &str = "[Context summary derived from earlier conversation]";
-const TOOL_RESULT_IMAGE_PLACEHOLDER_VERSION: &str = "tool_result_image";
 const RESERVED_REQUEST_KEYS: &[&str] = &[
     "model",
     "instructions",
@@ -80,16 +82,19 @@ pub(super) fn encode_request_with_images(
                 if !has_tool_calls {
                     continue;
                 }
-                let mut image_envelope = Vec::new();
+                let mut tool_messages = Vec::new();
                 while let Some(ConversationMessage::Tool(tool)) =
                     request.conversation.messages.get(index)
                 {
-                    let (item, images) = encode_tool_result(tool, prepared_images, adapter)?;
-                    input.push(item);
-                    image_envelope.extend(images);
+                    input.push(encode_tool_result(tool, prepared_images, adapter)?);
+                    tool_messages.push(tool);
                     index += 1;
                 }
-                if !image_envelope.is_empty() {
+                if adapter.tool_image_projection == ToolImageProjection::AggregatedUserInput
+                    && let Some(plan) = plan_tool_result_image_envelope(message, &tool_messages)
+                {
+                    let image_envelope =
+                        encode_tool_image_envelope(&plan.payload, prepared_images)?;
                     input.push(ResponsesInputItem::Message {
                         role: ResponsesRole::User,
                         content: image_envelope,
@@ -239,6 +244,11 @@ fn encode_user_message(
             UserPart::Text(text) | UserPart::Injected(text) => {
                 content.push(ResponsesContent::InputText {
                     text: text.text.clone(),
+                });
+            }
+            UserPart::InternalContext(context) => {
+                content.push(ResponsesContent::InputText {
+                    text: context.text.clone(),
                 });
             }
             UserPart::FileReferences(files) => {
@@ -481,10 +491,9 @@ fn encode_tool_result(
     message: &agent_types::ToolMessage,
     prepared_images: &agent_model::PreparedModelImages,
     adapter: &ResponsesProtocolAdapter,
-) -> Result<(ResponsesInputItem, Vec<ResponsesContent>), ModelError> {
+) -> Result<ResponsesInputItem, ModelError> {
     let mut text_parts = Vec::new();
     let mut native_parts = Vec::new();
-    let mut image_envelope = Vec::new();
     for (part_index, part) in message.result.content.as_parts().iter().enumerate() {
         match part {
             ToolResultPart::Text { text } => {
@@ -523,15 +532,9 @@ fn encode_tool_result(
                     }
                     ToolImageProjection::AggregatedUserInput => {
                         let label =
-                            tool_image_placeholder(message.result.call_id.as_str(), part_index);
+                            tool_result_image_label(message.result.call_id.as_str(), part_index);
                         text_parts.push(label.clone());
-                        native_parts.push(ResponsesContent::InputText {
-                            text: label.clone(),
-                        });
-                        image_envelope.push(ResponsesContent::InputText { text: label });
-                        image_envelope.push(ResponsesContent::InputImage {
-                            image_url: image_data_url(prepared),
-                        });
+                        native_parts.push(ResponsesContent::InputText { text: label });
                     }
                 }
             }
@@ -546,13 +549,39 @@ fn encode_tool_result(
         }
         FunctionOutputShape::ContentParts => ResponsesFunctionOutput::Parts(native_parts),
     };
-    Ok((
-        ResponsesInputItem::FunctionCallOutput {
-            call_id: message.result.call_id.as_str().to_owned(),
-            output,
-        },
-        image_envelope,
-    ))
+    Ok(ResponsesInputItem::FunctionCallOutput {
+        call_id: message.result.call_id.as_str().to_owned(),
+        output,
+    })
+}
+
+fn encode_tool_image_envelope(
+    payload: &ContextInsertionPayload,
+    prepared_images: &agent_model::PreparedModelImages,
+) -> Result<Vec<ResponsesContent>, ModelError> {
+    let ContextInsertionPayload::ToolResultImages(images) = payload else {
+        return Err(ModelError::Config(
+            "tool image insertion plan has an incompatible payload".to_owned(),
+        ));
+    };
+    let mut envelope = Vec::with_capacity(images.len().saturating_mul(2));
+    for image in images {
+        let prepared = prepared_images
+            .get_tool_image(image.image.relative_path())
+            .ok_or_else(|| {
+                ModelError::Resource(format!(
+                    "tool image `{}` was not prepared",
+                    image.image.relative_path()
+                ))
+            })?;
+        envelope.push(ResponsesContent::InputText {
+            text: image.label.clone(),
+        });
+        envelope.push(ResponsesContent::InputImage {
+            image_url: image_data_url(prepared),
+        });
+    }
+    Ok(envelope)
 }
 
 fn encode_tool_choice(
@@ -634,16 +663,4 @@ fn reasoning_effort_name(effort: &ReasoningEffort) -> &'static str {
         ReasoningEffort::XHigh => "xhigh",
         ReasoningEffort::Max => "max",
     }
-}
-
-fn tool_image_placeholder(call_id: &str, part_index: usize) -> String {
-    let escaped = call_id
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;");
-    format!(
-        "[{TOOL_RESULT_IMAGE_PLACEHOLDER_VERSION} call_id=\"{escaped}\" part_index=\"{part_index}\" supplied_in_following_batch]"
-    )
 }

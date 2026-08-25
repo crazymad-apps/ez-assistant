@@ -95,6 +95,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     model_catalog,
                     resources.model_factory,
                     resources.session_environment_factory,
+                    resources.skill_package_source,
                     resources.run_tool_factory,
                     resources.child_task_workspace_factory,
                     store.clone(),

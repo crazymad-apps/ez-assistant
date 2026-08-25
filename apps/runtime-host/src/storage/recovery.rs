@@ -20,7 +20,18 @@ pub(super) struct AppendRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub messages: Vec<ConversationMessage>,
+    pub message_step: Option<u32>,
     pub created_at_ms: i64,
+}
+
+pub(super) struct ChildAppendRequest {
+    pub operation_id: String,
+    pub child_task_id: ChildTaskId,
+    pub session_id: SessionId,
+    pub messages: Vec<ConversationMessage>,
+    pub message_step: Option<u32>,
+    pub created_at_ms: i64,
+    pub purpose: AppendPurpose,
 }
 
 pub(super) struct ReplacementPlan {
@@ -38,6 +49,7 @@ pub(super) struct StagedAppend {
     pub(super) base_byte_length: u64,
     pub(super) payload: Vec<u8>,
     pub(super) message_count_delta: u64,
+    pub(super) message_step: Option<u32>,
     pub(super) created_at_ms: i64,
     pub(super) purpose: AppendPurpose,
 }
@@ -85,6 +97,7 @@ impl StorageEngine {
                 run_id: request.run_id,
             },
             request.messages,
+            request.message_step,
             request.created_at_ms,
             purpose,
         )
@@ -92,23 +105,19 @@ impl StorageEngine {
 
     pub(super) fn append_child_messages(
         &mut self,
-        operation_id: String,
-        child_task_id: ChildTaskId,
-        session_id: SessionId,
-        messages: Vec<ConversationMessage>,
-        created_at_ms: i64,
-        purpose: AppendPurpose,
+        request: ChildAppendRequest,
     ) -> StorageResult<()> {
-        let operation = operation_id.clone();
+        let operation = request.operation_id.clone();
         self.stage_target_append(
-            operation_id,
+            request.operation_id,
             ConversationStorageTarget::ChildTask {
-                session_id,
-                child_task_id,
+                session_id: request.session_id,
+                child_task_id: request.child_task_id,
             },
-            messages,
-            created_at_ms,
-            purpose,
+            request.messages,
+            request.message_step,
+            request.created_at_ms,
+            request.purpose,
         )?;
         self.complete_target_append(&operation, AppendTable::ChildTask)
     }
@@ -118,6 +127,7 @@ impl StorageEngine {
         operation_id: String,
         target: ConversationStorageTarget,
         messages: Vec<ConversationMessage>,
+        message_step: Option<u32>,
         created_at_ms: i64,
         purpose: AppendPurpose,
     ) -> StorageResult<()> {
@@ -148,8 +158,8 @@ impl StorageEngine {
             ConversationStorageTarget::Session { session_id, run_id } => self.connection.execute(
                 "INSERT INTO body_appends (
                     operation_id, session_id, run_id, body_generation, base_byte_length,
-                    kind, payload, message_count_delta, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    kind, payload, message_count_delta, message_step, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     operation_id,
                     session_id.as_str(),
@@ -159,6 +169,7 @@ impl StorageEngine {
                     kind,
                     payload,
                     to_i64(message_count_delta, "message count exceeds SQLite range")?,
+                    message_step,
                     created_at_ms,
                 ],
             ),
@@ -168,8 +179,8 @@ impl StorageEngine {
             } => self.connection.execute(
                 "INSERT INTO child_body_appends (
                     operation_id, child_task_id, session_id, body_generation, base_byte_length,
-                    kind, payload, message_count_delta, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    kind, payload, message_count_delta, message_step, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     operation_id,
                     child_task_id.as_str(),
@@ -179,6 +190,7 @@ impl StorageEngine {
                     kind,
                     payload,
                     to_i64(message_count_delta, "message count exceeds SQLite range")?,
+                    message_step,
                     created_at_ms,
                 ],
             ),
@@ -344,8 +356,12 @@ impl StorageEngine {
             for message in &batch.messages {
                 transaction
                     .execute(
-                        "INSERT INTO run_message_refs (run_id, message_id) VALUES (?1, ?2)",
-                        params![run_id.as_str(), conversation::message_id(message).as_str()],
+                        "INSERT INTO run_message_refs (run_id, message_id, step) VALUES (?1, ?2, ?3)",
+                        params![
+                            run_id.as_str(),
+                            conversation::message_id(message).as_str(),
+                            staged.message_step,
+                        ],
                     )
                     .map_err(|source| {
                         internal_error("run message reference could not be recorded", source)
@@ -595,12 +611,12 @@ impl StorageEngine {
         let query = match table {
             AppendTable::Session => {
                 "SELECT operation_id, session_id, run_id, body_generation, base_byte_length,
-                        kind, payload, message_count_delta, created_at_ms
+                        kind, payload, message_count_delta, message_step, created_at_ms
                  FROM body_appends WHERE operation_id = ?1"
             }
             AppendTable::ChildTask => {
                 "SELECT operation_id, child_task_id, session_id, body_generation,
-                        base_byte_length, kind, payload, message_count_delta, created_at_ms
+                        base_byte_length, kind, payload, message_count_delta, message_step, created_at_ms
                  FROM child_body_appends WHERE operation_id = ?1"
             }
         };
@@ -616,7 +632,8 @@ impl StorageEngine {
                     row.get::<_, String>(5)?,
                     row.get::<_, Vec<u8>>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<u32>>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .optional()
@@ -654,7 +671,8 @@ impl StorageEngine {
                 row.7,
                 "staged append message count is invalid",
             )?,
-            created_at_ms: row.8,
+            message_step: row.8,
+            created_at_ms: row.9,
             purpose,
         })
     }

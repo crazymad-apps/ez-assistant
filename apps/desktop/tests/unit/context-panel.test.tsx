@@ -46,7 +46,7 @@ describe("ContextPanel", () => {
     expect(open).toHaveBeenCalledWith("workspace-1");
     expect(copy).toHaveBeenCalledWith("/workspace/project");
     expect(screen.queryByRole("button", { name: "重新选择" })).not.toBeInTheDocument();
-    expect(screen.getByText("Workspace 不是强沙盒。", { exact: false })).toBeVisible();
+    expect(screen.getByText("工作区不是强沙盒。", { exact: false })).toBeVisible();
   });
 
   it("shows latest and token-weighted session cache hit rates", () => {
@@ -81,10 +81,10 @@ describe("ContextPanel", () => {
     renderPanel(store);
 
     expect(screen.queryByText(/已冻结/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /System Context/ }));
+    fireEvent.click(screen.getByRole("button", { name: /系统上下文/ }));
 
     await waitFor(() => expect(get_system_context).toHaveBeenCalledWith("session-1"));
-    const dialog = screen.getByRole("dialog", { name: "System Context" });
+    const dialog = screen.getByRole("dialog", { name: "系统上下文" });
     expect(within(dialog).getByRole("heading", { name: "You are EZ Assistant." })).toBeVisible();
     expect(within(dialog).getByRole("heading", { name: "默认使用简体中文。" })).toBeVisible();
     expect(within(dialog).getByRole("button", { name: "预览" })).toHaveAttribute("aria-pressed", "true");
@@ -176,6 +176,7 @@ function contextStore(): RootStore {
         message_count: 2,
       },
       composer_capabilities: {
+        selected_model_key: "fixture",
         reasoning_effort_options: [],
         image_handling: "tool",
         goal_supported: true,
@@ -224,6 +225,25 @@ function contextStore(): RootStore {
         context: null,
       },
       child_tasks: [],
+      skill_catalog: {
+        status: "ready",
+        skills: [{
+          name: "review-skill",
+          description: "检查实现",
+          source: "workspace_ez_assistant",
+          model_invocable: true,
+          user_invocable: true,
+          enabled: true,
+          health: "ready",
+        }],
+        diagnostics: [],
+      },
+      active_skills: [{
+        tag: { name: "review-skill" },
+        trigger: "user",
+        message_id: "message-skill",
+        created_at_ms: 1,
+      }],
       conversation: {
         owner: { type: "main_session", session_id: "session-1" },
         generation: 1,

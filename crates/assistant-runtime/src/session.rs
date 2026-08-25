@@ -14,7 +14,7 @@ use assistant_protocol::{
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
+    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment, SessionSkillCatalog,
     StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredSession,
     goal::{GoalControl, GoalState},
     id,
@@ -27,6 +27,7 @@ pub(crate) struct SessionController {
     id: SessionId,
     created_at_ms: i64,
     system_prompt: SystemPromptSnapshot,
+    skill_catalog: SessionSkillCatalog,
     environment: SessionExecutionEnvironment,
     mutation_gate: AsyncMutex<()>,
     state: Mutex<SessionState>,
@@ -62,6 +63,8 @@ pub(crate) struct SessionState {
     pub(crate) archived_at_ms: Option<i64>,
     pub(crate) work_plan: Option<WorkPlan>,
     pub(crate) goal: Option<GoalControl>,
+    /// 规范 Conversation 的结构化 Skill Activation 账本。
+    pub(crate) skill_activations: Vec<crate::StoredSkillActivation>,
 }
 
 #[derive(Clone)]
@@ -138,6 +141,7 @@ impl SessionController {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
+            skill_catalog: stored.skill_catalog,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
@@ -168,6 +172,7 @@ impl SessionController {
                 archived_at_ms: stored.archived_at_ms,
                 work_plan: None,
                 goal: None,
+                skill_activations: Vec::new(),
             }),
         }
     }
@@ -178,6 +183,7 @@ impl SessionController {
         inputs: Vec<StoredInput>,
         work_plan: Option<WorkPlan>,
         goal: Option<GoalControl>,
+        skill_activations: Vec<crate::StoredSkillActivation>,
     ) -> Self {
         let is_conversation_available =
             stored.conversation_state == StoredConversationState::Available;
@@ -221,6 +227,7 @@ impl SessionController {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
+            skill_catalog: stored.skill_catalog,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
@@ -251,6 +258,7 @@ impl SessionController {
                 archived_at_ms: stored.archived_at_ms,
                 work_plan,
                 goal,
+                skill_activations,
             }),
         }
     }
@@ -406,6 +414,10 @@ impl SessionController {
 
     pub(crate) fn system_prompt(&self) -> &SystemPromptSnapshot {
         &self.system_prompt
+    }
+
+    pub(crate) fn skill_catalog(&self) -> &SessionSkillCatalog {
+        &self.skill_catalog
     }
 
     pub(crate) fn environment(&self) -> &SessionExecutionEnvironment {

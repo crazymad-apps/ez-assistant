@@ -90,7 +90,8 @@ fn reasoning_adapter() -> ChatProtocolAdapter {
     ChatProtocolAdapter {
         provider: provider_id("deepseek"),
         protocol: protocol_id("openai.chat_completions"),
-        reasoning_content_field: Some("reasoning_content".to_owned()),
+        reasoning_response_fields: vec!["reasoning_content".to_owned()],
+        reasoning_replay_field: Some("reasoning_content".to_owned()),
         reasoning_effort_field: Some("reasoning_effort".to_owned()),
         reasoning_effort_values: std::collections::BTreeMap::new(),
         supports_temperature: true,

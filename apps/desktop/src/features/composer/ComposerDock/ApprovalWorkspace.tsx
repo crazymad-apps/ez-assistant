@@ -27,7 +27,7 @@ export const ApprovalWorkspace = observer(function ApprovalWorkspace(props: Read
         <span><Icon name="shield" size={17} /></span>
         <div>
           <strong>{approvalQuestion(subject)}</strong>
-          <small>{props.approval.child_task_id ? `${props.child_title ?? "子任务"} · 由子 Agent 请求` : approvalContext(subject)}</small>
+          <small>{props.approval.child_task_id ? `${props.child_title ?? "子任务"} · 由子智能体请求` : approvalContext(subject)}</small>
         </div>
         {props.remaining > 0 && <b>另有 {props.remaining} 项</b>}
         <button aria-label="最小化授权面板" onClick={props.on_minimize} type="button">—</button>
@@ -80,7 +80,7 @@ function ApprovalSubject({ subject }: Readonly<{ subject: ToolApprovalSubject }>
 }
 
 function approvalQuestion(subject: ToolApprovalSubject): string {
-  return subject.type === "shell" ? "允许执行 Shell 命令？" : `允许执行 ${subject.tool_name}？`;
+  return subject.type === "shell" ? "允许执行命令行指令？" : `允许执行 ${subject.tool_name}？`;
 }
 
 function approvalContext(subject: ToolApprovalSubject): string {
@@ -95,7 +95,7 @@ function approvalContext(subject: ToolApprovalSubject): string {
 }
 
 function approvalDecisionLabel(decision: ApprovalDecision): string {
-  return decision === "allow_once" ? "仅本次" : decision === "allow_session" ? "当前会话" : "当前 Workspace";
+  return decision === "allow_once" ? "仅本次" : decision === "allow_session" ? "当前会话" : "当前工作区";
 }
 
 function approvalDecisionDescription(decision: ApprovalDecision): string {

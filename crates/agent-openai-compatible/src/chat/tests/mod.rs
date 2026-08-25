@@ -4,8 +4,8 @@ use agent_model::{
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
-    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, MessageId,
-    ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
+    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, InternalContextPart,
+    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
     SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition,
     ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
     ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
@@ -52,7 +52,8 @@ fn reasoning_adapter() -> ChatProtocolAdapter {
     ChatProtocolAdapter {
         provider: provider_id("deepseek"),
         protocol: protocol_id("openai.chat_completions"),
-        reasoning_content_field: Some("reasoning_content".to_owned()),
+        reasoning_response_fields: vec!["reasoning_content".to_owned()],
+        reasoning_replay_field: Some("reasoning_content".to_owned()),
         reasoning_effort_field: Some("reasoning_effort".to_owned()),
         reasoning_effort_values: std::collections::BTreeMap::new(),
         supports_temperature: true,
@@ -72,7 +73,8 @@ fn limited_adapter() -> ChatProtocolAdapter {
     ChatProtocolAdapter {
         provider: provider_id("strict"),
         protocol: protocol_id("openai.chat_completions"),
-        reasoning_content_field: None,
+        reasoning_response_fields: Vec::new(),
+        reasoning_replay_field: None,
         reasoning_effort_field: None,
         reasoning_effort_values: std::collections::BTreeMap::new(),
         supports_temperature: false,
@@ -235,3 +237,4 @@ mod encode;
 mod round_trip;
 mod service_stream;
 mod stream;
+mod vllm;

@@ -1,7 +1,10 @@
 //! 规范历史块与 protected tail 布局。
 
+use std::collections::HashSet;
+
 use agent_types::{
     AssistantPart, ConversationMessage, ConversationSnapshot, ConversationValidationError,
+    InternalContextPart, UserPart,
 };
 use thiserror::Error;
 
@@ -116,10 +119,70 @@ impl ContextLayout {
             split_index = split_index.min(index);
         }
 
+        // 每个 retention key 的最新内部上下文必须原样保留。Context replacement 只能
+        // 表达连续 tail，因此取这些最新版本中最早的块作为边界；同一消息中的用户正文
+        // 与内部 Part 也由此保持原子，不拆写历史消息。
+        if protect_active_turn && let Some(index) = self.latest_retained_block_index() {
+            split_index = split_index.min(index);
+        }
+
         ContextPartition {
             layout: self,
             split_index,
         }
+    }
+
+    fn latest_retained_block_index(&self) -> Option<usize> {
+        let mut seen = HashSet::new();
+        let mut earliest = None;
+        for (index, block) in self.blocks.iter().enumerate().rev() {
+            for message in block.messages().iter().rev() {
+                let ConversationMessage::User(message) = message else {
+                    continue;
+                };
+                for part in message.parts.iter().rev() {
+                    let UserPart::InternalContext(context) = part else {
+                        continue;
+                    };
+                    let Some(key) = &context.retention_key else {
+                        continue;
+                    };
+                    if seen.insert(key.clone()) {
+                        earliest = Some(index);
+                    }
+                }
+            }
+        }
+        earliest
+    }
+
+    /// 返回每个 retention key 的最新冻结正文，并保持这些最新版本在历史中的顺序。
+    ///
+    /// 活动 Turn 整体压缩时，Rolling Summary 会把它们原样重挂到新的隐藏 continuation
+    /// 锚点；普通压缩仍通过 protected tail 保留原消息。
+    pub(crate) fn latest_internal_contexts(&self) -> Vec<InternalContextPart> {
+        let mut seen = HashSet::new();
+        let mut latest = Vec::new();
+        for block in self.blocks.iter().rev() {
+            for message in block.messages().iter().rev() {
+                let ConversationMessage::User(message) = message else {
+                    continue;
+                };
+                for part in message.parts.iter().rev() {
+                    let UserPart::InternalContext(context) = part else {
+                        continue;
+                    };
+                    let Some(key) = &context.retention_key else {
+                        continue;
+                    };
+                    if seen.insert(key.clone()) {
+                        latest.push(context.clone());
+                    }
+                }
+            }
+        }
+        latest.reverse();
+        latest
     }
 }
 
@@ -236,10 +299,10 @@ pub enum ContextLayoutError {
 #[cfg(test)]
 mod tests {
     use agent_types::{
-        AssistantMessage, ContextSummaryMessage, FinishReason, MessageId, ModelIdentity,
-        OpaqueProviderState, PartId, ProtocolId, ProviderId, SystemMessage, TextPart, ToolCall,
-        ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
-        TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+        AssistantMessage, ContextSummaryMessage, FinishReason, InternalContextPart, MessageId,
+        ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, SystemMessage,
+        TextPart, ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent,
+        ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
     };
 
     use super::*;
@@ -437,6 +500,46 @@ mod tests {
         let partition = layout.partition(10);
         assert_eq!(partition.compressible_head().len(), 1);
         assert_eq!(partition.protected_tail().len(), 2);
+    }
+
+    #[test]
+    fn latest_internal_context_for_each_retention_key_stays_in_the_protected_tail() {
+        let internal_user = |message_id: &str, boundary_id: &str, key: &str| {
+            ConversationMessage::User(UserMessage {
+                id: id(message_id),
+                origin: UserMessageOrigin::Runtime,
+                transcript_visibility: TranscriptVisibility::Hidden,
+                parts: vec![UserPart::InternalContext(
+                    InternalContextPart::new(
+                        PartId::new(format!("{message_id}-part")).expect("part id"),
+                        boundary_id,
+                        "test_context",
+                        Some(key.to_owned()),
+                        "context",
+                    )
+                    .expect("internal context"),
+                )],
+            })
+        };
+        let layout = ContextLayout::build(&ConversationSnapshot::new(vec![
+            internal_user("user-plan-old", "boundary-plan-old", "work_plan"),
+            assistant("assistant-plan-old"),
+            user("user-ordinary"),
+            assistant("assistant-ordinary"),
+            internal_user("user-plan-new", "boundary-plan-new", "work_plan"),
+            assistant("assistant-plan-new"),
+            internal_user("user-goal", "boundary-goal", "goal:1"),
+            assistant("assistant-goal"),
+        ]))
+        .expect("valid layout");
+
+        let partition = layout.partition(0);
+        assert_eq!(partition.compressible_head().len(), 2);
+        assert_eq!(partition.protected_tail().len(), 2);
+        assert_eq!(
+            partition.protected_tail()[0].messages()[0],
+            internal_user("user-plan-new", "boundary-plan-new", "work_plan")
+        );
     }
 
     #[test]

@@ -9,7 +9,6 @@ import type {
   RuntimeEventEnvelope,
   SessionId,
   SessionViewSnapshot,
-  ToolCallId,
 } from "../generated/assistant-protocol";
 import {
   appendTextDelta,
@@ -17,9 +16,8 @@ import {
   emptyRun,
   ensureStep,
   reconcileTools,
-  removeCommittedTools,
   runKey,
-  updateCurrentStep,
+  updateStep,
   updateRunToolOutput,
   updateRunTools,
 } from "./liveExecutionProjection";
@@ -81,8 +79,7 @@ export class LiveExecutionStore {
     if (this.#pending.length > 0) {
       this.flush();
     }
-    const committed_steps = new Map<string, number>();
-    const committed_tool_calls = new Map<string, Set<ToolCallId>>();
+    const committed_steps = new Map<string, Set<number>>();
     for (const item of view.child_tasks ?? []) {
       this.child_tasks.set(item.task.child_task_id, item.task);
     }
@@ -90,14 +87,11 @@ export class LiveExecutionStore {
       if (item.type !== "assistant" || !item.run_id) {
         continue;
       }
-      committed_steps.set(item.run_id, (committed_steps.get(item.run_id) ?? 0) + 1);
-      const calls = committed_tool_calls.get(item.run_id) ?? new Set<ToolCallId>();
-      for (const segment of item.segments) {
-        if (segment.type === "tool_group") {
-          segment.tools.forEach((tool) => calls.add(tool.call_id));
-        }
+      if (item.step !== undefined) {
+        const steps = committed_steps.get(item.run_id) ?? new Set<number>();
+        steps.add(item.step);
+        committed_steps.set(item.run_id, steps);
       }
-      committed_tool_calls.set(item.run_id, calls);
     }
     for (const [key, run] of this.runs) {
       const is_current_session = run.session_id === view.session.session_id;
@@ -111,22 +105,17 @@ export class LiveExecutionStore {
         continue;
       }
       if (is_current_session && is_authoritatively_active) {
-        const committed_step_count = committed_steps.get(run.run_id) ?? 0;
-        const committed_calls = committed_tool_calls.get(run.run_id) ?? new Set<ToolCallId>();
+        const committed = committed_steps.get(run.run_id) ?? new Set<number>();
         this.runs.set(key, {
           ...run,
-          steps: run.steps
-            .filter((item) => item.step > committed_step_count)
-            .map((item) => ({ ...item, segments: removeCommittedTools(item.segments, committed_calls) }))
-            .filter((item) => item.segments.length > 0),
+          steps: run.steps.filter((item) => !committed.has(item.step)),
         });
       }
     }
     if (view.active_run) {
       this.#reconcileRunSnapshot(
         view.active_run,
-        committed_steps.get(view.active_run.run_id) ?? 0,
-        committed_tool_calls.get(view.active_run.run_id) ?? new Set<ToolCallId>(),
+        committed_steps.get(view.active_run.run_id) ?? new Set<number>(),
       );
     }
   }
@@ -152,18 +141,6 @@ export class LiveExecutionStore {
     }
     const child_task_id = view.task.task.child_task_id;
     this.child_tasks.set(child_task_id, view.task.task);
-    const committed_steps = view.conversation.items.filter((item) => item.type === "assistant").length;
-    const committed_calls = new Set<ToolCallId>();
-    for (const item of view.conversation.items) {
-      if (item.type !== "assistant") {
-        continue;
-      }
-      for (const segment of item.segments) {
-        if (segment.type === "tool_group") {
-          segment.tools.forEach((tool) => committed_calls.add(tool.call_id));
-        }
-      }
-    }
     const status = childRunStatus(view.task.task.status);
     const current = this.child_runs.get(child_task_id);
     if (view.task.task.status === "completed" || view.task.task.status === "failed" || view.task.task.status === "cancelled" || view.task.task.status === "interrupted") {
@@ -178,11 +155,8 @@ export class LiveExecutionStore {
     this.child_runs.set(child_task_id, {
       ...base,
       status,
-      active_step: base.active_step || committed_steps + 1,
-      steps: base.steps
-        .filter((step) => step.step > committed_steps)
-        .map((step) => ({ ...step, segments: removeCommittedTools(step.segments, committed_calls) }))
-        .filter((step) => step.segments.length > 0),
+      active_step: base.active_step,
+      steps: base.steps,
     });
   }
 
@@ -225,7 +199,7 @@ export class LiveExecutionStore {
           break;
         case "text_delta":
         case "reasoning_delta":
-          next = updateCurrentStep(current, (segments) => appendTextDelta(
+          next = updateStep(current, child_event.step, (segments) => appendTextDelta(
             segments,
             child_event.type === "text_delta" ? "text" : "reasoning",
             child_event.part_id,
@@ -233,7 +207,7 @@ export class LiveExecutionStore {
           ));
           break;
         case "tool_proposed":
-          next = updateCurrentStep(current, (segments) => appendTool(segments, {
+          next = updateStep(current, child_event.step, (segments) => appendTool(segments, {
             call_id: child_event.call_id,
             tool_name: child_event.tool_name,
             status: "proposed",
@@ -242,13 +216,13 @@ export class LiveExecutionStore {
           }));
           break;
         case "tool_started":
-          next = updateRunTools(current, child_event.call_id, { status: "running" });
+          next = updateRunTools(current, child_event.step, child_event.call_id, { status: "running" });
           break;
         case "tool_output":
-          next = updateRunToolOutput(current, child_event.call_id, child_event.channel, child_event.chunk);
+          next = updateRunToolOutput(current, child_event.step, child_event.call_id, child_event.channel, child_event.chunk);
           break;
         case "tool_completed":
-          next = updateRunTools(current, child_event.call_id, { status: child_event.status });
+          next = updateRunTools(current, child_event.step, child_event.call_id, { status: child_event.status });
           break;
         case "usage_updated":
           next = { ...current, usage: child_event.usage };
@@ -309,7 +283,7 @@ export class LiveExecutionStore {
         break;
       case "text_delta":
       case "reasoning_delta":
-        next = updateCurrentStep(current, (segments) =>
+        next = updateStep(current, event.step, (segments) =>
           appendTextDelta(
             segments,
             event.type === "text_delta" ? "text" : "reasoning",
@@ -319,7 +293,7 @@ export class LiveExecutionStore {
         );
         break;
       case "tool_proposed":
-        next = updateCurrentStep(current, (segments) =>
+        next = updateStep(current, event.step, (segments) =>
           appendTool(segments, {
             call_id: event.call_id,
             tool_name: event.tool_name,
@@ -330,13 +304,13 @@ export class LiveExecutionStore {
         );
         break;
       case "tool_started":
-        next = updateRunTools(current, event.call_id, { status: "running" });
+        next = updateRunTools(current, event.step, event.call_id, { status: "running" });
         break;
       case "tool_output":
-        next = updateRunToolOutput(current, event.call_id, event.channel, event.chunk);
+        next = updateRunToolOutput(current, event.step, event.call_id, event.channel, event.chunk);
         break;
       case "tool_completed":
-        next = updateRunTools(current, event.call_id, { status: event.status });
+        next = updateRunTools(current, event.step, event.call_id, { status: event.status });
         break;
       case "usage_updated":
         next = { ...current, usage: event.usage };
@@ -368,26 +342,30 @@ export class LiveExecutionStore {
 
   #reconcileRunSnapshot(
     snapshot: RunSnapshot,
-    committed_step_count = 0,
-    committed_call_ids: ReadonlySet<ToolCallId> = new Set<ToolCallId>(),
+    committed_steps: ReadonlySet<number> = new Set<number>(),
   ): void {
     const key = runKey(snapshot.session_id, snapshot.run_id);
     const current = this.runs.get(key);
-    const snapshot_tools = snapshot.tools.filter((tool) => !committed_call_ids.has(tool.call_id));
+    const active_step = snapshot.active_step ?? current?.active_step ?? 0;
+    const snapshot_tools = snapshot.tools.filter((tool) =>
+      tool.step === undefined || !committed_steps.has(tool.step));
     if (current) {
-      const active_step = current.active_step || committed_step_count + 1;
-      const steps = ensureStep(current.steps, active_step).map((step) =>
-        step.step === active_step
-          ? { ...step, segments: reconcileTools(step.segments, snapshot_tools) }
-          : step,
-      );
-      this.runs.set(key, {
+      let next: LiveRunProjection = {
         ...current,
+        steps: current.steps.filter((step) => !committed_steps.has(step.step)),
+      };
+      for (const tool of snapshot_tools) {
+        const step = tool.step ?? active_step;
+        if (step > 0) {
+          next = updateStep(next, step, (segments) => reconcileTools(segments, [tool]));
+        }
+      }
+      this.runs.set(key, {
+        ...next,
         status: snapshot.status,
         error_code: snapshot.error?.code ?? current.error_code,
         error_message: snapshot.error?.message ?? current.error_message,
         active_step,
-        steps,
       });
       return;
     }
@@ -398,25 +376,28 @@ export class LiveExecutionStore {
     if (snapshot.text) {
       segments.push({ type: "text", part_id: `snapshot-text:${snapshot.run_id}`, text: snapshot.text });
     }
-    if (snapshot_tools.length > 0) {
+    const active_tools = snapshot_tools.filter((tool) => (tool.step ?? active_step) === active_step);
+    if (active_tools.length > 0) {
       segments.push({
         type: "tool_group",
         group_id: `snapshot-tools:${snapshot.run_id}`,
-        tools: snapshot_tools,
+        tools: active_tools,
       });
     }
-    const active_step = committed_step_count + 1;
+    const extra_steps = snapshot_tools
+      .filter((tool) => tool.step !== undefined && tool.step !== active_step)
+      .reduce<LiveRunProjection>((run, tool) => updateStep(run, tool.step!, (items) => reconcileTools(items, [tool])), {
+        ...emptyRun(snapshot.session_id, snapshot.run_id, snapshot.created_at_ms ?? Date.now()),
+        status: snapshot.status,
+        active_step,
+        steps: segments.length > 0 && active_step > 0 ? [{ step: active_step, segments }] : [],
+      });
     this.runs.set(key, {
-      session_id: snapshot.session_id,
-      run_id: snapshot.run_id,
-      created_at_ms: Date.now(),
+      ...extra_steps,
       status: snapshot.status,
       active_step,
-      steps: segments.length > 0 ? [{ step: active_step, segments }] : [],
-      usage: null,
       error_code: snapshot.error?.code ?? null,
       error_message: snapshot.error?.message ?? null,
-      model_failure_kind: null,
     });
   }
 }

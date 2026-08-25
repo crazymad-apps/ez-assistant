@@ -15,8 +15,8 @@ use crate::{
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PersonaMutation,
     PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
     RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    SessionPinnedChange, SessionTitleChange, SkillNameState, SkillNameStateChange, StoreError,
+    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
     StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit,
@@ -75,6 +75,14 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
         self.inner.load_memory_context()
+    }
+
+    fn list_skill_name_states(&self) -> StoreFuture<'_, Vec<SkillNameState>> {
+        self.inner.list_skill_name_states()
+    }
+
+    fn set_skill_enabled(&self, change: SkillNameStateChange) -> StoreFuture<'_, SkillNameState> {
+        self.inner.set_skill_enabled(change)
     }
 
     fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {

@@ -4,14 +4,14 @@ import styles from "./index.module.scss";
 
 const labels = {
   booting: "正在启动",
-  starting_runtime: "启动 Runtime",
+  starting_runtime: "启动运行时",
   connecting: "正在连接",
-  connected: "Runtime 已连接",
+  connected: "运行时已连接",
   reconnecting: "正在重连",
-  stopping_runtime: "正在停止 Runtime",
-  restarting_runtime: "正在重启 Runtime",
-  runtime_stopped: "Runtime 已停止",
-  disconnected: "Runtime 已断开",
+  stopping_runtime: "正在停止运行时",
+  restarting_runtime: "正在重启运行时",
+  runtime_stopped: "运行时已停止",
+  disconnected: "运行时已断开",
   component_mismatch: "组件不匹配",
 } as const;
 

@@ -872,7 +872,7 @@ fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'st
                             .iter()
                             .map(|file| file.original_name.clone()),
                     ),
-                    UserPart::Injected(_) => {}
+                    UserPart::Injected(_) | UserPart::InternalContext(_) => {}
                 }
             }
             Some((&message.id, "user", parts.join("\n")))

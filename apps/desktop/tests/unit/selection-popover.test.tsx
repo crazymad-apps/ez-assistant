@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -85,6 +85,26 @@ describe("SelectionPopover", () => {
     expect(screen.getAllByRole("option")).toHaveLength(1);
     await user.click(screen.getByRole("option", { name: "DeepSeek" }));
 
+    expect(input).toHaveValue("deepseek");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps the editable options open when Enter only confirms input method composition", async () => {
+    const user = userEvent.setup();
+    render(<EditableSelection />);
+    const input = screen.getByRole("combobox", { name: "输入或选择示例" });
+
+    await user.click(input);
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "deep" } });
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+
+    expect(screen.getByRole("listbox")).toBeVisible();
+    expect(input).toHaveValue("deep");
+
+    fireEvent.keyUp(input, { key: "Enter", keyCode: 13 });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
     expect(input).toHaveValue("deepseek");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });

@@ -361,7 +361,7 @@ impl DemoRuntime {
     }
 
     async fn observe_event(&self, run_id: &str, event: AgentEvent) {
-        if let AgentEvent::ToolStarted { call_id } = &event {
+        if let AgentEvent::ToolStarted { call_id, .. } = &event {
             self.audit.record_started(run_id, call_id);
         }
         {
@@ -379,6 +379,7 @@ impl DemoRuntime {
                 threshold,
                 observed,
                 call_id,
+                ..
             } = &event
             {
                 run.snapshot.last_guardrail = Some(GuardrailTriggerSnapshot {
@@ -399,13 +400,19 @@ impl DemoRuntime {
 
     async fn finish_run(&self, run_id: &str, outcome: ExecutionOutcome) {
         let (status, last_error) = match &outcome {
-            ExecutionOutcome::Completed(message) => {
+            ExecutionOutcome::Completed { message, .. } => {
                 self.journal.append_assistant(message.clone());
                 (RunStatus::Completed, None)
             }
-            ExecutionOutcome::Failed(error) => (RunStatus::Failed, Some(error.to_string())),
-            ExecutionOutcome::Cancelled => (RunStatus::Cancelled, None),
+            ExecutionOutcome::Failed { error, .. } => (RunStatus::Failed, Some(error.to_string())),
+            ExecutionOutcome::Cancelled { .. } => (RunStatus::Cancelled, None),
             ExecutionOutcome::CompactionRequired { .. } => (RunStatus::CompactionRequired, None),
+            ExecutionOutcome::ContinuationRequired { reason, .. } => (
+                RunStatus::Failed,
+                Some(format!(
+                    "context continuation is not supported by safety-demo: {reason:?}"
+                )),
+            ),
         };
         self.approvals.clear();
         {
@@ -597,6 +604,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::ExecutionFailed { .. } => "execution_failed",
         AgentEvent::ExecutionCancelled { .. } => "execution_cancelled",
         AgentEvent::ExecutionCompactionRequired { .. } => "execution_compaction_required",
+        AgentEvent::ExecutionContinuationRequired { .. } => "execution_continuation_required",
     }
 }
 
@@ -609,25 +617,26 @@ fn progress_detail(event: &AgentEvent) -> Option<RunProgressDetail> {
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
         }),
-        AgentEvent::TextDelta { id, delta } => Some(RunProgressDetail::TextDelta {
+        AgentEvent::TextDelta { id, delta, .. } => Some(RunProgressDetail::TextDelta {
             part_id: id.to_string(),
             delta: delta.clone(),
         }),
-        AgentEvent::ReasoningDelta { id, delta } => Some(RunProgressDetail::ReasoningDelta {
+        AgentEvent::ReasoningDelta { id, delta, .. } => Some(RunProgressDetail::ReasoningDelta {
             part_id: id.to_string(),
             delta: delta.clone(),
         }),
-        AgentEvent::ToolProposed { call } => Some(RunProgressDetail::ToolProposed {
+        AgentEvent::ToolProposed { call, .. } => Some(RunProgressDetail::ToolProposed {
             call_id: call.id.to_string(),
             tool_name: call.name.as_str().to_owned(),
         }),
-        AgentEvent::ToolStarted { call_id } => Some(RunProgressDetail::ToolStarted {
+        AgentEvent::ToolStarted { call_id, .. } => Some(RunProgressDetail::ToolStarted {
             call_id: call_id.to_string(),
         }),
         AgentEvent::ToolOutput {
             call_id,
             channel,
             chunk,
+            ..
         } => Some(RunProgressDetail::ToolOutput {
             call_id: call_id.to_string(),
             channel: match channel {
@@ -637,7 +646,9 @@ fn progress_detail(event: &AgentEvent) -> Option<RunProgressDetail> {
             .to_owned(),
             chunk: chunk.clone(),
         }),
-        AgentEvent::ToolCompleted { call_id, status } => Some(RunProgressDetail::ToolCompleted {
+        AgentEvent::ToolCompleted {
+            call_id, status, ..
+        } => Some(RunProgressDetail::ToolCompleted {
             call_id: call_id.to_string(),
             status: match status {
                 agent_core::ToolCompletionStatus::Success => "success",
@@ -651,6 +662,7 @@ fn progress_detail(event: &AgentEvent) -> Option<RunProgressDetail> {
             threshold,
             observed,
             call_id,
+            ..
         } => Some(RunProgressDetail::GuardrailTriggered {
             kind: *kind,
             mode: *mode,
@@ -662,7 +674,8 @@ fn progress_detail(event: &AgentEvent) -> Option<RunProgressDetail> {
         | AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }
         | AgentEvent::ExecutionCancelled { .. }
-        | AgentEvent::ExecutionCompactionRequired { .. } => None,
+        | AgentEvent::ExecutionCompactionRequired { .. }
+        | AgentEvent::ExecutionContinuationRequired { .. } => None,
     }
 }
 
@@ -861,6 +874,7 @@ mod tests {
     #[test]
     fn progress_projection_keeps_live_text_but_redacts_tool_arguments() {
         let text = progress_detail(&AgentEvent::TextDelta {
+            step: 1,
             id: PartId::new("part-live").expect("part id"),
             delta: "streamed text".to_owned(),
         })
@@ -874,6 +888,7 @@ mod tests {
         );
 
         let proposed = progress_detail(&AgentEvent::ToolProposed {
+            step: 1,
             call: ToolCall {
                 id: ToolCallId::new("call-redacted").expect("call id"),
                 name: ToolName::new("write_file").expect("tool name"),

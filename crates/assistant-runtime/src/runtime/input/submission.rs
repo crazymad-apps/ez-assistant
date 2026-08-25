@@ -7,9 +7,14 @@ use super::super::{
     goal::{GoalSubmissionPersistence, PreparedGoalSubmission},
 };
 use crate::{
-    InputOrigin, NewStoredInput, RuntimeError, RuntimeResult,
+    InputOrigin, NewStoredInput, RuntimeError, RuntimeResult, SkillActivationOwner,
+    SkillActivationResolveError, SkillActivationTrigger, SkillName, StoredSkillActivation, id,
+    internal_boundary::{
+        InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+    },
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
+    skill::render_user_activation,
 };
 
 impl AssistantRuntime {
@@ -19,6 +24,7 @@ impl AssistantRuntime {
         request: SubmitInputRequest,
     ) -> RuntimeResult<SubmitInputResult> {
         let _operation = self.operation_gate.read().await;
+        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         if request.message.trim().is_empty() {
             return Err(RuntimeError::InvalidRequest {
@@ -34,6 +40,20 @@ impl AssistantRuntime {
             return Ok(SubmitInputResult { input_id, run });
         }
         session.ensure_healthy()?;
+        let model_key = session.model_key()?;
+        let configuration = self.config_registry.snapshot()?;
+        if configuration
+            .active()
+            .and_then(|active| active.model(&model_key))
+            .is_none()
+        {
+            return Err(RuntimeError::ModelUnavailable { model_key });
+        }
+        let selected_skill = request
+            .skill_name
+            .as_ref()
+            .map(|name| SkillName::parse(name.clone()).map_err(|_| RuntimeError::SkillNameInvalid))
+            .transpose()?;
         let goal_submission = self.goal_submission(session.as_ref(), request.mode)?;
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
@@ -51,6 +71,55 @@ impl AssistantRuntime {
         };
         let accepted_at_ms = super::super::now_ms()?;
         let prepared_goal = goal_submission.prepare(&mut message, accepted_at_ms)?;
+        let skill_activation = selected_skill
+            .as_ref()
+            .map(|name| {
+                let definition =
+                    session
+                        .skill_catalog()
+                        .user_definition(name)
+                        .map_err(|error| match error {
+                            SkillActivationResolveError::CatalogUnavailable => {
+                                RuntimeError::SkillCatalogUnavailable {
+                                    session_id: session.id().clone(),
+                                }
+                            }
+                            SkillActivationResolveError::NotFound => RuntimeError::SkillNotFound {
+                                session_id: session.id().clone(),
+                            },
+                            SkillActivationResolveError::NotUserInvocable => {
+                                RuntimeError::SkillNotUserInvocable {
+                                    session_id: session.id().clone(),
+                                }
+                            }
+                        })?;
+                InternalBoundaryCoordinator::append(
+                    &mut message,
+                    InternalBoundaryRequest {
+                        source: InternalBoundarySource::SkillActivation,
+                        retention_key: Some(format!("skill:{}", definition.name.as_str())),
+                        text: render_user_activation(&session.skill_catalog().revision, definition),
+                    },
+                )?;
+                Ok(StoredSkillActivation {
+                    activation_id: id::generate("skill-activation").map_err(|_| {
+                        RuntimeError::InternalStateUnavailable {
+                            component: "skill activation id random source",
+                        }
+                    })?,
+                    session_id: session.id().clone(),
+                    owner: SkillActivationOwner::Session(session.id().clone()),
+                    run_id: Some(run_id.clone()),
+                    input_id: Some(input_id.clone()),
+                    message_id: message.id.clone(),
+                    name: definition.name.clone(),
+                    catalog_revision: session.skill_catalog().revision.clone(),
+                    definition_digest: definition.definition_digest.clone(),
+                    trigger: SkillActivationTrigger::User,
+                    created_at_ms: accepted_at_ms,
+                })
+            })
+            .transpose()?;
         let goal_binding = prepared_goal.as_ref().map(|goal| goal.binding.clone());
         let new_goal = prepared_goal
             .as_ref()
@@ -71,6 +140,7 @@ impl AssistantRuntime {
                 agent_variant: request.variant,
                 origin: InputOrigin::User,
                 goal_binding: goal_binding.clone(),
+                skill_activation: skill_activation.clone(),
                 approval_mode,
                 message,
                 new_goal,
@@ -129,6 +199,9 @@ impl AssistantRuntime {
                     latest_run_id: accepted.run.run_id.clone(),
                 },
             );
+            if let Some(activation) = skill_activation {
+                state.skill_activations.push(activation);
+            }
             snapshot
         };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {

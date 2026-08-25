@@ -587,6 +587,32 @@ fn effective_output_limit_uses_min_without_changing_context_or_budget() {
 }
 
 #[test]
+fn endpoint_accepts_remote_http_and_rejects_non_http_schemes() {
+    let http_document = format!(
+        "schema_version = 1\ndefault_model = \"standard\"\n{}",
+        model_table("standard", "acme", 4096)
+            .replace("https://api.example.test/v1", "http://api.example.test/v1")
+    );
+    let http_compilation = compile_runtime_config(&http_document);
+    assert_eq!(http_compilation.state(), ConfigState::Ready);
+    assert_eq!(
+        http_compilation.projection().models[0].endpoint.as_deref(),
+        Some("http://api.example.test/v1")
+    );
+
+    let ftp_document =
+        http_document.replace("http://api.example.test/v1", "ftp://api.example.test/v1");
+    let ftp_compilation = compile_runtime_config(&ftp_document);
+    assert!(
+        ftp_compilation
+            .issues()
+            .iter()
+            .any(|issue| { issue.code() == ConfigIssueCode::InvalidEndpoint })
+    );
+    assert!(ftp_compilation.projection().models[0].endpoint.is_none());
+}
+
+#[test]
 fn credential_and_unsafe_endpoint_never_enter_safe_debug_projection() {
     let document = format!(
         r#"

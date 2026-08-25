@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 /// 验证 base URL 不会把 credential 或非路径配置带入可记录 URL。
 pub(crate) fn validate_base_url(base_url: String) -> Result<String, &'static str> {
     let parsed = reqwest::Url::parse(&base_url).map_err(|_| "must be a valid absolute URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("scheme must be http or https");
+    }
     if parsed.cannot_be_a_base() {
         return Err("must support path joining");
     }

@@ -196,6 +196,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
                 session_id: session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
             })
             .await
@@ -248,6 +249,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
             session_id: session.session_id.clone(),
             message: "must fail before start".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await

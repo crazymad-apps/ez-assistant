@@ -4,9 +4,11 @@ import type {
   ApprovalDecision,
   GoalStateSnapshot,
   SessionViewSnapshot,
+  SkillSummarySnapshot,
   SubmitInputMode,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { useInputMethodGuard } from "../../../components/InputMethodGuard";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
@@ -20,6 +22,7 @@ import { GoalStatusRow } from "./GoalStatusRow";
 import { ModelSettingsPopover } from "./ModelSettingsPopover";
 import { QueueDrawer } from "./QueueDrawer";
 import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
+import { SkillPicker } from "./SkillPicker";
 import { TodoSummary } from "./TodoSummary";
 import { type ComposerAttachment, useComposerAttachments } from "./useComposerAttachments";
 import styles from "./index.module.scss";
@@ -34,6 +37,8 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const session = session_view?.session;
   const [draft, setDraft] = useState("");
   const [goal_armed, setGoalArmed] = useState(false);
+  const [selected_skill, setSelectedSkill] = useState<SkillSummarySnapshot | null>(null);
+  const [skill_picker_open, setSkillPickerOpen] = useState(false);
   const [active_overlay, setActiveOverlay] = useState<"todo" | "execution" | "model" | null>(null);
   const [initial_settings_category, setInitialSettingsCategory] = useState<"variant" | "approval" | "model" | "effort" | null>(null);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
@@ -43,7 +48,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const [show_help, setShowHelp] = useState(false);
   const textarea_ref = useRef<HTMLTextAreaElement>(null);
   const slash_ref = useRef<HTMLDivElement>(null);
-  const composing_ref = useRef(false);
+  const input_method = useInputMethodGuard();
   const previous_approval_count = useRef(0);
   const previous_approval_session_id = useRef<string | null>(null);
   const attachment_flow = useComposerAttachments({
@@ -76,6 +81,8 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
 
   useEffect(() => {
     setGoalArmed(false);
+    setSelectedSkill(null);
+    setSkillPickerOpen(false);
     setExpandedDrawer("queue");
     setActiveOverlay(null);
     setShowHelp(false);
@@ -122,10 +129,12 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
 
   const is_archived = session.lifecycle === "archived";
   const is_idle_for_model = !session.active_run_id && session_view.queue.items.length === 0;
+  const selected_model_key = session_view.composer_capabilities.selected_model_key ?? null;
+  const model_required = selected_model_key === null;
 
   async function submitDraft() {
     const value = draft;
-    if (!value.trim() || store.composer_pending || attachment_flow.pending) {
+    if (!value.trim() || model_required || store.composer_pending || attachment_flow.pending) {
       return;
     }
     if (slash_query) {
@@ -140,9 +149,20 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       return;
     }
     const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
-    if (await store.submitInput(session!.session_id, value, session!.current_variant, attachment_ids, mode)) {
+    const submitted = selected_skill
+      ? await store.submitInput(
+        session!.session_id,
+        value,
+        session!.current_variant,
+        attachment_ids,
+        mode,
+        selected_skill.name,
+      )
+      : await store.submitInput(session!.session_id, value, session!.current_variant, attachment_ids, mode);
+    if (submitted) {
       setDraft("");
       setGoalArmed(false);
+      setSelectedSkill(null);
       attachment_flow.clear();
     }
   }
@@ -158,6 +178,11 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       setDraft("");
       setGoalArmed(true);
       requestAnimationFrame(() => textarea_ref.current?.focus());
+      return;
+    }
+    if (command.name === "/skill") {
+      setDraft("");
+      setSkillPickerOpen(true);
       return;
     }
     if (command.picker) {
@@ -176,7 +201,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   }
 
   function handleTextareaKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (composing_ref.current || event.nativeEvent.isComposing) {
+    if (input_method.shouldIgnoreKeyDown(event)) {
       return;
     }
     if (slash_items.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
@@ -301,12 +326,30 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} />
           )}
           {show_help && <SlashCommandHelp on_close={() => setShowHelp(false)} />}
-          {goal_armed && (
+          {skill_picker_open && (
+            <SkillPicker
+              on_close={() => {
+                setSkillPickerOpen(false);
+                requestAnimationFrame(() => textarea_ref.current?.focus());
+              }}
+              on_select={(skill) => {
+                setSelectedSkill(skill);
+                setSkillPickerOpen(false);
+                requestAnimationFrame(() => textarea_ref.current?.focus());
+              }}
+              skills={availableUserSkills(session_view.skill_catalog.skills)}
+            />
+          )}
+          {(goal_armed || selected_skill) && (
             <div className={styles.draft_tags}>
-              <span>
-                Goal
-                <button aria-label="取消 Goal 标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
-              </span>
+              {goal_armed && <span>
+                目标
+                <button aria-label="取消目标标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
+              </span>}
+              {selected_skill && <span title={selected_skill.name}>
+                {selected_skill.name}
+                <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => setSelectedSkill(null)} type="button"><Icon name="x" size={12} /></button>
+              </span>}
             </div>
           )}
           {attachment_flow.attachments.length > 0 && (
@@ -330,12 +373,17 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
           )}
           <textarea
             aria-label="输入消息"
-            disabled={store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
+            disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
             onChange={(event) => setDraft(event.target.value)}
-            onCompositionEnd={() => { composing_ref.current = false; }}
-            onCompositionStart={() => { composing_ref.current = true; }}
+            onCompositionEnd={input_method.onCompositionEnd}
+            onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleTextareaKeyDown}
-            placeholder={goal?.state === "paused" ? "输入新指导并恢复 Goal…" : "输入消息…  / 使用指令"}
+            onKeyUp={input_method.onKeyUp}
+            placeholder={model_required
+              ? "请先选择一个可用模型"
+              : goal?.state === "paused"
+                ? "输入新指导并恢复目标…"
+                : "输入消息…  / 使用指令"}
             ref={textarea_ref}
             rows={2}
             value={draft}
@@ -374,10 +422,12 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
-              model_display_name={modelDisplayName(application, session.model_key)}
-              model_key={session.model_key}
+              model_display_name={selected_model_key
+                ? modelDisplayName(application, selected_model_key)
+                : "未选择模型"}
+              model_key={selected_model_key}
               model_options={model_options}
-              model_switch_disabled_reason={is_idle_for_model ? undefined : "存在活动 Run 或排队输入时不能切换模型"}
+              model_switch_disabled_reason={is_idle_for_model ? undefined : "存在活动运行或排队输入时不能切换模型"}
               on_effort_change={(effort) => store.setSessionReasoningEffort(session.session_id, effort)}
               on_model_change={(model_key) => store.setSessionModel(session.session_id, model_key)}
               on_open_change={(open) => {
@@ -392,7 +442,10 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               aria-label={draft.trim() ? "发送消息" : primary_label}
               className={styles.send_button}
               data-action={primary_action}
-              disabled={store.composer_pending || attachment_flow.pending || !primary_action_available}
+              disabled={store.composer_pending
+                || attachment_flow.pending
+                || !primary_action_available
+                || (Boolean(draft.trim()) && model_required)}
               onClick={() => {
                 if (draft.trim()) {
                   void submitDraft();
@@ -458,8 +511,15 @@ function slashDisabledReason(
   command_name: string,
   view: SessionViewSnapshot | undefined,
 ): string | null {
+  if (command_name === "/skill") {
+    if (!view || view.skill_catalog.status === "unavailable" || view.skill_catalog.status === "legacy_unavailable") {
+      return "当前会话的技能信息不可用";
+    }
+    if (availableUserSkills(view.skill_catalog.skills).length === 0) return "当前会话没有用户可选技能";
+    return null;
+  }
   if (command_name !== "/goal") return null;
-  if (view?.goal) return "当前会话已有 Goal，请先继续或退出现有 Goal";
+  if (view?.goal) return "当前会话已有目标，请先继续或退出现有目标";
   return null;
 }
 
@@ -486,9 +546,13 @@ function nextEnabledSlashIndex(
 }
 
 function primaryActionLabel(action: "send" | "stop-goal" | "interrupt"): string {
-  if (action === "stop-goal") return "停止 Goal";
+  if (action === "stop-goal") return "停止目标";
   if (action === "interrupt") return "中断当前轮次";
   return "发送消息";
+}
+
+function availableUserSkills(skills: readonly SkillSummarySnapshot[]): SkillSummarySnapshot[] {
+  return skills.filter((skill) => skill.enabled && skill.user_invocable && skill.health === "ready");
 }
 
 function resolvePrimaryAction(

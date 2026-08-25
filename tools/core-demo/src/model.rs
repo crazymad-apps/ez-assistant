@@ -298,7 +298,9 @@ fn latest_user_text(request: &ModelRequest) -> String {
                     .iter()
                     .filter_map(|part| match part {
                         UserPart::Text(part) => Some(part.text.as_str()),
-                        UserPart::Injected(_) | UserPart::FileReferences(_) => None,
+                        UserPart::Injected(_)
+                        | UserPart::InternalContext(_)
+                        | UserPart::FileReferences(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

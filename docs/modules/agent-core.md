@@ -45,11 +45,13 @@ Context Window Evaluator、历史布局和 replacement 校验归
   进入 Authorizer；授权和执行不得再次各自解析原始 JSON。
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
-- Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；规范快照不得暴露 pending exchange。
+- Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；
+  `complete_tool_exchange` 只有在可靠提交成功后才能请求通用的上下文改变 continuation，规范快照不得
+  暴露 pending exchange。
 - Core 生成的 `ToolMessage.id` 必须相对输入的完整 Conversation 唯一。每个 Run 都会创建新的
   Engine，因此不得只依赖执行内从 1 开始的计数器；后续 Run 必须避开历史 Run 已占用的 ID。
 - 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付；终态包括
-  Completed、Failed、Cancelled 和 CompactionRequired，均报告丢弃计数。
+  Completed、Failed、Cancelled、CompactionRequired 和 ContinuationRequired，均报告丢弃计数。
 - CompactionRequired 同时携带 Engine 自身统计的已消费 Step 与实际 dispatch 工具数；这些值属于
   continuation 硬预算事实，Runtime 不得从可能丢弃的观察事件反推。
 - Core 不发起上下文压缩请求、不生成 Context Checkpoint，也不在同一个
@@ -85,6 +87,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
   并发执行；Invalid 或 Serial 项构成顺序屏障，不跨越屏障重排副作用。
 - 并行组结果必须按原 Tool Call 顺序观察 Guardrail、形成 ToolMessage 并原子完成 exchange；
   取消时先等待组内 Tool SPI 完成清理，再为未结算组统一形成 interrupted 结果。
+- `ToolCompleted` 只能在 Recorder 可靠完成整批 exchange 后发布；Recorder/Store 失败不得先产生
+  伪成功的工具完成事件，Core 随后收敛到 Failed。
 - 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在
   authorize 时提供本轮 resolved batch 上下文，批次审批交互由 Runtime 借此自行完成。
 - Core 授权决策仅 `Allow` / `Deny { reason }`；`Deny` 在授权闸处转换为错误 `ToolResult`——回喂模型、驱动循环继续的唯一载体是 error `ToolResult`，对模型与循环不存在"被拒绝"类别；reason 措辞归 Runtime。

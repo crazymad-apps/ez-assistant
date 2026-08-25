@@ -8,6 +8,7 @@
 
 mod conversation;
 mod id;
+mod insertion;
 mod model;
 mod tool;
 
@@ -21,6 +22,11 @@ pub use conversation::{
     TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
+pub use insertion::{
+    ContextInsertionPayload, ContextInsertionPersistence, ContextInsertionPlacement,
+    ContextInsertionPlan, ContextInsertionVisibility, InternalContextError, InternalContextPart,
+    ToolResultImageInsertion,
+};
 pub use model::{FinishReason, ModelIdentity, TokenUsage};
 pub use tool::{
     ToolChoice, ToolDefinition, ToolExecutionMetadata, ToolImageReference, ToolImageReferenceError,

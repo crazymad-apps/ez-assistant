@@ -8,13 +8,15 @@ import { ModelsSettingsPage } from "./ModelsSettingsPage";
 import { MemorySettingsPage } from "./MemorySettingsPage";
 import { PermissionSettingsPage } from "./PermissionSettingsPage";
 import { RuntimeSettingsPage } from "./RuntimeSettingsPage";
+import { SkillSettingsPage } from "./SkillSettingsPage";
 import styles from "./index.module.scss";
 
-const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: "terminal" | "bot" | "shield" | "pin" }> = [
-  { id: "runtime", label: "Runtime", icon: "terminal" },
+const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: "terminal" | "bot" | "shield" | "pin" | "folder" }> = [
+  { id: "runtime", label: "运行时", icon: "terminal" },
   { id: "models", label: "模型", icon: "bot" },
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
+  { id: "skills", label: "技能", icon: "folder" },
 ];
 
 export const SettingsDialog = observer(function SettingsDialog() {
@@ -82,6 +84,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
             {settings.page === "memory" && (
               <MemorySettingsPage onDirtyChange={setFormDirty} />
             )}
+            {settings.page === "skills" && <SkillSettingsPage />}
           </div>
         </div>
     </Dialog>

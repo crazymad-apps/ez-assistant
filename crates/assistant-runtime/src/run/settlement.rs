@@ -28,6 +28,7 @@ pub(crate) struct RunSettlementResult {
     pub(crate) run: RunSnapshot,
     pub(crate) continuation: Option<RunSnapshot>,
     pub(crate) goal: Option<assistant_protocol::GoalSnapshot>,
+    pub(crate) committed_step: Option<u32>,
 }
 
 /// 先完成正文与 Run 的 Store 原子结算，再替换内存投影。
@@ -61,6 +62,10 @@ async fn settle_run_inner(
     forced_error: Option<RuntimeErrorInfo>,
 ) -> RuntimeResult<RunSettlementResult> {
     let finished_at_ms = system_time_ms()?;
+    let final_step = outcome.as_ref().and_then(|outcome| match outcome {
+        ExecutionOutcome::Completed { step, .. } => Some(*step),
+        _ => None,
+    });
     let _mutation = session.mutation().await;
     let (candidate, messages, settlement, cancel_requested, goal_effect) = {
         let mut state = session.lock_state()?;
@@ -103,7 +108,7 @@ async fn settle_run_inner(
             }
         } else {
             match outcome {
-                Some(ExecutionOutcome::Completed(message)) => {
+                Some(ExecutionOutcome::Completed { message, .. }) => {
                     match candidate
                         .append_completed(ConversationMessage::Assistant(message.clone()))
                     {
@@ -114,12 +119,17 @@ async fn settle_run_inner(
                         }
                     }
                 }
-                Some(ExecutionOutcome::Failed(error)) => {
+                Some(ExecutionOutcome::Failed { error, .. }) => {
                     failed_settlement(&error, model_diagnostics)
                 }
-                Some(ExecutionOutcome::Cancelled) => RunSettlement::terminal(RunStatus::Cancelled),
+                Some(ExecutionOutcome::Cancelled { .. }) => {
+                    RunSettlement::terminal(RunStatus::Cancelled)
+                }
                 Some(ExecutionOutcome::CompactionRequired { .. }) => {
                     RunSettlement::terminal(RunStatus::CompactionRequired)
+                }
+                Some(ExecutionOutcome::ContinuationRequired { .. }) => {
+                    internal_failure("agent continuation escaped the run execution loop")
                 }
                 None => internal_failure("agent completion task terminated unexpectedly"),
             }
@@ -167,6 +177,7 @@ async fn settle_run_inner(
             cancel_requested,
             error: settlement.error.clone(),
             messages: messages.clone(),
+            message_step: final_step,
             goal_effect,
             finished_at_ms,
         })
@@ -208,7 +219,11 @@ async fn settle_run_inner(
         .runs
         .get_mut(run_id)
         .expect("run existence checked before persistence");
-    record.extend_message_ids(message_ids);
+    if let Some(step) = final_step {
+        record.extend_message_ids_at_step(message_ids, step);
+    } else {
+        record.extend_message_ids(message_ids);
+    }
     record.settle(settlement, finished_at_ms);
     let snapshot = record.snapshot();
     let continuation = stored_result.continuation.map(|accepted| {
@@ -248,6 +263,7 @@ async fn settle_run_inner(
         run: snapshot,
         continuation,
         goal,
+        committed_step: final_step,
     })
 }
 

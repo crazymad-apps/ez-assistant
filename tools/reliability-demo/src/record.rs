@@ -12,9 +12,9 @@ use std::{
 
 use agent_context::ContextWindowEvaluator;
 use agent_core::{
-    AgentExecution, AllowAllAuthorizer, ExchangeReceipt, ExecutionBudget, ExecutionContext,
-    ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec, ModelRequestConfig,
-    RecordError, RecordFuture,
+    AgentExecution, AllowAllAuthorizer, ExchangeCompletion, ExchangeReceipt, ExecutionBudget,
+    ExecutionContext, ExecutionInput, ExecutionOutcome, ExecutionRecorder, ExecutionSpec,
+    ModelRequestConfig, RecordError, RecordFuture,
 };
 use agent_model::{
     GenerationConfig, ModelCallContext, ModelCapabilities, ModelEventStream, ModelRequest,
@@ -261,11 +261,14 @@ pub(crate) async fn run(options: RecordOptions) -> Result<(), RecordCommandError
     print_summary(&summary, &outcome).await?;
 
     match outcome {
-        ExecutionOutcome::Completed(_) => Ok(()),
-        ExecutionOutcome::Failed(_) => Err(RecordCommandError::Execution("failed")),
-        ExecutionOutcome::Cancelled => Err(RecordCommandError::Execution("cancelled")),
+        ExecutionOutcome::Completed { .. } => Ok(()),
+        ExecutionOutcome::Failed { .. } => Err(RecordCommandError::Execution("failed")),
+        ExecutionOutcome::Cancelled { .. } => Err(RecordCommandError::Execution("cancelled")),
         ExecutionOutcome::CompactionRequired { .. } => {
             Err(RecordCommandError::Execution("compaction required"))
+        }
+        ExecutionOutcome::ContinuationRequired { .. } => {
+            Err(RecordCommandError::Execution("continuation required"))
         }
     }
 }
@@ -406,10 +409,11 @@ async fn print_summary(
 
 fn outcome_name(outcome: &ExecutionOutcome) -> &'static str {
     match outcome {
-        ExecutionOutcome::Completed(_) => "completed",
-        ExecutionOutcome::Failed(_) => "failed",
-        ExecutionOutcome::Cancelled => "cancelled",
+        ExecutionOutcome::Completed { .. } => "completed",
+        ExecutionOutcome::Failed { .. } => "failed",
+        ExecutionOutcome::Cancelled { .. } => "cancelled",
         ExecutionOutcome::CompactionRequired { .. } => "compaction_required",
+        ExecutionOutcome::ContinuationRequired { .. } => "continuation_required",
     }
 }
 
@@ -418,7 +422,8 @@ fn record_agent_event(sink: &TraceSink, event: agent_core::AgentEvent) {
         agent_core::AgentEvent::ExecutionCompleted { dropped_events, .. }
         | agent_core::AgentEvent::ExecutionFailed { dropped_events, .. }
         | agent_core::AgentEvent::ExecutionCancelled { dropped_events }
-        | agent_core::AgentEvent::ExecutionCompactionRequired { dropped_events, .. } => {
+        | agent_core::AgentEvent::ExecutionCompactionRequired { dropped_events, .. }
+        | agent_core::AgentEvent::ExecutionContinuationRequired { dropped_events, .. } => {
             *dropped_events
         }
         _ => 0,
@@ -558,6 +563,7 @@ impl DemoJournal {
 impl ExecutionRecorder for DemoJournal {
     fn begin_tool_exchange<'a>(
         &'a self,
+        _step: u32,
         assistant: agent_types::AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
@@ -589,7 +595,7 @@ impl ExecutionRecorder for DemoJournal {
         &'a self,
         receipt: &'a ExchangeReceipt,
         _results: Vec<agent_types::ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let existed = self
                 .pending
@@ -601,7 +607,7 @@ impl ExecutionRecorder for DemoJournal {
                 DemoHostEvent::JournalCommitFinished { succeeded: existed },
             ));
             if existed {
-                Ok(())
+                Ok(ExchangeCompletion::default())
             } else {
                 Err(RecordError {
                     message: "the Demo Journal does not contain this pending exchange".into(),
@@ -963,7 +969,7 @@ mod tests {
             !terminal
         }) {}
         let outcome = completion.await;
-        assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+        assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
         let _ = sink.record(NativeTracePayload::Host(
             DemoHostEvent::AgentExecutionFinished { outcome },
         ));

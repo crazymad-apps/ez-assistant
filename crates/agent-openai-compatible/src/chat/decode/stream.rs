@@ -201,9 +201,11 @@ impl ChunkAssembler {
         delta: &ChatChunkDelta,
         events: &mut Vec<ModelEvent>,
     ) -> Result<(), ModelError> {
-        if let Some(field) = &self.adapter.reasoning_content_field
-            && let Some(text) = reasoning_field_text(&delta.extra, field, "chunk delta")?
-            && !text.is_empty()
+        if let Some(text) = reasoning_field_text(
+            &delta.extra,
+            &self.adapter.reasoning_response_fields,
+            "chunk delta",
+        )? && !text.is_empty()
         {
             self.push_reasoning_delta(text, events);
         }

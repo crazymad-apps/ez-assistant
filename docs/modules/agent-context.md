@@ -43,7 +43,7 @@
   请求原样保留正常 Agent 的完整冻结 System Prompt，并由 Strategy 内部在
   `protected prefix + compressible head` 后追加临时摘要指令；调用方不拼接请求
   conversation，recent tail 不发送给压缩模型。
-- 临时摘要指令使用 `UserPart::Injected`，只存在于 compression request，不写入原始
+- 临时摘要指令使用 request-only `InternalContext` 计划，只存在于 compression request，不写入原始
   History、Layout、Candidate 或 Checkpoint。
 - compression request 使用空 tools、`ToolChoice::None` 和显式输出上限。
 - 只有 `FinishReason::Stop`、无 ToolCall 且至少包含一段非空 Text 的完整响应才能形成
@@ -56,7 +56,10 @@
   Message 使用同一 user role 和 Turn 结构进入模型上下文，产品转录过滤属于 Runtime/Host 投影职责。
 - Runtime continuation 使用 `partition_for_continuation`：普通阈值压缩保留最近完整 User Turn；
   Provider overflow 可压缩当前已经形成完整 Tool Exchange 的活动 Turn。若 replacement 会以
-  Assistant 继续执行，必须追加持久化的 Injected User continuation 锚点，维持规范 Turn 布局。
+  Assistant 继续执行，必须追加持久化且产品隐藏的 `InternalContext` User continuation 锚点，
+  维持规范 Turn 布局。
+- 普通压缩按 `retention_key` 保护每个 key 的最新 `InternalContext` 所在完整 User Turn；允许摘要
+  活动 Turn 的 overflow continuation 必须把这些最新冻结正文原样重挂到新的隐藏锚点，不能只依赖摘要转述。
 - Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界；但历史中
   出现 ProviderState 本身不构成永久 protected tail，完整旧 User Turn 可进入压缩 head，摘要替代后
   其 opaque state 自然离开活动上下文。

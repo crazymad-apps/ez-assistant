@@ -144,7 +144,7 @@ async fn builder_defaults_are_core_defaults_and_empty_tools_are_valid() {
     assert!(agent.tool_definitions().is_empty());
     assert!(matches!(
         complete_ephemeral(&agent, input("user_1", "hello")).await,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
@@ -311,11 +311,11 @@ async fn agent_reuses_frozen_configuration_across_sequential_starts() {
     assert_eq!(agent.tool_definitions()[0].name.as_str(), "lookup");
     assert!(matches!(
         complete_ephemeral(&agent, input("user_1", "first")).await,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
     assert!(matches!(
         complete_ephemeral(&agent, input("user_2", "second")).await,
-        ExecutionOutcome::Completed(_)
+        ExecutionOutcome::Completed { .. }
     ));
 
     let requests = model.take_requests();
@@ -352,7 +352,7 @@ async fn ephemeral_path_supports_single_tool_loop() {
 
     assert!(matches!(
         complete_ephemeral(&agent, input("user_1", "look once")).await,
-        ExecutionOutcome::Completed(message)
+        ExecutionOutcome::Completed { message, .. }
             if message == text_message("answer", "done")
     ));
     assert_eq!(model.take_requests().len(), 2);
@@ -385,7 +385,7 @@ async fn ephemeral_path_supports_multi_round_tool_loop() {
 
     assert!(matches!(
         complete_ephemeral(&agent, input("user_1", "look twice")).await,
-        ExecutionOutcome::Completed(message)
+        ExecutionOutcome::Completed { message, .. }
             if message == text_message("answer", "done")
     ));
     assert_eq!(model.take_requests().len(), 3);
@@ -424,7 +424,7 @@ async fn explicit_context_replaces_ephemeral_recorder_and_records_exchange() {
         .completion
         .await;
 
-    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
     assert_eq!(recorder.deltas().len(), 2);
     assert!(recorder.pending_exchanges().is_empty());
 }
@@ -466,7 +466,7 @@ async fn ephemeral_recorder_settles_pending_exchange_during_tool_cancellation() 
     let outcome = execution.completion.await;
     cleanup.notified().await;
 
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert!(matches!(outcome, ExecutionOutcome::Cancelled { .. }));
 }
 
 #[tokio::test]
@@ -493,7 +493,7 @@ async fn dropping_event_consumer_does_not_change_completion() {
 
     assert!(matches!(
         completion.await,
-        ExecutionOutcome::Completed(message)
+        ExecutionOutcome::Completed { message, .. }
             if message == text_message("answer", "still completes")
     ));
 }
@@ -528,6 +528,9 @@ async fn connected_event_consumer_observes_reliable_terminal_event() {
         terminal
     });
 
-    assert!(matches!(completion.await, ExecutionOutcome::Completed(_)));
+    assert!(matches!(
+        completion.await,
+        ExecutionOutcome::Completed { .. }
+    ));
     assert!(event_task.await.expect("event task joins").is_some());
 }

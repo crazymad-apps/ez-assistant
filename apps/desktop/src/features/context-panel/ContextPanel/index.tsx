@@ -25,7 +25,7 @@ import {
 } from "./contextDisplay";
 import styles from "./index.module.scss";
 
-type ContextSectionKey = "session" | "workspace" | "attachments" | "children" | "runs";
+type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "children" | "runs";
 
 export const ContextPanel = observer(function ContextPanel() {
   const store = useRootStore();
@@ -78,7 +78,7 @@ export const ContextPanel = observer(function ContextPanel() {
     try {
       setSystemContext(await store.getSystemContext(session_id));
     } catch (error: unknown) {
-      setSystemContextError(error instanceof Error ? error.message : "无法读取当前会话的 System Context。");
+      setSystemContextError(error instanceof Error ? error.message : "无法读取当前会话的系统上下文。");
     } finally {
       setSystemContextLoading(false);
     }
@@ -128,19 +128,19 @@ export const ContextPanel = observer(function ContextPanel() {
           )}
           {session_view?.usage.accumulated && (
             <dl className={`${styles.definition_list} ${styles.usage_list}`}>
-              <div><dt>会话 Token</dt><dd>{formatNullableTokens(session_view.usage.accumulated.total_tokens)}</dd></div>
+              <div><dt>会话令牌</dt><dd>{formatNullableTokens(session_view.usage.accumulated.total_tokens)}</dd></div>
               <div><dt>综合命中率</dt><dd>{formatBasisPoints(session_view.usage.overall_cache_hit_basis_points)}</dd></div>
             </dl>
           )}
           {session && (
             <button className={styles.system_context_row} onClick={() => void openSystemContext()} type="button">
-              <strong>System Context</strong>
+              <strong>系统上下文</strong>
               <em>{system_context_loading ? "读取中…" : "查看原文"}</em>
             </button>
           )}
           {system_context_error && <p className={styles.context_error}>{system_context_error}</p>}
         </ContextSection>
-        <ContextSection is_open={sectionIsOpen("workspace")} on_toggle={() => toggleSection("workspace")} title="Workspace">
+        <ContextSection is_open={sectionIsOpen("workspace")} on_toggle={() => toggleSection("workspace")} title="工作区">
           {workspace && session ? (
             <>
               <div className={styles.path_row} title={workspace.user_directory}>
@@ -165,9 +165,34 @@ export const ContextPanel = observer(function ContextPanel() {
                   复制路径
                 </button>
               </div>
-              <p className={styles.workspace_note}>Shell 仍以当前用户权限运行，Workspace 不是强沙盒。</p>
+              <p className={styles.workspace_note}>命令行仍以当前用户权限运行，工作区不是强沙盒。</p>
             </>
           ) : <p className={styles.empty_row}>未绑定目录</p>}
+        </ContextSection>
+        <ContextSection
+          is_open={sectionIsOpen("skills")}
+          on_toggle={() => toggleSection("skills")}
+          title="技能"
+        >
+          {session_view ? (
+            <div className={styles.skill_context}>
+              {(session_view.active_skills?.length ?? 0) > 0 ? (
+                <div className={styles.active_skills}>
+                  {session_view.active_skills?.map((skill) => (
+                    <div key={`${skill.message_id}-${skill.tag.name}`}>
+                      <strong title={skill.tag.name}>{skill.tag.name}</strong>
+                      <span>{skill.trigger === "user" ? "用户激活" : "智能体激活"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className={styles.empty_row}>{emptySkillMessage(session_view)}</p>}
+              {(session_view.skill_catalog?.diagnostics.length ?? 0) > 0 && (
+                <button className={styles.skill_diagnostics} onClick={() => store.settings.open("skills")} type="button">
+                  查看 {session_view.skill_catalog?.diagnostics.length} 项技能诊断
+                </button>
+              )}
+            </div>
+          ) : <p className={styles.empty_row}>尚未选择会话</p>}
         </ContextSection>
         <ContextSection
           is_open={sectionIsOpen("attachments")}
@@ -258,4 +283,13 @@ function imageHandlingLabel(mode: SessionViewSnapshot["composer_capabilities"]["
   if (mode === "native") return "模型原生";
   if (mode === "tool") return "辅助视觉模型";
   return "当前不可用";
+}
+
+function emptySkillMessage(view: SessionViewSnapshot): string {
+  if (!view.skill_catalog || view.skill_catalog.status === "legacy_unavailable") {
+    return "此历史会话没有可展示的技能信息";
+  }
+  if (view.skill_catalog.status === "unavailable") return "当前会话的技能信息不可用";
+  if (view.skill_catalog.status === "empty") return "当前会话没有可用技能";
+  return "当前还没有已激活技能";
 }

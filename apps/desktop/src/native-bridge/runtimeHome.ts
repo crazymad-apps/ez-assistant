@@ -7,7 +7,7 @@ type RuntimeHomeFailure = Readonly<{
 
 export async function openRuntimeHome(): Promise<void> {
   if (!isTauri()) {
-    throw new Error("浏览器预览无法打开 Runtime Home。");
+    throw new Error("浏览器预览无法打开运行时目录。");
   }
   try {
     await invoke("open_runtime_home");
@@ -15,7 +15,7 @@ export async function openRuntimeHome(): Promise<void> {
     if (isRuntimeHomeFailure(error)) {
       throw new Error(error.message);
     }
-    throw new Error("无法打开 Runtime Home。");
+    throw new Error("无法打开运行时目录。");
   }
 }
 

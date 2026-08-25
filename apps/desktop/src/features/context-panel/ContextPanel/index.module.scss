@@ -371,3 +371,11 @@
     font-style: normal;
   }
 }
+
+.skill_context { display: grid; gap: 8px; }
+.active_skills { display: grid; gap: 4px; }
+.active_skills > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 7px; border-radius: 6px; background: var(--ez-surface-subtle); }
+.active_skills strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.active_skills span { flex: 0 0 auto; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+.skill_diagnostics { justify-self: start; padding: 4px 7px; border: 0; border-radius: 6px; color: var(--ez-primary); background: transparent; }
+.skill_diagnostics:hover { background: var(--ez-primary-soft); }

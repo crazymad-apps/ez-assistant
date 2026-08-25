@@ -15,6 +15,7 @@ pub(super) struct ChildTerminal {
     pub(super) error: Option<RuntimeErrorInfo>,
     pub(super) messages: Vec<ConversationMessage>,
     pub(super) final_message_id: Option<agent_types::MessageId>,
+    pub(super) final_step: Option<u32>,
     pub(super) result: Option<String>,
 }
 
@@ -46,7 +47,7 @@ pub(super) fn child_terminal(
         ));
     }
     match outcome {
-        ExecutionOutcome::Completed(message) => {
+        ExecutionOutcome::Completed { step, message, .. } => {
             let result = message
                 .parts
                 .iter()
@@ -64,21 +65,27 @@ pub(super) fn child_terminal(
                 error: None,
                 messages: vec![ConversationMessage::Assistant(message)],
                 final_message_id: Some(message_id),
+                final_step: Some(step),
                 result: Some(result),
             }
         }
-        ExecutionOutcome::Cancelled => ChildTerminal {
+        ExecutionOutcome::Cancelled { .. } => ChildTerminal {
             status: ChildTaskStatus::Cancelled,
             cancel_requested: true,
             error: None,
             messages: Vec::new(),
             final_message_id: None,
+            final_step: None,
             result: None,
         },
-        ExecutionOutcome::Failed(error) => failed_terminal(execution_error(error)),
+        ExecutionOutcome::Failed { error, .. } => failed_terminal(execution_error(error)),
         ExecutionOutcome::CompactionRequired { .. } => failed_terminal(RuntimeErrorInfo::new(
             RuntimeErrorCode::Internal,
             "child task requires context compaction",
+        )),
+        ExecutionOutcome::ContinuationRequired { .. } => failed_terminal(RuntimeErrorInfo::new(
+            RuntimeErrorCode::Internal,
+            "child task continuation escaped its execution loop",
         )),
     }
 }
@@ -145,6 +152,7 @@ fn failed_terminal(error: RuntimeErrorInfo) -> ChildTerminal {
         error: Some(error),
         messages: Vec::new(),
         final_message_id: None,
+        final_step: None,
         result: None,
     }
 }

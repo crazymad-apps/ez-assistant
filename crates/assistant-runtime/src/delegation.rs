@@ -273,6 +273,7 @@ impl ChildTaskRegistry {
 pub(crate) struct ChildTaskJournalState {
     pub(crate) journal: Option<InMemoryJournal>,
     pub(crate) persisted_message_count: usize,
+    pub(crate) body_generation: u64,
 }
 
 impl ChildTaskRecord {
@@ -306,6 +307,7 @@ impl ChildTaskRecord {
             state: Mutex::new(ChildTaskJournalState {
                 journal,
                 persisted_message_count,
+                body_generation: stored.body_generation,
             }),
         })
     }
@@ -379,6 +381,7 @@ impl ChildTaskRecord {
             .replace_completed(replacement)
             .map_err(|_| crate::context_compaction::RuntimeCompactionError::Projection)?;
         state.persisted_message_count = journal.message_count();
+        state.body_generation = state.body_generation.saturating_add(1);
         Ok(())
     }
 }

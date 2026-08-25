@@ -73,14 +73,17 @@ impl IntoResponse for HttpError {
 
 pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
     match code {
-        RuntimeErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        RuntimeErrorCode::InvalidRequest | RuntimeErrorCode::SkillNameInvalid => {
+            StatusCode::BAD_REQUEST
+        }
         RuntimeErrorCode::SessionNotFound
         | RuntimeErrorCode::RunNotFound
         | RuntimeErrorCode::ChildTaskNotFound
         | RuntimeErrorCode::InputNotFound
         | RuntimeErrorCode::ModelNotFound
         | RuntimeErrorCode::WorkspaceNotFound
-        | RuntimeErrorCode::AttachmentNotFound => StatusCode::NOT_FOUND,
+        | RuntimeErrorCode::AttachmentNotFound
+        | RuntimeErrorCode::SkillNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::GoalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::SessionBusy
@@ -105,6 +108,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::QueueConflict
         | RuntimeErrorCode::SnapshotStale
         | RuntimeErrorCode::OperationNotAllowed => StatusCode::CONFLICT,
+        RuntimeErrorCode::SkillNotUserInvocable => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::GoalUnsupportedByModel => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::AttachmentTooLarge | RuntimeErrorCode::ResourceTooLarge => {
             StatusCode::PAYLOAD_TOO_LARGE
@@ -116,6 +120,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::ModelUnavailable
         | RuntimeErrorCode::PermissionReloadFailed
         | RuntimeErrorCode::PermissionPersistenceFailed
+        | RuntimeErrorCode::SkillCatalogUnavailable
         | RuntimeErrorCode::SnapshotBusy => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeErrorCode::PermissionFileInvalid | RuntimeErrorCode::ResourceNotPreviewable => {
             StatusCode::UNPROCESSABLE_ENTITY

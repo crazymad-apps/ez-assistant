@@ -40,36 +40,39 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
             <div className={styles.queue_item} key={item.input_id}>
               <span>{item.position}</span>
               <p title={item.text_preview}>{item.text_preview}</p>
-              <small>{item.held_by_goal ? "Goal 暂存" : ""}</small>
-              <time>{formatTime(item.submitted_at_ms)}</time>
-              <button
-                disabled={
-                  store.pending_queue_input_id !== null
-                  || Boolean(item.held_by_goal && props.goal?.state !== "paused")
-                }
-                onClick={() => {
-                  if (item.held_by_goal && props.goal?.state === "paused") {
-                    void store.resumeGoal(props.session_id, props.goal.goal_id, props.goal.generation, item.input_id);
-                  } else if (needs_resume) {
-                    void store.resumeQueuedInput(props.session_id, item.input_id, props.queue.revision);
-                  } else if (!item.held_by_goal) {
-                    void store.prioritizeQueuedInput(props.session_id, item.input_id, props.queue.revision);
+              <small>{item.held_by_goal ? "目标暂存" : ""}</small>
+              <div className={styles.queue_actions}>
+                {item.skill && <span className={styles.queue_skill} title={item.skill.name}>{item.skill.name}</span>}
+                <time>{formatTime(item.submitted_at_ms)}</time>
+                <button
+                  disabled={
+                    store.pending_queue_input_id !== null
+                    || Boolean(item.held_by_goal && props.goal?.state !== "paused")
                   }
-                }}
-                type="button"
-              >
-                {item.held_by_goal
-                  ? props.goal?.state === "paused" ? "用于 Goal" : "已暂存"
-                  : needs_resume ? "恢复" : item.is_prioritized ? "已优先" : "优先"}
-              </button>
-              <button
-                aria-label="移除排队输入"
-                disabled={store.pending_queue_input_id !== null}
-                onClick={() => void store.cancelQueuedInput(props.session_id, item.input_id)}
-                type="button"
-              >
-                <Icon name="x" size={14} />
-              </button>
+                  onClick={() => {
+                    if (item.held_by_goal && props.goal?.state === "paused") {
+                      void store.resumeGoal(props.session_id, props.goal.goal_id, props.goal.generation, item.input_id);
+                    } else if (needs_resume) {
+                      void store.resumeQueuedInput(props.session_id, item.input_id, props.queue.revision);
+                    } else if (!item.held_by_goal) {
+                      void store.prioritizeQueuedInput(props.session_id, item.input_id, props.queue.revision);
+                    }
+                  }}
+                  type="button"
+                >
+                  {item.held_by_goal
+                    ? props.goal?.state === "paused" ? "用于目标" : "已暂存"
+                    : needs_resume ? "恢复" : item.is_prioritized ? "已优先" : "优先"}
+                </button>
+                <button
+                  aria-label="移除排队输入"
+                  disabled={store.pending_queue_input_id !== null}
+                  onClick={() => void store.cancelQueuedInput(props.session_id, item.input_id)}
+                  type="button"
+                >
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
             </div>
           ))}
       </div>

@@ -1,7 +1,7 @@
 import { Component, type ComponentProps, type ErrorInfo, type ReactNode, useEffect, useState } from "react";
 import { Streamdown, type Components, type PluginConfig, type UrlTransform } from "streamdown";
 import "streamdown/styles.css";
-import { openExternalHttpUrl } from "../../../native-bridge/openExternalUrl";
+import { openExternalHttpUrl } from "../../native-bridge/openExternalUrl";
 import styles from "./index.module.scss";
 
 type MarkdownContentProps = Readonly<{

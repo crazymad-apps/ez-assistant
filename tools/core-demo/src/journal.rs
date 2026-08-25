@@ -5,7 +5,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
+use agent_core::{
+    ExchangeCompletion, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
+};
 use agent_types::{
     AssistantMessage, ConversationMessage, ConversationSnapshot, ToolMessage, UserMessage,
 };
@@ -141,6 +143,7 @@ impl DemoRecorder {
 impl ExecutionRecorder for DemoRecorder {
     fn begin_tool_exchange<'a>(
         &'a self,
+        _step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(ready(
@@ -162,13 +165,14 @@ impl ExecutionRecorder for DemoRecorder {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         for result in &results {
             self.audit.record_result(&self.run_id, &result.result);
         }
         Box::pin(ready(
             self.journal
                 .complete(&self.run_id, receipt, results)
+                .map(|()| ExchangeCompletion::default())
                 .map_err(record_error),
         ))
     }
@@ -213,7 +217,7 @@ mod tests {
         let journal = DemoJournal::default();
         let recorder = DemoRecorder::new(journal.clone(), "run-1".to_owned(), DemoAudit::default());
         let receipt = recorder
-            .begin_tool_exchange(assistant())
+            .begin_tool_exchange(1, assistant())
             .await
             .expect("begin exchange");
 

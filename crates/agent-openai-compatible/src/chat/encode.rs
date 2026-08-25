@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
-use agent_model::{ModelError, ModelRequest, ReasoningEffort, ToolImageProjection};
+use agent_model::{
+    ModelError, ModelRequest, ReasoningEffort, ToolImageProjection,
+    plan_tool_result_image_envelope, tool_result_image_label,
+};
 use agent_types::{
-    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
-    FileReferencesPart, ToolChoice, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
-    UserPart,
+    AssistantMessage, AssistantPart, ContextInsertionPayload, ContextSummaryMessage,
+    ConversationMessage, FileReferencesPart, ToolChoice, ToolDefinition, ToolMessage,
+    ToolResultPart, UserMessage, UserPart,
 };
 use serde_json::Value;
 
@@ -41,7 +44,6 @@ const CONTEXT_SUMMARY_PREFIX: &str = "[Context summary derived from earlier conv
 /// 在 tool-call 轮次省略该字段。单空格只是 wire 占位：它不进入规范消息，
 /// 同时兼容会拒绝空字符串的 DeepSeek 模型。
 const MISSING_REASONING_WIRE_PLACEHOLDER: &str = " ";
-const TOOL_RESULT_IMAGE_PLACEHOLDER_VERSION: &str = "tool_result_image";
 
 /// 把规范请求编码为 Chat Completions 原生请求。
 ///
@@ -79,13 +81,24 @@ pub(crate) fn encode_request_with_images(
         .validate_tool_exchange_pairs()
         .map_err(|error| ModelError::Config(error.to_string()))?;
     let mut messages = Vec::new();
-    // 每条 system 指令按序生成一个 system 消息，置于对话消息之前。
-    for system in request.system.parts() {
+    let mut leading_system_parts = request.system.parts().to_vec();
+    let mut index = 0_usize;
+    while let Some(message) = request.conversation.messages.get(index) {
+        let content = match message {
+            ConversationMessage::System(message) => message.text.clone(),
+            ConversationMessage::ContextSummary(message) => encode_context_summary(message).content,
+            _ => break,
+        };
+        leading_system_parts.push(content);
+        index += 1;
+    }
+    // 规范 Snapshot 继续保留独立 Part；Chat wire 合并为唯一前导 system，兼容只允许
+    // messages[0] 为 system 的严格模板，同时保持 Part 与前导对话事实的冻结顺序。
+    if !leading_system_parts.is_empty() {
         messages.push(ChatMessage::System(ChatSystemMessage {
-            content: system.clone(),
+            content: leading_system_parts.join("\n\n"),
         }));
     }
-    let mut index = 0_usize;
     while index < request.conversation.messages.len() {
         let message = &request.conversation.messages[index];
         messages.push(encode_conversation_message(
@@ -105,14 +118,14 @@ pub(crate) fn encode_request_with_images(
             continue;
         }
 
-        let mut image_envelope = Vec::new();
+        let mut tool_messages = Vec::new();
         while let Some(ConversationMessage::Tool(tool)) = request.conversation.messages.get(index) {
-            let (encoded, images) = encode_tool_message(tool, adapter, prepared_images)?;
-            messages.push(ChatMessage::Tool(encoded));
-            image_envelope.extend(images);
+            messages.push(ChatMessage::Tool(encode_tool_message(tool, adapter)?));
+            tool_messages.push(tool);
             index += 1;
         }
-        if !image_envelope.is_empty() {
+        if let Some(plan) = plan_tool_result_image_envelope(assistant, &tool_messages) {
+            let image_envelope = encode_tool_image_envelope(&plan.payload, prepared_images)?;
             messages.push(ChatMessage::User(ChatUserMessage {
                 content: ChatUserContent::Parts(image_envelope),
             }));
@@ -319,6 +332,11 @@ fn encode_user_message(
                     text: text.text.clone(),
                 });
             }
+            UserPart::InternalContext(context) => {
+                parts.push(ChatContentPart::Text {
+                    text: context.text.clone(),
+                });
+            }
             UserPart::FileReferences(files) => {
                 let mut ordinary = Vec::new();
                 for file in &files.files {
@@ -451,7 +469,7 @@ fn encode_assistant_message(
         crate::ReasoningReplayPolicy::PreserveAll => None,
     };
     if let Some(reasoning) = reasoning_to_encode
-        && let Some(field) = &adapter.reasoning_content_field
+        && let Some(field) = &adapter.reasoning_replay_field
     {
         extra.insert(field.clone(), Value::String(reasoning.to_owned()));
     }
@@ -472,66 +490,62 @@ fn encode_assistant_message(
 fn encode_tool_message(
     message: &ToolMessage,
     adapter: &ChatProtocolAdapter,
-    prepared_images: &agent_model::PreparedModelImages,
-) -> Result<(ChatToolMessage, Vec<ChatContentPart>), ModelError> {
+) -> Result<ChatToolMessage, ModelError> {
     let mut encoded_parts = Vec::with_capacity(message.result.content.as_parts().len());
-    let mut image_envelope = Vec::new();
     for (part_index, part) in message.result.content.as_parts().iter().enumerate() {
         match part {
             ToolResultPart::Text { text } => encoded_parts.push(text.clone()),
             // Chat Completions 的 tool content 只接受字符串；JSON 结果序列化后回传，
             // 结构对模型仍然完整可见。
             ToolResultPart::Json { value } => encoded_parts.push(value.to_string()),
-            ToolResultPart::Image { image } => {
+            ToolResultPart::Image { .. } => {
                 if adapter.tool_image_projection != ToolImageProjection::AggregatedUserInput {
                     return Err(ModelError::Config(
                         "Chat tool result image projection is not configured".to_owned(),
                     ));
                 }
-                let label = tool_image_placeholder(message.result.call_id.as_str(), part_index);
-                let prepared = prepared_images
-                    .get_tool_image(image.relative_path())
-                    .ok_or_else(|| {
-                        ModelError::Resource(format!(
-                            "tool image `{}` was not prepared",
-                            image.relative_path()
-                        ))
-                    })?;
-                encoded_parts.push(label.clone());
-                image_envelope.push(ChatContentPart::Text { text: label });
-                image_envelope.push(ChatContentPart::ImageUrl {
-                    image_url: ChatImageUrl {
-                        url: image_data_url(prepared),
-                    },
-                });
+                encoded_parts.push(tool_result_image_label(
+                    message.result.call_id.as_str(),
+                    part_index,
+                ));
             }
         }
     }
-    Ok((
-        ChatToolMessage {
-            tool_call_id: message.result.call_id.as_str().to_owned(),
-            content: encoded_parts.join("\n"),
-        },
-        image_envelope,
-    ))
+    Ok(ChatToolMessage {
+        tool_call_id: message.result.call_id.as_str().to_owned(),
+        content: encoded_parts.join("\n"),
+    })
 }
 
-fn tool_image_placeholder(call_id: &str, part_index: usize) -> String {
-    let mut label = format!("[{TOOL_RESULT_IMAGE_PLACEHOLDER_VERSION} call_id=\"");
-    for character in call_id.chars() {
-        match character {
-            '&' => label.push_str("&amp;"),
-            '<' => label.push_str("&lt;"),
-            '>' => label.push_str("&gt;"),
-            '\"' => label.push_str("&quot;"),
-            '\'' => label.push_str("&apos;"),
-            character => label.push(character),
-        }
+fn encode_tool_image_envelope(
+    payload: &ContextInsertionPayload,
+    prepared_images: &agent_model::PreparedModelImages,
+) -> Result<Vec<ChatContentPart>, ModelError> {
+    let ContextInsertionPayload::ToolResultImages(images) = payload else {
+        return Err(ModelError::Config(
+            "tool image insertion plan has an incompatible payload".to_owned(),
+        ));
+    };
+    let mut envelope = Vec::with_capacity(images.len().saturating_mul(2));
+    for image in images {
+        let prepared = prepared_images
+            .get_tool_image(image.image.relative_path())
+            .ok_or_else(|| {
+                ModelError::Resource(format!(
+                    "tool image `{}` was not prepared",
+                    image.image.relative_path()
+                ))
+            })?;
+        envelope.push(ChatContentPart::Text {
+            text: image.label.clone(),
+        });
+        envelope.push(ChatContentPart::ImageUrl {
+            image_url: ChatImageUrl {
+                url: image_data_url(prepared),
+            },
+        });
     }
-    label.push_str(&format!(
-        "\" part_index=\"{part_index}\" supplied_in_following_batch]"
-    ));
-    label
+    Ok(envelope)
 }
 
 /// 把规范工具定义编码为原生 function 工具。

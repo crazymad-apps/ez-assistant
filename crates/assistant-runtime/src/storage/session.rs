@@ -5,7 +5,7 @@ use assistant_protocol::{
     SessionId, SessionTitleOrigin,
 };
 
-use crate::SessionExecutionEnvironment;
+use crate::{SessionExecutionEnvironment, SessionSkillCatalog, StoredSkillActivation};
 
 use super::{StoredAttachment, StoredGoal, StoredWorkPlan};
 
@@ -36,6 +36,7 @@ pub struct NewStoredSession {
     pub model_key: ModelKey,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
+    pub skill_catalog: SessionSkillCatalog,
     pub environment: SessionExecutionEnvironment,
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
@@ -58,6 +59,8 @@ pub struct SessionFork {
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<ForkedAttachmentReference>,
     pub tool_images: Vec<ToolImageReference>,
+    /// 位于 Fork Conversation 前缀内、已改绑到目标 Session 的 Activation ledger。
+    pub skill_activations: Vec<StoredSkillActivation>,
     /// Fork 时冻结的源 WorkPlan；Store 在同一事务中为目标 Session 创建 revision 1。
     pub work_plan: Option<StoredWorkPlan>,
     /// 仅当 objective source 位于前缀时提供的新 Goal；状态固定为 Paused(Forked)。
@@ -70,6 +73,7 @@ pub struct StoredSessionFork {
     pub session: StoredSession,
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<StoredAttachment>,
+    pub skill_activations: Vec<StoredSkillActivation>,
     pub work_plan: Option<StoredWorkPlan>,
     pub goal: Option<StoredGoal>,
 }
@@ -90,6 +94,7 @@ pub struct StoredSession {
     pub model_key: ModelKey,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
+    pub skill_catalog: SessionSkillCatalog,
     pub environment: SessionExecutionEnvironment,
     pub lifecycle: StoredSessionLifecycle,
     pub current_variant: AgentVariant,

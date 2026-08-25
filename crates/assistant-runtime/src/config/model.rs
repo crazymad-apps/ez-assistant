@@ -410,7 +410,8 @@ fn validate_endpoint(endpoint: &str) -> bool {
     let Ok(parsed) = Url::parse(endpoint) else {
         return false;
     };
-    !parsed.cannot_be_a_base()
+    matches!(parsed.scheme(), "http" | "https")
+        && !parsed.cannot_be_a_base()
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.query().is_none()

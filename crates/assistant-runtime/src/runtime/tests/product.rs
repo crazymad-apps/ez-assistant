@@ -33,6 +33,7 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
             session_id: session.session.session_id.clone(),
             message: "exported question".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -126,6 +127,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
             session_id: session_id.clone(),
             message: "finish time".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -198,6 +200,7 @@ async fn session_usage_projects_latest_and_token_weighted_cache_hit_rates() {
                 session_id: session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
                 variant: assistant_protocol::AgentVariant::Build,
             })
@@ -240,6 +243,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
             session_id: session_id.clone(),
             message: "question".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -378,6 +382,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
                 session_id: session.session.session_id.clone(),
                 message: message.to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
                 variant: assistant_protocol::AgentVariant::Build,
             })
@@ -519,6 +524,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
             session_id: session_id.clone(),
             message: "active".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -533,6 +539,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
             session_id: session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -544,6 +551,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
             session_id: session_id.clone(),
             message: "third".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -619,6 +627,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
             session_id: session_id.clone(),
             message: "continue".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })
@@ -681,6 +690,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
             session_id: session_id.clone(),
             message: "save a report".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
             variant: assistant_protocol::AgentVariant::Build,
         })

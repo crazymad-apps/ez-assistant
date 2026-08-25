@@ -28,12 +28,12 @@ async fn max_steps_zero_fails_before_any_model_call() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
+        ExecutionError::BudgetExceeded {
             kind: BudgetKind::Steps,
             limit: 0,
-        })
+        },
     );
     // Some(0)：一次模型调用都不发生（无 StepStarted）。
     assert_eq!(
@@ -90,7 +90,7 @@ async fn max_steps_exactly_at_limit_completes() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(matches!(
         events.last(),
         Some(AgentEvent::ExecutionCompleted { .. })
@@ -133,12 +133,12 @@ async fn max_steps_exceeded_fails_at_next_precheck() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
+        ExecutionError::BudgetExceeded {
             kind: BudgetKind::Steps,
             limit: 1,
-        })
+        },
     );
     // 第一轮完整处理后，第二轮 max_steps 预检先于 Context Evaluator 受控终止
     // （无 StepStarted{2}）。
@@ -148,12 +148,15 @@ async fn max_steps_exceeded_fails_at_next_precheck() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "get_date", json!({})),
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_1"),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Success,
             },
@@ -205,12 +208,12 @@ async fn max_tool_calls_zero_settles_batch_without_dispatch() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
+        ExecutionError::BudgetExceeded {
             kind: BudgetKind::ToolCalls,
             limit: 0,
-        })
+        },
     );
     // dispatch 前预检：调用被结算预算超额错误，工具未执行，整批落账后受控终止。
     assert_eq!(
@@ -240,9 +243,11 @@ async fn max_tool_calls_zero_settles_batch_without_dispatch() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "get_date", json!({})),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Failed,
             },
@@ -293,7 +298,7 @@ async fn max_tool_calls_exactly_at_limit_completes() {
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert_eq!(model.take_requests().len(), 2);
 }
 
@@ -333,12 +338,12 @@ async fn max_tool_calls_crossed_within_batch_settles_rest() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::BudgetExceeded {
+        ExecutionError::BudgetExceeded {
             kind: BudgetKind::ToolCalls,
             limit: 1,
-        })
+        },
     );
     // 同批跨越上限：call_1 已 dispatch；call_2 过了授权闸后在 dispatch 前预检处
     // 被结算预算超额错误（未执行），整批落账后受控终止。
@@ -380,19 +385,24 @@ async fn max_tool_calls_crossed_within_batch_settles_rest() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "get_date", json!({})),
             },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_2", "get_time", json!({})),
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_1"),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Success,
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_2"),
                 status: ToolCompletionStatus::Failed,
             },
@@ -456,7 +466,7 @@ async fn deny_does_not_count_toward_tool_call_budget() {
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert_eq!(
         log.entries(),
         vec![

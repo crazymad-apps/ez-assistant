@@ -76,7 +76,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("ez-assistant · 本地 AI 助手")).toBeVisible();
   await expect(page.getByRole("button", { name: "新对话" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "当前上下文" })).toBeVisible();
-  await expect(page.getByText("Runtime 已连接")).toBeVisible();
+  await expect(page.getByText("运行时已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
   await expectModelCatalogForm(page);
   const navigation = page.getByRole("complementary", { name: "会话导航" });
@@ -139,23 +139,23 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   const composer = page.getByRole("textbox", { name: "输入消息" });
   await expect(composer).toBeVisible();
   await expect(page.getByRole("button", { name: "添加附件" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "执行设置" })).toContainText("Build · Ask");
+  await expect(page.getByRole("button", { name: "执行设置" })).toContainText("构建 · 询问");
   await expect(page.getByRole("button", { name: "模型设置" })).toBeVisible();
   await expect(page.getByRole("img", { name: /上下文用量/ })).toBeVisible();
 
   await page.getByRole("button", { name: "执行设置" }).click();
-  await expect(page.getByRole("menuitem", { name: /执行模式.*Build/ })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: /审批模式.*Ask/ })).toBeVisible();
-  await page.getByRole("menuitem", { name: /执行模式.*Build/ }).click();
-  await expect(page.getByRole("menuitemradio", { name: /Plan/ })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /执行模式.*构建/ })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /审批模式.*询问/ })).toBeVisible();
+  await page.getByRole("menuitem", { name: /执行模式.*构建/ }).click();
+  await expect(page.getByRole("menuitemradio", { name: /规划/ })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("menuitemradio", { name: /Plan/ })).toBeHidden();
+  await expect(page.getByRole("menuitemradio", { name: /规划/ })).toBeHidden();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("menuitem", { name: /执行模式.*Build/ })).toBeHidden();
+  await expect(page.getByRole("menuitem", { name: /执行模式.*构建/ })).toBeHidden();
 
   await composer.fill("/goal");
   await composer.press("Enter");
-  const cancel_goal_tag = page.getByRole("button", { name: "取消 Goal 标记" });
+  const cancel_goal_tag = page.getByRole("button", { name: "取消目标标记" });
   await expect(cancel_goal_tag).toBeVisible();
   await composer.press("Escape");
   await expect(cancel_goal_tag).toBeVisible();
@@ -189,7 +189,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
 
   const context_panel = page.getByRole("complementary", { name: "当前上下文" });
   await expect(context_panel.getByText("图片理解").locator("xpath=following-sibling::*[1]")).toContainText("当前不可用");
-  const workspace_section = context_panel.getByRole("button", { name: "Workspace", exact: true });
+  const workspace_section = context_panel.getByRole("button", { name: "工作区", exact: true });
   await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeVisible();
   await workspace_section.click();
   await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeHidden();
@@ -228,7 +228,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
   await child_header.getByRole("button", { name: "返回主会话" }).click();
   await page.reload();
-  await expect(page.getByText("Runtime 已连接")).toBeVisible();
+  await expect(page.getByText("运行时已连接")).toBeVisible();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
   await expect(context_panel.getByRole("button", { name: /E2E 子任务/ })).toBeVisible();
   await expect(page.getByText("离线回复：DELEGATE_CASE", { exact: true })).toBeVisible();
@@ -244,7 +244,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(navigation.getByRole("button", { name: new RegExp(renamed_title) })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByText("Runtime 已连接")).toBeVisible();
+  await expect(page.getByText("运行时已连接")).toBeVisible();
   await navigation.getByRole("button", { name: new RegExp(renamed_title) }).click();
   await expect(session_header.getByRole("button", { name: renamed_title })).toBeVisible();
 
@@ -337,7 +337,7 @@ async function expectResponsiveLayouts(page: Page): Promise<void> {
     await expect(left_sidebar).toBeVisible({ visible: layout.left_sidebar });
     await expect(right_sidebar).toBeVisible({ visible: layout.right_sidebar });
     await expect(page.getByText("ez-assistant · 本地 AI 助手")).toBeVisible();
-    await expect(page.getByText("Runtime 已连接")).toBeVisible();
+    await expect(page.getByText("运行时已连接")).toBeVisible();
 
     const geometry = await page.locator("main").evaluate((element) => ({
       client_width: element.clientWidth,

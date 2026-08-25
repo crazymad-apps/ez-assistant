@@ -24,8 +24,8 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
     return (
       <div className={styles.state_panel} role="status">
         <span className={styles.state_icon}><Icon name="message" size={22} /></span>
-        <strong>{is_connecting ? "正在连接本地 Runtime" : "Runtime 暂不可用"}</strong>
-        <span>{store.connection.error_message ?? "读取 Workspace 与会话…"}</span>
+        <strong>{is_connecting ? "正在连接本地运行时" : "运行时暂不可用"}</strong>
+        <span>{store.connection.error_message ?? "读取工作区与会话…"}</span>
       </div>
     );
   }
@@ -35,7 +35,7 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
       <div className={styles.state_panel}>
         <span className={styles.state_icon}><Icon name="message" size={22} /></span>
         <strong>开始新会话</strong>
-        <span>选择一个 Workspace 新建会话。</span>
+        <span>选择一个工作区新建会话。</span>
         <button
           disabled={
             store.connection.state !== "connected" ||
@@ -56,7 +56,7 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
       <span className={styles.state_icon}><Icon name="message" size={22} /></span>
       <strong>{session.message_count === 0 ? "开始新会话" : "会话已载入"}</strong>
       <span>
-        {workspace ? `Workspace · ${workspaceDisplayName(workspace.user_directory)}` : "未绑定 Workspace"}
+        {workspace ? `工作区 · ${workspaceDisplayName(workspace.user_directory)}` : "未绑定工作区"}
       </span>
       {session.message_count > 0 && <small>消息列表将在 M3 接入正式分页投影。</small>}
     </div>

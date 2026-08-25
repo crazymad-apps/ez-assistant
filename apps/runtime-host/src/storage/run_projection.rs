@@ -1,5 +1,7 @@
 //! SQLite Run 行、Message 引用与领域投影之间的严格转换。
 
+use std::collections::HashMap;
+
 use agent_types::MessageId;
 use assistant_protocol::{
     InputId, RunId, RunStatus, RuntimeErrorCode, RuntimeErrorInfo, SessionId,
@@ -79,8 +81,10 @@ impl StorageEngine {
                 }
                 _ => return Err(invalid_data("stored run error is incomplete")),
             };
+            let (message_ids, message_steps) = self.load_run_message_refs(&run_id)?;
             runs.push(StoredRun {
-                message_ids: self.load_run_message_ids(&run_id)?,
+                message_ids,
+                message_steps,
                 run_id,
                 session_id,
                 input_id: InputId::new(input_id).map_err(|source| {
@@ -104,28 +108,43 @@ impl StorageEngine {
     }
 
     /// 按持久插入顺序恢复某次 Run 对规范消息的引用。
-    fn load_run_message_ids(&self, run_id: &RunId) -> StorageResult<Vec<MessageId>> {
+    fn load_run_message_refs(
+        &self,
+        run_id: &RunId,
+    ) -> StorageResult<(Vec<MessageId>, HashMap<MessageId, u32>)> {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT message_id FROM run_message_refs
+                "SELECT message_id, step FROM run_message_refs
                  WHERE run_id = ?1 ORDER BY rowid",
             )
             .map_err(|source| {
                 internal_error("run message references could not be queried", source)
             })?;
         let rows = statement
-            .query_map([run_id.as_str()], |row| row.get::<_, String>(0))
+            .query_map([run_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })
             .map_err(|source| internal_error("run message references could not be read", source))?;
-        rows.map(|row| {
-            let value = row.map_err(|source| {
+        let mut message_ids = Vec::new();
+        let mut message_steps = HashMap::new();
+        for row in rows {
+            let (value, step) = row.map_err(|source| {
                 internal_error("run message reference could not be read", source)
             })?;
-            MessageId::new(value).map_err(|source| {
+            let message_id = MessageId::new(value).map_err(|source| {
                 invalid_data_with_source("stored run message id is invalid", source)
-            })
-        })
-        .collect()
+            })?;
+            if let Some(step) = step {
+                let step = u32::try_from(step)
+                    .ok()
+                    .filter(|step| *step > 0)
+                    .ok_or_else(|| invalid_data("stored run message step is invalid"))?;
+                message_steps.insert(message_id.clone(), step);
+            }
+            message_ids.push(message_id);
+        }
+        Ok((message_ids, message_steps))
     }
 }
 
@@ -160,6 +179,10 @@ pub(super) fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
         "goal_not_resumable" => Ok(RuntimeErrorCode::GoalNotResumable),
         "goal_run_requires_resume" => Ok(RuntimeErrorCode::GoalRunRequiresResume),
         "goal_unsupported_by_model" => Ok(RuntimeErrorCode::GoalUnsupportedByModel),
+        "skill_name_invalid" => Ok(RuntimeErrorCode::SkillNameInvalid),
+        "skill_catalog_unavailable" => Ok(RuntimeErrorCode::SkillCatalogUnavailable),
+        "skill_not_found" => Ok(RuntimeErrorCode::SkillNotFound),
+        "skill_not_user_invocable" => Ok(RuntimeErrorCode::SkillNotUserInvocable),
         "work_plan_revision_conflict" => Ok(RuntimeErrorCode::WorkPlanRevisionConflict),
         "storage_unavailable" => Ok(RuntimeErrorCode::StorageUnavailable),
         "runtime_shutting_down" => Ok(RuntimeErrorCode::RuntimeShuttingDown),
@@ -231,6 +254,10 @@ pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
         RuntimeErrorCode::GoalNotResumable => "goal_not_resumable",
         RuntimeErrorCode::GoalRunRequiresResume => "goal_run_requires_resume",
         RuntimeErrorCode::GoalUnsupportedByModel => "goal_unsupported_by_model",
+        RuntimeErrorCode::SkillNameInvalid => "skill_name_invalid",
+        RuntimeErrorCode::SkillCatalogUnavailable => "skill_catalog_unavailable",
+        RuntimeErrorCode::SkillNotFound => "skill_not_found",
+        RuntimeErrorCode::SkillNotUserInvocable => "skill_not_user_invocable",
         RuntimeErrorCode::WorkPlanRevisionConflict => "work_plan_revision_conflict",
         RuntimeErrorCode::StorageUnavailable => "storage_unavailable",
         RuntimeErrorCode::RuntimeShuttingDown => "runtime_shutting_down",
@@ -293,6 +320,10 @@ mod tests {
             RuntimeErrorCode::GoalNotResumable,
             RuntimeErrorCode::GoalRunRequiresResume,
             RuntimeErrorCode::GoalUnsupportedByModel,
+            RuntimeErrorCode::SkillNameInvalid,
+            RuntimeErrorCode::SkillCatalogUnavailable,
+            RuntimeErrorCode::SkillNotFound,
+            RuntimeErrorCode::SkillNotUserInvocable,
             RuntimeErrorCode::WorkPlanRevisionConflict,
             RuntimeErrorCode::StorageUnavailable,
             RuntimeErrorCode::RuntimeShuttingDown,

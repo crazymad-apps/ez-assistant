@@ -152,7 +152,7 @@ impl OpenAiChatCompletionsService {
         capabilities: Option<ModelCapabilities>,
     ) -> Self {
         let capabilities = capabilities.unwrap_or_else(|| ModelCapabilities {
-            reasoning: adapter.reasoning_content_field.is_some(),
+            reasoning: adapter.supports_reasoning(),
             image_input: false,
             tool_calls: true,
             multimodal_tool_result: adapter.tool_image_projection

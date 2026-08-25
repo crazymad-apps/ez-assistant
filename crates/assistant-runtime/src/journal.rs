@@ -162,29 +162,43 @@ impl InMemoryJournal {
         Ok(())
     }
 
-    /// 构造 complete 将提交的完整批次并验证配对，但不提前清除 pending。
-    pub(crate) fn tool_exchange_batch(
+    /// 构造完整 Tool Exchange 及其可靠提交后紧随的 Runtime 内部消息。
+    pub(crate) fn tool_exchange_batch_with_trailing(
         &self,
         run_id: &RunId,
         receipt: &ExchangeReceipt,
         results: &[ToolMessage],
+        trailing: &[ConversationMessage],
     ) -> Result<Vec<ConversationMessage>, JournalError> {
         let pending = self.pending(run_id, receipt)?;
         let mut batch = vec![ConversationMessage::Assistant(pending.assistant.clone())];
         batch.extend(results.iter().cloned().map(ConversationMessage::Tool));
+        batch.extend(trailing.iter().cloned());
         let mut candidate = self.completed.clone();
         candidate.extend(batch.iter().cloned());
         validate(&candidate)?;
         Ok(batch)
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_tool_exchange(
         &mut self,
         run_id: &RunId,
         receipt: &ExchangeReceipt,
         results: Vec<ToolMessage>,
     ) -> Result<(), JournalError> {
-        let batch = self.tool_exchange_batch(run_id, receipt, &results)?;
+        self.complete_tool_exchange_with_trailing(run_id, receipt, results, Vec::new())
+    }
+
+    /// 完成 Tool Exchange，并追加已经由 Store 同批可靠写入的尾随内部消息。
+    pub(crate) fn complete_tool_exchange_with_trailing(
+        &mut self,
+        run_id: &RunId,
+        receipt: &ExchangeReceipt,
+        results: Vec<ToolMessage>,
+        trailing: Vec<ConversationMessage>,
+    ) -> Result<(), JournalError> {
+        let batch = self.tool_exchange_batch_with_trailing(run_id, receipt, &results, &trailing)?;
         self.completed.extend(batch);
         self.pending = None;
         Ok(())

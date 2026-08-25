@@ -225,6 +225,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "text_delta",
         session_id: "session-1",
         run_id: "run-1",
+        step: 1,
         part_id: "part-1",
         delta: "新增内容",
       },
@@ -238,6 +239,7 @@ describe("ConversationView scroll anchoring", () => {
       type: "text_delta",
       session_id: "session-1",
       run_id: "run-1",
+      step: 1,
       part_id: "part-1",
       delta: "继续输出",
     }], () => frame);
@@ -264,6 +266,7 @@ describe("ConversationView scroll anchoring", () => {
             type: "assistant",
             message_id: "assistant-step-1",
             run_id: "run-1",
+            step: 1,
             attempt: 1,
             created_at_ms: null,
             finished_at_ms: null,
@@ -294,6 +297,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "reasoning_delta",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         part_id: "reasoning-2",
         delta: "继续分析",
       },
@@ -301,6 +305,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "tool_proposed",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         call_id: "call-live-1",
         tool_name: "shell",
       },
@@ -308,6 +313,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "tool_proposed",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         call_id: "call-live-2",
         tool_name: "shell",
       },
@@ -315,6 +321,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "tool_output",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         call_id: "call-live-2",
         channel: "stdout",
         chunk: "SMOKE OK",
@@ -323,6 +330,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "tool_completed",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         call_id: "call-live-1",
         status: "completed",
       },
@@ -330,6 +338,7 @@ describe("ConversationView scroll anchoring", () => {
         type: "tool_completed",
         session_id: "session-1",
         run_id: "run-1",
+        step: 2,
         call_id: "call-live-2",
         status: "completed",
       },
@@ -574,7 +583,7 @@ describe("ConversationView scroll anchoring", () => {
     } as unknown as Parameters<RootStore["projection"]["applyChildTaskSnapshot"]>[0]);
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
-    expect(screen.getByText("子 Agent 尚未产生可展示的消息。")).toBeVisible();
+    expect(screen.getByText("子智能体尚未产生可展示的消息。")).toBeVisible();
   });
 });
 

@@ -152,6 +152,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "compare".to_owned(),
             attachment_ids: vec![second.attachment_id.clone(), first.attachment_id.clone()],
+            skill_name: None,
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -191,8 +192,8 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             ),
         ]
     );
-    let UserPart::Injected(injected) = &user.parts[2] else {
-        panic!("third user part must contain the persisted variant injection");
+    let UserPart::InternalContext(injected) = &user.parts[2] else {
+        panic!("third user part must contain the persisted variant context");
     };
     assert_eq!(injected.text, crate::agent_variant::BUILD_INJECTION_V1);
 
@@ -203,6 +204,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "reuse one file".to_owned(),
             attachment_ids: vec![first.attachment_id.clone()],
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -222,7 +224,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
         .flatten()
         .filter_map(|part| match part {
             UserPart::FileReferences(files) => Some(&files.files),
-            UserPart::Text(_) | UserPart::Injected(_) => None,
+            UserPart::Text(_) | UserPart::Injected(_) | UserPart::InternalContext(_) => None,
         })
         .flatten()
         .filter(|file| file.original_name == first.original_name)
@@ -243,6 +245,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "ignored retry payload".to_owned(),
             attachment_ids: vec![foreign.attachment_id.clone()],
+            skill_name: None,
             idempotency_key: Some(key),
         })
         .await
@@ -256,6 +259,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: first_session.session_id.clone(),
                 message: "duplicate ids".to_owned(),
                 attachment_ids: vec![first.attachment_id.clone(), first.attachment_id.clone()],
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,
@@ -269,6 +273,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: second_session.session_id,
                 message: "cross session".to_owned(),
                 attachment_ids: vec![second.attachment_id],
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,
@@ -289,6 +294,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: first_session.session_id,
                 message: "unavailable".to_owned(),
                 attachment_ids: vec![first.attachment_id],
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,

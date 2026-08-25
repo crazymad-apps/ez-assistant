@@ -43,8 +43,18 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
         parts: vec![
             UserPart::Injected(TextPart {
                 id: part_id("injected_1"),
-                text: "<constraint>answer briefly</constraint>".to_owned(),
+                text: "legacy constraint".to_owned(),
             }),
+            UserPart::InternalContext(
+                InternalContextPart::new(
+                    part_id("internal_1"),
+                    "boundary_1",
+                    "goal_continuation",
+                    Some("goal:1".to_owned()),
+                    "<constraint>answer briefly</constraint>",
+                )
+                .expect("internal context"),
+            ),
             UserPart::Text(TextPart {
                 id: part_id("text_1"),
                 text: "What date is it?".to_owned(),
@@ -56,10 +66,11 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
     let json = serde_json::to_value(&encoded).expect("serialize request");
     assert!(json["messages"][0].get("origin").is_none());
     assert!(json["messages"][0].get("transcript_visibility").is_none());
-    // Injected 与 Text 在线上都是文本，多 parts 保序进入 text part 数组。
+    // 旧 Injected、新 InternalContext 与 Text 在线上都是文本，多 parts 保序进入数组。
     assert_eq!(
         json["messages"][0]["content"],
         json!([
+            {"type": "text", "text": "legacy constraint"},
             {"type": "text", "text": "<constraint>answer briefly</constraint>"},
             {"type": "text", "text": "What date is it?"},
         ])
@@ -403,19 +414,25 @@ fn encode_context_summary_uses_a_derived_system_message() {
         compacted_usage: None,
     });
 
-    let encoded = encode_request(&request(vec![message]), &adapter, MODEL).expect("encode request");
+    let mut req = request(vec![message]);
+    req.system = SystemPromptSnapshot::new(vec![
+        "base system".to_owned(),
+        "directory system".to_owned(),
+    ]);
+    let encoded = encode_request(&req, &adapter, MODEL).expect("encode request");
     let json = serde_json::to_value(&encoded).expect("serialize request");
+    assert_eq!(json["messages"].as_array().expect("messages").len(), 1);
     assert_eq!(
         json["messages"][0],
         json!({
             "role": "system",
-            "content": "[Context summary derived from earlier conversation]\nThe user selected a local-first architecture."
+            "content": "base system\n\ndirectory system\n\n[Context summary derived from earlier conversation]\nThe user selected a local-first architecture."
         })
     );
 }
 
 #[test]
-fn encode_system_and_multi_turn_conversation_preserves_order() {
+fn encode_merges_leading_system_content_and_preserves_multi_turn_order() {
     let adapter = reasoning_adapter();
     let mut req = request(vec![
         ConversationMessage::System(SystemMessage {
@@ -445,9 +462,7 @@ fn encode_system_and_multi_turn_conversation_preserves_order() {
     assert_eq!(
         json["messages"],
         json!([
-            {"role": "system", "content": "system one"},
-            {"role": "system", "content": "system two"},
-            {"role": "system", "content": "inline system"},
+            {"role": "system", "content": "system one\n\nsystem two\n\ninline system"},
             {"role": "user", "content": [
                 {"type": "text", "text": "first"},
                 {"type": "text", "text": "second"},

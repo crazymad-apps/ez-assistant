@@ -13,6 +13,7 @@ pub(crate) mod product;
 mod recovery;
 mod session_management;
 mod shutdown;
+mod skills;
 mod tasks;
 mod work_plan;
 mod workspace;
@@ -36,8 +37,8 @@ use assistant_protocol::{
     GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult,
     ListSessionsRequest, ListSessionsResult, ModelCatalogEntrySnapshot, ModelCatalogSnapshot,
     ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
-    SessionId, SessionLifecycle, SessionSummary, SetAuxiliaryVisionModelRequest,
-    SetDefaultModelRequest, UpdateModelRequest, WorkspaceId,
+    SessionId, SessionSummary, SetAuxiliaryVisionModelRequest, SetDefaultModelRequest,
+    UpdateModelRequest, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -91,6 +92,7 @@ pub struct AssistantRuntime {
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn ModelServiceFactory>,
     session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+    skill_package_source: Arc<dyn crate::SkillPackageSource>,
     run_tool_factory: Arc<dyn RunToolFactory>,
     child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     child_tasks: Arc<ChildTaskRegistry>,
@@ -131,6 +133,7 @@ impl AssistantRuntime {
             Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
+            Arc::new(crate::skill::EmptySkillPackageSource),
             run_tool_factory,
             child_task_workspace_factory,
             Arc::new(crate::storage::VolatileRuntimeStore::default()),
@@ -159,6 +162,7 @@ impl AssistantRuntime {
             Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
+            Arc::new(crate::skill::EmptySkillPackageSource),
             run_tool_factory,
             child_task_workspace_factory,
             store,
@@ -176,6 +180,7 @@ impl AssistantRuntime {
         model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        skill_package_source: Arc<dyn crate::SkillPackageSource>,
         run_tool_factory: Arc<dyn RunToolFactory>,
         child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
         store: Arc<dyn RuntimeStore>,
@@ -195,6 +200,7 @@ impl AssistantRuntime {
             model_catalog,
             model_factory,
             session_environment_factory,
+            skill_package_source,
             run_tool_factory,
             child_task_workspace_factory,
             store,
@@ -211,6 +217,7 @@ impl AssistantRuntime {
         model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
+        skill_package_source: Arc<dyn crate::SkillPackageSource>,
         run_tool_factory: Arc<dyn RunToolFactory>,
         child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
         store: Arc<dyn RuntimeStore>,
@@ -236,6 +243,7 @@ impl AssistantRuntime {
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
             session_environment_factory,
+            skill_package_source,
             run_tool_factory,
             child_task_workspace_factory,
             child_tasks: Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks)),
@@ -383,7 +391,7 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
-        self.ensure_model_not_referenced(&request.model_key)?;
+        self.ensure_model_deletable(&request.model_key)?;
         let snapshot = self
             .config_registry
             .mutate(
@@ -470,7 +478,7 @@ impl AssistantRuntime {
         Ok(())
     }
 
-    fn ensure_model_not_referenced(
+    fn ensure_model_deletable(
         &self,
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<()> {
@@ -484,22 +492,7 @@ impl AssistantRuntime {
                 reason: "model is configured as the auxiliary vision model",
             });
         }
-        for session in self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-        {
-            let summary = session.summary()?;
-            if &summary.model_key == model_key && summary.lifecycle == SessionLifecycle::Active {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "model is referenced by an active session",
-                });
-            }
-        }
-        Ok(())
+        self.ensure_model_not_in_flight(model_key)
     }
 
     /// 创建一个带初始 model key、冻结 System Prompt 和空 Conversation 的 Session。
@@ -555,6 +548,14 @@ impl AssistantRuntime {
                 memory_context: &memory_context,
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
+        let skill_catalog = self
+            .prepare_session_skill_catalog(
+                workspace
+                    .as_ref()
+                    .map(|workspace| workspace.user_directory.as_str()),
+            )
+            .await?;
+        let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
         let stored = self
             .store
             .create_session(NewStoredSession {
@@ -563,7 +564,8 @@ impl AssistantRuntime {
                 title_origin,
                 model_key,
                 reasoning_effort: None,
-                system_prompt: prepared.system_prompt,
+                system_prompt,
+                skill_catalog,
                 environment: prepared.environment,
                 current_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
@@ -605,6 +607,45 @@ impl AssistantRuntime {
             session: summary.clone(),
         });
         Ok(CreateSessionResult { session: summary })
+    }
+
+    async fn prepare_session_skill_catalog(
+        &self,
+        workspace_directory: Option<&str>,
+    ) -> RuntimeResult<crate::SessionSkillCatalog> {
+        let states = self
+            .store
+            .list_skill_name_states()
+            .await
+            .map_err(|source| RuntimeError::from_store("load skill name states", source))?;
+        let scan = match self
+            .skill_package_source
+            .scan(crate::SkillScanRequest {
+                workspace_directory: workspace_directory.map(str::to_owned),
+            })
+            .await
+        {
+            Ok(scan) => scan,
+            Err(_) => {
+                return Ok(crate::SessionSkillCatalog::unavailable(vec![
+                    crate::SkillDiagnostic::error(
+                        crate::SkillDiagnosticCode::ScanIncomplete,
+                        "skill package scan did not complete",
+                    ),
+                ]));
+            }
+        };
+        let discovery = crate::compile_skill_discovery(scan, &states);
+        if discovery.status == crate::SkillDiscoveryStatus::Unavailable {
+            return Ok(crate::SessionSkillCatalog::unavailable(
+                discovery.diagnostics,
+            ));
+        }
+        crate::SessionSkillCatalog::from_discovery(discovery).map_err(|_| {
+            RuntimeError::InternalStateUnavailable {
+                component: "skill catalog",
+            }
+        })
     }
 
     /// 按 SessionId 的确定性顺序列出当前进程内 Session。

@@ -4,7 +4,7 @@ import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
 import type { ConversationItem } from "../../../generated/assistant-protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
-import { MarkdownContent } from "../../conversation/MarkdownContent";
+import { MarkdownContent } from "../../../components/MarkdownContent";
 import styles from "./index.module.scss";
 
 /** 历史命中的只读上下文预览；预览本身不会写入当前 Agent 上下文。 */

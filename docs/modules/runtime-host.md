@@ -99,6 +99,9 @@ Worker 池。
   `.env` 或模型 CLI 参数读取 endpoint、model 和 credential。
 - Host 的 ModelServiceFactory 根据 Runtime 已编译的 provider/protocol/capabilities、endpoint、credential 和
   transport 构造具体 OpenAI-compatible 服务，不自行保存第二份模型配置或选择状态。
+- Chat Completions 的 `provider = "vllm"` 显式装配 vLLM 方言；`provider = "local"` 仍使用
+  普通 OpenAI-compatible，Host 不根据 loopback endpoint 猜测具体服务实现。只有模型能力声明
+  reasoning 时才启用该方言的 reasoning 解码和 effort wire 映射。
 - 私有 Ratatui Demo 可以查询/reload 配置、选择 model key、创建 Session 和显式触发连接验证；
   v0.10.0 又增加全部 Session 列表、持久化 Run 查询、应用选中模型和归档/恢复入口。连接验证
   必须先提示真实请求与可能费用。该状态只服务交互，不成为 Runtime 业务事实源。
@@ -398,3 +401,54 @@ cargo check -p assistant-runtime-host -p assistant-runtime -p assistant-protocol
 cargo run -p assistant-runtime-host -- --help
 cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnings
 ```
+
+## v0.19.0 内部上下文兼容存储
+
+- Host Store 把 `InternalContext` 与所在规范 UserMessage 一起写入既有 Conversation JSONL 和
+  queued message JSON；不增加 Provider request-only 信封表或第二份消息正文。
+- 恢复校验同时接受旧 `Injected` 与新 `InternalContext`；新结构的 boundary、kind、retention key
+  在 `agent-types` 反序列化边界校验，非法正文令恢复 fail-closed。
+- Recall/FTS、产品分页、导出和展示继续排除两类内部 Part，不能把结构化内部正文索引成用户内容。
+
+## v0.19.0 本地 Skill 扫描与名称状态存储
+
+- Host 只扫描当前工作区和用户 Home 各自的 `.ez-assistant/skills`、`.agents/skills`；每个 Root
+  只认直接子目录，不沿工作区祖先或其他客户端目录扩展。
+- `serde-saphyr` 仅在 Host 反序列化 frontmatter。YAML、必填字段或边界不可确定时跳过候选；
+  可选字段无法采用时使用缺省并生成诊断，不修改源文件，也不执行包内脚本。
+- 发现扫描只读取 `SKILL.md`，对候选数、定义/frontmatter 大小和候选特殊类型设固定上限；
+  候选项只保留源目录，不枚举或读取普通资源，Root 不可完整遍历令整次投影不可用。
+- SQLite `skill_name_states` 只保存通过校验的名称、布尔开关和更新时间；单行 upsert 使用
+  Immediate transaction。测试只打开 `TempDir` 或内存数据库，不访问用户实际 Runtime Home。
+- 新 Session 的 `skill_catalog_json` 保存 Runtime 编译出的精确 `SKILL.md` 正文、definition digest 和
+  共享源目录；普通资源树不枚举、不复制、不建立索引，Runtime Home 与 Session 目录均不创建
+  Skill 暂存或私有副本。
+- 普通资源按 Skill 指令通过既有文件/Shell 工具读取四个共享 Root 中的当前文件，并继续服从具体
+  工具的路径与权限规则；Host 不增加 Skill 级权限门禁。
+- SQLite 迁移给旧 Session 写入 `legacy_unavailable` 缺省；恢复只校验 Catalog 结构与 revision，
+  不因共享资源变化拒绝恢复。Fork 只复制 SQLite 中的 Catalog 事实，Session 删除不触碰共享源文件。
+
+## v0.19.0 用户 Skill Activation 持久化
+
+- `inputs.skill_activation_json` 保存 Input 自身的冻结 Activation 关联；`skill_activations` 保存可按
+  Session/Conversation 顺序恢复的 ledger。用户 Input 接受事务依次写入 Input、首次 Run 和 ledger，
+  任一步失败都不得留下部分事实。
+- Host 校验 user Activation 的 Session/Input/Run/Message、owner、trigger 和 `skill:<name>` retention
+  关系，但不执行 Skill 级权限判断；真实工具调用继续进入既有 Authorizer 与审批链。
+- 启动恢复同时读取 Input 关联与 ledger；Runtime 还会按 activation id 核对两份结构完全一致，并验证
+  Catalog revision、名称和 definition digest。旧 Input 缘由缺少字段时按无 Activation 读取。
+- Queue 取消、Goal 清理、历史尾段替换和 Session 删除同步删除不再属于规范 Conversation 的 ledger；
+  Fork 事务只插入前缀内已改绑目标 Session 的 Activation，不建立 Skill 目录或复制共享文件。
+- `list_skills`/`set_skill_enabled` 通过正式 HTTP Command 调用 Runtime；SSE 只发布
+  `skill_settings_changed` 失效提示，不成为开关或 Catalog 的第二份权威状态。
+
+## v0.19.0 模型 Skill Activation 原子恢复
+
+- parent/child pending exchange 的 ready 载荷同时冻结完整 Tool Results、可选隐藏 Activation Message
+  和 Activation ledger；旧版本只含 Tool Result 数组的载荷继续兼容读取。
+- staged append 把 Tool Call/Result、隐藏 Runtime UserMessage、相同 Run 全局 step 引用和 ledger 写入
+  同一次 SQLite transaction；只有 JSONL 已发布且 SQLite finalize 成功后才清理 pending。
+- 启动恢复按同一 ready 载荷重放全部事实，不能只恢复成功 Tool Result 而遗漏其 Skill Activation；
+  owner、Session、parent Run、message id、Model trigger 与 `skill:<name>` retention 关系均需交叉校验。
+- parent 与 child 复用同一原子提交协议，但分别写入各自 Conversation owner；共享 Skill 包仍留在四个
+  扫描 Root，不因激活复制到 Runtime Home 或 Session 目录。

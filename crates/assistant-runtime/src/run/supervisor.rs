@@ -78,48 +78,55 @@ fn project_agent_event(
                 run_id: run_id.clone(),
             }))
         }
-        AgentEvent::TextDelta { id, delta } => {
+        AgentEvent::TextDelta { step, id, delta } => {
             model_diagnostics.mark_output_observed();
             let part_id = ProtocolPartId::new(id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime text part id",
                 }
             })?;
-            with_active_record(session, run_id, |record| record.text.push_str(&delta))?;
+            with_active_record(session, run_id, |record| record.append_text(step, &delta))?;
             Ok(Some(RuntimeEvent::TextDelta {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 part_id,
                 delta,
             }))
         }
-        AgentEvent::ReasoningDelta { id, delta } => {
+        AgentEvent::ReasoningDelta { step, id, delta } => {
             model_diagnostics.mark_output_observed();
             let part_id = ProtocolPartId::new(id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime reasoning part id",
                 }
             })?;
-            with_active_record(session, run_id, |record| record.reasoning.push_str(&delta))?;
+            with_active_record(session, run_id, |record| {
+                record.append_reasoning(step, &delta)
+            })?;
             Ok(Some(RuntimeEvent::ReasoningDelta {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 part_id,
                 delta,
             }))
         }
-        AgentEvent::UsageUpdated { step, usage } => Ok(Some(RuntimeEvent::UsageUpdated {
-            session_id,
-            run_id: run_id.clone(),
-            step,
-            usage: TokenUsageSnapshot {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: usage.total_tokens,
-                cached_input_tokens: usage.cached_input_tokens,
-            },
-        })),
-        AgentEvent::ToolProposed { call } => {
+        AgentEvent::UsageUpdated { step, usage } => {
+            with_active_record(session, run_id, |record| record.start_step(step))?;
+            Ok(Some(RuntimeEvent::UsageUpdated {
+                session_id,
+                run_id: run_id.clone(),
+                step,
+                usage: TokenUsageSnapshot {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                    cached_input_tokens: usage.cached_input_tokens,
+                },
+            }))
+        }
+        AgentEvent::ToolProposed { step, call } => {
             let call_id = ProtocolToolCallId::new(call.id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime tool call id",
@@ -127,8 +134,14 @@ fn project_agent_event(
             })?;
             let tool_name = call.name.as_str().to_owned();
             with_active_record(session, run_id, |record| {
-                if !record.tools.iter().any(|tool| tool.call_id == call_id) {
+                record.start_step(step);
+                if !record
+                    .tools
+                    .iter()
+                    .any(|tool| tool.step == Some(step) && tool.call_id == call_id)
+                {
                     record.tools.push(ToolActivitySnapshot {
+                        step: Some(step),
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),
                         status: ToolActivityStatus::Proposed,
@@ -140,28 +153,32 @@ fn project_agent_event(
             Ok(Some(RuntimeEvent::ToolProposed {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 call_id,
                 tool_name,
             }))
         }
-        AgentEvent::ToolStarted { call_id } => {
+        AgentEvent::ToolStarted { step, call_id } => {
             let call_id = ProtocolToolCallId::new(call_id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime tool call id",
                 }
             })?;
             with_active_record(session, run_id, |record| {
-                if let Some(tool) = find_tool_mut(record, &call_id) {
+                record.start_step(step);
+                if let Some(tool) = find_tool_mut(record, step, &call_id) {
                     tool.status = ToolActivityStatus::Running;
                 }
             })?;
             Ok(Some(RuntimeEvent::ToolStarted {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 call_id,
             }))
         }
         AgentEvent::ToolOutput {
+            step,
             call_id,
             channel,
             chunk,
@@ -176,7 +193,8 @@ fn project_agent_event(
                 AgentToolOutputChannel::Stderr => ToolOutputChannel::Stderr,
             };
             with_active_record(session, run_id, |record| {
-                if let Some(tool) = find_tool_mut(record, &call_id) {
+                record.start_step(step);
+                if let Some(tool) = find_tool_mut(record, step, &call_id) {
                     match protocol_channel {
                         ToolOutputChannel::Stdout => tool.stdout.push_str(&chunk),
                         ToolOutputChannel::Stderr => tool.stderr.push_str(&chunk),
@@ -186,12 +204,17 @@ fn project_agent_event(
             Ok(Some(RuntimeEvent::ToolOutput {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 call_id,
                 channel: protocol_channel,
                 chunk,
             }))
         }
-        AgentEvent::ToolCompleted { call_id, status } => {
+        AgentEvent::ToolCompleted {
+            step,
+            call_id,
+            status,
+        } => {
             let call_id = ProtocolToolCallId::new(call_id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime tool call id",
@@ -202,20 +225,22 @@ fn project_agent_event(
                 ToolCompletionStatus::Failed => ToolActivityStatus::Failed,
             };
             with_active_record(session, run_id, |record| {
-                if let Some(tool) = find_tool_mut(record, &call_id) {
+                record.start_step(step);
+                if let Some(tool) = find_tool_mut(record, step, &call_id) {
                     tool.status = status;
                 }
             })?;
             Ok(Some(RuntimeEvent::ToolCompleted {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 call_id,
                 status,
             }))
         }
         AgentEvent::StepStarted { step } => {
             model_diagnostics.mark_step_started();
-            with_active_record(session, run_id, RunRecord::start_step)?;
+            with_active_record(session, run_id, |record| record.start_step(step))?;
             Ok(Some(RuntimeEvent::StepStarted {
                 session_id,
                 run_id: run_id.clone(),
@@ -223,6 +248,7 @@ fn project_agent_event(
             }))
         }
         AgentEvent::GuardrailTriggered {
+            step,
             kind,
             mode,
             threshold,
@@ -250,9 +276,11 @@ fn project_agent_event(
                     assistant_protocol::GuardrailMode::Enforce
                 }
             };
+            with_active_record(session, run_id, |record| record.start_step(step))?;
             Ok(Some(RuntimeEvent::GuardrailTriggered {
                 session_id,
                 run_id: run_id.clone(),
+                step,
                 call_id,
                 kind,
                 mode,
@@ -263,7 +291,8 @@ fn project_agent_event(
         AgentEvent::ExecutionCompleted { .. }
         | AgentEvent::ExecutionFailed { .. }
         | AgentEvent::ExecutionCancelled { .. }
-        | AgentEvent::ExecutionCompactionRequired { .. } => Ok(None),
+        | AgentEvent::ExecutionCompactionRequired { .. }
+        | AgentEvent::ExecutionContinuationRequired { .. } => Ok(None),
     }
 }
 
@@ -290,10 +319,11 @@ fn with_active_record<Output>(
 
 fn find_tool_mut<'a>(
     record: &'a mut RunRecord,
+    step: u32,
     call_id: &ProtocolToolCallId,
 ) -> Option<&'a mut ToolActivitySnapshot> {
     record
         .tools
         .iter_mut()
-        .find(|tool| &tool.call_id == call_id)
+        .find(|tool| tool.step == Some(step) && &tool.call_id == call_id)
 }

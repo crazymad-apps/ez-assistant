@@ -94,6 +94,18 @@ pub enum RuntimeError {
     /// 当前 Session 模型不具备 Goal 所需的 Tool Call 能力。
     #[error("session `{session_id}` model does not support Goal execution")]
     GoalUnsupportedByModel { session_id: SessionId },
+    /// 用户提交的 Skill 名称格式无效。
+    #[error("skill name is invalid")]
+    SkillNameInvalid,
+    /// 当前 Session 没有可用于激活的冻结 Skill Catalog。
+    #[error("session `{session_id}` skill catalog is unavailable")]
+    SkillCatalogUnavailable { session_id: SessionId },
+    /// 当前 Session Catalog 中不存在指定 Skill。
+    #[error("skill was not found in session `{session_id}`")]
+    SkillNotFound { session_id: SessionId },
+    /// 指定 Skill 不允许用户显式激活。
+    #[error("skill is not user invocable in session `{session_id}`")]
+    SkillNotUserInvocable { session_id: SessionId },
     /// WorkPlan revision 已被其他写入更新。
     #[error("work plan revision changed in session `{session_id}")]
     WorkPlanRevisionConflict { session_id: SessionId },
@@ -269,6 +281,21 @@ impl RuntimeError {
             Self::GoalUnsupportedByModel { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::GoalUnsupportedByModel,
                 "the current model does not support Goal execution",
+            ),
+            Self::SkillNameInvalid => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::SkillNameInvalid, "skill name is invalid")
+            }
+            Self::SkillCatalogUnavailable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SkillCatalogUnavailable,
+                "the session skill catalog is unavailable",
+            ),
+            Self::SkillNotFound { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SkillNotFound,
+                "skill was not found in the session catalog",
+            ),
+            Self::SkillNotUserInvocable { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SkillNotUserInvocable,
+                "skill is not available for user activation",
             ),
             Self::WorkPlanRevisionConflict { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::WorkPlanRevisionConflict,

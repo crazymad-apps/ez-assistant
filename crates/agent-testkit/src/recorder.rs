@@ -8,7 +8,8 @@
 use std::sync::Mutex;
 
 use agent_core::{
-    ConversationDelta, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
+    ConversationDelta, ExchangeCompletion, ExchangeReceipt, ExecutionRecorder, RecordError,
+    RecordFuture,
 };
 use agent_types::{AssistantMessage, AssistantPart, ToolCallId, ToolMessage};
 
@@ -21,6 +22,7 @@ pub struct InMemoryRecorder {
     /// 第 N 次 Recorder 调用（begin/complete 合计，从 1 开始）注入失败。
     fail_at: Option<u64>,
     fail_start: bool,
+    continuation_required: bool,
     log: OrderLog,
 }
 
@@ -47,6 +49,7 @@ impl InMemoryRecorder {
             state: Mutex::new(RecorderState::default()),
             fail_at: None,
             fail_start: false,
+            continuation_required: false,
             log,
         }
     }
@@ -66,6 +69,13 @@ impl InMemoryRecorder {
             fail_start: true,
             ..Self::new(log)
         }
+    }
+
+    /// 让每次成功 complete 都要求上层以新的 AgentExecution 续跑。
+    #[must_use]
+    pub fn with_continuation_required(mut self) -> Self {
+        self.continuation_required = true;
+        self
     }
 
     /// completed exchange 展平后的规范增量；pending 不会出现在此视图中。
@@ -111,6 +121,7 @@ impl InMemoryRecorder {
 impl ExecutionRecorder for InMemoryRecorder {
     fn begin_tool_exchange<'a>(
         &'a self,
+        _step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
@@ -170,7 +181,7 @@ impl ExecutionRecorder for InMemoryRecorder {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             self.log.push(LogEntry::RecordTool);
             let mut state = self.state.lock().expect("recorder mutex poisoned");
@@ -189,7 +200,9 @@ impl ExecutionRecorder for InMemoryRecorder {
             completed.push(ConversationDelta::Assistant(pending.assistant));
             completed.extend(results.into_iter().map(ConversationDelta::Tool));
             state.deltas.extend(completed);
-            Ok(())
+            Ok(ExchangeCompletion {
+                continuation_required: self.continuation_required,
+            })
         })
     }
 }
@@ -233,7 +246,7 @@ mod tests {
         let log = OrderLog::new();
         let recorder = InMemoryRecorder::new(log.clone());
         let receipt = recorder
-            .begin_tool_exchange(assistant_message())
+            .begin_tool_exchange(1, assistant_message())
             .await
             .expect("begin exchange");
         assert!(recorder.deltas().is_empty());
@@ -272,7 +285,7 @@ mod tests {
         };
         let results = vec![tool_message(), second_tool_message.clone()];
         let receipt = recorder
-            .begin_tool_exchange(assistant_message())
+            .begin_tool_exchange(1, assistant_message())
             .await
             .expect("begin succeeds");
         let error = recorder

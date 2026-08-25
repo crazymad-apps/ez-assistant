@@ -119,6 +119,7 @@ export function toolInputLabel(input: ToolInputSnapshot): string | null {
 }
 
 export function humanizeToolName(name: string): string {
+  if (name === "load_skill") return "加载技能";
   return name.replaceAll("_", " ");
 }
 
@@ -162,7 +163,7 @@ export function runFailureMessage(
     model_unavailable: "当前模型不可用，请检查配置或切换模型。",
     model_build_failed: "当前模型配置无法加载，请检查配置后重试。",
     model_execution_failed: "模型执行失败，请检查模型配置或稍后重试。",
-    agent_build_failed: "Agent 无法启动，请检查模型和会话配置。",
+    agent_build_failed: "智能体无法启动，请检查模型和会话配置。",
     timeout: "本轮执行超时，请稍后重试。",
     cancelled: "本轮已取消。",
   };

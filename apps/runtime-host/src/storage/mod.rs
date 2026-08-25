@@ -28,6 +28,7 @@ mod schema;
 mod session_management;
 mod session_resources;
 mod session_transfer;
+mod skill;
 mod tool_exchange;
 mod tool_images;
 mod usage;

@@ -25,8 +25,9 @@ async fn tool_failure_feeds_error_result_and_continues() {
     let (outcome, events) = finish(execution).await;
 
     // 工具失败不是执行错误：错误 ToolResult 回喂模型，循环继续到完成。
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(events.contains(&AgentEvent::ToolCompleted {
+        step: 1,
         call_id: call_id("call_1"),
         status: ToolCompletionStatus::Failed,
     }));
@@ -77,8 +78,9 @@ async fn unknown_tool_name_feeds_error_result() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(events.contains(&AgentEvent::ToolCompleted {
+        step: 1,
         call_id: call_id("call_1"),
         status: ToolCompletionStatus::Failed,
     }));
@@ -137,7 +139,7 @@ async fn mixed_valid_and_invalid_batch_authorizes_only_valid_items_in_order() {
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert_eq!(
         log.entries(),
         vec![
@@ -210,7 +212,7 @@ async fn authorizer_and_executor_observe_the_same_resolved_arguments() {
     );
     let (outcome, _) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     let observations = authorizer.observations();
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].resolved_arguments, resolved_arguments);
@@ -257,7 +259,7 @@ async fn repeated_observe_emits_once_and_keeps_executing() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert_eq!(
         events
             .iter()
@@ -265,6 +267,7 @@ async fn repeated_observe_emits_once_and_keeps_executing() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![AgentEvent::GuardrailTriggered {
+            step: 1,
             kind: GuardrailKind::RepeatedInvocation,
             mode: ActiveGuardrailMode::Observe,
             threshold: NonZeroU32::new(2).expect("non-zero threshold"),
@@ -327,8 +330,9 @@ async fn repeated_sequence_is_preserved_across_model_steps() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn3));
+    assert_completed(outcome, turn3);
     assert!(events.contains(&AgentEvent::GuardrailTriggered {
+        step: 2,
         kind: GuardrailKind::RepeatedInvocation,
         mode: ActiveGuardrailMode::Observe,
         threshold: NonZeroU32::new(2).expect("non-zero threshold"),
@@ -381,7 +385,7 @@ async fn invalid_item_resets_repeated_invocation_sequence() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     assert!(
         !events
             .iter()
@@ -438,14 +442,15 @@ async fn repeated_enforce_stops_before_triggering_invocation_and_settles_batch()
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
+        ExecutionError::GuardrailTriggered {
             kind: GuardrailKind::RepeatedInvocation,
             threshold,
-        })
+        },
     );
     assert!(events.contains(&AgentEvent::GuardrailTriggered {
+        step: 1,
         kind: GuardrailKind::RepeatedInvocation,
         mode: ActiveGuardrailMode::Enforce,
         threshold,
@@ -453,9 +458,11 @@ async fn repeated_enforce_stops_before_triggering_invocation_and_settles_batch()
         call_id: call_id("call_2"),
     }));
     assert!(!events.contains(&AgentEvent::ToolStarted {
+        step: 1,
         call_id: call_id("call_2"),
     }));
     assert!(!events.contains(&AgentEvent::ToolStarted {
+        step: 1,
         call_id: call_id("call_3"),
     }));
     assert_eq!(
@@ -533,7 +540,7 @@ async fn consecutive_failures_observe_rearms_after_success() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     let triggers = events
         .iter()
         .filter_map(|event| match event {
@@ -613,7 +620,7 @@ async fn shell_nonzero_success_resets_consecutive_failures() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(outcome, ExecutionOutcome::Completed(turn2));
+    assert_completed(outcome, turn2);
     let triggers = events
         .iter()
         .filter_map(|event| match event {
@@ -661,14 +668,15 @@ async fn consecutive_failure_sequence_is_preserved_across_model_steps() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
+        ExecutionError::GuardrailTriggered {
             kind: GuardrailKind::ConsecutiveFailures,
             threshold,
-        })
+        },
     );
     assert!(events.contains(&AgentEvent::GuardrailTriggered {
+        step: 2,
         kind: GuardrailKind::ConsecutiveFailures,
         mode: ActiveGuardrailMode::Enforce,
         threshold,
@@ -728,14 +736,15 @@ async fn invalid_and_deny_count_as_failures_before_enforce() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::GuardrailTriggered {
+        ExecutionError::GuardrailTriggered {
             kind: GuardrailKind::ConsecutiveFailures,
             threshold,
-        })
+        },
     );
     assert!(events.contains(&AgentEvent::GuardrailTriggered {
+        step: 1,
         kind: GuardrailKind::ConsecutiveFailures,
         mode: ActiveGuardrailMode::Enforce,
         threshold,
@@ -806,15 +815,16 @@ async fn recorder_complete_failure_takes_priority_over_guardrail_terminal() {
     );
     let (outcome, events) = finish(execution).await;
 
-    assert_eq!(
+    assert_failed(
         outcome,
-        ExecutionOutcome::Failed(ExecutionError::Record(RecordError {
+        ExecutionError::Record(RecordError {
             message: "injected record failure at call 2".to_owned(),
-        }))
+        }),
     );
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::GuardrailTriggered {
+            step: 1,
             kind: GuardrailKind::RepeatedInvocation,
             ..
         }

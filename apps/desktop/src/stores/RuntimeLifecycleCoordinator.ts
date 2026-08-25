@@ -147,7 +147,13 @@ export class RuntimeLifecycleCoordinator {
         return;
       }
       if (this.dependencies.navigation.selected_session_id === session_id) {
-        runInAction(() => this.dependencies.connection.markDisconnected(displayError(error)));
+        runInAction(() => {
+          if (isCommandBusinessFailure(error)) {
+            this.dependencies.report_interaction_error(displayError(error));
+          } else {
+            this.dependencies.connection.markDisconnected(displayError(error));
+          }
+        });
       }
     }
   }
@@ -410,9 +416,16 @@ function displayError(error: unknown): string {
   return error instanceof Error ? error.message : "无法连接本地 Runtime。";
 }
 
+function isCommandBusinessFailure(error: unknown): error is RuntimeClientError {
+  return error instanceof RuntimeClientError
+    && error.code !== "transport_error"
+    && error.code !== "protocol_mismatch";
+}
+
 function sessionIdForRefresh(event: RuntimeEvent): SessionId | null {
   switch (event.type) {
     case "conversation_committed":
+    case "step_committed":
       return event.owner.session_id;
     case "child_task_event":
       return event.session_id;

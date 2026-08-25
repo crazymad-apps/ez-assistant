@@ -8,27 +8,30 @@ use agent_types::{
     ToolResultStatus, UserPart,
 };
 use assistant_protocol::{
-    ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,
-    AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot,
-    ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot, ConversationFileReference,
-    ConversationHistoryHit, ConversationHistoryMatchKind, ConversationHistoryScope,
-    ConversationItem, ConversationOwner, ConversationPage, GetApplicationSnapshotRequest,
-    GetApplicationSnapshotResult, GetChildTaskViewRequest, GetChildTaskViewResult,
-    GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
-    GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
-    GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
-    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot,
-    GoalPauseReasonSnapshot, GoalSnapshot, GoalStateSnapshot, ImageHandlingMode,
-    ListAttachmentsRequest, ListConversationPageRequest, ListConversationPageResult,
-    ListSessionsRequest, ListWorkspacesRequest, MessageId, ObservedSnapshot, PartId,
-    QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, ReasoningEffortKey,
-    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
-    RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot,
-    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot,
-    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
-    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    ActiveSkillSnapshot, ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot,
+    AssistantMessageSnapshot, AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot,
+    ChildTaskUsageSnapshot, ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot,
+    ConversationFileReference, ConversationHistoryHit, ConversationHistoryMatchKind,
+    ConversationHistoryScope, ConversationItem, ConversationOwner, ConversationPage,
+    GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
+    GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
+    GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
+    GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
+    GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
+    GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ListAttachmentsRequest,
+    ListConversationPageRequest, ListConversationPageResult, ListSessionsRequest,
+    ListWorkspacesRequest, MessageId, ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot,
+    QueuedInputSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot, RecallNavigationTarget,
+    RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId,
+    RunSnapshot, SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
+    SessionListFilter, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
+    SessionUsageSnapshot, SessionViewSnapshot, SkillActivationTagSnapshot,
+    SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot,
+    SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
+    TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
+    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
+    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -55,6 +58,7 @@ struct ConversationCursor {
 pub(super) struct ProjectionContext {
     run_by_message: HashMap<String, MessageRunProjection>,
     input_by_message: HashMap<String, assistant_protocol::InputId>,
+    skill_by_message: HashMap<String, SkillActivationTagSnapshot>,
     attachment_by_path: HashMap<String, AttachmentId>,
     feedback_by_message: HashMap<String, assistant_protocol::MessageFeedback>,
     can_fork: bool,
@@ -63,6 +67,7 @@ pub(super) struct ProjectionContext {
 struct MessageRunProjection {
     snapshot: RunSnapshot,
     finished_at_ms: Option<i64>,
+    step: Option<u32>,
 }
 
 /// Host 通过稳定资源引用解析出的受控本地文件；不会进入应用协议。
@@ -112,7 +117,9 @@ impl AssistantRuntime {
                                 }
                                 markdown.push('\n');
                             }
-                            UserPart::Injected(_) | UserPart::FileReferences(_) => {}
+                            UserPart::Injected(_)
+                            | UserPart::InternalContext(_)
+                            | UserPart::FileReferences(_) => {}
                         }
                     }
                 }
@@ -280,11 +287,13 @@ impl AssistantRuntime {
             let usage = project_usage(&stored_usage, &summary, self)?;
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
-            let (work_plan, goal) = {
+            let (work_plan, goal, skill_catalog, active_skills) = {
                 let state = session.lock_state()?;
                 (
                     state.work_plan.as_ref().map(project_work_plan),
                     state.goal.as_ref().map(project_goal).transpose()?,
+                    project_session_skill_catalog(session.skill_catalog()),
+                    project_active_skills(&state)?,
                 )
             };
             let child_tasks = self.child_tasks.list_for_session(&request.session_id)?;
@@ -310,6 +319,8 @@ impl AssistantRuntime {
                             runs,
                             usage,
                             child_tasks: child_task_items,
+                            skill_catalog,
+                            active_skills,
                             conversation,
                         },
                     },
@@ -1067,7 +1078,7 @@ impl AssistantRuntime {
         session: &crate::session::SessionController,
         attachments: &[assistant_protocol::AttachmentSummary],
     ) -> RuntimeResult<ProjectionContext> {
-        let (run_by_message, input_by_message) = {
+        let (run_by_message, input_by_message, skill_by_message) = {
             let state = session.lock_state()?;
             let mut run_by_message = HashMap::new();
             for run in state.runs.values() {
@@ -1078,6 +1089,7 @@ impl AssistantRuntime {
                         MessageRunProjection {
                             snapshot: snapshot.clone(),
                             finished_at_ms: run.finished_at_ms(),
+                            step: run.message_step(message_id),
                         },
                     );
                 }
@@ -1092,7 +1104,12 @@ impl AssistantRuntime {
                     )
                 })
                 .collect();
-            (run_by_message, input_by_message)
+            let skill_by_message = state
+                .skill_activations
+                .iter()
+                .map(|activation| (activation.message_id.as_str().to_owned(), activation.tag()))
+                .collect();
+            (run_by_message, input_by_message, skill_by_message)
         };
         let attachment_by_path = attachments
             .iter()
@@ -1114,6 +1131,7 @@ impl AssistantRuntime {
         Ok(ProjectionContext {
             run_by_message,
             input_by_message,
+            skill_by_message,
             attachment_by_path,
             feedback_by_message,
             can_fork: true,
@@ -1148,14 +1166,12 @@ impl AssistantRuntime {
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<ComposerCapabilitiesSnapshot> {
         let snapshot = self.config_registry.snapshot()?;
-        let active = snapshot
-            .active()
-            .ok_or(RuntimeError::ConfigurationUnavailable)?;
-        let model = active
-            .model(model_key)
-            .ok_or_else(|| RuntimeError::ModelUnavailable {
-                model_key: model_key.clone(),
-            })?;
+        let Some(active) = snapshot.active() else {
+            return Ok(unavailable_composer_capabilities());
+        };
+        let Some(model) = active.model(model_key) else {
+            return Ok(unavailable_composer_capabilities());
+        };
         let reasoning_effort_options = model
             .capabilities()
             .reasoning
@@ -1179,10 +1195,20 @@ impl AssistantRuntime {
             ImageHandlingMode::Unavailable
         };
         Ok(ComposerCapabilitiesSnapshot {
+            selected_model_key: Some(model_key.clone()),
             reasoning_effort_options,
             image_handling,
             goal_supported: model.capabilities().tool_calls,
         })
+    }
+}
+
+fn unavailable_composer_capabilities() -> ComposerCapabilitiesSnapshot {
+    ComposerCapabilitiesSnapshot {
+        selected_model_key: None,
+        reasoning_effort_options: Vec::new(),
+        image_handling: ImageHandlingMode::Unavailable,
+        goal_supported: false,
     }
 }
 
@@ -1196,10 +1222,195 @@ fn protocol_effort_key(value: crate::ReasoningEffortKey) -> ReasoningEffortKey {
     }
 }
 
+fn project_session_skill_catalog(
+    catalog: &crate::SessionSkillCatalog,
+) -> SessionSkillCatalogSnapshot {
+    SessionSkillCatalogSnapshot {
+        status: match catalog.status {
+            crate::SkillCatalogStatus::Ready => SessionSkillCatalogStatusSnapshot::Ready,
+            crate::SkillCatalogStatus::Empty => SessionSkillCatalogStatusSnapshot::Empty,
+            crate::SkillCatalogStatus::Unavailable => {
+                SessionSkillCatalogStatusSnapshot::Unavailable
+            }
+            crate::SkillCatalogStatus::LegacyUnavailable => {
+                SessionSkillCatalogStatusSnapshot::LegacyUnavailable
+            }
+        },
+        skills: catalog
+            .definitions
+            .iter()
+            .map(|definition| SkillSummarySnapshot {
+                name: definition.name.as_str().to_owned(),
+                description: definition.description.clone(),
+                source: project_skill_source(definition.source),
+                model_invocable: definition.model_invocable,
+                user_invocable: definition.user_invocable,
+                enabled: true,
+                health: SkillHealthSnapshot::Ready,
+            })
+            .collect(),
+        diagnostics: catalog
+            .diagnostics
+            .iter()
+            .map(project_skill_diagnostic)
+            .collect(),
+    }
+}
+
+pub(super) fn project_skill_management(
+    discovery: &crate::SkillDiscovery,
+    states: &[crate::SkillNameState],
+) -> SkillManagementSnapshot {
+    let enabled_by_name = states
+        .iter()
+        .map(|state| (state.name.clone(), state.enabled))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let winner_names = discovery
+        .winners
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let conflict_names = discovery
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == crate::SkillDiagnosticCode::SameSourceConflict)
+        .filter_map(|diagnostic| diagnostic.skill_name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut by_name = std::collections::BTreeMap::new();
+    for candidate in &discovery.candidates {
+        by_name.entry(candidate.name.clone()).or_insert(candidate);
+    }
+    let skills = by_name
+        .into_iter()
+        .map(|(name, candidate)| {
+            let enabled = enabled_by_name.get(&name).copied().unwrap_or(true);
+            let health = if !enabled {
+                SkillHealthSnapshot::Disabled
+            } else if discovery.status == crate::SkillDiscoveryStatus::Unavailable {
+                SkillHealthSnapshot::Unavailable
+            } else if conflict_names.contains(&name) {
+                SkillHealthSnapshot::Conflict
+            } else if winner_names.contains(&name) {
+                SkillHealthSnapshot::Ready
+            } else {
+                SkillHealthSnapshot::Unavailable
+            };
+            SkillSummarySnapshot {
+                name: name.as_str().to_owned(),
+                description: candidate.description.clone(),
+                source: project_skill_source(candidate.source),
+                model_invocable: candidate.model_invocable,
+                user_invocable: candidate.user_invocable,
+                enabled,
+                health,
+            }
+        })
+        .collect();
+    SkillManagementSnapshot {
+        available: discovery.status == crate::SkillDiscoveryStatus::Available,
+        skills,
+        diagnostics: discovery
+            .diagnostics
+            .iter()
+            .map(project_skill_diagnostic)
+            .collect(),
+    }
+}
+
+fn project_active_skills(
+    state: &crate::session::SessionState,
+) -> RuntimeResult<Vec<ActiveSkillSnapshot>> {
+    let mut latest = std::collections::BTreeMap::new();
+    for activation in &state.skill_activations {
+        if !matches!(&activation.owner, crate::SkillActivationOwner::Session(_)) {
+            continue;
+        }
+        let is_committed = activation.input_id.as_ref().is_none_or(|input_id| {
+            state
+                .inputs
+                .get(input_id)
+                .is_some_and(|input| input.stored.state == crate::StoredInputState::Committed)
+        });
+        if is_committed {
+            latest.insert(activation.name.clone(), activation);
+        }
+    }
+    let mut active = latest
+        .into_values()
+        .map(|activation| {
+            Ok(ActiveSkillSnapshot {
+                tag: activation.tag(),
+                trigger: match activation.trigger {
+                    crate::SkillActivationTrigger::User => SkillActivationTriggerSnapshot::User,
+                    crate::SkillActivationTrigger::Model => SkillActivationTriggerSnapshot::Model,
+                },
+                message_id: protocol_message_id(activation.message_id.as_str())?,
+                created_at_ms: activation.created_at_ms,
+            })
+        })
+        .collect::<RuntimeResult<Vec<_>>>()?;
+    active.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then(left.message_id.as_str().cmp(right.message_id.as_str()))
+    });
+    Ok(active)
+}
+
+fn project_skill_source(source: crate::SkillSource) -> SkillSourceSnapshot {
+    match source {
+        crate::SkillSource::WorkspaceEzAssistant => SkillSourceSnapshot::WorkspaceEzAssistant,
+        crate::SkillSource::WorkspaceAgents => SkillSourceSnapshot::WorkspaceAgents,
+        crate::SkillSource::UserEzAssistant => SkillSourceSnapshot::UserEzAssistant,
+        crate::SkillSource::UserAgents => SkillSourceSnapshot::UserAgents,
+    }
+}
+
+fn project_skill_diagnostic(diagnostic: &crate::SkillDiagnostic) -> SkillDiagnosticSnapshot {
+    SkillDiagnosticSnapshot {
+        severity: match diagnostic.severity {
+            crate::SkillDiagnosticSeverity::Warning => SkillDiagnosticSeveritySnapshot::Warning,
+            crate::SkillDiagnosticSeverity::Error => SkillDiagnosticSeveritySnapshot::Error,
+        },
+        code: skill_diagnostic_code(diagnostic.code).to_owned(),
+        skill_name: diagnostic
+            .skill_name
+            .as_ref()
+            .map(|name| name.as_str().to_owned()),
+        source: diagnostic.source.map(project_skill_source),
+        detail: diagnostic.detail.clone(),
+    }
+}
+
+fn skill_diagnostic_code(code: crate::SkillDiagnosticCode) -> &'static str {
+    match code {
+        crate::SkillDiagnosticCode::RootUnreadable => "root_unreadable",
+        crate::SkillDiagnosticCode::ScanIncomplete => "scan_incomplete",
+        crate::SkillDiagnosticCode::CandidateLimitExceeded => "candidate_limit_exceeded",
+        crate::SkillDiagnosticCode::MissingDefinition => "missing_definition",
+        crate::SkillDiagnosticCode::DefinitionTooLarge => "definition_too_large",
+        crate::SkillDiagnosticCode::FrontmatterTooLarge => "frontmatter_too_large",
+        crate::SkillDiagnosticCode::InvalidFrontmatter => "invalid_frontmatter",
+        crate::SkillDiagnosticCode::MissingRequiredField => "missing_required_field",
+        crate::SkillDiagnosticCode::InvalidName => "invalid_name",
+        crate::SkillDiagnosticCode::InvalidDescription => "invalid_description",
+        crate::SkillDiagnosticCode::OptionalFieldDefaulted => "optional_field_defaulted",
+        crate::SkillDiagnosticCode::UnknownField => "unknown_field",
+        crate::SkillDiagnosticCode::SpecialFile => "special_file",
+        crate::SkillDiagnosticCode::SameSourceConflict => "same_source_conflict",
+        crate::SkillDiagnosticCode::DisabledByName => "disabled_by_name",
+        crate::SkillDiagnosticCode::Shadowed => "shadowed",
+        crate::SkillDiagnosticCode::NotInvocable => "not_invocable",
+        crate::SkillDiagnosticCode::CatalogLimitExceeded => "catalog_limit_exceeded",
+        crate::SkillDiagnosticCode::LegacyCatalogUnavailable => "legacy_catalog_unavailable",
+    }
+}
+
 pub(super) fn empty_child_projection() -> ProjectionContext {
     ProjectionContext {
         run_by_message: HashMap::new(),
         input_by_message: HashMap::new(),
+        skill_by_message: HashMap::new(),
         attachment_by_path: HashMap::new(),
         feedback_by_message: HashMap::new(),
         can_fork: false,
@@ -1230,6 +1441,11 @@ pub(super) fn queue_snapshot(
                 position: u32::try_from(position).unwrap_or(u32::MAX),
                 is_prioritized: position == 0,
                 held_by_goal,
+                skill: input
+                    .stored
+                    .skill_activation
+                    .as_ref()
+                    .map(crate::StoredSkillActivation::tag),
             })
         })
         .collect();
@@ -1373,6 +1589,7 @@ pub(super) fn project_conversation(
                     input_id: context.input_by_message.get(user.id.as_str()).cloned(),
                     text: user_text(user),
                     attachment_ids,
+                    skill: context.skill_by_message.get(user.id.as_str()).cloned(),
                     created_at_ms: None,
                 }));
             }
@@ -1421,6 +1638,7 @@ pub(super) fn project_conversation(
                     message_id: protocol_message_id(assistant.id.as_str())?,
                     run_id: run.map(|run| run.snapshot.run_id.clone()),
                     attempt: run.map(|run| run.snapshot.attempt),
+                    step: run.and_then(|run| run.step),
                     created_at_ms: None,
                     finished_at_ms: run.and_then(|run| run.finished_at_ms),
                     status: run.map(|run| run.snapshot.status),
@@ -1946,7 +2164,9 @@ fn user_text(message: &agent_types::UserMessage) -> String {
         .iter()
         .filter_map(|part| match part {
             UserPart::Text(text) => Some(text.text.as_str()),
-            UserPart::Injected(_) | UserPart::FileReferences(_) => None,
+            UserPart::Injected(_) | UserPart::InternalContext(_) | UserPart::FileReferences(_) => {
+                None
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

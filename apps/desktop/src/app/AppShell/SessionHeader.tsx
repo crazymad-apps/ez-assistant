@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from "../../components/DropdownMenu";
 import { Icon } from "../../components/Icon";
+import { useInputMethodGuard } from "../../components/InputMethodGuard";
 import type { PrepareDeleteSessionResult, SessionSummary } from "../../generated/assistant-protocol";
 import { SessionActionDialog } from "../../features/sessions/SessionActionDialog";
 import { useRootStore } from "../../stores/RootStoreContext";
@@ -20,6 +21,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
   const [title, setTitle] = useState(session?.title ?? "");
   const [delete_preview, setDeletePreview] = useState<PrepareDeleteSessionResult | null>(null);
   const cancel_blur_ref = useRef(false);
+  const input_method = useInputMethodGuard();
   const recent = [...(store.projection.application?.active_sessions ?? [])]
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
@@ -126,7 +128,12 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
               finishEdit();
             }}
             onChange={(event) => setTitle(event.currentTarget.value)}
+            onCompositionEnd={input_method.onCompositionEnd}
+            onCompositionStart={input_method.onCompositionStart}
             onKeyDown={(event) => {
+              if (input_method.shouldIgnoreKeyDown(event)) {
+                return;
+              }
               if (event.key === "Enter") {
                 event.preventDefault();
                 finishEdit();
@@ -137,6 +144,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 setTitle(session.title);
               }
             }}
+            onKeyUp={input_method.onKeyUp}
             value={title}
           />
         ) : (

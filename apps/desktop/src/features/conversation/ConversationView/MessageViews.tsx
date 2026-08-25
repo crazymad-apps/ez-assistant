@@ -54,6 +54,11 @@ export function UserMessage(props: Readonly<{
         </div>
       )}
       <div className={styles.user_bubble}>{props.message.text}</div>
+      {props.message.skill && (
+        <div className={styles.user_skill}>
+          <span title={props.message.skill.name}>{props.message.skill.name}</span>
+        </div>
+      )}
       <time>{formatTime(props.message.created_at_ms)}</time>
     </article>
   );

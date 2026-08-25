@@ -32,7 +32,7 @@ export function SlashCommandMenu(props: Readonly<{
 export function SlashCommandHelp({ on_close }: Readonly<{ on_close: () => void }>) {
   return (
     <div className={styles.slash_help}>
-      <strong>Slash Command</strong>
+      <strong>斜杠指令</strong>
       <span>↑↓ 选择 · Enter 确认 · Esc 关闭</span>
       <button aria-label="关闭指令帮助" onClick={on_close} type="button">
         <Icon name="x" size={14} />

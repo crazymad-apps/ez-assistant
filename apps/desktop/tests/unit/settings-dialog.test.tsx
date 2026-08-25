@@ -2,12 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsDialog } from "../../src/features/settings/SettingsDialog";
 import type {
+  ApplicationSnapshot,
   MemoryCapabilities,
   ModelCatalogSnapshot,
   ModelConfiguration,
   PersonaSnapshot,
   PinnedMemoryCollectionSnapshot,
   PermissionDocumentSnapshot,
+  SessionSummary,
 } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
@@ -18,6 +20,46 @@ afterEach(() => {
 });
 
 describe("SettingsDialog model management", () => {
+  it("shows the Chinese skill management projection and delegates the name toggle", () => {
+    const store = settingsStore();
+    store.settings.page = "skills";
+    store.settings.skill_management = {
+      available: true,
+      skills: [{ name: "review", description: "检查实现", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" }],
+      diagnostics: [],
+    };
+    const toggle = vi.spyOn(store.settings, "setSkillEnabled").mockResolvedValue(true);
+    renderDialog(store);
+
+    expect(screen.getByRole("button", { name: /运行时/ })).toBeVisible();
+    expect(screen.queryByText("文件与启停变更仅对新会话生效。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "技能工作区范围" })).toHaveTextContent("仅用户根目录");
+    expect(screen.getByText("检查实现")).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(toggle).toHaveBeenCalledWith("review", false);
+  });
+
+  it("moves the summary into the description row and renders the skill body", () => {
+    const store = settingsStore();
+    const skill = { name: "review", description: "检查实现", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" } as const;
+    store.settings.page = "skills";
+    store.settings.skill_management = { available: true, skills: [skill], diagnostics: [] };
+    store.settings.skill_detail = { skill, body: "# 检查步骤\n\n确认实现与测试。", diagnostics: [] };
+    const load_detail = vi.spyOn(store.settings, "loadSkillDetail").mockResolvedValue();
+    renderDialog(store);
+
+    fireEvent.click(screen.getByRole("button", { name: /review/ }));
+
+    expect(load_detail).toHaveBeenCalledWith("review");
+    expect(screen.getByRole("heading", { name: "review" })).toBeVisible();
+    expect(screen.getByText("描述").nextElementSibling).toHaveTextContent("检查实现");
+    expect(screen.getByRole("heading", { name: "技能正文" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "检查步骤" })).toBeVisible();
+    expect(screen.getByText("确认实现与测试。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "返回技能列表" }));
+    expect(screen.getByRole("heading", { name: "技能" })).toBeVisible();
+  });
+
   it("keeps management actions available for existing and default models", () => {
     const store = settingsStore();
     const existing_default = model("primary", true);
@@ -31,6 +73,8 @@ describe("SettingsDialog model management", () => {
 
     expect(screen.getByRole("heading", { name: "编辑模型" })).toBeInTheDocument();
     expect(screen.getByLabelText("显示名称")).toHaveValue("primary");
+    fireEvent.click(screen.getByRole("button", { name: "返回模型列表" }));
+    expect(screen.getByRole("heading", { name: "模型" })).toBeVisible();
   });
 
   it("selects the default auxiliary vision model from compiled image-capable models", async () => {
@@ -86,7 +130,7 @@ describe("SettingsDialog model management", () => {
     fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "Fixture Pro" } });
     fireEvent.change(screen.getByLabelText("模型 Key"), { target: { value: "fixture-pro" } });
     fireEvent.change(screen.getByRole("combobox", { name: "模型 ID" }), { target: { value: "fixture-pro-model" } });
-    fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: "https://api.example.test/v1" } });
+    fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: "http://api.example.test/v1" } });
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "form-secret" } });
     fireEvent.click(screen.getByLabelText("设为默认模型"));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -95,6 +139,7 @@ describe("SettingsDialog model management", () => {
       model_key: "fixture-pro",
       protocol: "openai_chat_completions",
       provider: "deepseek",
+      endpoint: "http://api.example.test/v1",
       credential: { mode: "replace", value: "form-secret" },
     }), true));
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
@@ -133,6 +178,32 @@ describe("SettingsDialog model management", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "删除模型" }));
     await waitFor(() => expect(remove).toHaveBeenCalledWith("primary", "secondary"));
   });
+
+  it("allows deletion for an idle referencing session but blocks a running one", async () => {
+    const idle_store = settingsStore();
+    idle_store.settings.models = [model("primary", true), model("secondary", false)];
+    idle_store.projection.application = applicationWithSession(modelSession(null));
+    const remove = vi.spyOn(idle_store.settings, "deleteModel").mockResolvedValue(true);
+    const idle_view = renderDialog(idle_store);
+
+    fireEvent.click(screen.getByRole("button", { name: "secondary的更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除模型" }));
+    const idle_dialog = screen.getByRole("dialog", { name: "删除模型" });
+    expect(idle_dialog).toHaveTextContent("空闲会话将变为未选择模型");
+    fireEvent.click(within(idle_dialog).getByRole("button", { name: "删除模型" }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("secondary", null));
+    idle_view.unmount();
+
+    const running_store = settingsStore();
+    running_store.settings.models = [model("primary", true), model("secondary", false)];
+    running_store.projection.application = applicationWithSession(modelSession("run-1"));
+    renderDialog(running_store);
+    fireEvent.click(screen.getByRole("button", { name: "secondary的更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除模型" }));
+    const running_dialog = screen.getByRole("dialog", { name: "删除模型" });
+    expect(running_dialog).toHaveTextContent("正在执行或存在排队输入");
+    expect(within(running_dialog).queryByRole("button", { name: "删除模型" })).not.toBeInTheDocument();
+  });
 });
 
 describe("SettingsDialog permission management", () => {
@@ -146,9 +217,12 @@ describe("SettingsDialog permission management", () => {
     ];
     renderDialog(store);
 
-    expect(screen.getByRole("button", { name: "当前会话" })).toHaveTextContent(/^当前会话$/);
-    expect(screen.getByRole("button", { name: "Workspace" })).toHaveTextContent(/^Workspace$/);
-    expect(screen.getByRole("button", { name: "全局" })).toHaveTextContent(/^全局$/);
+    const scope_tabs = screen.getByRole("tablist");
+    expect(scope_tabs.closest("header")).not.toBeNull();
+    expect(within(scope_tabs).getByRole("tab", { name: "当前会话" })).toHaveTextContent(/^当前会话$/);
+    expect(within(scope_tabs).getByRole("tab", { name: "当前会话" })).toHaveAttribute("aria-selected", "true");
+    expect(within(scope_tabs).getByRole("tab", { name: "工作区" })).toHaveTextContent(/^工作区$/);
+    expect(within(scope_tabs).getByRole("tab", { name: "全局" })).toHaveTextContent(/^全局$/);
 
     fireEvent.click(screen.getByRole("button", { name: "添加规则" }));
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
@@ -243,6 +317,57 @@ function model(model_key: string, is_default: boolean): ModelConfiguration {
     is_default,
     is_valid: true,
     issues: [],
+  };
+}
+
+function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
+  return {
+    runtime_lifecycle: "running",
+    configuration: {
+      config_path: null,
+      revision: "revision-1",
+      state: "ready",
+      schema_version: 1,
+      default_model: "primary",
+      auxiliary_vision_model: null,
+      issues: [],
+    },
+    models: [],
+    workspaces: [],
+    active_sessions: [session],
+    archived_sessions: [],
+    capabilities: {
+      conversation_paging: true,
+      tool_detail: true,
+      queue_control: true,
+      approval_queue: true,
+      child_task_view: true,
+      conversation_search: true,
+    },
+  };
+}
+
+function modelSession(active_run_id: string | null): SessionSummary {
+  return {
+    session_id: "session-1",
+    title: "模型引用会话",
+    model_key: "secondary",
+    lifecycle: "active",
+    current_variant: "build",
+    approval_mode: "ask",
+    workspace_id: null,
+    active_run_id,
+    message_count: 1,
+    queued_input_count: 0,
+    resume_required: false,
+    created_at_ms: 1,
+    updated_at_ms: 1,
+    archived_at_ms: null,
+    is_pinned: false,
+    title_origin: "user",
+    pending_approval_count: 0,
+    active_child_count: 0,
+    active_run_status: active_run_id ? "running" : null,
   };
 }
 

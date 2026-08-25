@@ -134,13 +134,13 @@ async fn agents_share_model_service_while_cancellation_remains_execution_local()
     first_execution.control.cancel();
     release.cancel();
 
-    assert_eq!(
+    assert!(matches!(
         first_execution.completion.await,
-        ExecutionOutcome::Cancelled
-    );
+        ExecutionOutcome::Cancelled { .. }
+    ));
     assert!(matches!(
         second_execution.completion.await,
-        ExecutionOutcome::Completed(message) if message == answer()
+        ExecutionOutcome::Completed { message, .. } if message == answer()
     ));
     assert_eq!(model.requests.load(Ordering::SeqCst), 2);
 }

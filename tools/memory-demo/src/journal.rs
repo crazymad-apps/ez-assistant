@@ -2,7 +2,9 @@
 
 use std::{collections::HashSet, path::PathBuf};
 
-use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
+use agent_core::{
+    ExchangeCompletion, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
+};
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, MessageId, ToolMessage, ToolResult,
     ToolResultContent, ToolResultStatus,
@@ -124,6 +126,7 @@ impl DemoJournal {
 impl ExecutionRecorder for DemoJournal {
     fn begin_tool_exchange<'a>(
         &'a self,
+        _step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
@@ -197,7 +200,7 @@ impl ExecutionRecorder for DemoJournal {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let mut state = self.state.lock().await;
             let pending = state.pending_exchange.as_ref().ok_or_else(|| RecordError {
@@ -243,7 +246,7 @@ impl ExecutionRecorder for DemoJournal {
                 .await
                 .map_err(record_error)?;
             *state = candidate;
-            Ok(())
+            Ok(ExchangeCompletion::default())
         })
     }
 }
@@ -336,7 +339,7 @@ mod tests {
         let journal = DemoJournal::new(path, record("journal")).expect("create journal");
 
         let receipt = journal
-            .begin_tool_exchange(assistant(&["call_1", "call_2"]))
+            .begin_tool_exchange(1, assistant(&["call_1", "call_2"]))
             .await
             .expect("begin exchange");
         let pending = restore_session(&sessions, "journal")
@@ -377,7 +380,7 @@ mod tests {
             .await
             .expect("save initial session");
         let receipt = good
-            .begin_tool_exchange(assistant(&["call_1"]))
+            .begin_tool_exchange(1, assistant(&["call_1"]))
             .await
             .expect("begin exchange");
         let pending = good.record().await;
@@ -429,7 +432,7 @@ mod tests {
             .await
             .expect("append plain assistant");
         let receipt = journal
-            .begin_tool_exchange(assistant(&["call_1", "call_2"]))
+            .begin_tool_exchange(1, assistant(&["call_1", "call_2"]))
             .await
             .expect("begin exchange");
         assert!(
@@ -458,7 +461,7 @@ mod tests {
             .expect("save initial session");
         let first = DemoJournal::new(path.clone(), initial).expect("create journal");
         first
-            .begin_tool_exchange(assistant(&["call_1"]))
+            .begin_tool_exchange(1, assistant(&["call_1"]))
             .await
             .expect("begin exchange");
         drop(first);

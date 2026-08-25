@@ -24,8 +24,8 @@ export function ExecutionSettingsPopover(props: ExecutionSettingsPopoverProps) {
       selected: props.variant,
       value_label: variantLabel(props.variant),
       options: [
-        { value: "build", label: "Build", description: "允许在授权范围内修改与执行" },
-        { value: "plan", label: "Plan", description: "仅分析与规划，不修改工作区" },
+        { value: "build", label: "构建", description: "允许在授权范围内修改与执行" },
+        { value: "plan", label: "规划", description: "仅分析与规划，不修改工作区" },
       ],
       on_select: (value) => props.on_variant_change(value as AgentVariant),
     },
@@ -35,8 +35,8 @@ export function ExecutionSettingsPopover(props: ExecutionSettingsPopoverProps) {
       selected: props.approval_mode,
       value_label: approvalLabel(props.approval_mode),
       options: [
-        { value: "ask", label: "Ask", description: "敏感操作到达时请求确认" },
-        { value: "auto", label: "Auto", description: "按已配置权限规则自动判断" },
+        { value: "ask", label: "询问", description: "敏感操作到达时请求确认" },
+        { value: "auto", label: "自动", description: "按已配置权限规则自动判断" },
       ],
       on_select: (value) => props.on_approval_change(value as ApprovalMode),
     },
@@ -56,9 +56,9 @@ export function ExecutionSettingsPopover(props: ExecutionSettingsPopoverProps) {
 }
 
 function variantLabel(value: AgentVariant): string {
-  return value === "build" ? "Build" : "Plan";
+  return value === "build" ? "构建" : "规划";
 }
 
 function approvalLabel(value: ApprovalMode): string {
-  return value === "ask" ? "Ask" : "Auto";
+  return value === "ask" ? "询问" : "自动";
 }

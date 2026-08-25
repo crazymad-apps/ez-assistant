@@ -3,7 +3,7 @@
 use assistant_protocol::{
     ChildTaskId, ChildTaskStatus, RunId, RunStatus, RuntimeErrorInfo, SessionId,
 };
-use assistant_runtime::StoredGoalSettlementEffect;
+use assistant_runtime::{StoredGoalSettlementEffect, StoredSkillActivation};
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,11 @@ pub(super) enum AppendPurpose {
         reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     },
     /// 完整工具批次已写入；清除对应的临时 pending 事实。
-    ToolExchange { receipt_id: String },
+    ToolExchange {
+        receipt_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skill_activations: Vec<StoredSkillActivation>,
+    },
     /// 最终消息已写入，结算 Run 终态。
     RunSettlement {
         status: RunStatus,
@@ -39,7 +43,11 @@ pub(super) enum AppendPurpose {
     /// 子任务初始 User Message 已写入，切换到 running。
     ChildStart,
     /// 子任务完整工具批次已写入，清除 child pending 事实。
-    ChildToolExchange { receipt_id: String },
+    ChildToolExchange {
+        receipt_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skill_activations: Vec<StoredSkillActivation>,
+    },
     /// 子任务最终消息已写入，结算 child 终态。
     ChildSettlement {
         status: ChildTaskStatus,
@@ -97,7 +105,10 @@ pub(super) fn apply_purpose(
             created_at_ms,
         ),
         (
-            AppendPurpose::ToolExchange { receipt_id },
+            AppendPurpose::ToolExchange {
+                receipt_id,
+                skill_activations,
+            },
             ConversationStorageTarget::Session { session_id, run_id },
         ) => {
             let deleted = transaction
@@ -114,6 +125,9 @@ pub(super) fn apply_purpose(
                     "pending tool exchange finalization is inconsistent",
                 ));
             }
+            for activation in skill_activations {
+                super::skill::insert_skill_activation(transaction, activation)?;
+            }
             Ok(())
         }
         (
@@ -128,12 +142,21 @@ pub(super) fn apply_purpose(
             },
         ) => apply_child_start(transaction, child_task_id, session_id, created_at_ms),
         (
-            AppendPurpose::ChildToolExchange { receipt_id },
+            AppendPurpose::ChildToolExchange {
+                receipt_id,
+                skill_activations,
+            },
             ConversationStorageTarget::ChildTask {
                 session_id,
                 child_task_id,
             },
-        ) => clear_child_exchange(transaction, receipt_id, child_task_id, session_id),
+        ) => {
+            clear_child_exchange(transaction, receipt_id, child_task_id, session_id)?;
+            for activation in skill_activations {
+                super::skill::insert_skill_activation(transaction, activation)?;
+            }
+            Ok(())
+        }
         (
             AppendPurpose::ChildSettlement { .. },
             ConversationStorageTarget::ChildTask {

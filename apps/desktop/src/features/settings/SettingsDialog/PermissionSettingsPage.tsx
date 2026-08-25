@@ -16,6 +16,7 @@ import {
   SelectionPopover,
   type SelectionOption,
 } from "../../../components/SelectionPopover";
+import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
 type MatcherType = "general" | "file" | "shell";
@@ -28,7 +29,7 @@ const EFFECT_OPTIONS: readonly SelectionOption<PermissionRuleEffect>[] = [
 ];
 const MATCHER_OPTIONS: readonly SelectionOption<MatcherType>[] = [
   { value: "file", label: "文件操作" },
-  { value: "shell", label: "Shell 命令" },
+  { value: "shell", label: "命令行" },
   { value: "general", label: "通用工具" },
 ];
 const FILE_OPERATION_OPTIONS: readonly SelectionOption<PermissionFileOperationDefinition>[] = [
@@ -123,37 +124,39 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
   }
 
   return (
-    <section>
-      <div className={styles.page_header}>
-        <h3>权限</h3>
-        <button
-          disabled={settings.pending_action === "permission:reload"}
-          onClick={() => void settings.reloadPermissions()}
-          type="button"
-        >
-          <Icon name="refresh" size={14} />重新加载
-        </button>
-      </div>
-
-      <div className={styles.permission_scope_tabs}>
-        {documents.map((document) => (
+    <SettingsPageContainer
+      actions={(
+        <>
+          <div className={styles.permission_scope_tabs} role="tablist">
+            {documents.map((document) => (
+              <button
+                aria-selected={scopeKey(document) === selected_key}
+                key={scopeKey(document)}
+                onClick={() => {
+                  if (editing && !window.confirm("当前规则尚未保存，确定切换范围吗？")) return;
+                  setEditing(null);
+                  setSelectedKey(scopeKey(document));
+                }}
+                role="tab"
+                type="button"
+              >
+                {scopeLabel(document)}
+              </button>
+            ))}
+          </div>
           <button
-            aria-current={scopeKey(document) === selected_key ? "page" : undefined}
-            key={scopeKey(document)}
-            onClick={() => {
-              if (editing && !window.confirm("当前规则尚未保存，确定切换范围吗？")) return;
-              setEditing(null);
-              setSelectedKey(scopeKey(document));
-            }}
+            disabled={settings.pending_action === "permission:reload"}
+            onClick={() => void settings.reloadPermissions()}
             type="button"
           >
-            {scopeLabel(document)}
+            <Icon name="refresh" size={14} />重新加载
           </button>
-        ))}
-      </div>
-
+        </>
+      )}
+      title="权限"
+    >
       {!selected && (
-        <div className={styles.permission_empty}>选择一个会话后，可查看 Session 与 Workspace 权限。</div>
+        <div className={styles.permission_empty}>选择一个会话后，可查看会话与工作区权限。</div>
       )}
 
       {selected && (
@@ -223,7 +226,7 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
           )}
         </>
       )}
-    </section>
+    </SettingsPageContainer>
   );
 });
 
@@ -247,7 +250,7 @@ function RuleEditor(props: Readonly<{
     <div className={styles.permission_editor}>
       <div className={styles.permission_editor_header}>
         <strong>{props.form.id.startsWith("ui-") ? "添加规则" : "编辑规则"}</strong>
-        <span>规则按 Session → Workspace → Global 顺序匹配，Deny 始终优先。</span>
+        <span>规则按会话 → 工作区 → 全局顺序匹配，拒绝始终优先。</span>
       </div>
       <div className={styles.permission_form}>
         <PermissionSelect
@@ -320,8 +323,8 @@ function RuleEditor(props: Readonly<{
         )}
         <fieldset className={styles.permission_variants}>
           <legend>适用模式</legend>
-          <label><input checked={props.form.variants.includes("build")} onChange={() => toggleVariant("build")} type="checkbox" />Build</label>
-          <label><input checked={props.form.variants.includes("plan")} onChange={() => toggleVariant("plan")} type="checkbox" />Plan</label>
+          <label><input checked={props.form.variants.includes("build")} onChange={() => toggleVariant("build")} type="checkbox" />构建</label>
+          <label><input checked={props.form.variants.includes("plan")} onChange={() => toggleVariant("plan")} type="checkbox" />规划</label>
         </fieldset>
       </div>
       <div className={styles.permission_editor_actions}>
@@ -408,13 +411,13 @@ function buildRule(form: RuleForm): PermissionRuleDefinition | null {
 
 function scopeKey(document: PermissionDocumentSnapshot): string { return document.scope.type; }
 function scopeLabel(document: PermissionDocumentSnapshot): string {
-  return document.scope.type === "session" ? "当前会话" : document.scope.type === "workspace" ? "Workspace" : "全局";
+  return document.scope.type === "session" ? "当前会话" : document.scope.type === "workspace" ? "工作区" : "全局";
 }
 function statusLabel(status: PermissionDocumentSnapshot["status"]): string {
   return ({ empty: "未配置", ready: "已生效", invalid: "文件无效", unavailable: "不可用" })[status];
 }
 function effectLabel(effect: PermissionRuleEffect): string { return ({ allow: "允许", ask: "询问", deny: "拒绝" })[effect]; }
-function variantLabel(variant: AgentVariant): string { return variant === "build" ? "Build" : "Plan"; }
+function variantLabel(variant: AgentVariant): string { return variant === "build" ? "构建" : "规划"; }
 function matcherTitle(rule: PermissionRuleDefinition): string {
   if (rule.matcher.type === "general") return rule.matcher.payload.tool_name;
   if (rule.matcher.type === "file") return `${rule.matcher.payload.operation} · ${rule.matcher.payload.path}`;

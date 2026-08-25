@@ -37,7 +37,7 @@ async fn cancel_during_model_stream_converges_to_cancelled() {
     control.cancel();
 
     let outcome = completion.await;
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_cancelled(outcome);
     let rest: Vec<AgentEvent> = events.collect().await;
     let events = [prefix, rest].concat();
     assert_lifecycle(&events);
@@ -47,6 +47,7 @@ async fn cancel_during_model_stream_converges_to_cancelled() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::TextDelta {
+                step: 1,
                 id: part_id("text_1"),
                 delta: "partial".to_owned(),
             },
@@ -104,8 +105,7 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
     let mut prefix = Vec::new();
     loop {
         let event = events.next().await.expect("event stream open");
-        let hit =
-            matches!(&event, AgentEvent::ToolStarted { call_id: id } if *id == call_id("call_2"));
+        let hit = matches!(&event, AgentEvent::ToolStarted { call_id: id, .. } if *id == call_id("call_2"));
         prefix.push(event);
         if hit {
             break;
@@ -115,7 +115,7 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
     control.cancel();
 
     let outcome = completion.await;
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_cancelled(outcome);
     // Engine 只有在 cancellation-aware tool 完成清理并返回后才能解析取消终态。
     slow_cleanup_completed.notified().await;
     let rest: Vec<AgentEvent> = events.collect().await;
@@ -128,36 +128,45 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
         "cancellation must not count as a consecutive failure"
     );
     // 取消收敛：call_1 已成功；call_2（执行中清理完成）与 call_3（未到达）补记
-    // interrupted 错误 ToolResult，各发 ToolCompleted{Failed}；唯一终态 ExecutionCancelled。
+    // interrupted 错误 ToolResult；整批 Recorder 成功后再按原顺序发布 ToolCompleted，
+    // 唯一终态为 ExecutionCancelled。
     assert_eq!(
         events,
         vec![
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "fast", json!({})),
             },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_2", "slow", json!({})),
             },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_3", "never", json!({})),
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_1"),
-            },
-            AgentEvent::ToolCompleted {
-                call_id: call_id("call_1"),
-                status: ToolCompletionStatus::Success,
             },
             AgentEvent::ToolStarted {
+                step: 1,
                 call_id: call_id("call_2"),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
+                call_id: call_id("call_1"),
+                status: ToolCompletionStatus::Success,
+            },
+            AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_2"),
                 status: ToolCompletionStatus::Failed,
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_3"),
                 status: ToolCompletionStatus::Failed,
             },
@@ -258,7 +267,7 @@ async fn cancel_during_authorize_hang_settles_batch() {
         let events = collector.await.expect("event collection task panicked");
         (outcome, events)
     };
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_cancelled(outcome);
     assert_lifecycle(&events);
     // 两个已宣告调用均未结算：取消收敛各补 interrupted 错误 ToolResult。
     assert_eq!(
@@ -267,16 +276,20 @@ async fn cancel_during_authorize_hang_settles_batch() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_1", "read_file", json!({"path": "a.txt"})),
             },
             AgentEvent::ToolProposed {
+                step: 1,
                 call: call("call_2", "write_file", json!({"path": "b.txt"})),
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_1"),
                 status: ToolCompletionStatus::Failed,
             },
             AgentEvent::ToolCompleted {
+                step: 1,
                 call_id: call_id("call_2"),
                 status: ToolCompletionStatus::Failed,
             },
@@ -393,6 +406,6 @@ async fn dropped_event_stream_still_resolves_completion() {
     drop(events);
 
     let outcome = completion.await;
-    assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
     assert_eq!(recorder.deltas().len(), 2);
 }

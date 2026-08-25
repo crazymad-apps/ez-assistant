@@ -196,43 +196,53 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
             usage.input_tokens, usage.output_tokens, usage.total_tokens
         ),
         AgentEvent::StepStarted { step } => format!("agent.step_started step={step}"),
-        AgentEvent::TextDelta { id, delta } => {
-            format!("agent.text_delta id={id} text={delta}")
+        AgentEvent::TextDelta { step, id, delta } => {
+            format!("agent.text_delta step={step} id={id} text={delta}")
         }
-        AgentEvent::ReasoningDelta { id, delta } => {
-            format!("agent.reasoning_delta id={id} text={delta}")
+        AgentEvent::ReasoningDelta { step, id, delta } => {
+            format!("agent.reasoning_delta step={step} id={id} text={delta}")
         }
-        AgentEvent::ToolProposed { call } => {
-            format!("agent.tool_proposed id={} name={}", call.id, call.name)
+        AgentEvent::ToolProposed { step, call } => {
+            format!(
+                "agent.tool_proposed step={step} id={} name={}",
+                call.id, call.name
+            )
         }
-        AgentEvent::ToolStarted { call_id } => {
-            format!("agent.tool_started id={call_id}")
+        AgentEvent::ToolStarted { step, call_id } => {
+            format!("agent.tool_started step={step} id={call_id}")
         }
         AgentEvent::ToolOutput {
+            step,
             call_id,
             channel,
             chunk,
         } => {
-            format!("agent.tool_output id={call_id} channel={channel:?} text={chunk}")
+            format!("agent.tool_output step={step} id={call_id} channel={channel:?} text={chunk}")
         }
-        AgentEvent::ToolCompleted { call_id, status } => {
-            format!("agent.tool_completed id={call_id} status={status:?}")
+        AgentEvent::ToolCompleted {
+            step,
+            call_id,
+            status,
+        } => {
+            format!("agent.tool_completed step={step} id={call_id} status={status:?}")
         }
         AgentEvent::GuardrailTriggered {
+            step,
             kind,
             mode,
             threshold,
             observed,
             call_id,
         } => format!(
-            "agent.guardrail_triggered kind={kind:?} mode={mode:?} threshold={threshold} \
+            "agent.guardrail_triggered step={step} kind={kind:?} mode={mode:?} threshold={threshold} \
              observed={observed} id={call_id}"
         ),
         AgentEvent::ExecutionCompleted {
+            step,
             message,
             dropped_events,
         } => format!(
-            "agent.execution_completed message={} dropped={dropped_events}",
+            "agent.execution_completed step={step} message={} dropped={dropped_events}",
             message.id
         ),
         AgentEvent::ExecutionFailed {
@@ -251,18 +261,28 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
             "agent.execution_compaction_required reason={reason:?} step={step} \
              dropped={dropped_events}"
         ),
+        AgentEvent::ExecutionContinuationRequired {
+            reason,
+            dropped_events,
+            ..
+        } => format!(
+            "agent.execution_continuation_required reason={reason:?} dropped={dropped_events}"
+        ),
     }
 }
 
 pub(crate) fn format_outcome(outcome: &ExecutionOutcome) -> String {
     match outcome {
-        ExecutionOutcome::Completed(message) => {
+        ExecutionOutcome::Completed { message, .. } => {
             format!("completed message={}", message.id)
         }
-        ExecutionOutcome::Failed(error) => format!("failed error={error}"),
-        ExecutionOutcome::Cancelled => "cancelled".to_owned(),
+        ExecutionOutcome::Failed { error, .. } => format!("failed error={error}"),
+        ExecutionOutcome::Cancelled { .. } => "cancelled".to_owned(),
         ExecutionOutcome::CompactionRequired { reason, step, .. } => {
             format!("compaction_required reason={reason:?} step={step}")
+        }
+        ExecutionOutcome::ContinuationRequired { reason, .. } => {
+            format!("continuation_required reason={reason:?}")
         }
     }
 }

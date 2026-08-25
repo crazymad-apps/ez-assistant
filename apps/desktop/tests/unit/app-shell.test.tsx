@@ -41,6 +41,26 @@ describe("AppShell session header", () => {
     expect(rename).toHaveBeenCalledWith("session-1", "Renamed session");
   });
 
+  it("does not finish title editing when Enter only confirms input method composition", () => {
+    const store = storeWithSessions();
+    const rename = vi.spyOn(store, "renameSession").mockResolvedValue(true);
+    renderShell(store);
+
+    fireEvent.click(screen.getByRole("button", { name: "First session" }));
+    const input = screen.getByRole("textbox", { name: "会话标题" });
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "New title" } });
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(input).toHaveValue("New title");
+
+    fireEvent.keyUp(input, { key: "Enter", keyCode: 13 });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    expect(rename).toHaveBeenCalledWith("session-1", "New title");
+  });
+
   it("switches recent sessions and keeps pin/archive in one more menu", () => {
     const store = storeWithSessions();
     const select = vi.spyOn(store, "selectSession").mockResolvedValue();

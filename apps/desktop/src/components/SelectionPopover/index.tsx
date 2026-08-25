@@ -8,6 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../Icon";
+import { useInputMethodGuard } from "../InputMethodGuard";
 import styles from "./index.module.scss";
 
 export type SelectionOption<T extends string> = Readonly<{
@@ -35,6 +36,7 @@ type SelectionPopoverProps<T extends string> = Readonly<{
 }>;
 
 export function SelectionPopover<T extends string>(props: SelectionPopoverProps<T>) {
+  const input_method = useInputMethodGuard();
   const listbox_id = useId();
   const trigger_ref = useRef<HTMLElement>(null);
   const focus_target_ref = useRef<HTMLElement>(null);
@@ -119,6 +121,9 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
   }
 
   function handleEditableKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (input_method.shouldIgnoreKeyDown(event)) {
+      return;
+    }
     if (event.key === "Escape" && props.open) {
       event.preventDefault();
       props.on_open_change(false);
@@ -177,7 +182,10 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
               setQuery("");
               if (!props.open) props.on_open_change(true);
             }}
+            onCompositionEnd={input_method.onCompositionEnd}
+            onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleEditableKeyDown}
+            onKeyUp={input_method.onKeyUp}
             placeholder={props.placeholder}
             ref={(node) => { focus_target_ref.current = node; }}
             role="combobox"

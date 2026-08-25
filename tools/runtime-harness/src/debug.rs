@@ -240,12 +240,18 @@ impl RunDebug {
 
     pub(crate) fn post_run_finished(&self, snapshot: &RuntimeSnapshot, outcome: &ExecutionOutcome) {
         let (name, error) = match outcome {
-            ExecutionOutcome::Completed(_) => ("run_completed", None),
-            ExecutionOutcome::Failed(error) => ("run_failed", Some(error.to_string())),
-            ExecutionOutcome::Cancelled => ("run_cancelled", None),
+            ExecutionOutcome::Completed { .. } => ("run_completed", None),
+            ExecutionOutcome::Failed { error, .. } => ("run_failed", Some(error.to_string())),
+            ExecutionOutcome::Cancelled { .. } => ("run_cancelled", None),
             ExecutionOutcome::CompactionRequired { reason, step, .. } => (
                 "run_compaction_required",
                 Some(format!("{reason:?} at step {step}")),
+            ),
+            ExecutionOutcome::ContinuationRequired { reason, .. } => (
+                "run_continuation_required",
+                Some(format!(
+                    "generic context continuation is not supported by runtime-harness: {reason:?}"
+                )),
             ),
         };
         self.post_runtime_snapshot(name, snapshot, error);
@@ -917,7 +923,7 @@ mod tests {
             .expect("finish run");
         debug.post_run_finished(&runtime.snapshot().expect("snapshot"), &outcome);
 
-        assert!(matches!(outcome, ExecutionOutcome::Completed(_)));
+        assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while !debug.client.is_muted() {
                 tokio::task::yield_now().await;

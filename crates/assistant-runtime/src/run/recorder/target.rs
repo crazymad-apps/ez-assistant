@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use agent_core::{ExchangeReceipt, RecordError};
-use agent_types::{AssistantMessage, ConversationMessage, ToolMessage};
-use assistant_protocol::{RunId, ToolCallId as ProtocolToolCallId};
+use agent_types::{AssistantMessage, ConversationMessage, ToolMessage, UserMessage};
+use assistant_protocol::{ConversationOwner, RunId, ToolCallId as ProtocolToolCallId};
 
 use crate::{
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange,
@@ -19,6 +19,17 @@ use crate::{
 
 use super::record_error;
 
+/// Recorder 已冻结、等待 Store 原子提交的一次完整 Tool Exchange。
+pub(super) struct PersistedToolExchangeCompletion {
+    pub(super) operation_id: String,
+    pub(super) receipt: ExchangeReceipt,
+    pub(super) step: u32,
+    pub(super) results: Vec<ToolMessage>,
+    pub(super) activation_message: Option<UserMessage>,
+    pub(super) skill_activations: Vec<crate::StoredSkillActivation>,
+    pub(super) completed_at_ms: i64,
+}
+
 /// Recorder 只在这一处区分主 Run 与 child；Core 契约和可靠顺序完全共用。
 pub(super) enum RecorderTarget {
     Parent {
@@ -27,6 +38,7 @@ pub(super) enum RecorderTarget {
     },
     Child {
         task: Arc<ChildTaskRecord>,
+        session: Arc<SessionController>,
     },
 }
 
@@ -35,14 +47,14 @@ impl RecorderTarget {
         Self::Parent { session, run_id }
     }
 
-    pub(super) fn child(task: Arc<ChildTaskRecord>) -> Self {
-        Self::Child { task }
+    pub(super) fn child(task: Arc<ChildTaskRecord>, session: Arc<SessionController>) -> Self {
+        Self::Child { task, session }
     }
 
     pub(super) async fn mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
         match self {
             Self::Parent { session, .. } => session.mutation().await,
-            Self::Child { task } => task.mutation().await,
+            Self::Child { task, .. } => task.mutation().await,
         }
     }
 
@@ -62,7 +74,7 @@ impl RecorderTarget {
                     .validate_tool_exchange_begin(assistant)
                     .map_err(|_| record_error("journal rejected tool exchange begin"))
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 let state = lock_child(task)?;
                 let journal = state
                     .journal
@@ -78,6 +90,7 @@ impl RecorderTarget {
     pub(super) fn commit_begin(
         &self,
         receipt: ExchangeReceipt,
+        _step: u32,
         assistant: AssistantMessage,
     ) -> Result<(), RecordError> {
         match self {
@@ -91,7 +104,7 @@ impl RecorderTarget {
                     .begin_tool_exchange_with_receipt(run_id, receipt, assistant)
                     .map_err(|_| record_error("journal rejected persisted tool exchange"))
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 let mut state = lock_child(task)?;
                 let journal = state
                     .journal
@@ -108,7 +121,13 @@ impl RecorderTarget {
         &self,
         receipt: &ExchangeReceipt,
         results: &[ToolMessage],
+        activation_message: Option<&UserMessage>,
     ) -> Result<Vec<ConversationMessage>, RecordError> {
+        let trailing = activation_message
+            .cloned()
+            .map(ConversationMessage::User)
+            .into_iter()
+            .collect::<Vec<_>>();
         match self {
             Self::Parent { session, run_id } => {
                 let mut state = lock_parent(session)?;
@@ -121,17 +140,22 @@ impl RecorderTarget {
                     .as_ref()
                     .ok_or_else(|| record_error("session conversation is unavailable"))?;
                 journal
-                    .tool_exchange_batch(run_id, receipt, results)
+                    .tool_exchange_batch_with_trailing(run_id, receipt, results, &trailing)
                     .map_err(|_| record_error("journal rejected tool exchange completion"))
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 let state = lock_child(task)?;
                 let journal = state
                     .journal
                     .as_ref()
                     .ok_or_else(|| record_error("child conversation is unavailable"))?;
                 journal
-                    .tool_exchange_batch(task.journal_owner(), receipt, results)
+                    .tool_exchange_batch_with_trailing(
+                        task.journal_owner(),
+                        receipt,
+                        results,
+                        &trailing,
+                    )
                     .map_err(|_| record_error("child journal rejected tool exchange completion"))
             }
         }
@@ -140,7 +164,10 @@ impl RecorderTarget {
     pub(super) fn commit_complete(
         &self,
         receipt: &ExchangeReceipt,
+        step: u32,
         results: Vec<ToolMessage>,
+        activation_message: Option<UserMessage>,
+        skill_activations: Vec<crate::StoredSkillActivation>,
         batch: &[ConversationMessage],
     ) -> Result<(), RecordError> {
         match self {
@@ -152,7 +179,15 @@ impl RecorderTarget {
                     .as_mut()
                     .ok_or_else(|| record_error("session conversation is unavailable"))?;
                 journal
-                    .complete_tool_exchange(run_id, receipt, results)
+                    .complete_tool_exchange_with_trailing(
+                        run_id,
+                        receipt,
+                        results,
+                        activation_message
+                            .map(ConversationMessage::User)
+                            .into_iter()
+                            .collect(),
+                    )
                     .map_err(|_| record_error("journal rejected persisted tool exchange"))?;
                 let persisted_message_count = journal.message_count();
                 let message_count = u64::try_from(persisted_message_count)
@@ -161,21 +196,34 @@ impl RecorderTarget {
                     .runs
                     .get_mut(run_id)
                     .ok_or_else(|| record_error("active run record is unavailable"))?;
-                run.extend_message_ids(message_ids);
+                run.extend_message_ids_at_step(message_ids, step);
+                state.skill_activations.extend(skill_activations);
                 state.persisted_message_count = persisted_message_count;
                 state.message_count = message_count;
                 Ok(())
             }
-            Self::Child { task } => {
+            Self::Child { task, session } => {
                 let mut state = lock_child(task)?;
                 let journal = state
                     .journal
                     .as_mut()
                     .ok_or_else(|| record_error("child conversation is unavailable"))?;
                 journal
-                    .complete_tool_exchange(task.journal_owner(), receipt, results)
+                    .complete_tool_exchange_with_trailing(
+                        task.journal_owner(),
+                        receipt,
+                        results,
+                        activation_message
+                            .map(ConversationMessage::User)
+                            .into_iter()
+                            .collect(),
+                    )
                     .map_err(|_| record_error("child journal rejected persisted tool exchange"))?;
                 state.persisted_message_count = journal.message_count();
+                drop(state);
+                lock_parent(session)?
+                    .skill_activations
+                    .extend(skill_activations);
                 Ok(())
             }
         }
@@ -185,6 +233,7 @@ impl RecorderTarget {
         &self,
         store: &dyn RuntimeStore,
         receipt: ExchangeReceipt,
+        step: u32,
         assistant: AssistantMessage,
         created_at_ms: i64,
     ) -> Result<(), crate::StoreError> {
@@ -195,17 +244,19 @@ impl RecorderTarget {
                         receipt,
                         session_id: session.id().clone(),
                         run_id: run_id.clone(),
+                        step,
                         assistant,
                         created_at_ms,
                     })
                     .await
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 store
                     .begin_child_tool_exchange(PendingChildToolExchange {
                         receipt,
                         child_task_id: task.id().clone(),
                         session_id: task.session_id().clone(),
+                        step,
                         assistant,
                         created_at_ms,
                     })
@@ -233,7 +284,7 @@ impl RecorderTarget {
                     })
                     .await
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 store
                     .mark_child_tool_execution_started(ChildToolExecutionStart {
                         receipt,
@@ -250,33 +301,36 @@ impl RecorderTarget {
     pub(super) async fn persist_complete(
         &self,
         store: &dyn RuntimeStore,
-        operation_id: String,
-        receipt: ExchangeReceipt,
-        results: Vec<ToolMessage>,
-        completed_at_ms: i64,
+        completion: PersistedToolExchangeCompletion,
     ) -> Result<(), crate::StoreError> {
         match self {
             Self::Parent { session, run_id } => {
                 store
                     .complete_tool_exchange(CompletedToolExchange {
-                        operation_id,
-                        receipt,
+                        operation_id: completion.operation_id,
+                        receipt: completion.receipt,
                         session_id: session.id().clone(),
                         run_id: run_id.clone(),
-                        results,
-                        completed_at_ms,
+                        step: completion.step,
+                        results: completion.results,
+                        activation_message: completion.activation_message,
+                        skill_activations: completion.skill_activations,
+                        completed_at_ms: completion.completed_at_ms,
                     })
                     .await
             }
-            Self::Child { task } => {
+            Self::Child { task, .. } => {
                 store
                     .complete_child_tool_exchange(CompletedChildToolExchange {
-                        operation_id,
-                        receipt,
+                        operation_id: completion.operation_id,
+                        receipt: completion.receipt,
                         child_task_id: task.id().clone(),
                         session_id: task.session_id().clone(),
-                        results,
-                        completed_at_ms,
+                        step: completion.step,
+                        results: completion.results,
+                        activation_message: completion.activation_message,
+                        skill_activations: completion.skill_activations,
+                        completed_at_ms: completion.completed_at_ms,
                     })
                     .await
             }
@@ -290,10 +344,59 @@ impl RecorderTarget {
                     state.is_faulted = true;
                 }
             }
-            Self::Child { task: _ } => {
+            Self::Child { .. } => {
                 // child 的 Recorder 错误会立即收敛当前独立 AgentExecution，并由控制器
                 // 可靠写入 failed 终态；它没有接受后续输入的会话级入口，无需第二份 fault flag。
             }
+        }
+    }
+
+    pub(super) fn committed_projection(&self) -> Result<(ConversationOwner, u64), RecordError> {
+        match self {
+            Self::Parent { session, .. } => {
+                let state = lock_parent(session)?;
+                Ok((
+                    ConversationOwner::MainSession {
+                        session_id: session.id().clone(),
+                    },
+                    state.body_generation,
+                ))
+            }
+            Self::Child { task, .. } => {
+                let state = lock_child(task)?;
+                Ok((
+                    ConversationOwner::ChildTask {
+                        session_id: task.session_id().clone(),
+                        child_task_id: task.id().clone(),
+                    },
+                    state.body_generation,
+                ))
+            }
+        }
+    }
+
+    /// 生成模型 Activation ledger 所需的冻结 Conversation 归属事实。
+    pub(super) fn skill_activation_context(
+        &self,
+    ) -> (
+        assistant_protocol::SessionId,
+        crate::SkillActivationOwner,
+        assistant_protocol::RunId,
+        String,
+    ) {
+        match self {
+            Self::Parent { session, run_id } => (
+                session.id().clone(),
+                crate::SkillActivationOwner::Session(session.id().clone()),
+                run_id.clone(),
+                session.skill_catalog().revision.clone(),
+            ),
+            Self::Child { task, session } => (
+                task.session_id().clone(),
+                crate::SkillActivationOwner::ChildTask(task.id().as_str().to_owned()),
+                task.journal_owner().clone(),
+                session.skill_catalog().revision.clone(),
+            ),
         }
     }
 }

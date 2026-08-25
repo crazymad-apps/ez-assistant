@@ -21,8 +21,8 @@ use crate::{
     RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
     ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle,
     SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionSummary, SystemContextSnapshot, WorkPlanSnapshot, WorkspaceId,
-    WorkspaceSummary,
+    SessionListFilter, SessionSummary, SkillDetailSnapshot, SkillManagementSnapshot,
+    SystemContextSnapshot, WorkPlanSnapshot, WorkspaceId, WorkspaceSummary,
 };
 
 /// 查询当前配置总体状态。
@@ -581,9 +581,63 @@ pub struct SubmitInputRequest {
     /// 按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 从目标 Session 冻结 Catalog 中选择的单个 Skill 名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skill_name: Option<String>,
     /// 可选的不透明请求身份；重复 key 直接返回首次结果。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<IdempotencyKey>,
+}
+
+/// 读取指定 Workspace 范围下四个固定 Root 的最新 Skill 管理投影。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListSkillsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<WorkspaceId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListSkillsResult {
+    pub snapshot: SkillManagementSnapshot,
+}
+
+/// 按名称读取指定管理范围内当前候选的安全详情与指令正文。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSkillDetailRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<WorkspaceId>,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSkillDetailResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<SkillDetailSnapshot>,
+}
+
+/// 以校验后的名称为唯一键切换全局 Skill 开关，并返回同范围的最新管理投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSkillEnabledRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<WorkspaceId>,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSkillEnabledResult {
+    pub snapshot: SkillManagementSnapshot,
 }
 
 /// 输入已持久化接受的结果。
@@ -1128,6 +1182,12 @@ pub enum RuntimeCommand {
     DeleteSession(DeleteSessionRequest),
     /// 列出 Session。
     ListSessions(ListSessionsRequest),
+    /// 读取当前本地 Skill 管理投影。
+    ListSkills(ListSkillsRequest),
+    /// 按需读取当前管理范围内的一项 Skill 正文。
+    GetSkillDetail(GetSkillDetailRequest),
+    /// 按名称启用或禁用 Skill。
+    SetSkillEnabled(SetSkillEnabledRequest),
     /// 查询 Session。
     GetSession(GetSessionRequest),
     /// 提交持久化输入。
@@ -1247,6 +1307,9 @@ pub enum RuntimeCommandResult {
     DeleteSession(DeleteSessionResult),
     /// Session 列表已返回。
     ListSessions(ListSessionsResult),
+    ListSkills(ListSkillsResult),
+    GetSkillDetail(GetSkillDetailResult),
+    SetSkillEnabled(SetSkillEnabledResult),
     /// Session 查询已返回。
     GetSession(GetSessionResult),
     /// 输入已接受。
@@ -1337,6 +1400,7 @@ mod tests {
             approval_mode: ApprovalMode::Ask,
             reasoning_effort: None,
             cancel_requested: false,
+            active_step: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
@@ -1463,6 +1527,7 @@ mod tests {
             message: "hello".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         });
         let value = serde_json::to_value(&command).expect("serialize command");
@@ -1499,6 +1564,7 @@ mod tests {
         }))
         .expect("minimal input request");
         assert!(minimal.attachment_ids.is_empty());
+        assert!(minimal.skill_name.is_none());
         assert_eq!(minimal.mode, SubmitInputMode::Normal);
 
         let request = SubmitInputRequest {
@@ -1510,6 +1576,7 @@ mod tests {
                 AttachmentId::new("attachment-2").expect("attachment id"),
                 AttachmentId::new("attachment-1").expect("attachment id"),
             ],
+            skill_name: None,
             idempotency_key: None,
         };
         assert_eq!(
@@ -1522,6 +1589,7 @@ mod tests {
             message: "ship".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         };
         assert_eq!(
@@ -1686,6 +1754,7 @@ mod tests {
                     message: "hello".to_owned(),
                     variant: AgentVariant::Build,
                     attachment_ids: Vec::new(),
+                    skill_name: None,
                     idempotency_key: None,
                 }),
                 "submit_input",

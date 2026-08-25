@@ -69,6 +69,7 @@ impl StorageEngine {
             cancel_requested: false,
             error: None,
             message_ids: Vec::new(),
+            message_steps: std::collections::HashMap::new(),
             created_at_ms: attempt.created_at_ms,
             started_at_ms: None,
             finished_at_ms: None,
@@ -93,6 +94,7 @@ impl StorageEngine {
                 session_id: commit.session_id,
                 run_id: commit.run_id,
                 messages: vec![ConversationMessage::User(message)],
+                message_step: None,
                 created_at_ms: commit.created_at_ms,
             },
             AppendPurpose::UserMessage {
@@ -176,6 +178,7 @@ impl StorageEngine {
                 session_id: settlement.session_id,
                 run_id: settlement.run_id,
                 messages: settlement.messages,
+                message_step: settlement.message_step,
                 created_at_ms: settlement.finished_at_ms,
             },
             purpose,

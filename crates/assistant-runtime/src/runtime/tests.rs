@@ -4,7 +4,7 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,8 +24,9 @@ use agent_types::{
 };
 use assistant_protocol::{
     ApprovalSnapshot, ConnectionValidationFailure, ConnectionValidationFailureKind,
-    ConnectionValidationOutcome, ListPendingApprovalsRequest, ModelConnectionTarget, RunId,
-    SetSessionApprovalModeRequest, ShutdownRuntimeRequest, SubmitInputRequest,
+    ConnectionValidationOutcome, GetSessionViewRequest, InterruptRunRequest,
+    ListPendingApprovalsRequest, ModelConnectionTarget, RunId, SetSessionApprovalModeRequest,
+    SetSessionModelRequest, ShutdownRuntimeRequest, SubmitInputRequest,
     ValidateModelConnectionRequest,
 };
 use serde_json::json;
@@ -411,6 +412,34 @@ impl ModelServiceFactory for FailingModelFactory {
         _request: ModelServiceFactoryRequest<'_>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
         Err(ModelServiceFactoryError::new("fixture model build failed"))
+    }
+}
+
+struct FailOnceModelFactory {
+    model: Arc<dyn ModelService>,
+    should_fail: AtomicBool,
+}
+
+impl FailOnceModelFactory {
+    fn new(model: Arc<dyn ModelService>) -> Self {
+        Self {
+            model,
+            should_fail: AtomicBool::new(true),
+        }
+    }
+}
+
+impl ModelServiceFactory for FailOnceModelFactory {
+    fn create_model(
+        &self,
+        _request: ModelServiceFactoryRequest<'_>,
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        if self.should_fail.swap(false, Ordering::SeqCst) {
+            return Err(ModelServiceFactoryError::new(
+                "fixture first model build failed",
+            ));
+        }
+        Ok(ModelServiceBundle::text_only(self.model.clone()))
     }
 }
 

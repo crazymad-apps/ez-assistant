@@ -7,11 +7,11 @@ use agent_model::{
 use agent_testkit::{BodyStep, EventCollector, RecordedResponse, RecordedTransport};
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
-    FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice,
-    ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent,
-    ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin,
-    UserPart,
+    FileReferencesPart, FinishReason, InternalContextPart, MessageId, ModelIdentity,
+    OpaqueProviderState, PartId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall,
+    ToolCallId, ToolChoice, ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult,
+    ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 use serde_json::{Value, json};
 
@@ -80,10 +80,16 @@ fn runtime_user(id: &str, text: &str) -> ConversationMessage {
         origin: UserMessageOrigin::Runtime,
         transcript_visibility: TranscriptVisibility::Hidden,
         id: message_id(id),
-        parts: vec![UserPart::Injected(TextPart {
-            id: part_id(&format!("{id}-injected")),
-            text: text.to_owned(),
-        })],
+        parts: vec![UserPart::InternalContext(
+            InternalContextPart::new(
+                part_id(&format!("{id}-internal")),
+                format!("boundary-{id}"),
+                "runtime_context",
+                Some("runtime:context".to_owned()),
+                text,
+            )
+            .expect("internal context"),
+        )],
     })
 }
 

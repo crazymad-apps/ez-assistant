@@ -59,6 +59,7 @@ pub struct PendingChildToolExchange {
     pub receipt: ExchangeReceipt,
     pub child_task_id: ChildTaskId,
     pub session_id: SessionId,
+    pub step: u32,
     pub assistant: AssistantMessage,
     pub created_at_ms: i64,
 }
@@ -80,7 +81,12 @@ pub struct CompletedChildToolExchange {
     pub receipt: ExchangeReceipt,
     pub child_task_id: ChildTaskId,
     pub session_id: SessionId,
+    pub step: u32,
     pub results: Vec<ToolMessage>,
+    /// 与结果同一可靠提交追加的隐藏 Runtime Skill 上下文。
+    pub activation_message: Option<UserMessage>,
+    /// 与隐藏消息同一事务写入的 child Activation ledger。
+    pub skill_activations: Vec<crate::StoredSkillActivation>,
     pub completed_at_ms: i64,
 }
 

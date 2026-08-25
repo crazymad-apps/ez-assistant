@@ -99,8 +99,8 @@ pub struct ChatImageUrl {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 /// role 为 `assistant` 的原生消息；也用于非流式响应中的 message。
 ///
-/// `reasoning_content` 等随 ChatProtocolAdapter 变化的 reasoning 字段由 `extra` 平铺承接，
-/// 解码时再按 [`crate::ChatProtocolAdapter::reasoning_content_field`] 查取。
+/// `reasoning` / `reasoning_content` 等随 ChatProtocolAdapter 变化的字段由 `extra` 平铺承接，
+/// 解码时再按 Adapter 声明的有序响应字段查取。
 pub struct ChatAssistantMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// 反序列化独立 message 时吞掉的 role 标记；编码时 role 由外层 [`ChatMessage`] 写入。
@@ -309,7 +309,7 @@ pub struct ChatChunkChoice {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 /// 流式 chunk 的增量内容。
 ///
-/// `reasoning_content` 等随 ChatProtocolAdapter 变化的 reasoning 字段由 `extra` 平铺承接。
+/// `reasoning` / `reasoning_content` 等随 ChatProtocolAdapter 变化的字段由 `extra` 平铺承接。
 pub struct ChatChunkDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// 首个 chunk 携带的角色声明；Codec 不消费，仅用来避免落入 `extra`。

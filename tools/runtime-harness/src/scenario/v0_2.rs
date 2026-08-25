@@ -83,7 +83,10 @@ async fn run_plain_text() -> Result<ScenarioReport, HarnessError> {
     .await?;
 
     ensure(
-        evidence.outcome == ExecutionOutcome::Completed(final_message),
+        matches!(
+            &evidence.outcome,
+            ExecutionOutcome::Completed { message, .. } if message == &final_message
+        ),
         "plain_text did not complete with the scripted message",
     )?;
     ensure(
@@ -127,7 +130,10 @@ async fn run_single_tool_loop() -> Result<ScenarioReport, HarnessError> {
     .await?;
 
     ensure(
-        evidence.outcome == ExecutionOutcome::Completed(final_message),
+        matches!(
+            &evidence.outcome,
+            ExecutionOutcome::Completed { message, .. } if message == &final_message
+        ),
         "single_tool_loop did not reach its scripted final message",
     )?;
     ensure(
@@ -271,7 +277,10 @@ async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
     ensure(
         matches!(
             establishment.outcome,
-            ExecutionOutcome::Failed(ExecutionError::Model(ModelError::Transport { .. }))
+            ExecutionOutcome::Failed {
+                error: ExecutionError::Model(ModelError::Transport { .. }),
+                ..
+            }
         ),
         "controlled_failure establishment subcase did not fail as expected",
     )?;
@@ -308,7 +317,7 @@ async fn run_controlled_failure() -> Result<ScenarioReport, HarnessError> {
     )
     .await?;
     ensure(
-        matches!(tool_evidence.outcome, ExecutionOutcome::Completed(_)),
+        matches!(tool_evidence.outcome, ExecutionOutcome::Completed { .. }),
         "controlled_failure tool error subcase did not continue",
     )?;
     ensure(
@@ -368,7 +377,7 @@ async fn run_cancelled() -> Result<ScenarioReport, HarnessError> {
     let report = build_report("cancelled", run_id, runtime.snapshot()?, &events, &outcome)?;
 
     ensure(
-        outcome == ExecutionOutcome::Cancelled,
+        matches!(outcome, ExecutionOutcome::Cancelled { .. }),
         "cancelled scenario did not converge to Cancelled",
     )?;
     ensure(
@@ -414,7 +423,10 @@ async fn run_observation_disconnect() -> Result<ScenarioReport, HarnessError> {
         .as_ref()
         .ok_or_else(|| scenario_error("observation_disconnect lost its Run snapshot"))?;
     ensure(
-        outcome == ExecutionOutcome::Completed(final_message),
+        matches!(
+            &outcome,
+            ExecutionOutcome::Completed { message, .. } if message == &final_message
+        ),
         "observation_disconnect changed the completion result",
     )?;
     ensure(
@@ -507,10 +519,11 @@ fn build_report(
         format!("{name} reported the wrong Run ID"),
     )?;
     let expected_status = match outcome {
-        ExecutionOutcome::Completed(_) => RunStatus::Completed,
-        ExecutionOutcome::Failed(_) => RunStatus::Failed,
-        ExecutionOutcome::Cancelled => RunStatus::Cancelled,
+        ExecutionOutcome::Completed { .. } => RunStatus::Completed,
+        ExecutionOutcome::Failed { .. } => RunStatus::Failed,
+        ExecutionOutcome::Cancelled { .. } => RunStatus::Cancelled,
         ExecutionOutcome::CompactionRequired { .. } => RunStatus::CompactionRequired,
+        ExecutionOutcome::ContinuationRequired { .. } => RunStatus::Failed,
     };
     ensure(
         run.status == expected_status,

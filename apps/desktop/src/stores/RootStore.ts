@@ -406,8 +406,9 @@ export class RootStore {
     variant: AgentVariant,
     attachment_ids: readonly AttachmentId[] = [],
     mode: SubmitInputMode = "normal",
+    skill_name: string | null = null,
   ): Promise<boolean> {
-    return this.#run_interaction.submitInput(session_id, message, variant, attachment_ids, mode);
+    return this.#run_interaction.submitInput(session_id, message, variant, attachment_ids, mode, skill_name);
   }
 
   async exportSession(session_id: SessionId, title: string): Promise<boolean> {

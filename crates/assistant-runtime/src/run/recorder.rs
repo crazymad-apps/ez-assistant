@@ -2,23 +2,48 @@
 
 mod target;
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
-use agent_core::{ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture};
+use agent_core::{
+    ExchangeCompletion, ExchangeReceipt, ExecutionRecorder, RecordError, RecordFuture,
+};
 use agent_types::{AssistantMessage, ToolCallId, ToolMessage};
 use assistant_protocol::{RunId, ToolCallId as ProtocolToolCallId};
 
 use crate::{
-    RuntimeStore, delegation::ChildTaskRecord as ChildTaskRecordImpl, id,
+    RuntimeStore,
+    delegation::ChildTaskRecord as ChildTaskRecordImpl,
+    id,
+    internal_boundary::{
+        InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+    },
+    observation::ObservationCoordinator,
     session::SessionController,
+    skill::{
+        SkillActivationLatch, SkillActivationTrigger, StoredSkillActivation,
+        render_model_activation,
+    },
 };
 
-use self::target::RecorderTarget;
+use self::target::{PersistedToolExchangeCompletion, RecorderTarget};
+
+/// 一批成功 `load_skill` 调用生成的冻结持久化事实。
+struct PreparedSkillActivations {
+    message: Option<agent_types::UserMessage>,
+    activations: Vec<StoredSkillActivation>,
+    call_ids: Vec<ToolCallId>,
+}
 
 /// 把 Core 的两阶段落账调用绑定到唯一的规范 Conversation 目标。
 pub(crate) struct RuntimeRecorder {
     target: RecorderTarget,
     store: Arc<dyn RuntimeStore>,
+    pending_steps: Mutex<HashMap<String, u32>>,
+    events: ObservationCoordinator,
+    skill_activation_latch: Arc<SkillActivationLatch>,
 }
 
 impl RuntimeRecorder {
@@ -26,17 +51,31 @@ impl RuntimeRecorder {
         session: Arc<SessionController>,
         run_id: RunId,
         store: Arc<dyn RuntimeStore>,
+        events: ObservationCoordinator,
+        skill_activation_latch: Arc<SkillActivationLatch>,
     ) -> Self {
         Self {
             target: RecorderTarget::parent(session, run_id),
             store,
+            pending_steps: Mutex::new(HashMap::new()),
+            events,
+            skill_activation_latch,
         }
     }
 
-    pub(crate) fn for_child(task: Arc<ChildTaskRecordImpl>, store: Arc<dyn RuntimeStore>) -> Self {
+    pub(crate) fn for_child(
+        task: Arc<ChildTaskRecordImpl>,
+        session: Arc<SessionController>,
+        store: Arc<dyn RuntimeStore>,
+        events: ObservationCoordinator,
+        skill_activation_latch: Arc<SkillActivationLatch>,
+    ) -> Self {
         Self {
-            target: RecorderTarget::child(task),
+            target: RecorderTarget::child(task, session),
             store,
+            pending_steps: Mutex::new(HashMap::new()),
+            events,
+            skill_activation_latch,
         }
     }
 }
@@ -44,6 +83,7 @@ impl RuntimeRecorder {
 impl ExecutionRecorder for RuntimeRecorder {
     fn begin_tool_exchange<'a>(
         &'a self,
+        step: u32,
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
@@ -65,6 +105,7 @@ impl ExecutionRecorder for RuntimeRecorder {
                 .persist_begin(
                     self.store.as_ref(),
                     receipt.clone(),
+                    step,
                     assistant.clone(),
                     created_at_ms,
                 )
@@ -75,8 +116,12 @@ impl ExecutionRecorder for RuntimeRecorder {
                 return Err(record_error("tool exchange begin could not be persisted"));
             }
             self.target
-                .commit_begin(receipt.clone(), assistant)
+                .commit_begin(receipt.clone(), step, assistant)
                 .inspect_err(|_| self.target.fault())?;
+            self.pending_steps
+                .lock()
+                .map_err(|_| record_error("tool exchange step registry is unavailable"))?
+                .insert(receipt.as_str().to_owned(), step);
             Ok(receipt)
         })
     }
@@ -102,25 +147,42 @@ impl ExecutionRecorder for RuntimeRecorder {
         &'a self,
         receipt: &'a ExchangeReceipt,
         results: Vec<ToolMessage>,
-    ) -> RecordFuture<'a, ()> {
+    ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let _mutation = self.target.mutation().await;
-            let batch = self
-                .target
-                .validate_complete(receipt, &results)
-                .inspect_err(|_| self.target.fault())?;
-            let operation_id = id::generate("append")
-                .map_err(|_| record_error("storage operation id could not be allocated"))?;
             let completed_at_ms = crate::runtime::now_ms()
                 .map_err(|_| record_error("tool exchange time could not be recorded"))?;
+            let staged = self
+                .skill_activation_latch
+                .staged_for_results(&results)
+                .map_err(|_| record_error("skill activation latch is unavailable"))?;
+            let prepared = prepare_skill_activations(&self.target, staged, completed_at_ms)?;
+            let batch = self
+                .target
+                .validate_complete(receipt, &results, prepared.message.as_ref())
+                .inspect_err(|_| self.target.fault())?;
+            let step = self
+                .pending_steps
+                .lock()
+                .map_err(|_| record_error("tool exchange step registry is unavailable"))?
+                .get(receipt.as_str())
+                .copied()
+                .ok_or_else(|| record_error("tool exchange step is unavailable"))?;
+            let operation_id = id::generate("append")
+                .map_err(|_| record_error("storage operation id could not be allocated"))?;
             if self
                 .target
                 .persist_complete(
                     self.store.as_ref(),
-                    operation_id,
-                    receipt.clone(),
-                    results.clone(),
-                    completed_at_ms,
+                    PersistedToolExchangeCompletion {
+                        operation_id,
+                        receipt: receipt.clone(),
+                        step,
+                        results: results.clone(),
+                        activation_message: prepared.message.clone(),
+                        skill_activations: prepared.activations.clone(),
+                        completed_at_ms,
+                    },
                 )
                 .await
                 .is_err()
@@ -131,10 +193,99 @@ impl ExecutionRecorder for RuntimeRecorder {
                 ));
             }
             self.target
-                .commit_complete(receipt, results, &batch)
-                .inspect_err(|_| self.target.fault())
+                .commit_complete(
+                    receipt,
+                    step,
+                    results,
+                    prepared.message,
+                    prepared.activations,
+                    &batch,
+                )
+                .inspect_err(|_| self.target.fault())?;
+            self.skill_activation_latch
+                .commit(&prepared.call_ids)
+                .map_err(|_| record_error("skill activation latch could not be committed"))?;
+            let (owner, generation) = self.target.committed_projection()?;
+            let _ = self
+                .events
+                .send(assistant_protocol::RuntimeEvent::ConversationCommitted {
+                    owner: owner.clone(),
+                    generation,
+                });
+            let _ = self
+                .events
+                .send(assistant_protocol::RuntimeEvent::StepCommitted {
+                    owner,
+                    step,
+                    generation,
+                });
+            self.pending_steps
+                .lock()
+                .map_err(|_| record_error("tool exchange step registry is unavailable"))?
+                .remove(receipt.as_str());
+            Ok(ExchangeCompletion {
+                continuation_required: !prepared.call_ids.is_empty(),
+            })
         })
     }
+}
+
+fn prepare_skill_activations(
+    target: &RecorderTarget,
+    staged: Vec<(ToolCallId, crate::SessionSkillDefinition)>,
+    created_at_ms: i64,
+) -> Result<PreparedSkillActivations, RecordError> {
+    if staged.is_empty() {
+        return Ok(PreparedSkillActivations {
+            message: None,
+            activations: Vec::new(),
+            call_ids: Vec::new(),
+        });
+    }
+    let (session_id, owner, run_id, catalog_revision) = target.skill_activation_context();
+    let first = &staged[0].1;
+    let (mut message, _) = InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
+        source: InternalBoundarySource::SkillActivation,
+        retention_key: Some(format!("skill:{}", first.name.as_str())),
+        text: render_model_activation(&catalog_revision, first),
+    })
+    .map_err(|_| record_error("skill activation boundary could not be constructed"))?;
+    for (_, definition) in staged.iter().skip(1) {
+        InternalBoundaryCoordinator::append(
+            &mut message,
+            InternalBoundaryRequest {
+                source: InternalBoundarySource::SkillActivation,
+                retention_key: Some(format!("skill:{}", definition.name.as_str())),
+                text: render_model_activation(&catalog_revision, definition),
+            },
+        )
+        .map_err(|_| record_error("skill activation boundary could not be constructed"))?;
+    }
+    let activations = staged
+        .iter()
+        .map(|(_, definition)| {
+            Ok(StoredSkillActivation {
+                activation_id: id::generate("activation")
+                    .map_err(|_| record_error("skill activation id could not be allocated"))?,
+                session_id: session_id.clone(),
+                owner: owner.clone(),
+                run_id: Some(run_id.clone()),
+                input_id: None,
+                message_id: message.id.clone(),
+                name: definition.name.clone(),
+                catalog_revision: catalog_revision.clone(),
+                definition_digest: definition.definition_digest.clone(),
+                trigger: SkillActivationTrigger::Model,
+                created_at_ms,
+            })
+        })
+        .collect::<Result<Vec<_>, RecordError>>()?;
+    let call_ids = staged.into_iter().map(|(call_id, _)| call_id).collect();
+    Ok(PreparedSkillActivations {
+        message: Some(message),
+        activations,
+        call_ids,
+    })
 }
 
 pub(super) fn record_error(message: &'static str) -> RecordError {
@@ -174,6 +325,7 @@ mod tests {
                 model_key: ModelKey::new("fixture").expect("model key"),
                 reasoning_effort: None,
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
+                skill_catalog: crate::SessionSkillCatalog::legacy_unavailable(),
                 environment: SessionExecutionEnvironment {
                     workspace_id: None,
                     working_directory: "/volatile/session/private".to_owned(),
@@ -197,6 +349,7 @@ mod tests {
                 agent_variant: AgentVariant::Build,
                 origin: crate::InputOrigin::User,
                 goal_binding: None,
+                skill_activation: None,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),
                 new_goal: None,
@@ -235,10 +388,15 @@ mod tests {
             .load_child_conversation(&session_id, &child_task_id)
             .await
             .expect("load child conversation");
-        let stored = store
-            .load_runtime()
-            .await
-            .expect("load child projection")
+        let recovered = store.load_runtime().await.expect("load child projection");
+        let session = Arc::new(SessionController::new(
+            recovered
+                .sessions
+                .into_iter()
+                .find(|session| session.session_id == session_id)
+                .expect("stored parent session"),
+        ));
+        let stored = recovered
             .child_tasks
             .into_iter()
             .find(|task| task.child_task_id == child_task_id)
@@ -246,23 +404,32 @@ mod tests {
         let task = Arc::new(
             ChildTaskRecord::recovered(&stored, Some(conversation)).expect("recover child record"),
         );
-        let recorder = RuntimeRecorder::for_child(task, store.clone());
+        let recorder = RuntimeRecorder::for_child(
+            task,
+            session,
+            store.clone(),
+            crate::observation::ObservationCoordinator::new(16),
+            Arc::new(crate::skill::SkillActivationLatch::new(Vec::new())),
+        );
         let call_id = ToolCallId::new("child-call").expect("call id");
         let receipt = recorder
-            .begin_tool_exchange(AssistantMessage {
-                id: MessageId::new("child-assistant-tool").expect("message id"),
-                model: ModelIdentity::new(
-                    ProviderId::new("fixture").expect("provider id"),
-                    "fixture",
-                ),
-                parts: vec![AssistantPart::ToolCall(ToolCall {
-                    id: call_id.clone(),
-                    name: ToolName::new("fixture").expect("tool name"),
-                    arguments: json!({}),
-                })],
-                finish_reason: FinishReason::ToolCalls,
-                usage: None,
-            })
+            .begin_tool_exchange(
+                1,
+                AssistantMessage {
+                    id: MessageId::new("child-assistant-tool").expect("message id"),
+                    model: ModelIdentity::new(
+                        ProviderId::new("fixture").expect("provider id"),
+                        "fixture",
+                    ),
+                    parts: vec![AssistantPart::ToolCall(ToolCall {
+                        id: call_id.clone(),
+                        name: ToolName::new("fixture").expect("tool name"),
+                        arguments: json!({}),
+                    })],
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: None,
+                },
+            )
             .await
             .expect("begin child exchange");
         recorder

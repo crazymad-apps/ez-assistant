@@ -138,14 +138,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== 最终结果 ===");
     match &outcome {
-        ExecutionOutcome::Completed(message) => {
+        ExecutionOutcome::Completed { message, .. } => {
             println!("状态：Completed");
             println!("回答：{}", assistant_text(message));
         }
-        ExecutionOutcome::Failed(error) => println!("状态：Failed ({error})"),
-        ExecutionOutcome::Cancelled => println!("状态：Cancelled"),
+        ExecutionOutcome::Failed { error, .. } => println!("状态：Failed ({error})"),
+        ExecutionOutcome::Cancelled { .. } => println!("状态：Cancelled"),
         ExecutionOutcome::CompactionRequired { reason, step, .. } => {
             println!("状态：CompactionRequired ({reason:?}, step={step})")
+        }
+        ExecutionOutcome::ContinuationRequired { reason, .. } => {
+            println!("状态：ContinuationRequired ({reason:?})")
         }
     }
 
@@ -207,14 +210,16 @@ fn describe_event(event: &AgentEvent) -> String {
         AgentEvent::StepStarted { step } => format!("step.started #{step}"),
         AgentEvent::TextDelta { delta, .. } => format!("text.delta: {delta}"),
         AgentEvent::ReasoningDelta { delta, .. } => format!("reasoning.delta: {delta}"),
-        AgentEvent::ToolProposed { call } => {
+        AgentEvent::ToolProposed { call, .. } => {
             format!("tool.proposed: {} {}", call.name, call.arguments)
         }
-        AgentEvent::ToolStarted { call_id } => format!("tool.started: {call_id}"),
+        AgentEvent::ToolStarted { call_id, .. } => format!("tool.started: {call_id}"),
         AgentEvent::ToolOutput { channel, chunk, .. } => {
             format!("tool.output ({channel:?}): {chunk}")
         }
-        AgentEvent::ToolCompleted { call_id, status } => {
+        AgentEvent::ToolCompleted {
+            call_id, status, ..
+        } => {
             let status = match status {
                 ToolCompletionStatus::Success => "success",
                 ToolCompletionStatus::Failed => "failed",
@@ -222,6 +227,7 @@ fn describe_event(event: &AgentEvent) -> String {
             format!("tool.completed: {call_id} ({status})")
         }
         AgentEvent::GuardrailTriggered {
+            step: _,
             kind,
             mode,
             threshold,
@@ -231,6 +237,13 @@ fn describe_event(event: &AgentEvent) -> String {
             "guardrail.triggered: {kind:?} mode={mode:?} threshold={threshold} \
              observed={observed} call={call_id}"
         ),
+        AgentEvent::ExecutionContinuationRequired {
+            reason,
+            dropped_events,
+            ..
+        } => {
+            format!("execution.continuation_required: {reason:?} (dropped_events={dropped_events})")
+        }
         AgentEvent::ExecutionCompleted { dropped_events, .. } => {
             format!("execution.completed (dropped_events={dropped_events})")
         }

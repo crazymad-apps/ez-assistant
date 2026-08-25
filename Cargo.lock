@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-openai-compatible"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -190,6 +190,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "annotate-snippets"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
+dependencies = [
+ "anstyle",
+ "memchr",
+ "unicode-width",
 ]
 
 [[package]]
@@ -249,8 +260,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "assistant-protocol"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -260,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -290,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -318,6 +335,7 @@ dependencies = [
  "rusqlite",
  "schemars 1.2.1",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2",
  "tempfile",
@@ -960,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1166,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1391,6 +1409,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "encoding_rs_io"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1466,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
@@ -1947,6 +1974,16 @@ dependencies = [
  "glib-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "granit-parser"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ccd1be9ebf2bd5520dbfcfb72b70ef492f654061299a097056f3e73410e38ec"
+dependencies = [
+ "arraydeque",
+ "smallvec",
 ]
 
 [[package]]
@@ -2693,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3620,7 +3657,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3722,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3874,7 +3911,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4047,6 +4084,20 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1ec1f5cac0eb96063c64b28705255a7ed6e7d77f95c1d25e9f8b8c928006ce1"
+dependencies = [
+ "annotate-snippets",
+ "encoding_rs_io",
+ "granit-parser",
+ "num-traits",
+ "serde_core",
+ "smallvec",
 ]
 
 [[package]]
@@ -5351,6 +5402,12 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "untrusted"

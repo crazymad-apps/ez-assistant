@@ -11,6 +11,7 @@ mod id;
 mod memory;
 mod permission;
 mod product;
+mod skill;
 mod snapshot;
 
 pub use command::{
@@ -26,11 +27,12 @@ pub use command::{
     GetConfigStatusResult, GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult,
     GetModelRequest, GetModelResult, GetPermissionDocumentRequest, GetPermissionDocumentResult,
     GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult, GetSessionRequest,
-    GetSessionResult, GetSystemContextRequest, GetSystemContextResult, GetWorkspaceRequest,
-    GetWorkspaceResult, ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest,
-    ListChildTasksResult, ListModelsRequest, ListModelsResult, ListPendingApprovalsRequest,
-    ListPendingApprovalsResult, ListPinnedMemoriesRequest, ListPinnedMemoriesResult,
-    ListRunsRequest, ListRunsResult, ListSessionsRequest, ListSessionsResult,
+    GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult, GetSystemContextRequest,
+    GetSystemContextResult, GetWorkspaceRequest, GetWorkspaceResult, ListAttachmentsRequest,
+    ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult, ListModelsRequest,
+    ListModelsResult, ListPendingApprovalsRequest, ListPendingApprovalsResult,
+    ListPinnedMemoriesRequest, ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult,
+    ListSessionsRequest, ListSessionsResult, ListSkillsRequest, ListSkillsResult,
     ListWorkspacesRequest, ListWorkspacesResult, ModelCatalogEntrySnapshot, ModelCatalogSnapshot,
     ModelConfigurationInput, ModelConnectionTarget, ModelCredentialChange,
     PinnedMemoryMutationResult, PrepareDeleteSessionRequest, PrepareDeleteSessionResult,
@@ -45,10 +47,10 @@ pub use command::{
     SetSessionApprovalModeRequest, SetSessionApprovalModeResult, SetSessionModelRequest,
     SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
     SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
-    SetSessionVariantResult, ShutdownRuntimeRequest, ShutdownRuntimeResult, StopGoalRequest,
-    StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult, UpdateModelRequest,
-    UpdatePinnedMemoryRequest, UploadAttachmentResult, ValidateModelConnectionRequest,
-    ValidateModelConnectionResult,
+    SetSessionVariantResult, SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest,
+    ShutdownRuntimeResult, StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest,
+    SubmitInputResult, UpdateModelRequest, UpdatePinnedMemoryRequest, UploadAttachmentResult,
+    ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
@@ -97,6 +99,12 @@ pub use product::{
     SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
     ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
     ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+};
+pub use skill::{
+    ActiveSkillSnapshot, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
+    SkillActivationTagSnapshot, SkillActivationTriggerSnapshot, SkillDetailSnapshot,
+    SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot, SkillHealthSnapshot,
+    SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
 };
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,

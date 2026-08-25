@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     FinishReason, MessageId, ModelIdentity, PartId, ProtocolId, ProviderId, TokenUsage, ToolCallId,
-    ToolName, ToolResult,
+    ToolName, ToolResult, insertion::InternalContextPart,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -256,6 +256,8 @@ pub enum UserPart {
     Text(TextPart),
     /// 上层应用注入的约束/上下文文本；UI 展示时隐藏，回放时仍进入发给模型的内容。
     Injected(TextPart),
+    /// 结构化的 Runtime/上下文内部指令；正文进入模型，但不作为用户正文展示。
+    InternalContext(InternalContextPart),
     /// 用户可见的附件引用；不包含文件正文或应用层 Attachment ID。
     FileReferences(FileReferencesPart),
 }
@@ -817,7 +819,9 @@ mod tests {
             .iter()
             .filter_map(|part| match part {
                 UserPart::Text(text) => Some(text),
-                UserPart::Injected(_) | UserPart::FileReferences(_) => None,
+                UserPart::Injected(_)
+                | UserPart::InternalContext(_)
+                | UserPart::FileReferences(_) => None,
             })
             .collect();
         assert_eq!(visible.len(), 1);
@@ -841,6 +845,62 @@ mod tests {
         let encoded = serde_json::to_value(decoded).expect("serialize current user message");
         assert_eq!(encoded["origin"], "user");
         assert_eq!(encoded["transcript_visibility"], "visible");
+    }
+
+    #[test]
+    fn internal_context_round_trips_without_changing_legacy_injected_shape() {
+        let message = UserMessage {
+            id: id("message_internal"),
+            origin: UserMessageOrigin::Runtime,
+            transcript_visibility: TranscriptVisibility::Hidden,
+            parts: vec![UserPart::InternalContext(
+                crate::InternalContextPart::new(
+                    id("part_internal"),
+                    "boundary_1",
+                    "goal_continuation",
+                    Some("goal:1".to_owned()),
+                    "continue",
+                )
+                .expect("internal context"),
+            )],
+        };
+        let encoded = serde_json::to_value(&message).expect("serialize message");
+        assert_eq!(encoded["parts"][0]["type"], "internal_context");
+        assert_eq!(
+            serde_json::from_value::<UserMessage>(encoded).expect("deserialize message"),
+            message
+        );
+
+        let legacy = serde_json::json!({
+            "id": "message_legacy_injected",
+            "parts": [{
+                "type": "injected",
+                "data": {"id": "part_legacy_injected", "text": "legacy"}
+            }]
+        });
+        assert!(matches!(
+            serde_json::from_value::<UserMessage>(legacy)
+                .expect("deserialize legacy injected")
+                .parts
+                .as_slice(),
+            [UserPart::Injected(_)]
+        ));
+
+        let invalid = serde_json::json!({
+            "id": "message_invalid_internal",
+            "origin": "runtime",
+            "transcript_visibility": "hidden",
+            "parts": [{
+                "type": "internal_context",
+                "data": {
+                    "id": "part_invalid_internal",
+                    "boundary_id": "",
+                    "kind": "goal_continuation",
+                    "text": "continue"
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<UserMessage>(invalid).is_err());
     }
 
     #[test]

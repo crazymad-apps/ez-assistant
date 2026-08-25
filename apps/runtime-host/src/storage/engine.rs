@@ -145,6 +145,7 @@ impl StorageEngine {
             child_tasks: self.load_child_tasks()?,
             work_plans: self.load_all_work_plans()?,
             goals: self.load_all_goals()?,
+            skill_activations: self.load_skill_activations()?,
         })
     }
 
@@ -153,13 +154,17 @@ impl StorageEngine {
         session: NewStoredSession,
     ) -> StorageResult<StoredSession> {
         super::filesystem::validate_session_component(&session.session_id)?;
+        let prompt_json = serde_json::to_string(&session.system_prompt)
+            .map_err(|source| internal_error("system prompt could not be encoded", source))?;
+        let skill_catalog_json = serde_json::to_string(&session.skill_catalog)
+            .map_err(|source| internal_error("skill catalog could not be encoded", source))?;
         let paths = self.prepare_new_session_directories(&session)?;
         let body_path = body_path(&paths.session_directory, 1);
         create_new_private_file(&body_path)?;
-        sync_directory(&paths.session_directory)?;
-
-        let prompt_json = serde_json::to_string(&session.system_prompt)
-            .map_err(|source| internal_error("system prompt could not be encoded", source))?;
+        if let Err(error) = sync_directory(&paths.session_directory) {
+            remove_created_session_directories(&paths);
+            return Err(error);
+        }
         let persisted = (|| -> StorageResult<()> {
             let transaction = self
                 .connection
@@ -170,16 +175,17 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
+                        session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', 1, 0, ?8, ?8, NULL, 0, ?9)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 1, 0, ?9, ?9, NULL, 0, ?10)",
                     params![
                         session.session_id.as_str(),
                         session.title,
                         session.model_key.as_str(),
                         session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
+                        skill_catalog_json,
                         agent_variant_value(session.current_variant),
                         approval_mode_value(session.approval_mode),
                         session.created_at_ms,
@@ -225,6 +231,7 @@ impl StorageEngine {
             model_key: session.model_key,
             reasoning_effort: session.reasoning_effort,
             system_prompt: session.system_prompt,
+            skill_catalog: session.skill_catalog,
             environment: session.environment,
             lifecycle: StoredSessionLifecycle::Active,
             current_variant: session.current_variant,
@@ -395,7 +402,7 @@ impl StorageEngine {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant,
+                "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
@@ -415,13 +422,14 @@ impl StorageEngine {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, i64>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, String>(14)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, String>(15)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -434,6 +442,7 @@ impl StorageEngine {
                 model_key,
                 reasoning_effort,
                 prompt_json,
+                skill_catalog_json,
                 current_variant,
                 approval_mode,
                 lifecycle,
@@ -460,6 +469,14 @@ impl StorageEngine {
                 serde_json::from_str(&prompt_json).map_err(|source| {
                     invalid_data_with_source("stored system prompt is invalid", source)
                 })?;
+            let skill_catalog: assistant_runtime::SessionSkillCatalog =
+                serde_json::from_str(&skill_catalog_json).map_err(|source| {
+                    invalid_data_with_source("stored skill catalog is invalid", source)
+                })?;
+            skill_catalog.validate_structure().map_err(|source| {
+                invalid_data_with_source("stored skill catalog structure is invalid", source)
+            })?;
+            let environment = self.load_session_environment(&parsed_session_id)?;
             let lifecycle = match lifecycle.as_str() {
                 "active" => StoredSessionLifecycle::Active,
                 "archived" => StoredSessionLifecycle::Archived,
@@ -471,7 +488,8 @@ impl StorageEngine {
                 model_key: parsed_model_key,
                 reasoning_effort: parse_reasoning_effort(reasoning_effort)?,
                 system_prompt,
-                environment: self.load_session_environment(&parsed_session_id)?,
+                skill_catalog,
+                environment,
                 lifecycle,
                 current_variant: parse_agent_variant(&current_variant)?,
                 approval_mode: parse_approval_mode(&approval_mode)?,

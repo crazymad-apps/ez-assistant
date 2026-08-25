@@ -184,6 +184,9 @@ fn summarize_agent_event(event: &AgentEvent) -> String {
         AgentEvent::ExecutionCompactionRequired { .. } => {
             "agent_event execution_compaction_required".into()
         }
+        AgentEvent::ExecutionContinuationRequired { .. } => {
+            "agent_event execution_continuation_required".into()
+        }
     }
 }
 

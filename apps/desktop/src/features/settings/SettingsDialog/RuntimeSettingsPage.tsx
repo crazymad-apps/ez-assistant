@@ -4,6 +4,7 @@ import { SelectionPopover, type SelectionOption } from "../../../components/Sele
 import type { DesktopCloseBehavior } from "../../../native-bridge/desktopPreferences";
 import { openRuntimeHome } from "../../../native-bridge/runtimeHome";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
 const close_behavior_options: readonly SelectionOption<DesktopCloseBehavior>[] = [
@@ -43,18 +44,19 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
     try {
       await openRuntimeHome();
     } catch (error: unknown) {
-      settings.showError(error instanceof Error ? error.message : "无法打开 Runtime Home。");
+      settings.showError(error instanceof Error ? error.message : "无法打开运行时目录。");
     }
   }
 
   return (
-    <section>
-      <div className={styles.page_header}>
-        <h3>Runtime</h3>
+    <SettingsPageContainer
+      actions={(
         <button disabled={settings.pending_action !== null} onClick={() => void settings.reloadConfiguration()} type="button">
           重新加载配置
         </button>
-      </div>
+      )}
+      title="运行时"
+    >
       <div className={styles.runtime_grid}>
         <article>
           <h4>连接</h4>
@@ -63,14 +65,14 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
             <div><dt>生命周期</dt><dd>{runtime_lifecycle ?? "—"}</dd></div>
             <div><dt>实例</dt><dd title={connection.instance_id ?? undefined}>{connection.instance_id ?? "—"}</dd></div>
             <div><dt>本地地址</dt><dd>{connection.address ?? "—"}</dd></div>
-            <div><dt>Runtime 版本</dt><dd>{capabilities?.runtime_version ?? "—"}</dd></div>
+            <div><dt>运行时版本</dt><dd>{capabilities?.runtime_version ?? "—"}</dd></div>
             <div><dt>协议版本</dt><dd>{capabilities?.protocol_version ?? "—"}</dd></div>
             <div><dt>最近连接</dt><dd>{formatDateTime(connection.last_connected_at_ms)}</dd></div>
             <div><dt>错误分类</dt><dd>{connection.last_error_code ?? "—"}</dd></div>
           </dl>
           <div className={styles.runtime_actions}>
             <button onClick={() => store.retryConnection()} type="button">重新连接</button>
-            <button onClick={() => void openHome()} type="button">打开 Runtime Home</button>
+            <button onClick={() => void openHome()} type="button">打开运行时目录</button>
           </div>
         </article>
         <article>
@@ -78,7 +80,7 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
           <dl>
             <div><dt>状态</dt><dd data-state={status?.state}>{configurationLabel(status?.state)}</dd></div>
             <div><dt>默认模型</dt><dd>{status?.default_model ?? "—"}</dd></div>
-            <div><dt>Schema</dt><dd>{status?.schema_version ?? "—"}</dd></div>
+            <div><dt>结构版本</dt><dd>{status?.schema_version ?? "—"}</dd></div>
             <div><dt>修订</dt><dd title={status?.revision ?? undefined}>{status?.revision?.slice(0, 12) ?? "—"}</dd></div>
           </dl>
         </article>
@@ -86,14 +88,14 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
       <article className={styles.diagnostic_card}>
         <div>
           <h4>诊断信息</h4>
-          <p>{status?.config_path ?? "尚未创建 Runtime 配置文件"}</p>
+          <p>{status?.config_path ?? "尚未创建运行时配置文件"}</p>
         </div>
         <button onClick={() => void copyDiagnostics()} type="button">复制诊断</button>
       </article>
       <article className={styles.lifecycle_card}>
         <div>
           <h4>桌面生命周期</h4>
-          <p>关闭窗口不会默认停止 Runtime。</p>
+          <p>关闭窗口不会默认停止运行时。</p>
         </div>
         <SelectionPopover
           aria_label="关闭主窗口时"
@@ -107,8 +109,8 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
           trigger_variant="compact"
         />
         <div className={styles.lifecycle_actions}>
-          <button onClick={() => store.desktop_lifecycle.request("restart_runtime")} type="button">重启 Runtime</button>
-          <button className={styles.danger_button} onClick={() => store.desktop_lifecycle.request("stop_runtime")} type="button">停止 Runtime</button>
+          <button onClick={() => store.desktop_lifecycle.request("restart_runtime")} type="button">重启运行时</button>
+          <button className={styles.danger_button} onClick={() => store.desktop_lifecycle.request("stop_runtime")} type="button">停止运行时</button>
         </div>
       </article>
       {status?.issues.length ? (
@@ -117,7 +119,7 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
         </div>
       ) : null}
       <SettingsMessages />
-    </section>
+    </SettingsPageContainer>
   );
 });
 

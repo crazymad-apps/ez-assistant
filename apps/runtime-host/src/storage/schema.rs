@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     model_key           TEXT NOT NULL,
     reasoning_effort    TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max')),
     system_prompt_json  TEXT NOT NULL,
+    skill_catalog_json  TEXT NOT NULL,
     current_variant     TEXT NOT NULL DEFAULT 'build'
                             CHECK (current_variant IN ('plan', 'build')),
     approval_mode       TEXT NOT NULL DEFAULT 'ask'
@@ -44,6 +45,12 @@ CREATE TABLE IF NOT EXISTS memory_state (
 
 INSERT OR IGNORE INTO memory_state (singleton_key, pinned_collection_revision)
 VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS skill_name_states (
+    name          TEXT PRIMARY KEY,
+    enabled       INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
 
 CREATE TABLE IF NOT EXISTS pinned_memories (
     id                    TEXT PRIMARY KEY,
@@ -173,10 +180,29 @@ CREATE TABLE IF NOT EXISTS inputs (
     goal_id             TEXT,
     goal_generation     INTEGER CHECK (goal_generation IS NULL OR goal_generation > 0),
     goal_turn           INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0),
+    skill_activation_json TEXT,
     CHECK ((goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL)
         OR (goal_id IS NOT NULL AND goal_generation IS NOT NULL AND goal_turn IS NOT NULL)),
     UNIQUE (session_id, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS skill_activations (
+    activation_id       TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL CHECK (owner_kind IN ('session', 'child_task')),
+    owner_id            TEXT NOT NULL,
+    run_id              TEXT REFERENCES runs(run_id) ON DELETE CASCADE,
+    input_id            TEXT REFERENCES inputs(input_id) ON DELETE CASCADE,
+    message_id          TEXT NOT NULL,
+    name                TEXT NOT NULL,
+    catalog_revision    TEXT NOT NULL,
+    definition_digest   TEXT NOT NULL,
+    trigger             TEXT NOT NULL CHECK (trigger IN ('user', 'model')),
+    created_at_ms       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS skill_activations_session_order
+    ON skill_activations(session_id, created_at_ms, activation_id);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id              TEXT PRIMARY KEY,
@@ -199,6 +225,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS run_message_refs (
     run_id              TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
     message_id          TEXT NOT NULL,
+    step                INTEGER CHECK (step IS NULL OR step > 0),
     PRIMARY KEY (run_id, message_id)
 );
 
@@ -273,6 +300,7 @@ CREATE TABLE IF NOT EXISTS child_pending_tool_exchanges (
     receipt_id          TEXT PRIMARY KEY,
     child_task_id       TEXT NOT NULL UNIQUE REFERENCES child_tasks(child_task_id) ON DELETE CASCADE,
     session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    step                INTEGER CHECK (step IS NULL OR step > 0),
     assistant_json      TEXT NOT NULL,
     results_json        TEXT,
     state               TEXT NOT NULL CHECK (state IN ('begun', 'ready')),
@@ -295,6 +323,7 @@ CREATE TABLE IF NOT EXISTS child_body_appends (
     kind                TEXT NOT NULL,
     payload             BLOB NOT NULL,
     message_count_delta INTEGER NOT NULL CHECK (message_count_delta > 0),
+    message_step        INTEGER CHECK (message_step IS NULL OR message_step > 0),
     created_at_ms       INTEGER NOT NULL
 );
 
@@ -302,6 +331,7 @@ CREATE TABLE IF NOT EXISTS pending_tool_exchanges (
     receipt_id          TEXT PRIMARY KEY,
     session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     run_id              TEXT NOT NULL UNIQUE REFERENCES runs(run_id) ON DELETE CASCADE,
+    step                INTEGER CHECK (step IS NULL OR step > 0),
     assistant_json      TEXT NOT NULL,
     results_json        TEXT,
     state               TEXT NOT NULL CHECK (state IN ('begun', 'ready')),
@@ -324,6 +354,7 @@ CREATE TABLE IF NOT EXISTS body_appends (
     kind                TEXT NOT NULL,
     payload             BLOB NOT NULL,
     message_count_delta INTEGER NOT NULL CHECK (message_count_delta > 0),
+    message_step        INTEGER CHECK (message_step IS NULL OR message_step > 0),
     created_at_ms       INTEGER NOT NULL
 );
 
@@ -387,9 +418,10 @@ END;
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
-    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
     "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
+    "SELECT name, enabled, updated_at_ms FROM skill_name_states LIMIT 0",
     "SELECT id, category, content, attributes_json, created_by_kind, created_by_session_id, revision, created_at_ms, updated_at_ms FROM pinned_memories LIMIT 0",
     "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
     "SELECT session_id, revision, objective, items_json, last_operation_id, updated_at_ms FROM session_work_plans LIMIT 0",
@@ -399,18 +431,19 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json FROM inputs LIMIT 0",
+    "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
-    "SELECT run_id, message_id FROM run_message_refs LIMIT 0",
+    "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
     "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
     "SELECT session_id, owner_kind, owner_id, request_id, run_id, request_kind, provider, model_id, input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, completed_at_ms FROM model_request_records LIMIT 0",
     "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, final_message_id, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM child_tasks LIMIT 0",
-    "SELECT receipt_id, child_task_id, session_id, assistant_json, results_json, state, created_at_ms FROM child_pending_tool_exchanges LIMIT 0",
+    "SELECT receipt_id, child_task_id, session_id, step, assistant_json, results_json, state, created_at_ms FROM child_pending_tool_exchanges LIMIT 0",
     "SELECT receipt_id, call_id, started_at_ms FROM child_pending_tool_starts LIMIT 0",
-    "SELECT operation_id, child_task_id, session_id, body_generation, base_byte_length, kind, payload, message_count_delta, created_at_ms FROM child_body_appends LIMIT 0",
-    "SELECT receipt_id, session_id, run_id, assistant_json, results_json, state, created_at_ms FROM pending_tool_exchanges LIMIT 0",
+    "SELECT operation_id, child_task_id, session_id, body_generation, base_byte_length, kind, payload, message_count_delta, message_step, created_at_ms FROM child_body_appends LIMIT 0",
+    "SELECT receipt_id, session_id, run_id, step, assistant_json, results_json, state, created_at_ms FROM pending_tool_exchanges LIMIT 0",
     "SELECT receipt_id, call_id, started_at_ms FROM pending_tool_starts LIMIT 0",
-    "SELECT operation_id, session_id, run_id, body_generation, base_byte_length, kind, payload, message_count_delta, created_at_ms FROM body_appends LIMIT 0",
+    "SELECT operation_id, session_id, run_id, body_generation, base_byte_length, kind, payload, message_count_delta, message_step, created_at_ms FROM body_appends LIMIT 0",
     "SELECT document_rowid, document_id, owner_kind, owner_id, session_id, child_task_id, body_generation, message_id, message_kind, message_ordinal, created_at_ms, normalized_text, content_hash FROM conversation_recall_documents LIMIT 0",
     "SELECT owner_kind, owner_id, session_id, child_task_id, body_generation, indexed_message_count, state, updated_at_ms FROM conversation_recall_heads LIMIT 0",
 ];
@@ -444,6 +477,36 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "media_type",
         "ALTER TABLE attachment_blobs ADD COLUMN media_type TEXT",
     )?;
+    ensure_column(
+        &transaction,
+        "run_message_refs",
+        "step",
+        "ALTER TABLE run_message_refs ADD COLUMN step INTEGER CHECK (step IS NULL OR step > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "pending_tool_exchanges",
+        "step",
+        "ALTER TABLE pending_tool_exchanges ADD COLUMN step INTEGER CHECK (step IS NULL OR step > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "child_pending_tool_exchanges",
+        "step",
+        "ALTER TABLE child_pending_tool_exchanges ADD COLUMN step INTEGER CHECK (step IS NULL OR step > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "body_appends",
+        "message_step",
+        "ALTER TABLE body_appends ADD COLUMN message_step INTEGER CHECK (message_step IS NULL OR message_step > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "child_body_appends",
+        "message_step",
+        "ALTER TABLE child_body_appends ADD COLUMN message_step INTEGER CHECK (message_step IS NULL OR message_step > 0)",
+    )?;
     transaction
         .execute(
             "INSERT OR IGNORE INTO session_usage (session_id, backfilled, updated_at_ms)
@@ -458,6 +521,12 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "sessions",
         "reasoning_effort",
         "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low','medium','high','xhigh','max'));",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "skill_catalog_json",
+        "ALTER TABLE sessions ADD COLUMN skill_catalog_json TEXT NOT NULL DEFAULT '{\"schema_version\":1,\"revision\":\"sha256-v1:92279a522f56969beaee47d8c8e03a5b73496e4e40dbb3e1810d15e2ff80e036\",\"status\":\"legacy_unavailable\",\"definitions\":[],\"diagnostics\":[]}'",
     )?;
     ensure_column(
         &transaction,
@@ -524,6 +593,12 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "inputs",
         "goal_turn",
         "ALTER TABLE inputs ADD COLUMN goal_turn INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "skill_activation_json",
+        "ALTER TABLE inputs ADD COLUMN skill_activation_json TEXT",
     )?;
     transaction
         .execute(
@@ -665,6 +740,17 @@ mod tests {
 
         initialize(&mut connection).expect("first migration");
         initialize(&mut connection).expect("idempotent second migration");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'skill_name_states'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("skill name state table"),
+            1
+        );
         connection
             .execute(
                 "INSERT INTO sessions (session_id, title, model_key, system_prompt_json, lifecycle,

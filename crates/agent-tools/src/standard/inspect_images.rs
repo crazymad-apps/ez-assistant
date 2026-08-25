@@ -70,9 +70,9 @@ impl Tool for InspectImagesTool {
         if input.goal.trim().is_empty() {
             return Err(ToolError::invalid_input("goal must not be blank"));
         }
-        if input.image_paths.is_empty() || input.image_paths.len() > 10 {
+        if input.image_paths.is_empty() {
             return Err(ToolError::invalid_input(
-                "image_paths must contain between 1 and 10 entries",
+                "image_paths must contain at least one entry",
             ));
         }
         let mut seen = BTreeSet::new();
@@ -207,6 +207,11 @@ mod tests {
             schema.pointer("/additionalProperties"),
             Some(&serde_json::Value::Bool(false))
         );
+        assert_eq!(
+            schema.pointer("/properties/image_paths/minItems"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(schema.pointer("/properties/image_paths/maxItems"), None);
     }
 
     #[test]
@@ -233,6 +238,21 @@ mod tests {
             background: None,
         };
         assert!(tool().resolve(duplicate).is_err());
+
+        let many_paths = InspectImagesInput {
+            image_paths: (0..11).map(|index| format!("image-{index}.png")).collect(),
+            goal: "compare all images".to_owned(),
+            background: None,
+        };
+        assert_eq!(
+            tool()
+                .resolve(many_paths)
+                .expect("resolve more than ten images")
+                .into_input()
+                .image_paths
+                .len(),
+            11
+        );
 
         let mut registry = ToolRegistry::new();
         registry.register(tool()).expect("register");

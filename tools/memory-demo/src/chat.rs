@@ -279,18 +279,22 @@ async fn finish_run(
     outcome: ExecutionOutcome,
 ) -> Result<(), DemoError> {
     match outcome {
-        ExecutionOutcome::Completed(message) => {
+        ExecutionOutcome::Completed { message, .. } => {
             journal
                 .append_message(ConversationMessage::Assistant(message))
                 .await
                 .map_err(|error| DemoError::Session(error.to_string()))?;
             println!("\nrun completed");
         }
-        ExecutionOutcome::Failed(error) => eprintln!("\nrun failed: {error}"),
-        ExecutionOutcome::Cancelled => println!("\nrun cancelled"),
+        ExecutionOutcome::Failed { error, .. } => eprintln!("\nrun failed: {error}"),
+        ExecutionOutcome::Cancelled { .. } => println!("\nrun cancelled"),
         ExecutionOutcome::CompactionRequired { reason, step, .. } => eprintln!(
             "\nrun requires context compaction at step {step} ({reason:?}); this demo does not \
              implement Runtime compaction"
+        ),
+        ExecutionOutcome::ContinuationRequired { reason, .. } => eprintln!(
+            "\nrun requires context continuation ({reason:?}); this demo does not implement \
+             Runtime continuation"
         ),
     }
     Ok(())
@@ -344,9 +348,11 @@ fn print_event(event: &AgentEvent) -> Result<(), DemoError> {
                 .flush()
                 .map_err(|error| DemoError::Io(error.to_string()))?;
         }
-        AgentEvent::ToolProposed { call } => println!("\n{}", tool_proposed_label(call)),
-        AgentEvent::ToolStarted { call_id } => println!("[tool started] {call_id}"),
-        AgentEvent::ToolCompleted { call_id, status } => {
+        AgentEvent::ToolProposed { call, .. } => println!("\n{}", tool_proposed_label(call)),
+        AgentEvent::ToolStarted { call_id, .. } => println!("[tool started] {call_id}"),
+        AgentEvent::ToolCompleted {
+            call_id, status, ..
+        } => {
             println!("[tool completed] {call_id}: {status:?}")
         }
         AgentEvent::ExecutionFailed { error, .. } => eprintln!("[execution failed] {error}"),
@@ -520,7 +526,10 @@ mod tests {
             observed.iter().filter(|event| event.is_terminal()).count(),
             1
         );
-        assert_eq!(outcome, ExecutionOutcome::Completed(turns[5].clone()));
+        assert!(matches!(
+            &outcome,
+            ExecutionOutcome::Completed { message, .. } if message == &turns[5]
+        ));
         finish_run(&journal, outcome)
             .await
             .expect("finish scripted run");
@@ -603,7 +612,7 @@ mod tests {
         control.cancel();
         let observed = events.by_ref().collect::<Vec<_>>().await;
         let outcome = completion.await;
-        assert_eq!(outcome, ExecutionOutcome::Cancelled);
+        assert!(matches!(outcome, ExecutionOutcome::Cancelled { .. }));
         assert_eq!(
             observed.iter().filter(|event| event.is_terminal()).count(),
             1

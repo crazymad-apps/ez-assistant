@@ -194,6 +194,9 @@ impl AssistantRuntime {
             .runs
             .retain(|_, run| run.input_id() != &request.input_id);
         state.inputs.remove(&request.input_id);
+        state
+            .skill_activations
+            .retain(|activation| activation.input_id.as_ref() != Some(&request.input_id));
         state.queue_revision = state.queue_revision.saturating_add(1);
         if state
             .inputs

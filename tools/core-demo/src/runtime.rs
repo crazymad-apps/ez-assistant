@@ -756,7 +756,14 @@ async fn supervise(
         };
 
         if cancellation.is_cancelled() {
-            finish_run(&session, &run_id, ExecutionOutcome::Cancelled, &runtime);
+            finish_run(
+                &session,
+                &run_id,
+                ExecutionOutcome::Cancelled {
+                    consumption: Default::default(),
+                },
+                &runtime,
+            );
             return;
         }
         if !reserve_compaction_handoff(&session, &run_id, reason, step, &runtime) {
@@ -786,7 +793,14 @@ async fn supervise(
         let replacement = match replacement {
             Ok(replacement) => replacement,
             Err(_error) if cancellation.is_cancelled() => {
-                finish_run(&session, &run_id, ExecutionOutcome::Cancelled, &runtime);
+                finish_run(
+                    &session,
+                    &run_id,
+                    ExecutionOutcome::Cancelled {
+                        consumption: Default::default(),
+                    },
+                    &runtime,
+                );
                 return;
             }
             Err(error) => {
@@ -875,14 +889,14 @@ fn record_event(
             match event {
                 AgentEvent::ReasoningDelta { delta, .. } => run.reasoning.push_str(delta),
                 AgentEvent::TextDelta { delta, .. } => run.text.push_str(delta),
-                AgentEvent::ToolProposed { call } => run.tools.push(ToolActivitySnapshot {
+                AgentEvent::ToolProposed { call, .. } => run.tools.push(ToolActivitySnapshot {
                     call_id: call.id.to_string(),
                     tool_name: call.name.as_str().to_owned(),
                     status: "proposed".to_owned(),
                     stdout: String::new(),
                     stderr: String::new(),
                 }),
-                AgentEvent::ToolStarted { call_id } => {
+                AgentEvent::ToolStarted { call_id, .. } => {
                     session.audit.record_started(&run_id.to_string(), call_id);
                     if let Some(tool) = run
                         .tools
@@ -896,6 +910,7 @@ fn record_event(
                     call_id,
                     channel,
                     chunk,
+                    ..
                 } => {
                     if let Some(tool) = run
                         .tools
@@ -908,7 +923,9 @@ fn record_event(
                         }
                     }
                 }
-                AgentEvent::ToolCompleted { call_id, status } => {
+                AgentEvent::ToolCompleted {
+                    call_id, status, ..
+                } => {
                     if let Some(tool) = run
                         .tools
                         .iter_mut()
@@ -923,7 +940,8 @@ fn record_event(
                 AgentEvent::ExecutionCompleted { dropped_events, .. }
                 | AgentEvent::ExecutionFailed { dropped_events, .. }
                 | AgentEvent::ExecutionCancelled { dropped_events }
-                | AgentEvent::ExecutionCompactionRequired { dropped_events, .. } => {
+                | AgentEvent::ExecutionCompactionRequired { dropped_events, .. }
+                | AgentEvent::ExecutionContinuationRequired { dropped_events, .. } => {
                     run.dropped_events = *dropped_events;
                 }
                 _ => {}
@@ -958,7 +976,7 @@ fn finish_run(
             return;
         }
         let status = match outcome {
-            ExecutionOutcome::Completed(message) => {
+            ExecutionOutcome::Completed { message, .. } => {
                 if let Some(run) = &mut state.run {
                     let (reasoning, text) = completed_text(&message);
                     run.reasoning = reasoning;
@@ -967,13 +985,13 @@ fn finish_run(
                 session.journal.append_assistant(message);
                 RunStatus::Completed
             }
-            ExecutionOutcome::Failed(error) => {
+            ExecutionOutcome::Failed { error, .. } => {
                 if let Some(run) = &mut state.run {
                     run.last_error = Some(error.to_string());
                 }
                 RunStatus::Failed
             }
-            ExecutionOutcome::Cancelled => RunStatus::Cancelled,
+            ExecutionOutcome::Cancelled { .. } => RunStatus::Cancelled,
             ExecutionOutcome::CompactionRequired { reason, step, .. } => {
                 if let Some(run) = &mut state.run {
                     run.last_error = Some(format!(
@@ -981,6 +999,14 @@ fn finish_run(
                     ));
                 }
                 RunStatus::CompactionRequired
+            }
+            ExecutionOutcome::ContinuationRequired { reason, .. } => {
+                if let Some(run) = &mut state.run {
+                    run.last_error = Some(format!(
+                        "generic context continuation is not supported by core-demo: {reason:?}"
+                    ));
+                }
+                RunStatus::Failed
             }
         };
         if let Some(run) = &mut state.run {
@@ -1051,6 +1077,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::ExecutionFailed { .. } => "execution_failed",
         AgentEvent::ExecutionCancelled { .. } => "execution_cancelled",
         AgentEvent::ExecutionCompactionRequired { .. } => "execution_compaction_required",
+        AgentEvent::ExecutionContinuationRequired { .. } => "execution_continuation_required",
     }
 }
 

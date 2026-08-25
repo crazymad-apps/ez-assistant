@@ -57,14 +57,45 @@ describe("ComposerDock", () => {
 
     await user.type(input, "/model");
     fireEvent.keyDown(input, { key: "Enter" });
-    await user.click(screen.getByRole("menuitemradio", { name: /备用模型/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /备用模型/ }));
     await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", "alternate"));
     await waitFor(() => expect(screen.queryByRole("menuitemradio", { name: /备用模型/ })).not.toBeInTheDocument());
 
     await user.type(input, "/mode");
     fireEvent.keyDown(input, { key: "Enter" });
-    await user.click(screen.getByRole("menuitemradio", { name: /Plan/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /规划/ }));
     expect(set_variant).toHaveBeenCalledWith("session-1", "plan");
+  });
+
+  it("does not submit the Enter used to finish input method composition", async () => {
+    const store = renderComposer();
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "open ai" } });
+    // WKWebView 可能先结束 composition，再发送用于确认本次输入的 Enter keydown。
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("open ai");
+
+    fireEvent.keyUp(input, { key: "Enter", keyCode: 13 });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  });
+
+  it("recognizes the WebKit input method keyCode fallback", () => {
+    const store = renderComposer();
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    fireEvent.change(input, { target: { value: "raw phrase" } });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("raw phrase");
   });
 
   it("supports queue priority, removal and explicit resume without a bottom-wide action", async () => {
@@ -104,6 +135,44 @@ describe("ComposerDock", () => {
     expect(resume).toHaveBeenCalledWith("session-1", "input-1", 5);
   });
 
+  it("selects exactly one skill, replaces it and clears it only after accepted submit", async () => {
+    const user = userEvent.setup();
+    const skill_catalog: SessionViewSnapshot["skill_catalog"] = {
+      status: "ready",
+      diagnostics: [],
+      skills: [
+        { name: "review", description: "检查代码", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" },
+        { name: "release", description: "准备发布", source: "workspace_agents", model_invocable: false, user_invocable: true, enabled: true, health: "ready" },
+      ],
+    };
+    const store = renderComposer({ skill_catalog });
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    await user.type(input, "/skill");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await user.click(screen.getByRole("option", { name: /review/ }));
+    expect(screen.getByRole("button", { name: "移除技能 review" })).toBeVisible();
+
+    await user.type(input, "/skill");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await user.click(screen.getByRole("option", { name: /release/ }));
+    expect(screen.queryByRole("button", { name: "移除技能 review" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除技能 release" })).toBeVisible();
+
+    await user.type(input, "准备当前版本");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(submit).toHaveBeenLastCalledWith(
+      "session-1", "准备当前版本", "build", [], "normal", "release",
+    ));
+    expect(screen.getByRole("button", { name: "移除技能 release" })).toBeVisible();
+    expect(input).toHaveValue("准备当前版本");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "移除技能 release" })).not.toBeInTheDocument());
+    expect(input).toHaveValue("");
+  });
+
   it("lets a pending approval take over the bottom workspace and remain blocking when minimized", async () => {
     const user = userEvent.setup();
     const approval = approvalSnapshot();
@@ -123,7 +192,7 @@ describe("ComposerDock", () => {
     const decide = vi.spyOn(store, "decideApproval").mockResolvedValue();
     const reject_and_stop = vi.spyOn(store, "rejectApprovalAndStopRun").mockResolvedValue();
 
-    expect(screen.getByText("允许执行 Shell 命令？", { exact: true })).toBeVisible();
+    expect(screen.getByText("允许执行命令行指令？", { exact: true })).toBeVisible();
     expect(screen.getByText("审批后执行下一项", { exact: true })).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "输入消息" })).not.toBeInTheDocument();
     expect(screen.getByText("npm run build && npm test", { exact: true })).toBeVisible();
@@ -143,8 +212,8 @@ describe("ComposerDock", () => {
     const approval = { ...approvalSnapshot(), child_task_id: "child-1" };
     renderComposer({ approvals: [approval], child_tasks: [childTaskItem()], read_only: true });
 
-    expect(screen.getByText("检查恢复一致性 · 由子 Agent 请求")).toBeVisible();
-    expect(screen.getByText("允许执行 Shell 命令？", { exact: true })).toBeVisible();
+    expect(screen.getByText("检查恢复一致性 · 由子智能体请求")).toBeVisible();
+    expect(screen.getByText("允许执行命令行指令？", { exact: true })).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "输入消息" })).not.toBeInTheDocument();
   });
 
@@ -216,6 +285,7 @@ describe("ComposerDock", () => {
     const user = userEvent.setup();
     const store = renderComposer({
       composer_capabilities: {
+        selected_model_key: "fixture",
         reasoning_effort_options: [
           { key: "low", label: "较少" },
           { key: "max", label: "最大" },
@@ -231,6 +301,32 @@ describe("ComposerDock", () => {
     await user.click(screen.getByRole("menuitem", { name: /推理强度/ }));
     await user.click(screen.getByRole("menuitemradio", { name: /最大/ }));
     expect(set_effort).toHaveBeenCalledWith("session-1", "max");
+  });
+
+  it("loads a missing historical model as unselected and blocks messages until reselection", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer({
+      composer_capabilities: {
+        selected_model_key: null,
+        reasoning_effort_options: [],
+        image_handling: "unavailable",
+        goal_supported: false,
+      },
+    });
+    const set_model = vi.spyOn(store, "setSessionModel").mockResolvedValue(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("placeholder", "请先选择一个可用模型");
+    expect(screen.getByRole("button", { name: "模型设置" })).toHaveTextContent("未选择模型");
+
+    await user.click(screen.getByRole("button", { name: "模型设置" }));
+    await user.click(screen.getByRole("menuitem", { name: /模型/ }));
+    expect(screen.getAllByRole("menuitemradio").every(
+      (item) => item.getAttribute("aria-checked") === "false",
+    )).toBe(true);
+    await user.click(screen.getByRole("menuitemradio", { name: /备用模型/ }));
+    expect(set_model).toHaveBeenCalledWith("session-1", "alternate");
   });
 
   it("repositions the settings submenu from measured DOM dimensions", async () => {
@@ -266,6 +362,7 @@ describe("ComposerDock", () => {
     const user = userEvent.setup();
     const store = renderComposer({
       composer_capabilities: {
+        selected_model_key: "fixture",
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: false,
@@ -278,9 +375,9 @@ describe("ComposerDock", () => {
     await user.keyboard("{Enter}");
     expect(input).toHaveValue("");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "取消 Goal 标记" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消目标标记" })).toBeVisible();
     await user.keyboard("{Escape}");
-    expect(screen.getByRole("button", { name: "取消 Goal 标记" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消目标标记" })).toBeVisible();
 
     await user.type(input, "完成本版本验收");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
@@ -292,7 +389,7 @@ describe("ComposerDock", () => {
       "start_goal",
     ));
     expect(input).toHaveValue("完成本版本验收");
-    await user.click(screen.getByRole("button", { name: "取消 Goal 标记" }));
+    await user.click(screen.getByRole("button", { name: "取消目标标记" }));
     expect(input).toHaveValue("完成本版本验收");
   });
 
@@ -320,10 +417,10 @@ describe("ComposerDock", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "工作计划详情" })).not.toBeInTheDocument());
     await waitFor(() => expect(document.querySelector("[data-todo-detail]")).not.toBeInTheDocument());
 
-    const goal_trigger = screen.getByRole("button", { name: /Goal 等待输入/ });
+    const goal_trigger = screen.getByRole("button", { name: /目标等待输入/ });
     expect(goal_trigger).toHaveAttribute("aria-expanded", "false");
     await user.click(goal_trigger);
-    const goal_detail = screen.getByRole("region", { name: "Goal 详情" });
+    const goal_detail = screen.getByRole("region", { name: "目标详情" });
     expect(goal_detail).toBeVisible();
     expect(goal_trigger).toHaveAttribute("aria-expanded", "true");
     expect(goal_trigger.closest("section")).toContainElement(goal_detail);
@@ -336,10 +433,10 @@ describe("ComposerDock", () => {
     await user.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() => expect(resume_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
 
-    await user.click(screen.getByRole("button", { name: "退出 Goal" }));
+    await user.click(screen.getByRole("button", { name: "退出目标" }));
     expect(confirm_exit).toHaveBeenCalledTimes(1);
     expect(clear_goal).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "退出 Goal" }));
+    await user.click(screen.getByRole("button", { name: "退出目标" }));
     await waitFor(() => expect(clear_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
   });
 
@@ -383,7 +480,7 @@ describe("ComposerDock", () => {
     const resume_goal = vi.spyOn(store, "resumeGoal").mockResolvedValue(true);
 
     const queue_trigger = screen.getByRole("button", { name: /待处理指导/ });
-    const goal_trigger = screen.getByRole("button", { name: /Goal 等待输入/ });
+    const goal_trigger = screen.getByRole("button", { name: /目标等待输入/ });
     expect(queue_trigger).toHaveAttribute("aria-expanded", "true");
     expect(goal_trigger).toHaveAttribute("aria-expanded", "false");
     await user.click(goal_trigger);
@@ -394,7 +491,7 @@ describe("ComposerDock", () => {
     expect(goal_trigger).toHaveAttribute("aria-expanded", "false");
 
     expect(screen.queryByRole("button", { name: "确认并继续全部" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "用于 Goal" }));
+    await user.click(screen.getByRole("button", { name: "用于目标" }));
     expect(resume_goal).toHaveBeenCalledWith("session-1", "goal-1", 2, "input-held");
   });
 
@@ -403,6 +500,7 @@ describe("ComposerDock", () => {
     const store = renderComposer({
       goal: goalSnapshot("running"),
       composer_capabilities: {
+        selected_model_key: "fixture",
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: true,
@@ -410,17 +508,17 @@ describe("ComposerDock", () => {
     });
     const stop_goal = vi.spyOn(store, "stopGoal").mockResolvedValue(true);
 
-    await user.click(screen.getByRole("button", { name: "停止 Goal" }));
+    await user.click(screen.getByRole("button", { name: "停止目标" }));
     await waitFor(() => expect(stop_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
 
     const input = screen.getByRole("textbox", { name: "输入消息" });
     await user.type(input, "/goal");
-    expect(screen.getByText("当前会话已有 Goal，请先继续或退出现有 Goal")).toBeVisible();
+    expect(screen.getByText("当前会话已有目标，请先继续或退出现有目标")).toBeVisible();
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("alert")).toHaveTextContent("当前会话已有 Goal");
+    expect(screen.getByRole("alert")).toHaveTextContent("当前会话已有目标");
     expect(input).toHaveValue("");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "取消 Goal 标记" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消目标标记" })).not.toBeInTheDocument();
   });
 });
 
@@ -432,6 +530,7 @@ function renderComposer(overrides: Readonly<{
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
+  skill_catalog?: SessionViewSnapshot["skill_catalog"];
 }> = {}): RootStore {
   const store = new RootStore();
   store.connection.markConnected("instance-1", {
@@ -512,10 +611,12 @@ function sessionView(overrides: Readonly<{
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
+  skill_catalog?: SessionViewSnapshot["skill_catalog"];
 }> = {}): SessionViewSnapshot {
   return {
     session: sessionSummary(),
     composer_capabilities: overrides.composer_capabilities ?? {
+      selected_model_key: "fixture",
       reasoning_effort_options: [],
       image_handling: "unavailable",
       goal_supported: false,
@@ -536,6 +637,12 @@ function sessionView(overrides: Readonly<{
       context: null,
     },
     child_tasks: [...(overrides.child_tasks ?? [])],
+    skill_catalog: overrides.skill_catalog ?? {
+      status: "empty",
+      skills: [],
+      diagnostics: [],
+    },
+    active_skills: [],
     conversation: {
       owner: { type: "main_session", session_id: "session-1" },
       generation: 1,

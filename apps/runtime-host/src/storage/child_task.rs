@@ -140,14 +140,15 @@ impl StorageEngine {
             &start.child_task_id,
             ChildTaskStatus::Accepted,
         )?;
-        self.append_child_messages(
-            start.operation_id,
-            start.child_task_id,
-            start.session_id,
-            vec![ConversationMessage::User(start.message)],
-            start.started_at_ms,
-            AppendPurpose::ChildStart,
-        )
+        self.append_child_messages(super::recovery::ChildAppendRequest {
+            operation_id: start.operation_id,
+            child_task_id: start.child_task_id,
+            session_id: start.session_id,
+            messages: vec![ConversationMessage::User(start.message)],
+            message_step: None,
+            created_at_ms: start.started_at_ms,
+            purpose: AppendPurpose::ChildStart,
+        })
     }
 
     pub(super) fn settle_child_task(
@@ -220,14 +221,15 @@ impl StorageEngine {
                 database_write_error("child task settlement could not be committed", source)
             });
         }
-        self.append_child_messages(
-            settlement.operation_id,
-            settlement.child_task_id,
-            settlement.session_id,
-            settlement.messages,
-            settlement.finished_at_ms,
+        self.append_child_messages(super::recovery::ChildAppendRequest {
+            operation_id: settlement.operation_id,
+            child_task_id: settlement.child_task_id,
+            session_id: settlement.session_id,
+            messages: settlement.messages,
+            message_step: None,
+            created_at_ms: settlement.finished_at_ms,
             purpose,
-        )
+        })
     }
 
     pub(super) fn load_child_conversation(

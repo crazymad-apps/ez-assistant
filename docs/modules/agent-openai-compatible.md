@@ -31,6 +31,10 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - `OpenAiChatCompletionsService::new` 与 `with_transport` 都是可失败构造，统一返回
   `OpenAiChatCompletionsServiceError`；无效 URL 错误不得回显可能包含 credential 的原始 URL。
 - Chat Provider 差异通过显式 `ChatProtocolAdapter` 表达，不在 Core 中按名称分支。
+- `ChatProtocolAdapter::vllm()` 承担 vLLM Chat Completions 方言：响应优先读取当前
+  `reasoning`，缺失或为 null 时兼容旧版 `reasoning_content`；历史回放只写当前字段
+  `reasoning`。响应读取字段与请求回放字段必须分离，不能为了兼容别名把同一 reasoning
+  重复追加。
 - DeepSeek thinking 工具调用必须维持可回放的 `reasoning_content`、`tool_calls` 和
   `tool_call_id`。
 - `ChatProtocolAdapter::deepseek()` 明确表示 thinking-enabled 形态；经 `provider_options` 关闭
@@ -41,19 +45,24 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   补入仅用于 wire 的 reasoning 占位字段。该兼容逻辑不得进入 Core、UI 或
   Journal，也不得应用到不接受 `reasoning_content` 的其他 Chat 方言。
 - Context Summary 编码为带固定派生说明的 system message。
-- User Message 的 `Text`、`Injected` 和 `FileReferences` 按规范 Part 顺序编码为
+- User Message 的 `Text`、旧 `Injected`、新 `InternalContext` 和 `FileReferences` 按规范 Part 顺序编码为
   原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
   不伪造 Tool Call、Tool Result 或已读取文件的事实。
 - Chat Completions 与 Responses 都不得把 `UserMessageOrigin`、`TranscriptVisibility` 编码到
   Provider wire；隐藏 Runtime User Message 仍按普通 user role 及原有 Part 顺序发送。
-- `ModelRequest.system` 按 `SystemPromptSnapshot::parts()` 的冻结顺序逐条编码；透明快照
-  不改变既有线上 JSON 和 system message 顺序。
+- `ModelRequest.system` 继续按 `SystemPromptSnapshot::parts()` 保存冻结边界；Chat Completions
+  wire 必须把全部 Snapshot Part 和紧随其后的前导 Conversation System/Context Summary 按原顺序以
+  `\n\n` 合并成唯一一条开头 system message，兼容只允许 `messages[0]` 为 system 的严格模板。
+  Responses 继续把 Snapshot Part 合并进单个 `instructions`。两种投影都不得反向改写 Snapshot、
+  Conversation 或持久化事实，也不得把对话中间的 system 事实静默前移。
 - 请求编码前复用 `ConversationSnapshot` 的严格 Tool Call/Result 双向校验，不在
   Adapter 内维护第二套配对算法。
 - Chat 编码器读取统一的有序 Tool Result Parts：纯 Text/JSON 结果继续确定性编码为字符串。
   `AggregatedUserInput` 路径必须按 Assistant Tool Call 顺序先输出完整整批 tool messages，Image
   Part 在字符串中留下带 `call_id + part_index` 的版本化占位；随后至多追加一条 wire-only user
   image envelope，并按 Tool Call、Part 顺序排列“标签文本 → 图片”。不得逐结果穿插 user message。
+- Chat 与 Responses 的聚合图片信封必须先由 `agent-model` 从完整规范 Tool Result 批次生成同一份
+  request-only insertion plan；协议编码器只负责把该计划映射为自己的 wire content，不自行决定插入位置。
 - wire-only 图片 envelope 只由当前规范 Tool Result 确定性重建，不分配 MessageId，也不能回写
   Conversation、Journal、Recall、事件或产品消息计数。投影为 `Unsupported`、图片未准备或资源
   不匹配时必须在建流前失败，不能静默丢图或动态改走另一投影。

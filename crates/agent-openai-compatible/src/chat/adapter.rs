@@ -27,8 +27,13 @@ pub struct ChatProtocolAdapter {
     pub(crate) provider: ProviderId,
     /// Provider 使用的通信协议标识；本 crate 固定为 `openai.chat_completions`。
     pub(crate) protocol: ProtocolId,
-    /// reasoning 文本在线上使用的字段名（如 `reasoning_content`）；`None` 表示不支持 reasoning。
-    pub(crate) reasoning_content_field: Option<String>,
+    /// 响应中按优先级接受的 reasoning 文本字段。
+    ///
+    /// 第一个字段是当前方言的规范字段，后续字段只承担旧版本兼容；空列表表示不支持
+    /// reasoning。解码器只读取第一个存在且非 null 的字段，避免同一内容被重复追加。
+    pub(crate) reasoning_response_fields: Vec<String>,
+    /// 历史 Assistant reasoning 在线上请求中回放时使用的字段；`None` 表示不回放。
+    pub(crate) reasoning_replay_field: Option<String>,
     /// reasoning 强度参数在线上使用的字段名；`None` 表示不支持 reasoning 强度配置。
     pub(crate) reasoning_effort_field: Option<String>,
     pub(crate) reasoning_effort_values: BTreeMap<ReasoningEffort, Value>,
@@ -82,7 +87,8 @@ impl ChatProtocolAdapter {
             provider,
             protocol: ProtocolId::new("openai.chat_completions")
                 .expect("`openai.chat_completions` is a valid protocol id"),
-            reasoning_content_field: None,
+            reasoning_response_fields: Vec::new(),
+            reasoning_replay_field: None,
             reasoning_effort_field: None,
             reasoning_effort_values: BTreeMap::new(),
             supports_temperature: true,
@@ -135,7 +141,8 @@ impl ChatProtocolAdapter {
             provider: ProviderId::new("deepseek").expect("`deepseek` is a valid provider id"),
             protocol: ProtocolId::new("openai.chat_completions")
                 .expect("`openai.chat_completions` is a valid protocol id"),
-            reasoning_content_field: Some("reasoning_content".to_owned()),
+            reasoning_response_fields: vec!["reasoning_content".to_owned()],
+            reasoning_replay_field: Some("reasoning_content".to_owned()),
             reasoning_effort_field: None,
             reasoning_effort_values: BTreeMap::new(),
             supports_temperature: false,
@@ -150,9 +157,37 @@ impl ChatProtocolAdapter {
         }
     }
 
+    /// 构造 vLLM Chat Completions 方言。
+    ///
+    /// vLLM 当前使用 `reasoning` 返回和回放推理内容；旧版本使用的
+    /// `reasoning_content` 仅作为响应兼容字段保留。Provider 必须显式配置为
+    /// `vllm`，不能从 loopback endpoint 或 `local` 名称猜测服务实现。
+    ///
+    /// 依据：<https://docs.vllm.ai/en/latest/features/reasoning_outputs/>
+    pub fn vllm() -> Self {
+        Self {
+            provider: ProviderId::new("vllm").expect("`vllm` is a valid provider id"),
+            protocol: ProtocolId::new("openai.chat_completions")
+                .expect("`openai.chat_completions` is a valid protocol id"),
+            reasoning_response_fields: vec!["reasoning".to_owned(), "reasoning_content".to_owned()],
+            reasoning_replay_field: Some("reasoning".to_owned()),
+            reasoning_effort_field: None,
+            reasoning_effort_values: BTreeMap::new(),
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop: true,
+            max_output_tokens_field: Some("max_tokens".to_owned()),
+            supports_tool_choice: true,
+            tool_image_projection: ToolImageProjection::Unsupported,
+            tool_schema_dialect: ToolSchemaDialect::OpenAiFunctionSubset,
+            reasoning_replay: ReasoningReplayPolicy::Drop,
+            cached_input_tokens_field: None,
+        }
+    }
+
     /// Adapter 是否声明可解码 reasoning 内容。
     pub fn supports_reasoning(&self) -> bool {
-        self.reasoning_content_field.is_some()
+        !self.reasoning_response_fields.is_empty()
     }
 
     pub fn with_reasoning(
@@ -161,7 +196,19 @@ impl ChatProtocolAdapter {
         effort_field: Option<&str>,
         effort_values: BTreeMap<ReasoningEffort, Value>,
     ) -> Self {
-        self.reasoning_content_field = content_field.map(str::to_owned);
+        self.reasoning_response_fields = content_field.into_iter().map(str::to_owned).collect();
+        self.reasoning_replay_field = content_field.map(str::to_owned);
+        self.reasoning_effort_field = effort_field.map(str::to_owned);
+        self.reasoning_effort_values = effort_values;
+        self
+    }
+
+    /// 只更新 reasoning effort wire 映射，保留具名方言已经声明的响应与回放字段。
+    pub fn with_reasoning_efforts(
+        mut self,
+        effort_field: Option<&str>,
+        effort_values: BTreeMap<ReasoningEffort, Value>,
+    ) -> Self {
         self.reasoning_effort_field = effort_field.map(str::to_owned);
         self.reasoning_effort_values = effort_values;
         self

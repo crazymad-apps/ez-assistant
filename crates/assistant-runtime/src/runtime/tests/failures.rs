@@ -62,6 +62,7 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
             session_id: session.session.session_id.clone(),
             message: "fail once".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -77,6 +78,7 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
             session_id: session.session.session_id.clone(),
             message: "overflow once".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -140,6 +142,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             session_id: session.session.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -158,6 +161,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             session_id: session.session.session_id.clone(),
             message: "continue".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -189,6 +193,102 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 }
 
 #[tokio::test]
+async fn provider_overflow_continuation_advances_the_same_run_step() {
+    let first = assistant_text("assistant-before-overflow", "prior answer");
+    let summary = assistant_text("summary-after-overflow", "prior turn summarized");
+    let final_message = assistant_text("assistant-after-overflow", "continued after overflow");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::FailEstablishment(ModelError::ContextOverflow {
+                message: "fixture overflow".to_owned(),
+            }),
+            ModelScript::Events(message_events(&summary)),
+            ModelScript::Events(message_events(&final_message)),
+        ],
+    ));
+    let runtime = runtime(model);
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+
+    let first_run = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "first turn".to_owned(),
+            attachment_ids: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("first run accepted");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session.session_id, &first_run.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+
+    let mut events = runtime.subscribe_events();
+    let continued = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "continue after provider overflow".to_owned(),
+            attachment_ids: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("continuation accepted");
+    let terminal =
+        wait_for_terminal(&runtime, &session.session.session_id, &continued.run.run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
+
+    let observed = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events.recv().await.expect("runtime event");
+            let finished = matches!(
+                &event,
+                RuntimeEvent::RunFinished { run_id, .. } if run_id == &continued.run.run_id
+            );
+            observed.push(event);
+            if finished {
+                return observed;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(
+        observed
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::StepStarted { run_id, step, .. }
+                    if run_id == &continued.run.run_id =>
+                {
+                    Some(*step)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::StepCommitted { step: 2, .. }))
+    );
+}
+
+#[tokio::test]
 async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
     const PRIVATE_PROVIDER_DETAIL: &str = "private-provider-overload-detail";
     let failure = || ModelError::Unavailable {
@@ -217,6 +317,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
             session_id: session.session.session_id.clone(),
             message: "retry unavailable model".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -323,6 +424,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
             session_id: session.session.session_id.clone(),
             message: "stream then fail".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -360,6 +462,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
             session_id: session.session.session_id.clone(),
             message: "panic".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -416,6 +519,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -430,6 +534,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             session_id: session.session.session_id.clone(),
             message: "must remain queued".to_owned(),
             attachment_ids: Vec::new(),
+            skill_name: None,
             idempotency_key: None,
         })
         .await
@@ -456,6 +561,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
                 session_id: session.session.session_id,
                 message: "must be rejected".to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,
@@ -478,6 +584,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
                 session_id: session.session.session_id.clone(),
                 message: " \n\t".to_owned(),
                 attachment_ids: Vec::new(),
+                skill_name: None,
                 idempotency_key: None,
             })
             .await,

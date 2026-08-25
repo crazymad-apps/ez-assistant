@@ -29,10 +29,18 @@ pub(super) fn recover_registries(
         }
     }
     let mut input_sessions = BTreeMap::<InputId, SessionId>::new();
+    let mut input_activations = BTreeMap::new();
     for input in &recovered.inputs {
         if input_sessions
             .insert(input.input_id.clone(), input.session_id.clone())
             .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+        if let Some(activation) = input.skill_activation.as_ref()
+            && input_activations
+                .insert(activation.activation_id.clone(), activation.clone())
+                .is_some()
         {
             return Err(invalid_recovery());
         }
@@ -100,6 +108,33 @@ pub(super) fn recover_registries(
             .or_default()
             .push(input);
     }
+    let mut ledger_activation_ids = std::collections::BTreeSet::new();
+    let mut activations_by_session = BTreeMap::<SessionId, Vec<_>>::new();
+    for activation in recovered.skill_activations {
+        if !ledger_activation_ids.insert(activation.activation_id.clone())
+            || activation.input_id.as_ref().is_some_and(|input_id| {
+                input_sessions.get(input_id) != Some(&activation.session_id)
+            })
+            || activation
+                .run_id
+                .as_ref()
+                .is_some_and(|run_id| run_sessions.get(run_id) != Some(&activation.session_id))
+            || activation.input_id.is_some()
+                && input_activations.get(&activation.activation_id) != Some(&activation)
+        {
+            return Err(invalid_recovery());
+        }
+        activations_by_session
+            .entry(activation.session_id.clone())
+            .or_default()
+            .push(activation);
+    }
+    if input_activations
+        .keys()
+        .any(|activation_id| !ledger_activation_ids.contains(activation_id))
+    {
+        return Err(invalid_recovery());
+    }
     let mut work_plans_by_session = BTreeMap::<SessionId, WorkPlan>::new();
     for stored in recovered.work_plans {
         let session_id = stored.session_id.clone();
@@ -117,6 +152,17 @@ pub(super) fn recover_registries(
         }
     }
 
+    let recovered_children = recovered
+        .child_tasks
+        .iter()
+        .map(|child| {
+            (
+                child.child_task_id.as_str().to_owned(),
+                child.session_id.clone(),
+                child.parent_run_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut sessions = BTreeMap::new();
     for stored in recovered.sessions {
         if let Some(workspace_id) = stored.environment.workspace_id.as_ref()
@@ -125,12 +171,35 @@ pub(super) fn recover_registries(
             return Err(invalid_recovery());
         }
         let session_id = stored.session_id.clone();
+        let activations = activations_by_session
+            .remove(&session_id)
+            .unwrap_or_default();
+        if activations.iter().any(|activation| {
+            activation.catalog_revision != stored.skill_catalog.revision
+                || stored.skill_catalog.definitions.iter().all(|definition| {
+                    definition.name != activation.name
+                        || definition.definition_digest != activation.definition_digest
+                })
+                || match &activation.owner {
+                    crate::SkillActivationOwner::Session(owner) => owner != &session_id,
+                    crate::SkillActivationOwner::ChildTask(owner) => !recovered_children
+                        .iter()
+                        .any(|(child_id, child_session_id, parent_run_id)| {
+                            child_id == owner
+                                && child_session_id == &session_id
+                                && activation.run_id.as_ref() == Some(parent_run_id)
+                        }),
+                }
+        }) {
+            return Err(invalid_recovery());
+        }
         let controller = Arc::new(SessionController::recovered(
             stored,
             runs_by_session.remove(&session_id).unwrap_or_default(),
             inputs_by_session.remove(&session_id).unwrap_or_default(),
             work_plans_by_session.remove(&session_id),
             goals_by_session.remove(&session_id),
+            activations,
         ));
         if sessions.insert(session_id, controller).is_some() {
             return Err(invalid_recovery());
@@ -140,6 +209,7 @@ pub(super) fn recover_registries(
         || !inputs_by_session.is_empty()
         || !work_plans_by_session.is_empty()
         || !goals_by_session.is_empty()
+        || !activations_by_session.is_empty()
     {
         return Err(invalid_recovery());
     }
