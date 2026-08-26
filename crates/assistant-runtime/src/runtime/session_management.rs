@@ -4,16 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart};
 use assistant_protocol::{
-    ArchiveSessionRequest, ArchiveSessionResult, DeleteConfirmationToken, DeleteSessionRequest,
-    DeleteSessionResult, ForkSessionRequest, ForkSessionResult, ListRunsRequest, ListRunsResult,
-    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReasoningEffortKey as ProtocolEffort,
+    ArchiveSessionRequest, ArchiveSessionResult, ClearSessionRequest, ClearSessionResult,
+    DeleteConfirmationToken, DeleteSessionRequest, DeleteSessionResult, ForkSessionRequest,
+    ForkSessionResult, ListRunsRequest, ListRunsResult, PrepareDeleteSessionRequest,
+    PrepareDeleteSessionResult, ReasoningEffortKey as ProtocolEffort,
     ReenterFromUserMessageRequest, ReenterFromUserMessageResult, RenameSessionRequest,
     RenameSessionResult, RestoreSessionRequest, RestoreSessionResult, RunSnapshot,
     SessionLifecycle, SessionTitleOrigin, SetMessageFeedbackRequest, SetMessageFeedbackResult,
     SetSessionApprovalModeRequest, SetSessionApprovalModeResult, SetSessionModelRequest,
-    SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
-    SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
-    SetSessionVariantResult,
+    SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionProxyRequest,
+    SetSessionProxyResult, SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult,
+    SetSessionVariantRequest, SetSessionVariantResult,
 };
 
 use super::{
@@ -28,8 +29,9 @@ use crate::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, ForkSessionEnvironmentFactoryRequest,
     ForkedAttachmentReference, MessageFeedbackChange, ModelChange, NewStoredInput,
     NewStoredSession, ReasoningEffortChange, RewriteGoalEffect, RuntimeError, RuntimeResult,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoredInputState,
-    VariantChange,
+    SessionDeletion, SessionEnvironmentFactoryRequest, SessionFork, SessionHistoryClear,
+    SessionPinnedChange, SessionTitleChange, StoreErrorKind, StoredInputState, VariantChange,
+    WorkspaceEnvironmentSource,
     journal::InMemoryJournal,
     run::{RunRecord, allocate_run_id, create_user_message},
     session::InputRecord,
@@ -47,6 +49,7 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
         let source = self.session(&request.session_id)?;
+        source.ensure_standard_role()?;
         source
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -259,6 +262,7 @@ impl AssistantRuntime {
                     environment: prepared.environment,
                     current_variant,
                     approval_mode,
+                    role: crate::SessionRole::Standard,
                     created_at_ms,
                 },
                 conversation,
@@ -333,6 +337,7 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;
+        session.ensure_standard_role()?;
         session.ensure_idle()?;
         if self
             .child_tasks
@@ -385,6 +390,7 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;
+        session.ensure_standard_role()?;
         session.ensure_idle()?;
         if self
             .child_tasks
@@ -442,6 +448,121 @@ impl AssistantRuntime {
         })
     }
 
+    /// 清除产品历史，并以当前 Persona、Pinned Memory 与 Skill 重新冻结 System Context。
+    ///
+    /// clear 只允许完全空闲的活动 Session。Runtime 先准备完整替代上下文，Store 再原子切换
+    /// generation；因此准备失败或存储冲突都不会让内存进入半清空状态。
+    pub async fn clear_session(
+        &self,
+        request: ClearSessionRequest,
+    ) -> RuntimeResult<ClearSessionResult> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let session = self.session(&request.session_id)?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
+        session.ensure_healthy()?;
+        session.ensure_active()?;
+        session.ensure_idle()?;
+        if self
+            .child_tasks
+            .active_count_for_session(&request.session_id)?
+            != 0
+            || !self.approval_registry.list(&request.session_id)?.is_empty()
+        {
+            return Err(RuntimeError::SessionNotIdle {
+                session_id: request.session_id,
+            });
+        }
+
+        let current_environment = session.environment().clone();
+        let expected_role = session.role()?;
+        let workspace = current_environment
+            .workspace_id
+            .as_ref()
+            .map(|workspace_id| self.workspace_for_session_context(workspace_id))
+            .transpose()?;
+        let memory_context =
+            self.store.load_memory_context().await.map_err(|source| {
+                RuntimeError::from_store("load memory context for clear", source)
+            })?;
+        let prepared = self
+            .session_environment_factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &request.session_id,
+                workspace: workspace
+                    .as_ref()
+                    .map(|workspace| WorkspaceEnvironmentSource {
+                        workspace_id: &workspace.workspace_id,
+                        user_directory: &workspace.user_directory,
+                        agent_directory: &workspace.agent_directory,
+                    }),
+                memory_context: &memory_context,
+            })
+            .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
+        if prepared.environment != current_environment {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "clear session stable environment",
+            });
+        }
+        let skill_catalog = self
+            .prepare_session_skill_catalog(
+                workspace
+                    .as_ref()
+                    .map(|workspace| workspace.user_directory.as_str()),
+            )
+            .await?;
+        let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
+        let cleared = self
+            .store
+            .clear_session_history(SessionHistoryClear {
+                operation_id: request.operation_id,
+                session_id: request.session_id.clone(),
+                expected_generation: request.expected_generation,
+                system_prompt,
+                skill_catalog,
+                environment: prepared.environment,
+                expected_role,
+                changed_at_ms: now_ms()?,
+            })
+            .await
+            .map_err(|source| {
+                if source.kind() == StoreErrorKind::Conflict {
+                    RuntimeError::SnapshotStale
+                } else {
+                    RuntimeError::from_store("clear session history", source)
+                }
+            })?;
+
+        let controller =
+            std::sync::Arc::new(crate::session::SessionController::new(cleared.session));
+        self.child_tasks.remove_session(&request.session_id)?;
+        self.sessions
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .insert(request.session_id.clone(), controller.clone());
+        let summary = controller.summary()?;
+        self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+            session_id: request.session_id.clone(),
+        });
+        self.publish(assistant_protocol::RuntimeEvent::ConversationCommitted {
+            owner: assistant_protocol::ConversationOwner::MainSession {
+                session_id: request.session_id,
+            },
+            generation: cleared.result_generation,
+        });
+        Ok(ClearSessionResult {
+            session: summary,
+            source_generation: cleared.source_generation,
+            result_generation: cleared.result_generation,
+            cleanup_status: cleared.cleanup_status,
+        })
+    }
+
     fn allocate_delete_confirmation_token(
         &self,
         now: i64,
@@ -492,6 +613,7 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;
+        session.ensure_standard_role()?;
         session.ensure_healthy()?;
         session.ensure_active()?;
         session.ensure_idle()?;
@@ -624,6 +746,26 @@ impl AssistantRuntime {
             session_id: request.session_id,
         });
         Ok(SetSessionPinnedResult { session: summary })
+    }
+
+    /// 设置当前产品主控对一个普通 Session 的代理终态；Queue 不参与状态门禁。
+    pub async fn set_session_proxy(
+        &self,
+        request: SetSessionProxyRequest,
+    ) -> RuntimeResult<SetSessionProxyResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let controller = self
+            .controller_sessions()?
+            .into_iter()
+            .next()
+            .ok_or(RuntimeError::ControllerUnavailable)?;
+        self.controller_tool_coordinator()
+            .set_proxy(controller.id(), &request.session_id, request.enabled)
+            .await?;
+        let session = self.session(&request.session_id)?;
+        let summary = session.summary()?;
+        Ok(SetSessionProxyResult { session: summary })
     }
 
     /// 保存一条可靠 Assistant Message 的本地反馈。
@@ -945,6 +1087,7 @@ impl AssistantRuntime {
                 child_tasks: self.child_tasks.clone(),
                 store: self.store.clone(),
                 recall_reference_codec: self.recall_reference_codec.clone(),
+                controller_tools: self.controller_tool_coordinator(),
             },
             RunAuthorizationInput {
                 permission_coordinator: self.permission_coordinator.clone(),
@@ -955,6 +1098,8 @@ impl AssistantRuntime {
                 cancellation: self.root_cancellation.child_token(),
                 events: self.event_sender.clone(),
                 goal_binding: None,
+                input_origin: crate::InputOrigin::User,
+                cross_session_binding: None,
             },
             None,
         )?;
@@ -992,6 +1137,7 @@ impl AssistantRuntime {
                     agent_variant: request.variant,
                     origin: crate::InputOrigin::User,
                     goal_binding: None,
+                    cross_session_binding: None,
                     skill_activation: None,
                     approval_mode,
                     message: new_message.clone(),
@@ -1019,10 +1165,10 @@ impl AssistantRuntime {
             state
                 .skill_activations
                 .retain(|activation| !removed_user_ids.contains(&activation.message_id));
-            state.user_inputs.clear();
+            state.session_inputs.clear();
             state.goal_inputs.clear();
             state.goal = rewritten_goal.map(|(goal, _)| goal);
-            state.resume_required = state.goal.is_some() || !state.user_inputs.is_empty();
+            state.resume_required = state.goal.is_some() || !state.session_inputs.is_empty();
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.message_count = replacement_message_count;
@@ -1032,7 +1178,7 @@ impl AssistantRuntime {
             state.current_variant = rewritten.input.agent_variant;
             state.runs.insert(rewritten.run.run_id.clone(), run);
             state
-                .user_inputs
+                .session_inputs
                 .push_back(rewritten.input.input_id.clone());
             state.inputs.insert(
                 rewritten.input.input_id.clone(),

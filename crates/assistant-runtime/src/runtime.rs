@@ -2,7 +2,9 @@
 
 mod approval;
 mod attachment;
+mod compaction;
 mod connection_validation;
+pub(crate) mod controller;
 mod delegation;
 pub(crate) mod goal;
 mod input;
@@ -15,10 +17,12 @@ mod session_management;
 mod shutdown;
 mod skills;
 mod tasks;
+mod tool_assembly;
 mod work_plan;
 mod workspace;
 
 pub use attachment::StagedAttachmentUpload;
+pub(crate) use input::projection::project_accepted_input;
 pub use product::ResolvedToolFileResource;
 
 use std::{
@@ -79,7 +83,7 @@ pub(crate) fn now_ms() -> RuntimeResult<i64> {
 pub struct AssistantRuntime {
     config: RuntimeConfig,
     lifecycle: RwLock<RuntimeLifecycle>,
-    sessions: RwLock<BTreeMap<SessionId, Arc<SessionController>>>,
+    sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
     workspaces: RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>,
     attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
@@ -100,7 +104,7 @@ pub struct AssistantRuntime {
     context_window: Arc<ContextWindowEvaluator>,
     event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
-    tasks: RuntimeTasks,
+    tasks: Arc<RuntimeTasks>,
 }
 
 #[derive(Clone)]
@@ -187,10 +191,23 @@ impl AssistantRuntime {
         permission_store: Arc<dyn crate::PermissionFileStore>,
         recall_reference_key: [u8; 32],
     ) -> RuntimeResult<Self> {
-        let recovered = store
+        let mut recovered = store
             .load_runtime()
             .await
             .map_err(|source| RuntimeError::from_store("recover runtime", source))?;
+        let recovery_settlements =
+            recovery::prepare_interrupted_run_settlements(&recovered, now_ms()?)?;
+        if !recovery_settlements.is_empty() {
+            for settlement in recovery_settlements {
+                store.settle_run(settlement).await.map_err(|source| {
+                    RuntimeError::from_store("settle interrupted recovery run", source)
+                })?;
+            }
+            recovered = store
+                .load_runtime()
+                .await
+                .map_err(|source| RuntimeError::from_store("reload recovered runtime", source))?;
+        }
         let permission_scopes = permission_scopes(&recovered);
         let permission_coordinator =
             Arc::new(PermissionCoordinator::open(permission_store, permission_scopes).await);
@@ -230,7 +247,7 @@ impl AssistantRuntime {
         Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
-            sessions: RwLock::new(recovered.sessions),
+            sessions: Arc::new(RwLock::new(recovered.sessions)),
             workspaces: RwLock::new(recovered.workspaces),
             attachments: RwLock::new(recovered.attachments),
             delete_confirmations: Mutex::new(BTreeMap::new()),
@@ -254,7 +271,7 @@ impl AssistantRuntime {
             ),
             event_sender,
             root_cancellation: CancellationToken::new(),
-            tasks: RuntimeTasks::new(),
+            tasks: Arc::new(RuntimeTasks::new()),
         })
     }
 
@@ -337,6 +354,7 @@ impl AssistantRuntime {
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
         let snapshot = self.config_registry.reload().await?;
+        let _ = self.ensure_controller_session().await;
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(ReloadConfigResult {
             status: self.configuration_status(&snapshot),
@@ -360,7 +378,7 @@ impl AssistantRuntime {
                 },
             )
             .await?;
-        self.configuration_mutated(&snapshot)
+        self.configuration_mutated(&snapshot).await
     }
 
     pub async fn update_model(
@@ -381,7 +399,7 @@ impl AssistantRuntime {
                 },
             )
             .await?;
-        self.configuration_mutated(&snapshot)
+        self.configuration_mutated(&snapshot).await
     }
 
     pub async fn delete_model(
@@ -402,7 +420,7 @@ impl AssistantRuntime {
                 },
             )
             .await?;
-        self.configuration_mutated(&snapshot)
+        self.configuration_mutated(&snapshot).await
     }
 
     pub async fn set_default_model(
@@ -421,7 +439,7 @@ impl AssistantRuntime {
                 },
             )
             .await?;
-        self.configuration_mutated(&snapshot)
+        self.configuration_mutated(&snapshot).await
     }
 
     pub async fn set_auxiliary_vision_model(
@@ -440,13 +458,14 @@ impl AssistantRuntime {
                 },
             )
             .await?;
-        self.configuration_mutated(&snapshot)
+        self.configuration_mutated(&snapshot).await
     }
 
-    fn configuration_mutated(
+    async fn configuration_mutated(
         &self,
         snapshot: &ConfigSnapshot,
     ) -> RuntimeResult<ConfigurationMutationResult> {
+        let _ = self.ensure_controller_session().await;
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(ConfigurationMutationResult {
             status: self.configuration_status(snapshot),
@@ -505,10 +524,20 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
+        self.create_session_inner(request, crate::SessionRole::Standard, "New Session")
+            .await
+    }
+
+    async fn create_session_inner(
+        &self,
+        request: CreateSessionRequest,
+        role: crate::SessionRole,
+        generated_title: &str,
+    ) -> RuntimeResult<CreateSessionResult> {
         let (title, title_origin) = match request.title {
             Some(title) => (title, assistant_protocol::SessionTitleOrigin::User),
             None => (
-                "New Session".to_owned(),
+                generated_title.to_owned(),
                 assistant_protocol::SessionTitleOrigin::Generated,
             ),
         };
@@ -569,6 +598,7 @@ impl AssistantRuntime {
                 environment: prepared.environment,
                 current_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
+                role,
                 created_at_ms: now_ms()?,
             })
             .await
@@ -607,6 +637,53 @@ impl AssistantRuntime {
             session: summary.clone(),
         });
         Ok(CreateSessionResult { session: summary })
+    }
+
+    async fn ensure_controller_session(&self) -> RuntimeResult<Arc<SessionController>> {
+        if let Some(controller) = self.controller_sessions()?.into_iter().next() {
+            return Ok(controller);
+        }
+        if self.config_registry.snapshot()?.active().is_none() {
+            return Err(RuntimeError::ControllerUnavailable);
+        }
+        let created = self
+            .create_session_inner(
+                CreateSessionRequest {
+                    title: None,
+                    model_key: None,
+                    workspace_id: None,
+                },
+                crate::SessionRole::Controller,
+                "主控会话",
+            )
+            .await?;
+        self.session(&created.session.session_id)
+    }
+
+    pub(crate) fn controller_sessions(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {
+        let candidates = self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut controllers = candidates
+            .into_iter()
+            .filter_map(|session| match session.role() {
+                Ok(crate::SessionRole::Controller) => Some(Ok(session)),
+                Ok(crate::SessionRole::Standard) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
+        controllers.sort_by(|left, right| {
+            left.created_at_ms()
+                .cmp(&right.created_at_ms())
+                .then_with(|| left.id().cmp(right.id()))
+        });
+        Ok(controllers)
     }
 
     async fn prepare_session_skill_catalog(

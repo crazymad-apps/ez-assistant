@@ -27,6 +27,8 @@ pub(crate) enum InternalBoundarySource {
     DelegationExpectedOutput,
     DelegationVariant,
     DelegationDirectories,
+    ControllerDelivery,
+    ProxyReport,
 }
 
 impl InternalBoundarySource {
@@ -42,6 +44,8 @@ impl InternalBoundarySource {
             Self::DelegationExpectedOutput => "delegation_expected_output",
             Self::DelegationVariant => "delegation_variant",
             Self::DelegationDirectories => "delegation_directories",
+            Self::ControllerDelivery => "controller_delivery",
+            Self::ProxyReport => "proxy_report",
         }
     }
 }

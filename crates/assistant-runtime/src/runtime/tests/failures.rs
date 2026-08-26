@@ -35,7 +35,7 @@ impl ModelService for GatedCompletionModel {
 }
 
 #[tokio::test]
-async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failure() {
+async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
         8_192,
@@ -46,6 +46,10 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
             }),
             ModelScript::FailEstablishment(ModelError::ContextOverflow {
                 message: "fixture overflow".to_owned(),
+            }),
+            ModelScript::FailEstablishment(ModelError::Provider {
+                message: "fixture compaction failure".to_owned(),
+                status: Some(500),
             }),
         ],
     ));
@@ -96,7 +100,7 @@ async fn failed_run_settles_and_uncompressible_overflow_reports_compaction_failu
             .as_ref()
             .is_some_and(|error| error.message.contains("provider_overflow"))
     );
-    assert_eq!(model.take_requests().len(), 2);
+    assert_eq!(model.take_requests().len(), 3);
     assert_eq!(
         runtime
             .conversation_snapshot(&session.session.session_id)
@@ -154,6 +158,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
         assistant_protocol::RunStatus::Completed
     );
 
+    let mut events = runtime.subscribe_events();
     let continued = runtime
         .submit_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
@@ -190,6 +195,43 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
     assert_eq!(requests.len(), 3);
     assert!(requests[1].tools.is_empty());
     assert_eq!(requests[1].tool_choice, ToolChoice::None);
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session.session.session_id.clone(),
+        })
+        .await
+        .expect("compacted session view")
+        .snapshot
+        .value;
+    assert_eq!(view.conversation_generation, 2);
+    assert!(view.conversation.items.iter().any(|item| matches!(
+        item,
+        assistant_protocol::ConversationItem::ContextSummary { .. }
+    )));
+    assert!(view.session.active_compaction.is_none());
+    let mut saw_started = false;
+    let mut saw_finished = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            assistant_protocol::RuntimeEvent::SessionCompactionStarted { compaction, .. } => {
+                saw_started = true;
+                assert!(matches!(
+                    compaction.trigger,
+                    assistant_protocol::SessionCompactionTriggerSnapshot::Automatic {
+                        reason:
+                            assistant_protocol::SessionCompactionReasonSnapshot::ThresholdReached,
+                        ..
+                    }
+                ));
+            }
+            assistant_protocol::RuntimeEvent::SessionCompactionFinished {
+                outcome: assistant_protocol::SessionCompactionFinishedOutcome::Compacted { .. },
+                ..
+            } => saw_finished = true,
+            _ => {}
+        }
+    }
+    assert!(saw_started && saw_finished);
 }
 
 #[tokio::test]

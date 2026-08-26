@@ -32,6 +32,65 @@ describe("ComposerDock", () => {
     vi.restoreAllMocks();
   });
 
+  it("routes an exact standalone /compact command without creating an input", async () => {
+    const store = renderComposer();
+    const compact = vi.spyOn(store, "compactSession").mockResolvedValue({
+      type: "compacted",
+      source_generation: 1,
+      result_generation: 2,
+      compacted_message_count: 6,
+      retained_message_count: 2,
+    });
+    const submit = vi.spyOn(store, "submitInput");
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    fireEvent.change(input, { target: { value: "/compact" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(compact).toHaveBeenCalledWith("session-1", 1));
+    expect(submit).not.toHaveBeenCalled();
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it("clears /compact when the session is busy", async () => {
+    renderComposer({ session: { queued_input_count: 1 } });
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/compact" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("当前会话正忙");
+    expect(input).toHaveValue("");
+  });
+
+  it("clears /compact when the Runtime rejects the operation", async () => {
+    const store = renderComposer();
+    const compact = vi.spyOn(store, "compactSession").mockResolvedValue(null);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/compact" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(compact).toHaveBeenCalledWith("session-1", 1));
+    expect(input).toHaveValue("");
+  });
+
+  it("reuses the primary stop action for manual compaction", async () => {
+    const store = renderComposer({
+      session: {
+        active_compaction: {
+          compaction_id: "compact-1",
+          trigger: { type: "manual" },
+          source_generation: 1,
+          started_at_ms: 2,
+          cancellable: true,
+        },
+      },
+    });
+    const cancel = vi.spyOn(store, "cancelSessionCompaction").mockResolvedValue(true);
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "终止压缩" }));
+    expect(cancel).toHaveBeenCalledWith("session-1", "compact-1");
+  });
+
   it("submits with Enter, preserves Shift+Enter and opens shared slash pickers", async () => {
     const user = userEvent.setup();
     const store = renderComposer();
@@ -104,8 +163,8 @@ describe("ComposerDock", () => {
       revision: 4,
       state: "automatic",
       items: [
-        { input_id: "input-1", text_preview: "先检查构建", submitted_at_ms: 1, position: 1, is_prioritized: false, held_by_goal: false },
-        { input_id: "input-2", text_preview: "再运行测试", submitted_at_ms: 2, position: 2, is_prioritized: false, held_by_goal: false },
+        { input_id: "input-1", text_preview: "先检查构建", submitted_at_ms: 1, position: 1, is_prioritized: false, held_by_goal: false, source: { type: "user" } },
+        { input_id: "input-2", text_preview: "再运行测试", submitted_at_ms: 2, position: 2, is_prioritized: false, held_by_goal: false, source: { type: "user" } },
       ],
     };
     const store = renderComposer({ queue });
@@ -117,14 +176,15 @@ describe("ComposerDock", () => {
     expect(queue_trigger).toHaveAttribute("aria-expanded", "true");
     await user.click(queue_trigger);
     expect(queue_trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("先检查构建", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("再运行测试", { exact: true })).not.toBeInTheDocument();
     await user.click(queue_trigger);
-    const first_row = screen.getByText("先检查构建").closest("div");
+    expect(screen.queryByText("先检查构建", { exact: true })).not.toBeInTheDocument();
+    const first_row = screen.getByText("再运行测试").closest("div");
     expect(first_row).not.toBeNull();
     await user.click(within(first_row!).getByRole("button", { name: "优先" }));
-    expect(prioritize).toHaveBeenCalledWith("session-1", "input-1", 4);
+    expect(prioritize).toHaveBeenCalledWith("session-1", "input-2", 4);
     await user.click(within(first_row!).getByRole("button", { name: "移除排队输入" }));
-    expect(cancel).toHaveBeenCalledWith("session-1", "input-1");
+    expect(cancel).toHaveBeenCalledWith("session-1", "input-2");
     expect(screen.queryByRole("button", { name: /执行全部/ })).not.toBeInTheDocument();
 
     store.projection.applySessionSnapshot(observed(sessionView({
@@ -186,6 +246,7 @@ describe("ComposerDock", () => {
         position: 1,
         is_prioritized: false,
         held_by_goal: false,
+        source: { type: "user" },
       }],
     };
     const store = renderComposer({ approvals: [approval], queue });
@@ -193,7 +254,7 @@ describe("ComposerDock", () => {
     const reject_and_stop = vi.spyOn(store, "rejectApprovalAndStopRun").mockResolvedValue();
 
     expect(screen.getByText("允许执行命令行指令？", { exact: true })).toBeVisible();
-    expect(screen.getByText("审批后执行下一项", { exact: true })).toBeVisible();
+    expect(screen.queryByText("审批后执行下一项", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "输入消息" })).not.toBeInTheDocument();
     expect(screen.getByText("npm run build && npm test", { exact: true })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "最小化授权面板" }));
@@ -406,6 +467,7 @@ describe("ComposerDock", () => {
     expect(todo_summary).toHaveTextContent("编写客户端交互");
     expect(todo_summary).not.toHaveTextContent("完成 v0.18.0");
     expect(todo_summary).not.toHaveTextContent("Todo");
+    expect(todo_summary.querySelector("span[aria-hidden='true']")).not.toBeInTheDocument();
     await user.hover(todo_summary);
     const todo_dialog = await screen.findByRole("dialog", { name: "工作计划详情" });
     expect(todo_dialog).toBeVisible();
@@ -438,6 +500,23 @@ describe("ComposerDock", () => {
     expect(clear_goal).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "退出目标" }));
     await waitFor(() => expect(clear_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
+  });
+
+  it("shows Todo loading only while the session has an active Run", () => {
+    renderComposer({
+      work_plan: workPlan(),
+      session: { active_run_id: "run-1", active_run_status: "running" },
+    });
+
+    const todo_summary = screen.getByRole("button", { name: /工作计划/ });
+    expect(todo_summary.querySelector("span[aria-hidden='true']")).toBeInTheDocument();
+  });
+
+  it("treats a work plan with no items as a cleared Todo list", () => {
+    renderComposer({ work_plan: { ...workPlan(), items: [] } });
+
+    expect(screen.queryByRole("button", { name: /工作计划/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("工作计划待更新")).not.toBeInTheDocument();
   });
 
   it("centers the wider Todo detail from measured trigger and overlay dimensions", async () => {
@@ -474,6 +553,7 @@ describe("ComposerDock", () => {
         position: 1,
         is_prioritized: false,
         held_by_goal: true,
+        source: { type: "user" },
       }],
     };
     const store = renderComposer({ queue, goal: goalSnapshot("paused") });
@@ -531,6 +611,7 @@ function renderComposer(overrides: Readonly<{
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
   skill_catalog?: SessionViewSnapshot["skill_catalog"];
+  session?: Partial<SessionSummary>;
 }> = {}): RootStore {
   const store = new RootStore();
   store.connection.markConnected("instance-1", {
@@ -577,6 +658,8 @@ function applicationSnapshot(): ApplicationSnapshot {
     }],
     active_sessions: [sessionSummary()],
     archived_sessions: [],
+    controller_availability: { status: "unavailable" },
+    additional_controller_count: 0,
     capabilities: { conversation_paging: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
   };
 }
@@ -612,9 +695,11 @@ function sessionView(overrides: Readonly<{
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
   skill_catalog?: SessionViewSnapshot["skill_catalog"];
+  session?: Partial<SessionSummary>;
 }> = {}): SessionViewSnapshot {
   return {
-    session: sessionSummary(),
+    session: { ...sessionSummary(), ...overrides.session },
+    conversation_generation: 1,
     composer_capabilities: overrides.composer_capabilities ?? {
       selected_model_key: "fixture",
       reasoning_effort_options: [],
@@ -682,6 +767,7 @@ function sessionSummary(): SessionSummary {
     title: "交互测试",
     model_key: "fixture",
     lifecycle: "active",
+    role: "standard",
     current_variant: "build",
     approval_mode: "ask",
     workspace_id: "workspace-1",

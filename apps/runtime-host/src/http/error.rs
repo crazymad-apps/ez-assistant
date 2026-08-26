@@ -89,6 +89,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::SessionBusy
         | RuntimeErrorCode::SessionArchived
         | RuntimeErrorCode::SessionNotIdle
+        | RuntimeErrorCode::SessionRoleRestricted
         | RuntimeErrorCode::RunNotRetryable
         | RuntimeErrorCode::GoalAlreadyExists
         | RuntimeErrorCode::GoalGenerationConflict
@@ -107,6 +108,8 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::ConfigurationConflict
         | RuntimeErrorCode::QueueConflict
         | RuntimeErrorCode::SnapshotStale
+        | RuntimeErrorCode::SessionCompactionInProgress
+        | RuntimeErrorCode::SessionCompactionNotFound
         | RuntimeErrorCode::OperationNotAllowed => StatusCode::CONFLICT,
         RuntimeErrorCode::SkillNotUserInvocable => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::GoalUnsupportedByModel => StatusCode::UNPROCESSABLE_ENTITY,
@@ -114,14 +117,16 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
             StatusCode::PAYLOAD_TOO_LARGE
         }
         RuntimeErrorCode::AttachmentUploadInvalid => StatusCode::BAD_REQUEST,
-        RuntimeErrorCode::StorageUnavailable
+        RuntimeErrorCode::ControllerUnavailable
+        | RuntimeErrorCode::StorageUnavailable
         | RuntimeErrorCode::RuntimeShuttingDown
         | RuntimeErrorCode::ConfigurationUnavailable
         | RuntimeErrorCode::ModelUnavailable
         | RuntimeErrorCode::PermissionReloadFailed
         | RuntimeErrorCode::PermissionPersistenceFailed
         | RuntimeErrorCode::SkillCatalogUnavailable
-        | RuntimeErrorCode::SnapshotBusy => StatusCode::SERVICE_UNAVAILABLE,
+        | RuntimeErrorCode::SnapshotBusy
+        | RuntimeErrorCode::SessionHistoryCleanupPending => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeErrorCode::PermissionFileInvalid | RuntimeErrorCode::ResourceNotPreviewable => {
             StatusCode::UNPROCESSABLE_ENTITY
         }

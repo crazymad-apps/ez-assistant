@@ -21,6 +21,7 @@ use super::{
 use crate::{
     RuntimeError, RuntimeResult, SessionExecutionEnvironment,
     goal::{GoalRunSignalLatch, GoalSignalAuthorizationFacts, UPDATE_GOAL_TOOL_NAME},
+    runtime::controller::ControllerAuthorizationFacts,
     skill::LoadSkillAuthorizationFacts,
     work_plan::WorkPlanAuthorizationFacts,
 };
@@ -189,6 +190,10 @@ impl RuntimeToolAuthorizer {
         // Skill 启用只改变模型指令上下文，不授予任何底层能力；真正的文件、Shell 等
         // 调用仍按各自 facts 进入既有权限链，因此 load_skill 本身不增加审批。
         if invocation.facts::<LoadSkillAuthorizationFacts>().is_some() {
+            return ToolAuthorization::Allow;
+        }
+        // 主控工具只由来源门禁通过的 Controller Run 装配，私有 facts 不进入文件权限规则。
+        if invocation.facts::<ControllerAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
         }
         // 授权器按解析后的结构化 facts 判断，未知 facts 默认拒绝；不能退回到工具名或原始

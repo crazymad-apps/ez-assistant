@@ -2,6 +2,8 @@ import { runInAction } from "mobx";
 import type {
   AgentVariant,
   ApprovalMode,
+  ClearSessionResult,
+  CompactSessionOutcome,
   MessageFeedback,
   MessageId,
   ModelKey,
@@ -21,6 +23,14 @@ type SessionManagementState = {
   interaction_error: string | null;
   pending_session_action: boolean;
   pending_workspace_action: boolean;
+  pending_proxy_session_id: SessionId | null;
+  pending_compaction_session_id: SessionId | null;
+  pending_compaction_cancel_session_id: SessionId | null;
+  session_notice: Readonly<{
+    session_id: SessionId;
+    tone: "success" | "warning" | "neutral";
+    message: string;
+  }> | null;
 };
 
 type SessionManagementDependencies = Readonly<{
@@ -149,6 +159,142 @@ export class SessionManagementController {
     } finally {
       runInAction(() => {
         state.pending_session_action = false;
+      });
+    }
+  }
+
+  async clearSession(session_id: SessionId, expected_generation: number): Promise<ClearSessionResult | null> {
+    const { connection, runtime, state } = this.dependencies;
+    const client = runtime.client;
+    if (!client || connection.state !== "connected" || state.pending_session_action) {
+      return null;
+    }
+    state.pending_session_action = true;
+    state.interaction_error = null;
+    try {
+      const result = await client.command({
+        type: "clear_session",
+        payload: { session_id, operation_id: createOperationId("clear"), expected_generation },
+      });
+      await runtime.loadSession(session_id);
+      await runtime.loadApplication();
+      runInAction(() => {
+        state.session_notice = result.payload.cleanup_status === "pending"
+          ? { session_id, tone: "warning", message: "历史已清空，后台资源仍在清理。" }
+          : { session_id, tone: "success", message: "会话历史已清空。" };
+      });
+      return result.payload;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      await runtime.loadSession(session_id);
+      return null;
+    } finally {
+      runInAction(() => {
+        state.pending_session_action = false;
+      });
+    }
+  }
+
+  async compactSession(session_id: SessionId, expected_generation: number): Promise<CompactSessionOutcome | null> {
+    const { connection, runtime, state } = this.dependencies;
+    const client = runtime.client;
+    if (
+      !client
+      || connection.state !== "connected"
+      || state.pending_compaction_session_id
+      || state.pending_session_action
+    ) {
+      return null;
+    }
+    state.pending_compaction_session_id = session_id;
+    state.interaction_error = null;
+    state.session_notice = null;
+    try {
+      const result = await client.command({
+        type: "compact_session",
+        payload: { session_id, operation_id: createOperationId("compact"), expected_generation },
+      });
+      const outcome = result.payload.outcome;
+      runInAction(() => {
+        state.session_notice = {
+          session_id,
+          tone: outcome.type === "compacted" ? "success" : "neutral",
+          message: outcome.type === "compacted"
+            ? "上下文压缩完成。"
+            : outcome.type === "no_op"
+              ? "当前没有需要压缩的较早内容。"
+              : "已取消压缩。",
+        };
+      });
+      return outcome;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      return null;
+    } finally {
+      await runtime.loadSession(session_id);
+      await runtime.loadApplication();
+      runInAction(() => {
+        state.pending_compaction_session_id = null;
+      });
+    }
+  }
+
+  async cancelSessionCompaction(session_id: SessionId, operation_id: string): Promise<boolean> {
+    const { runtime, state } = this.dependencies;
+    if (!runtime.client || state.pending_compaction_cancel_session_id) {
+      return false;
+    }
+    state.pending_compaction_cancel_session_id = session_id;
+    state.interaction_error = null;
+    try {
+      await runtime.client.command({
+        type: "cancel_session_compaction",
+        payload: { session_id, operation_id },
+      });
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      return false;
+    } finally {
+      await runtime.loadSession(session_id);
+      runInAction(() => {
+        state.pending_compaction_cancel_session_id = null;
+      });
+    }
+  }
+
+  async setSessionProxy(session_id: SessionId, enabled: boolean): Promise<boolean> {
+    const { connection, runtime, state } = this.dependencies;
+    if (
+      !runtime.client
+      || connection.state !== "connected"
+      || state.pending_proxy_session_id
+      || state.pending_session_action
+    ) {
+      return false;
+    }
+    state.pending_proxy_session_id = session_id;
+    state.interaction_error = null;
+    try {
+      await runtime.client.command({ type: "set_session_proxy", payload: { session_id, enabled } });
+      await runtime.loadSession(session_id);
+      await runtime.loadApplication();
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      await runtime.loadSession(session_id);
+      return false;
+    } finally {
+      runInAction(() => {
+        state.pending_proxy_session_id = null;
       });
     }
   }
@@ -355,4 +501,10 @@ export class SessionManagementController {
 
 function displayError(error: unknown): string {
   return error instanceof Error ? error.message : "无法连接本地 Runtime。";
+}
+
+function createOperationId(kind: "clear" | "compact"): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

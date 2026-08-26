@@ -21,6 +21,7 @@ import { ExecutionSettingsPopover } from "./ExecutionSettingsPopover";
 import { GoalStatusRow } from "./GoalStatusRow";
 import { ModelSettingsPopover } from "./ModelSettingsPopover";
 import { QueueDrawer } from "./QueueDrawer";
+import { queuePresentation } from "./queuePresentation";
 import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
 import { SkillPicker } from "./SkillPicker";
 import { TodoSummary } from "./TodoSummary";
@@ -52,7 +53,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const previous_approval_count = useRef(0);
   const previous_approval_session_id = useRef<string | null>(null);
   const attachment_flow = useComposerAttachments({
-    disabled: store.composer_pending,
+    disabled: store.composer_pending || store.pending_compaction_session_id === session_id,
     on_error: (message) => store.showInteractionError(message),
     session_id,
   });
@@ -73,10 +74,6 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
     setSlashActiveIndex(Math.max(0, first_enabled));
-    if (slash_query !== null) {
-      setActiveOverlay(null);
-      setShowHelp(false);
-    }
   }, [slash_query]);
 
   useEffect(() => {
@@ -131,9 +128,45 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const is_idle_for_model = !session.active_run_id && session_view.queue.items.length === 0;
   const selected_model_key = session_view.composer_capabilities.selected_model_key ?? null;
   const model_required = selected_model_key === null;
+  const queue_presentation = queuePresentation(session_view.queue, session.active_run_id);
+  const manual_compaction = session.active_compaction?.trigger.type === "manual"
+    ? session.active_compaction
+    : null;
+  const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
+
+  async function submitCompaction() {
+    if (draft.trim() !== "/compact") {
+      return;
+    }
+    setDraft("");
+    if (attachment_flow.attachments.length > 0 || goal_armed || selected_skill) {
+      store.showInteractionError("/compact 必须单独使用，请先移除附件、目标和技能标记。");
+      return;
+    }
+    if (
+      session!.active_run_id
+      || session!.queued_input_count > 0
+      || session!.pending_approval_count > 0
+      || session!.active_child_count > 0
+      || session!.active_compaction
+      || compaction_command_pending
+      || store.pending_session_action
+    ) {
+      store.showInteractionError("当前会话正忙，暂时不能压缩上下文。");
+      return;
+    }
+    await store.compactSession(
+      session!.session_id,
+      session_view!.conversation_generation,
+    );
+  }
 
   async function submitDraft() {
     const value = draft;
+    if (value.trim() === "/compact") {
+      await submitCompaction();
+      return;
+    }
     if (!value.trim() || model_required || store.composer_pending || attachment_flow.pending) {
       return;
     }
@@ -168,6 +201,15 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   }
 
   function handleSlashCommand(command: SlashCommandItem) {
+    if (command.name === "/compact") {
+      if (draft.trim() === "/compact") {
+        void submitCompaction();
+      } else {
+        setDraft("/compact");
+        requestAnimationFrame(() => textarea_ref.current?.focus());
+      }
+      return;
+    }
     if (command.disabled_reason) {
       setDraft("");
       store.showInteractionError(command.disabled_reason);
@@ -235,11 +277,20 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     }
   }
 
+  function handleDraftChange(value: string) {
+    setDraft(value);
+    if (value.startsWith("/") && !value.includes("\n")) {
+      setActiveOverlay(null);
+      setShowHelp(false);
+    }
+  }
+
   const goal = session_view.goal;
-  const goal_stops_from_primary = !draft.trim() && goal?.state === "running";
+  const compaction_cancels_from_primary = Boolean(manual_compaction?.cancellable);
+  const goal_stops_from_primary = !compaction_cancels_from_primary && !draft.trim() && goal?.state === "running";
   const run_interrupts_from_primary = !draft.trim() && !goal_stops_from_primary && Boolean(session.active_run_id);
-  const primary_action_available = Boolean(draft.trim()) || goal_stops_from_primary || run_interrupts_from_primary;
-  const primary_action = resolvePrimaryAction(goal_stops_from_primary, run_interrupts_from_primary);
+  const primary_action_available = compaction_cancels_from_primary || Boolean(draft.trim()) || goal_stops_from_primary || run_interrupts_from_primary;
+  const primary_action = resolvePrimaryAction(compaction_cancels_from_primary, goal_stops_from_primary, run_interrupts_from_primary);
   const primary_label = primaryActionLabel(primary_action);
   const execution_initial_category = active_overlay === "execution"
     && (initial_settings_category === "variant" || initial_settings_category === "approval")
@@ -262,10 +313,11 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
 
   return (
     <div className={styles.dock}>
-      {!read_only && session_view.work_plan && (
+      {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
         <TodoSummary
           on_open_change={(open) => updateActiveOverlay("todo", open)}
           open={active_overlay === "todo"}
+          running={Boolean(session.active_run_id)}
           work_plan={session_view.work_plan}
         />
       )}
@@ -273,6 +325,12 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
         <div className={styles.error_notice} role="alert">
           <span>{store.interaction_error}</span>
           <button aria-label="关闭错误提示" onClick={() => store.clearInteractionError()} type="button"><Icon name="x" size={14} /></button>
+        </div>
+      )}
+      {store.session_notice?.session_id === session.session_id && (
+        <div className={styles.session_notice} data-tone={store.session_notice.tone} role="status">
+          <span>{store.session_notice.message}</span>
+          <button aria-label="关闭状态提示" onClick={() => store.clearSessionNotice(session.session_id)} type="button"><Icon name="x" size={14} /></button>
         </div>
       )}
       {!read_only && goal && (
@@ -294,14 +352,21 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
           <Icon name="chevron-down" size={14} />
         </button>
       )}
-      {!read_only && session_view.queue.items.length > 0 && (
+      {!read_only && queue_presentation.visible && (
         <QueueDrawer
           goal={goal}
           open={expanded_drawer === "queue"}
           on_open_change={(open) => setExpandedDrawer(open ? "queue" : null)}
           queue={session_view.queue}
+          presentation={queue_presentation}
           session_id={session.session_id}
         />
+      )}
+      {!read_only && session.active_compaction && (
+        <div className={styles.compaction_status} role="status">
+          <span className={styles.loading_ring} />
+          <strong>{session.active_compaction.trigger.type === "manual" ? "正在压缩上下文" : "正在自动压缩上下文"}</strong>
+        </div>
       )}
       {approval && !approval_minimized ? (
         <ApprovalWorkspace
@@ -322,6 +387,9 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
         </div>
       ) : (
         <section className={styles.composer}>
+          {session.proxy && (
+            <div className={styles.proxy_takeover_hint}>当前由主控代理；发送消息后将由你接管并退出代理。</div>
+          )}
           {slash_items.length > 0 && (
             <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} />
           )}
@@ -373,14 +441,16 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
           )}
           <textarea
             aria-label="输入消息"
-            disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
-            onChange={(event) => setDraft(event.target.value)}
+            disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
+            onChange={(event) => handleDraftChange(event.target.value)}
             onCompositionEnd={input_method.onCompositionEnd}
             onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleTextareaKeyDown}
             onKeyUp={input_method.onKeyUp}
             placeholder={model_required
               ? "请先选择一个可用模型"
+              : manual_compaction || compaction_command_pending
+                ? "正在压缩上下文…"
               : goal?.state === "paused"
                 ? "输入新指导并恢复目标…"
                 : "输入消息…  / 使用指令"}
@@ -393,7 +463,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               <button
                 aria-label="添加附件"
                 className={styles.icon_button}
-                disabled={store.composer_pending || attachment_flow.pending}
+                disabled={store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
                 onClick={() => void attachment_flow.choose()}
                 type="button"
               >
@@ -402,7 +472,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             </Tooltip>
             <ExecutionSettingsPopover
               approval_mode={session.approval_mode}
-              disabled={store.composer_pending}
+              disabled={store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
               initial_category={execution_initial_category}
               on_approval_change={(mode) => store.setSessionApprovalMode(session.session_id, mode)}
               on_open_change={(open) => {
@@ -418,7 +488,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             <span className={styles.action_spacer} />
             <ContextUsageRing view={session_view} />
             <ModelSettingsPopover
-              disabled={store.composer_pending}
+              disabled={store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
@@ -439,15 +509,18 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               trigger_class_name={styles.model_selector}
             />
             <button
-              aria-label={draft.trim() ? "发送消息" : primary_label}
+              aria-label={draft.trim() && !compaction_cancels_from_primary ? "发送消息" : primary_label}
               className={styles.send_button}
               data-action={primary_action}
-              disabled={store.composer_pending
+              disabled={(store.composer_pending && !compaction_cancels_from_primary)
                 || attachment_flow.pending
                 || !primary_action_available
-                || (Boolean(draft.trim()) && model_required)}
+                || store.pending_compaction_cancel_session_id === session.session_id
+                || (Boolean(draft.trim()) && model_required && !compaction_cancels_from_primary)}
               onClick={() => {
-                if (draft.trim()) {
+                if (compaction_cancels_from_primary && manual_compaction) {
+                  void store.cancelSessionCompaction(session.session_id, manual_compaction.compaction_id);
+                } else if (draft.trim()) {
                   void submitDraft();
                 } else if (goal_stops_from_primary && goal) {
                   void store.stopGoal(session.session_id, goal.goal_id, goal.generation);
@@ -457,7 +530,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               }}
               type="button"
             >
-              <Icon name={goal_stops_from_primary || run_interrupts_from_primary ? "stop" : "arrow-down"} size={16} />
+              <Icon name={compaction_cancels_from_primary || goal_stops_from_primary || run_interrupts_from_primary ? "stop" : "arrow-down"} size={16} />
             </button>
           </footer>
         </section>
@@ -545,7 +618,8 @@ function nextEnabledSlashIndex(
   return current;
 }
 
-function primaryActionLabel(action: "send" | "stop-goal" | "interrupt"): string {
+function primaryActionLabel(action: "send" | "stop-goal" | "interrupt" | "cancel-compaction"): string {
+  if (action === "cancel-compaction") return "终止压缩";
   if (action === "stop-goal") return "停止目标";
   if (action === "interrupt") return "中断当前轮次";
   return "发送消息";
@@ -556,9 +630,11 @@ function availableUserSkills(skills: readonly SkillSummarySnapshot[]): SkillSumm
 }
 
 function resolvePrimaryAction(
+  cancel_compaction: boolean,
   stop_goal: boolean,
   interrupt_run: boolean,
-): "send" | "stop-goal" | "interrupt" {
+): "send" | "stop-goal" | "interrupt" | "cancel-compaction" {
+  if (cancel_compaction) return "cancel-compaction";
   if (stop_goal) return "stop-goal";
   if (interrupt_run) return "interrupt";
   return "send";

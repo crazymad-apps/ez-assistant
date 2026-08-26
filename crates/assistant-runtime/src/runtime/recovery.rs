@@ -2,12 +2,17 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assistant_protocol::{AttachmentId, ChildTaskId, InputId, RunId, SessionId, WorkspaceId};
+use assistant_protocol::{
+    AttachmentId, ChildTaskId, InputId, RunId, RunStatus, SessionId, WorkspaceId,
+};
 
 use crate::{
     RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredChildTask,
-    StoredWorkspace, goal::GoalControl, session::SessionController, work_plan::WorkPlan,
+    StoredInputState, StoredRunSettlement, StoredSessionLifecycle, StoredWorkspace,
+    goal::GoalControl, session::SessionController, work_plan::WorkPlan,
 };
+
+use super::controller::{ProxyReportDraft, build_proxy_report_input};
 
 pub(super) struct RecoveredRegistries {
     pub workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
@@ -16,9 +21,160 @@ pub(super) struct RecoveredRegistries {
     pub child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
 }
 
+pub(super) fn prepare_interrupted_run_settlements(
+    recovered: &RecoveredRuntime,
+    finished_at_ms: i64,
+) -> RuntimeResult<Vec<StoredRunSettlement>> {
+    let sessions = recovered
+        .sessions
+        .iter()
+        .map(|session| (session.session_id.clone(), session))
+        .collect::<BTreeMap<_, _>>();
+    let inputs = recovered
+        .inputs
+        .iter()
+        .map(|input| (input.input_id.clone(), input))
+        .collect::<BTreeMap<_, _>>();
+    let mut settlements = Vec::new();
+    for run in &recovered.runs {
+        let Some(input) = inputs.get(&run.input_id).copied() else {
+            continue;
+        };
+        let recoverable = matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+            || run.status == RunStatus::Accepted && input.state == StoredInputState::Committed;
+        if !recoverable {
+            continue;
+        }
+        let source = sessions
+            .get(&run.session_id)
+            .copied()
+            .ok_or_else(invalid_recovery)?;
+        let source_queue_empty = !recovered.inputs.iter().any(|candidate| {
+            candidate.session_id == run.session_id && candidate.state == StoredInputState::Queued
+        });
+        let proxy_report = if source.role == crate::SessionRole::Standard && source_queue_empty {
+            source
+                .proxy
+                .as_ref()
+                .and_then(|proxy| sessions.get(&proxy.controller_session_id).copied())
+                .filter(|controller| {
+                    controller.role == crate::SessionRole::Controller
+                        && controller.lifecycle == StoredSessionLifecycle::Active
+                })
+                .map(|controller| {
+                    let draft = ProxyReportDraft {
+                        source_session_id: source.session_id.clone(),
+                        source_title: source.title.clone(),
+                        source_run_id: run.run_id.clone(),
+                        source_goal_id: input
+                            .goal_binding
+                            .as_ref()
+                            .map(|binding| binding.goal_id.clone()),
+                        goal_summary: recovered
+                            .goals
+                            .iter()
+                            .find(|goal| goal.session_id == source.session_id)
+                            .map(|goal| {
+                                format!(
+                                    "state={:?}, runs={}/{}, tokens={}/{}, usage_complete={}",
+                                    goal.state,
+                                    goal.budget.used_runs,
+                                    goal.budget.max_runs,
+                                    goal.budget.used_total_tokens,
+                                    goal.budget.max_total_tokens,
+                                    goal.budget.usage_complete,
+                                )
+                            }),
+                        source_run_status: RunStatus::Interrupted,
+                        controller_session_id: controller.session_id.clone(),
+                        final_text: None,
+                        error: None,
+                        accepted_at_ms: finished_at_ms,
+                    };
+                    build_proxy_report_input(
+                        draft,
+                        controller.current_variant,
+                        controller.approval_mode,
+                        recovery_input_id()?,
+                        recovery_run_id()?,
+                    )
+                    .map(Box::new)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        settlements.push(StoredRunSettlement {
+            operation_id: crate::id::generate("recovery-settlement").map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "recovery settlement operation id",
+                }
+            })?,
+            run_id: run.run_id.clone(),
+            session_id: run.session_id.clone(),
+            status: RunStatus::Interrupted,
+            cancel_requested: run.cancel_requested,
+            error: None,
+            messages: Vec::new(),
+            message_step: None,
+            goal_effect: None,
+            proxy_report,
+            finished_at_ms,
+        });
+    }
+    Ok(settlements)
+}
+
+fn recovery_input_id() -> RuntimeResult<InputId> {
+    let value =
+        crate::id::generate("input").map_err(|_| RuntimeError::InternalStateUnavailable {
+            component: "recovery proxy report input id",
+        })?;
+    InputId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "recovery proxy report input id",
+    })
+}
+
+fn recovery_run_id() -> RuntimeResult<RunId> {
+    let value = crate::id::generate("run").map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "recovery proxy report Run id",
+    })?;
+    RunId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "recovery proxy report Run id",
+    })
+}
+
 pub(super) fn recover_registries(
     recovered: RecoveredRuntime,
 ) -> RuntimeResult<RecoveredRegistries> {
+    let session_roles = recovered
+        .sessions
+        .iter()
+        .map(|session| {
+            (
+                session.session_id.clone(),
+                (session.role, session.lifecycle),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if session_roles.len() != recovered.sessions.len()
+        || recovered.sessions.iter().any(|session| {
+            session.role == crate::SessionRole::Controller
+                && (session.proxy.is_some()
+                    || session.lifecycle != crate::StoredSessionLifecycle::Active)
+                || session.proxy.as_ref().is_some_and(|proxy| {
+                    session.role != crate::SessionRole::Standard
+                        || proxy.controller_session_id == session.session_id
+                        || session_roles.get(&proxy.controller_session_id)
+                            != Some(&(
+                                crate::SessionRole::Controller,
+                                crate::StoredSessionLifecycle::Active,
+                            ))
+                })
+        })
+    {
+        return Err(invalid_recovery());
+    }
     let mut workspaces = BTreeMap::new();
     for workspace in recovered.workspaces {
         if workspaces
@@ -31,6 +187,41 @@ pub(super) fn recover_registries(
     let mut input_sessions = BTreeMap::<InputId, SessionId>::new();
     let mut input_activations = BTreeMap::new();
     for input in &recovered.inputs {
+        let target_role = session_roles.get(&input.session_id).copied();
+        let source_is_valid = match (&input.origin, &input.cross_session_binding) {
+            (crate::InputOrigin::User, None) => true,
+            (crate::InputOrigin::Runtime, None) => input.goal_binding.is_some(),
+            (
+                crate::InputOrigin::Runtime,
+                Some(crate::CrossSessionInputBinding::ControllerDelivery {
+                    controller_session_id,
+                    ..
+                }),
+            ) => {
+                input.goal_binding.is_none()
+                    && target_role.is_some_and(|(role, _)| role == crate::SessionRole::Standard)
+                    && session_roles.get(controller_session_id)
+                        == Some(&(
+                            crate::SessionRole::Controller,
+                            crate::StoredSessionLifecycle::Active,
+                        ))
+            }
+            (
+                crate::InputOrigin::Runtime,
+                Some(crate::CrossSessionInputBinding::ProxyReport { .. }),
+            ) => {
+                input.goal_binding.is_none()
+                    && target_role
+                        == Some((
+                            crate::SessionRole::Controller,
+                            crate::StoredSessionLifecycle::Active,
+                        ))
+            }
+            (crate::InputOrigin::User, Some(_)) => false,
+        };
+        if !source_is_valid {
+            return Err(invalid_recovery());
+        }
         if input_sessions
             .insert(input.input_id.clone(), input.session_id.clone())
             .is_some()

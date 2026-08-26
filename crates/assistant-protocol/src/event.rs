@@ -6,9 +6,26 @@ use ts_rs::TS;
 use crate::{
     ApprovalDecision, ApprovalId, ApprovalSnapshot, ChildTaskId, ChildTaskSnapshot,
     ChildTaskStatus, ConversationOwner, GoalId, GuardrailKind, GuardrailMode, ModelFailureKind,
-    PartId, PermissionFileSummary, RunId, RunStatus, RuntimeErrorInfo, SessionId, SessionSummary,
-    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel, WorkspaceId,
+    PartId, PermissionFileSummary, RunId, RunStatus, RuntimeErrorInfo, SessionCompactionSnapshot,
+    SessionId, SessionSummary, TokenUsageSnapshot, ToolActivityStatus, ToolCallId,
+    ToolOutputChannel, WorkspaceId,
 };
+
+/// 一次 Session 压缩的稳定结束投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionCompactionFinishedOutcome {
+    Compacted {
+        source_generation: u64,
+        result_generation: u64,
+    },
+    NoOp,
+    Cancelled,
+    Failed {
+        code: crate::RuntimeErrorCode,
+    },
+}
 
 /// Runtime 单实例内严格递增的实时事件封装。
 ///
@@ -96,6 +113,17 @@ pub enum RuntimeEvent {
     /// Session 的稳定产品投影已经变化；事件本身不替代组合快照。
     SessionChanged {
         session_id: SessionId,
+    },
+    /// 自动或手动 parent compaction 已进入模型调用阶段。
+    SessionCompactionStarted {
+        session_id: SessionId,
+        compaction: SessionCompactionSnapshot,
+    },
+    /// 对应压缩已清除易失 active 状态。
+    SessionCompactionFinished {
+        session_id: SessionId,
+        compaction_id: String,
+        outcome: SessionCompactionFinishedOutcome,
     },
     /// Session 输入队列已经变化；revision 用于拒绝基于旧顺序的 mutation。
     QueueChanged {
@@ -380,6 +408,9 @@ mod tests {
             model_key: ModelKey::new("model-1").expect("model key"),
             reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
+            role: crate::SessionRoleSnapshot::Standard,
+            proxy: None,
+            active_compaction: None,
             current_variant: crate::AgentVariant::Build,
             approval_mode: crate::ApprovalMode::Ask,
             workspace_id: None,
@@ -467,6 +498,36 @@ mod tests {
     fn every_event_variant_has_a_stable_tag_and_round_trips() {
         let events = vec![
             (RuntimeEvent::RuntimeShuttingDown, "runtime_shutting_down"),
+            (
+                RuntimeEvent::SessionChanged {
+                    session_id: session_id(),
+                },
+                "session_changed",
+            ),
+            (
+                RuntimeEvent::SessionCompactionStarted {
+                    session_id: session_id(),
+                    compaction: SessionCompactionSnapshot {
+                        compaction_id: "compact-1".to_owned(),
+                        trigger: crate::SessionCompactionTriggerSnapshot::Manual,
+                        source_generation: 2,
+                        started_at_ms: 100,
+                        cancellable: true,
+                    },
+                },
+                "session_compaction_started",
+            ),
+            (
+                RuntimeEvent::SessionCompactionFinished {
+                    session_id: session_id(),
+                    compaction_id: "compact-1".to_owned(),
+                    outcome: SessionCompactionFinishedOutcome::Compacted {
+                        source_generation: 2,
+                        result_generation: 3,
+                    },
+                },
+                "session_compaction_finished",
+            ),
             (
                 RuntimeEvent::SessionCreated {
                     session: session_fixture(),

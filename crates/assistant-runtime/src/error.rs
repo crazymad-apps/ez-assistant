@@ -1,5 +1,6 @@
 //! Runtime library 的结构化错误及应用协议映射。
 
+use agent_model::ModelError;
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
     ApprovalId, AttachmentId, ChildTaskId, GoalId, InputId, ModelKey, RunId, RuntimeErrorCode,
@@ -44,6 +45,18 @@ pub enum RuntimeError {
     /// Session 尚有活动、排队或未终结 Run。
     #[error("session `{session_id}` is not idle")]
     SessionNotIdle { session_id: SessionId },
+    /// Session 已有自动或手动上下文压缩正在执行。
+    #[error("session `{session_id}` context compaction is already in progress")]
+    SessionCompactionInProgress { session_id: SessionId },
+    /// 取消目标不是当前仍可取消的手动压缩。
+    #[error("session `{session_id}` context compaction was not found")]
+    SessionCompactionNotFound { session_id: SessionId },
+    /// 当前没有可供产品使用的主控会话。
+    #[error("controller session is unavailable")]
+    ControllerUnavailable,
+    /// Controller 不允许归档、删除或 Fork。
+    #[error("session `{session_id}` role does not allow this operation")]
+    SessionRoleRestricted { session_id: SessionId },
     /// 目标 Run 不存在于指定 Session。
     #[error("run `{run_id}` was not found in session `{session_id}`")]
     RunNotFound {
@@ -133,6 +146,20 @@ pub enum RuntimeError {
     /// Runtime 无法持久化已通过编译的配置 candidate。
     #[error("runtime configuration could not be persisted")]
     ConfigurationPersistenceFailed,
+    /// 独立命令中的模型调用已经开始，但 Provider Turn 最终失败。
+    #[error("model execution failed")]
+    ModelExecutionFailed {
+        /// 保留在 Runtime 内部的原始模型错误；协议层只返回脱敏分类。
+        #[source]
+        source: ModelError,
+    },
+    /// 独立手动上下文压缩未能生成或提交受控结果。
+    #[error("session context compaction failed")]
+    ContextCompactionFailed {
+        /// 保留压缩布局、响应或替换校验的完整内部错误链。
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// 用户指定的模型 key 不存在。
     #[error("model `{model_key}` was not found")]
     ModelNotFound { model_key: ModelKey },
@@ -246,6 +273,22 @@ impl RuntimeError {
             Self::SessionNotIdle { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::SessionNotIdle, "session is not idle")
             }
+            Self::SessionCompactionInProgress { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SessionCompactionInProgress,
+                "session context compaction is already in progress",
+            ),
+            Self::SessionCompactionNotFound { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SessionCompactionNotFound,
+                "session context compaction was not found",
+            ),
+            Self::ControllerUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ControllerUnavailable,
+                "controller session is unavailable",
+            ),
+            Self::SessionRoleRestricted { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::SessionRoleRestricted,
+                "session role does not allow this operation",
+            ),
             Self::RunNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::RunNotFound, "run was not found")
             }
@@ -320,6 +363,17 @@ impl RuntimeError {
             Self::ConfigurationPersistenceFailed => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
                 "configuration could not be persisted",
+            ),
+            Self::ModelExecutionFailed { source } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ModelExecutionFailed,
+                format!(
+                    "model execution failed (kind={})",
+                    crate::run::model_failure_kind_value(crate::run::model_failure_kind(source))
+                ),
+            ),
+            Self::ContextCompactionFailed { .. } => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ContextCompactionFailed,
+                "session context compaction failed",
             ),
             Self::ModelNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::ModelNotFound, "model was not found")

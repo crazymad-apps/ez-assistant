@@ -10,23 +10,25 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
-    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest, GoalClear,
-    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
-    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
+    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
+    ConversationWindowRequest, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
+    GoalStopResult, MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PermissionFileLoad,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionStoreFuture,
     PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
     QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, SkillNameState,
-    SkillNameStateChange, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationWindow, StoredMessageFeedback,
-    StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionTitleChange, SkillNameState, SkillNameStateChange, StoreError, StoreErrorKind,
+    StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -95,7 +97,7 @@ enum Command {
         reply: oneshot::Sender<Result<StoredSession, StoreError>>,
     },
     ForkSession {
-        fork: SessionFork,
+        fork: Box<SessionFork>,
         reply: oneshot::Sender<Result<StoredSessionFork, StoreError>>,
     },
     InspectSessionDeletion {
@@ -104,6 +106,18 @@ enum Command {
     },
     DeleteSession {
         deletion: SessionDeletion,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ClearSessionHistory {
+        clear: Box<SessionHistoryClear>,
+        reply: oneshot::Sender<Result<SessionHistoryClearResult, StoreError>>,
+    },
+    PrepareSessionCompaction {
+        preparation: SessionHistoryCompactionPreparation,
+        reply: oneshot::Sender<Result<SessionHistoryCompactionPreparationResult, StoreError>>,
+    },
+    FinishSessionCompaction {
+        finish: SessionHistoryCompactionFinish,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     CreateChildTask {
@@ -142,10 +156,10 @@ enum Command {
     },
     ReplaceContext {
         replacement: ContextReplacement,
-        reply: oneshot::Sender<Result<(), StoreError>>,
+        reply: oneshot::Sender<Result<ContextReplacementResult, StoreError>>,
     },
     AcceptInput {
-        input: NewStoredInput,
+        input: Box<NewStoredInput>,
         reply: oneshot::Sender<Result<AcceptedInput, StoreError>>,
     },
     CancelQueuedInput {
@@ -178,7 +192,7 @@ enum Command {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     SettleRun {
-        settlement: StoredRunSettlement,
+        settlement: Box<StoredRunSettlement>,
         reply: oneshot::Sender<Result<StoredRunSettlementResult, StoreError>>,
     },
     StopGoal {
@@ -219,6 +233,10 @@ enum Command {
     },
     SetSessionArchive {
         change: ArchiveChange,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetSessionProxy {
+        change: SessionProxyChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     RenameSession {
@@ -553,7 +571,11 @@ impl RuntimeStore for LocalRuntimeStore {
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
-            self.enqueue(Command::ForkSession { fork, reply }).await?;
+            self.enqueue(Command::ForkSession {
+                fork: Box::new(fork),
+                reply,
+            })
+            .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -575,6 +597,45 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::DeleteSession { deletion, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn clear_session_history(
+        &self,
+        clear: SessionHistoryClear,
+    ) -> StoreFuture<'_, SessionHistoryClearResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::ClearSessionHistory {
+                clear: Box::new(clear),
+                reply,
+            })
+            .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn prepare_session_compaction(
+        &self,
+        preparation: SessionHistoryCompactionPreparation,
+    ) -> StoreFuture<'_, SessionHistoryCompactionPreparationResult> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::PrepareSessionCompaction { preparation, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn finish_session_compaction(
+        &self,
+        finish: SessionHistoryCompactionFinish,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::FinishSessionCompaction { finish, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -678,7 +739,10 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
-    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()> {
+    fn replace_context(
+        &self,
+        replacement: ContextReplacement,
+    ) -> StoreFuture<'_, ContextReplacementResult> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::ReplaceContext { replacement, reply })
@@ -690,7 +754,11 @@ impl RuntimeStore for LocalRuntimeStore {
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
-            self.enqueue(Command::AcceptInput { input, reply }).await?;
+            self.enqueue(Command::AcceptInput {
+                input: Box::new(input),
+                reply,
+            })
+            .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -747,8 +815,11 @@ impl RuntimeStore for LocalRuntimeStore {
     ) -> StoreFuture<'_, StoredRunSettlementResult> {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
-            self.enqueue(Command::SettleRun { settlement, reply })
-                .await?;
+            self.enqueue(Command::SettleRun {
+                settlement: Box::new(settlement),
+                reply,
+            })
+            .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
     }
@@ -883,6 +954,15 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             let (reply, result) = oneshot::channel();
             self.enqueue(Command::SetSessionArchive { change, reply })
+                .await?;
+            result.await.map_err(|_| worker_unavailable())?
+        })
+    }
+
+    fn set_session_proxy(&self, change: SessionProxyChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (reply, result) = oneshot::channel();
+            self.enqueue(Command::SetSessionProxy { change, reply })
                 .await?;
             result.await.map_err(|_| worker_unavailable())?
         })
@@ -1065,13 +1145,22 @@ fn run_worker(
                 let _ = reply.send(engine.create_session(session));
             }
             Command::ForkSession { fork, reply } => {
-                let _ = reply.send(engine.fork_session(fork));
+                let _ = reply.send(engine.fork_session(*fork));
             }
             Command::InspectSessionDeletion { session_id, reply } => {
                 let _ = reply.send(engine.inspect_session_deletion(&session_id));
             }
             Command::DeleteSession { deletion, reply } => {
                 let _ = reply.send(engine.delete_session(deletion));
+            }
+            Command::ClearSessionHistory { clear, reply } => {
+                let _ = reply.send(engine.clear_session_history(*clear));
+            }
+            Command::PrepareSessionCompaction { preparation, reply } => {
+                let _ = reply.send(engine.prepare_session_compaction(preparation));
+            }
+            Command::FinishSessionCompaction { finish, reply } => {
+                let _ = reply.send(engine.finish_session_compaction(finish));
             }
             Command::CreateChildTask { task, reply } => {
                 let _ = reply.send(engine.create_child_task(task));
@@ -1110,7 +1199,7 @@ fn run_worker(
                 let _ = reply.send(engine.replace_context(replacement));
             }
             Command::AcceptInput { input, reply } => {
-                let _ = reply.send(engine.accept_input(input));
+                let _ = reply.send(engine.accept_input(*input));
             }
             Command::CancelQueuedInput {
                 session_id,
@@ -1138,7 +1227,7 @@ fn run_worker(
                 let _ = reply.send(engine.complete_tool_exchange(completed));
             }
             Command::SettleRun { settlement, reply } => {
-                let _ = reply.send(engine.settle_run(settlement));
+                let _ = reply.send(engine.settle_run(*settlement));
             }
             Command::StopGoal { stop, reply } => {
                 let _ = reply.send(engine.stop_goal(stop));
@@ -1169,6 +1258,9 @@ fn run_worker(
             }
             Command::SetSessionArchive { change, reply } => {
                 let _ = reply.send(engine.set_session_archive(change));
+            }
+            Command::SetSessionProxy { change, reply } => {
+                let _ = reply.send(engine.set_session_proxy(change));
             }
             Command::RenameSession { change, reply } => {
                 let _ = reply.send(engine.rename_session(change));

@@ -10,14 +10,16 @@ use crate::{
 use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
-    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest, GoalClear,
-    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
-    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
-    NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RewriteResult,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreFuture,
-    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
+    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
+    ConversationWindowRequest, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
+    GoalStopResult, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration,
+    PendingChildToolExchange, PendingToolExchange, QueuePriorityChange, ReasoningEffortChange,
+    RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionTitleChange, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement,
     StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
@@ -110,6 +112,27 @@ pub trait RuntimeStore: Send + Sync {
     /// 在再次核对影响后永久删除 Session 私有事实。
     fn delete_session(&self, deletion: SessionDeletion) -> StoreFuture<'_, ()>;
 
+    /// 原子切换到空 Conversation generation、刷新冻结上下文并删除旧历史事实。
+    ///
+    /// 权威切换后的物理清理失败不得作为业务回滚，而应通过结果中的
+    /// `Pending` 状态与启动恢复继续收敛。
+    fn clear_session_history(
+        &self,
+        clear: SessionHistoryClear,
+    ) -> StoreFuture<'_, SessionHistoryClearResult>;
+
+    /// 幂等登记手动压缩；同一 operation 的既有终态直接返回。
+    fn prepare_session_compaction(
+        &self,
+        preparation: SessionHistoryCompactionPreparation,
+    ) -> StoreFuture<'_, SessionHistoryCompactionPreparationResult>;
+
+    /// 将尚未提交 replacement 的手动压缩收敛为 no-op、cancelled 或 interrupted。
+    fn finish_session_compaction(
+        &self,
+        finish: SessionHistoryCompactionFinish,
+    ) -> StoreFuture<'_, ()>;
+
     /// 创建 accepted 子任务关系及其空的 generation 1 正文。
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask>;
 
@@ -149,7 +172,10 @@ pub trait RuntimeStore: Send + Sync {
     ) -> StoreFuture<'_, ConversationSnapshot>;
 
     /// 可靠切换父 Run 或 child 的压缩后有效正文 generation。
-    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()>;
+    fn replace_context(
+        &self,
+        replacement: ContextReplacement,
+    ) -> StoreFuture<'_, ContextReplacementResult>;
 
     /// 原子创建 Input 与首次 Accepted Run，或返回同 Session 幂等 key 的首次结果。
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
@@ -229,6 +255,9 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 原子切换 Session 归档状态；正文和运行历史保持不变。
     fn set_session_archive(&self, change: ArchiveChange) -> StoreFuture<'_, ()>;
+
+    /// 显式设置普通 Session 的主控代理终态。
+    fn set_session_proxy(&self, change: SessionProxyChange) -> StoreFuture<'_, ()>;
 
     /// 修改 Session 标题并持久化用户来源。
     fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()>;

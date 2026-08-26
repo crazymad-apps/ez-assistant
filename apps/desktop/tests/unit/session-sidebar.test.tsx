@@ -14,6 +14,26 @@ afterEach(() => {
 });
 
 describe("SessionSidebar grouping", () => {
+  it("keeps the controller fixed in the active list and hides it from archived sessions", () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    const controller = { ...sessionSummary("controller-1", "版本主控", null), role: "controller" as const };
+    snapshot.active_sessions.unshift(controller);
+    snapshot.controller_availability = { status: "available", session_id: controller.session_id };
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+
+    render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
+    expect(screen.getByRole("region", { name: "主控会话" })).toHaveTextContent("版本主控");
+
+    fireEvent.click(screen.getByRole("button", { name: "搜索会话" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索会话名称" }), { target: { value: "无匹配" } });
+    expect(screen.getByRole("region", { name: "主控会话" })).toHaveTextContent("版本主控");
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
+    fireEvent.click(screen.getByRole("tab", { name: "已归档" }));
+    expect(screen.queryByRole("region", { name: "主控会话" })).not.toBeInTheDocument();
+  });
+
   it("filters the current session list by title without a search scope", () => {
     const store = connectedStore();
     const history_search = vi.spyOn(store, "searchConversationHistory");
@@ -182,7 +202,7 @@ describe("SessionSidebar grouping", () => {
     );
 
     const session = screen.getByRole("button", { name: /^工作区会话/ });
-    expect(session.querySelector("[aria-label='正在运行']")).toBeInTheDocument();
+    expect(session.querySelector("svg[aria-label='正在运行']")).toBeInTheDocument();
     expect(session.querySelector("time")).not.toBeInTheDocument();
   });
 
@@ -264,6 +284,8 @@ function applicationSnapshot(): ApplicationSnapshot {
       sessionSummary("unbound-session", "未绑定会话", null),
     ],
     archived_sessions: [],
+    controller_availability: { status: "unavailable" },
+    additional_controller_count: 0,
     capabilities: {
       conversation_paging: true,
       tool_detail: true,
@@ -285,6 +307,7 @@ function sessionSummary(
     title,
     model_key: "fixture",
     lifecycle: "active",
+    role: "standard",
     current_variant: "build",
     approval_mode: "ask",
     workspace_id,

@@ -16,6 +16,12 @@ pub enum FunctionOutputShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NormalizedReasoningShape {
+    SummaryWithItemId,
+    PlainTextContent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpaqueReasoningPolicy {
     None,
     PreserveEncryptedItem,
@@ -37,6 +43,7 @@ pub struct ResponsesProtocolAdapter {
     pub(crate) function_output_shape: FunctionOutputShape,
     pub(crate) tool_image_projection: ToolImageProjection,
     pub(crate) tool_schema_dialect: ToolSchemaDialect,
+    pub(crate) normalized_reasoning_shape: NormalizedReasoningShape,
     pub(crate) include_encrypted_reasoning: bool,
     pub(crate) opaque_reasoning: OpaqueReasoningPolicy,
     pub(crate) route_fingerprint: Option<String>,
@@ -58,6 +65,7 @@ impl ResponsesProtocolAdapter {
             function_output_shape: FunctionOutputShape::StringOnly,
             tool_image_projection: ToolImageProjection::Unsupported,
             tool_schema_dialect: ToolSchemaDialect::OpenAiFunctionSubset,
+            normalized_reasoning_shape: NormalizedReasoningShape::SummaryWithItemId,
             include_encrypted_reasoning: false,
             opaque_reasoning: OpaqueReasoningPolicy::None,
             route_fingerprint: None,
@@ -80,6 +88,7 @@ impl ResponsesProtocolAdapter {
         Self {
             supports_temperature: false,
             supports_top_p: false,
+            normalized_reasoning_shape: NormalizedReasoningShape::PlainTextContent,
             include_encrypted_reasoning: true,
             opaque_reasoning: OpaqueReasoningPolicy::PreserveEncryptedItem,
             ..Self::openai_compatible(

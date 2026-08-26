@@ -1,9 +1,14 @@
 //! 单 Session 队列执行器：持久化领取、启动 Agent，并等待 Run 收敛后领取下一项。
 
 mod commands;
+pub(crate) mod projection;
 mod submission;
 
-use std::{panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    panic::AssertUnwindSafe,
+    sync::{Arc, RwLock},
+};
 
 use agent_core::{AgentExecution, ExecutionContext, ExecutionInput};
 use agent_sdk::ContextWindowEvaluator;
@@ -31,6 +36,7 @@ use crate::{
 
 #[derive(Clone)]
 struct QueueDriverContext {
+    sessions: Arc<RwLock<BTreeMap<assistant_protocol::SessionId, Arc<SessionController>>>>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
@@ -43,36 +49,23 @@ struct QueueDriverContext {
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     events: ObservationCoordinator,
     root_cancellation: CancellationToken,
+    tasks: Arc<super::tasks::RuntimeTasks>,
 }
 
 impl AssistantRuntime {
     pub(super) fn wake_queue(&self, session: Arc<SessionController>) -> RuntimeResult<()> {
-        let should_spawn = {
-            let mut state = session.lock_state()?;
-            if state.is_faulted
-                || state.is_queue_driver_running
-                || state.next_runnable_input().is_none()
-            {
-                false
-            } else {
-                state.is_queue_driver_running = true;
-                true
-            }
-        };
-        if should_spawn {
-            let context = self.queue_driver_context();
-            let panic_context = context.clone();
-            let panic_session = session.clone();
-            self.tasks.spawn(
-                run_queue(context, session),
-                recover_panicked_queue(panic_context, panic_session),
-            );
-        }
-        Ok(())
+        wake_queue_with(self.queue_driver_context(), self.tasks.clone(), session)
+    }
+
+    pub(super) fn controller_tool_coordinator(
+        &self,
+    ) -> Arc<super::controller::ControllerToolCoordinator> {
+        controller_tool_coordinator_from(&self.queue_driver_context())
     }
 
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
+            sessions: self.sessions.clone(),
             config_registry: self.config_registry.clone(),
             permission_coordinator: self.permission_coordinator.clone(),
             approval_registry: self.approval_registry.clone(),
@@ -85,8 +78,51 @@ impl AssistantRuntime {
             recall_reference_codec: self.recall_reference_codec.clone(),
             events: self.event_sender.clone(),
             root_cancellation: self.root_cancellation.clone(),
+            tasks: self.tasks.clone(),
         }
     }
+}
+
+fn controller_tool_coordinator_from(
+    context: &QueueDriverContext,
+) -> Arc<super::controller::ControllerToolCoordinator> {
+    let wake_context = context.clone();
+    let tasks = context.tasks.clone();
+    Arc::new(super::controller::ControllerToolCoordinator::new(
+        context.sessions.clone(),
+        context.store.clone(),
+        context.events.clone(),
+        Arc::new(move |session| wake_queue_with(wake_context.clone(), tasks.clone(), session)),
+    ))
+}
+
+fn wake_queue_with(
+    context: QueueDriverContext,
+    tasks: Arc<super::tasks::RuntimeTasks>,
+    session: Arc<SessionController>,
+) -> RuntimeResult<()> {
+    let should_spawn = {
+        let mut state = session.lock_state()?;
+        if state.is_faulted
+            || state.is_queue_driver_running
+            || state.active_compaction.is_some()
+            || state.next_runnable_input().is_none()
+        {
+            false
+        } else {
+            state.is_queue_driver_running = true;
+            true
+        }
+    };
+    if should_spawn {
+        let panic_context = context.clone();
+        let panic_session = session.clone();
+        tasks.spawn(
+            run_queue(context, session),
+            recover_panicked_queue(panic_context, panic_session),
+        );
+    }
+    Ok(())
 }
 
 /// Runtime 自己的队列/supervisor task 若 panic，先取消可能仍在运行的 Core，随后
@@ -116,8 +152,16 @@ async fn recover_panicked_queue_inner(
         fault_driver(&session);
         return;
     };
-    if let Ok(settlement) =
-        crate::run::settle_run(&session, &run_id, None, context.store.as_ref(), None).await
+    let controller = controller_tool_coordinator_from(&context);
+    if let Ok(settlement) = crate::run::settle_run(
+        &session,
+        &run_id,
+        None,
+        context.store.as_ref(),
+        controller.as_ref(),
+        None,
+    )
+    .await
     {
         publish_settlement_events(&context.events, &session, settlement);
     }
@@ -147,7 +191,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 Ok(state) => state,
                 Err(_) => return,
             };
-            if state.is_faulted || state.active_run.is_some() {
+            if state.is_faulted || state.active_run.is_some() || state.active_compaction.is_some() {
                 state.is_queue_driver_running = false;
                 return;
             }
@@ -172,6 +216,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         ));
         let run_cancellation = context.root_cancellation.child_token();
         let start_error = match context.config_registry.snapshot().and_then(|config| {
+            let controller_tools = controller_tool_coordinator_from(&context);
             compile_run_agent(
                 session.clone(),
                 &config,
@@ -183,6 +228,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     child_tasks: context.child_tasks.clone(),
                     store: context.store.clone(),
                     recall_reference_codec: context.recall_reference_codec.clone(),
+                    controller_tools,
                 },
                 RunAuthorizationInput {
                     permission_coordinator: context.permission_coordinator.clone(),
@@ -199,6 +245,8 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             run_id: next.2.run_id.clone(),
                         }
                     }),
+                    input_origin: next.1.stored.origin,
+                    cross_session_binding: next.1.stored.cross_session_binding.clone(),
                 },
                 Some(model_diagnostics.clone()),
             )
@@ -446,9 +494,11 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     compaction_count += 1;
                     match compact_parent_context(
                         compactor.as_ref(),
-                        &session,
+                        session.clone(),
                         &next.2.run_id,
+                        reason,
                         context.store.as_ref(),
+                        context.events.clone(),
                         cancellation.clone(),
                     )
                     .await
@@ -481,20 +531,24 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     }
                 };
                 let settled = if let Some(error) = forced_error {
+                    let controller = controller_tool_coordinator_from(&context);
                     crate::run::settle_run_with_error(
                         &session,
                         &next.2.run_id,
                         error,
                         context.store.as_ref(),
+                        controller.as_ref(),
                         Some(model_diagnostics.as_ref()),
                     )
                     .await
                 } else {
+                    let controller = controller_tool_coordinator_from(&context);
                     crate::run::settle_run(
                         &session,
                         &next.2.run_id,
                         outcome,
                         context.store.as_ref(),
+                        controller.as_ref(),
                         Some(model_diagnostics.as_ref()),
                     )
                     .await
@@ -580,7 +634,51 @@ async fn fail_before_start(
         fault_driver(session);
         return;
     };
-    if context
+    let controller = controller_tool_coordinator_from(context);
+    let proxy_report = session
+        .lock_state()
+        .ok()
+        .and_then(|state| {
+            let source_input = state
+                .runs
+                .get(run_id)
+                .and_then(|run| state.inputs.get(run.input_id()).map(|input| (run, input)))?;
+            let queue_empty_after_settlement = !state.inputs.values().any(|input| {
+                input.stored.state == StoredInputState::Queued
+                    && input.stored.input_id != source_input.1.stored.input_id
+            });
+            (state.role == crate::SessionRole::Standard && queue_empty_after_settlement)
+                .then(|| {
+                    state
+                        .proxy
+                        .as_ref()
+                        .map(|proxy| super::controller::ProxyReportDraft {
+                            source_session_id: session.id().clone(),
+                            source_title: state.title.clone(),
+                            source_run_id: run_id.clone(),
+                            source_goal_id: source_input
+                                .1
+                                .stored
+                                .goal_binding
+                                .as_ref()
+                                .map(|binding| binding.goal_id.clone()),
+                            goal_summary: None,
+                            source_run_status: RunStatus::Failed,
+                            controller_session_id: proxy.controller_session_id.clone(),
+                            final_text: None,
+                            error: Some(error.clone()),
+                            accepted_at_ms: finished_at,
+                        })
+                })
+                .flatten()
+        })
+        .map(|draft| controller.prepare_proxy_report(draft).map(Box::new))
+        .transpose();
+    let Ok(proxy_report) = proxy_report else {
+        fault_driver(session);
+        return;
+    };
+    let stored_result = context
         .store
         .settle_run(StoredRunSettlement {
             operation_id,
@@ -592,14 +690,14 @@ async fn fail_before_start(
             messages: Vec::new(),
             message_step: None,
             goal_effect: None,
+            proxy_report,
             finished_at_ms: finished_at,
         })
-        .await
-        .is_err()
-    {
+        .await;
+    let Ok(stored_result) = stored_result else {
         fault_driver(session);
         return;
-    }
+    };
     if let Ok(mut state) = session.lock_state() {
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
         if let Some(input_id) = failed_input_id.as_ref()
@@ -622,6 +720,12 @@ async fn fail_before_start(
             status: RunStatus::Failed,
             error: Some(error),
         });
+    // 源 Run 的 Store 和内存终态均已完成，且未持有源状态锁；此后才进入主控 Session 投影。
+    if let Some(report) = stored_result.accepted_proxy_report
+        && controller.project_proxy_report(report).await.is_err()
+    {
+        fault_driver(session);
+    }
 }
 
 fn finish_driver(session: &SessionController) {

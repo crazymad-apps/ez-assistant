@@ -513,6 +513,82 @@ pub struct DeleteSessionResult {
     pub session_id: SessionId,
 }
 
+/// 不可撤销地清空一个空闲 Session 的产品历史并重建 System Context。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearSessionRequest {
+    pub session_id: SessionId,
+    /// 客户端生成的有界幂等身份；网络重试必须复用原值。
+    pub operation_id: IdempotencyKey,
+    /// 用户确认时观察到的 Conversation generation。
+    pub expected_generation: u64,
+}
+
+/// clear 权威切换后的物理清理进度。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionHistoryCleanupStatus {
+    /// 旧产品正文与可重建派生文件已完成精确清理。
+    Completed,
+    /// 新空历史已权威生效，物理清理将由启动恢复继续收敛。
+    Pending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ClearSessionResult {
+    pub session: SessionSummary,
+    pub source_generation: u64,
+    pub result_generation: u64,
+    pub cleanup_status: SessionHistoryCleanupStatus,
+}
+
+/// 在完全空闲的 Session 上显式压缩较早上下文。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CompactSessionRequest {
+    pub session_id: SessionId,
+    pub operation_id: IdempotencyKey,
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompactSessionOutcome {
+    Compacted {
+        source_generation: u64,
+        result_generation: u64,
+        compacted_message_count: u64,
+        retained_message_count: u64,
+    },
+    NoOp,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CompactSessionResult {
+    pub session: SessionSummary,
+    pub outcome: CompactSessionOutcome,
+}
+
+/// 取消当前 Session 上仍未提交 replacement 的手动压缩。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CancelSessionCompactionRequest {
+    pub session_id: SessionId,
+    pub operation_id: IdempotencyKey,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CancelSessionCompactionResult {
+    pub session_id: SessionId,
+    pub operation_id: IdempotencyKey,
+}
+
 /// 按生命周期列出 Session；缺省只返回活动 Session。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -876,6 +952,20 @@ pub struct SetSessionPinnedResult {
     pub session: SessionSummary,
 }
 
+/// 显式设置目标 Session 是否由当前产品主控代理；不受目标 Queue 是否为空影响。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionProxyRequest {
+    pub session_id: SessionId,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetSessionProxyResult {
+    pub session: SessionSummary,
+}
+
 /// 保存或清除一条 Assistant Message 的本地反馈。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -1180,6 +1270,12 @@ pub enum RuntimeCommand {
     PrepareDeleteSession(PrepareDeleteSessionRequest),
     /// 使用单次 token 永久删除 Session。
     DeleteSession(DeleteSessionRequest),
+    /// 清空空闲 Session 的历史并重建 System Context。
+    ClearSession(ClearSessionRequest),
+    /// 压缩空闲 Session 的较早上下文。
+    CompactSession(CompactSessionRequest),
+    /// 取消仍在生成候选的手动压缩。
+    CancelSessionCompaction(CancelSessionCompactionRequest),
     /// 列出 Session。
     ListSessions(ListSessionsRequest),
     /// 读取当前本地 Skill 管理投影。
@@ -1221,6 +1317,8 @@ pub enum RuntimeCommand {
     RenameSession(RenameSessionRequest),
     /// 设置 Session 固定状态。
     SetSessionPinned(SetSessionPinnedRequest),
+    /// 设置 Session 主控代理状态。
+    SetSessionProxy(SetSessionProxyRequest),
     /// 保存 Assistant Message 反馈。
     SetMessageFeedback(SetMessageFeedbackRequest),
     /// 切换 Session 模型。
@@ -1305,6 +1403,10 @@ pub enum RuntimeCommandResult {
     PrepareDeleteSession(PrepareDeleteSessionResult),
     /// Session 已永久删除。
     DeleteSession(DeleteSessionResult),
+    /// Session 历史已切换到新空 generation。
+    ClearSession(ClearSessionResult),
+    CompactSession(CompactSessionResult),
+    CancelSessionCompaction(CancelSessionCompactionResult),
     /// Session 列表已返回。
     ListSessions(ListSessionsResult),
     ListSkills(ListSkillsResult),
@@ -1339,6 +1441,8 @@ pub enum RuntimeCommandResult {
     RenameSession(RenameSessionResult),
     /// Session 固定状态已设置。
     SetSessionPinned(SetSessionPinnedResult),
+    /// Session 主控代理状态已设置。
+    SetSessionProxy(SetSessionProxyResult),
     /// Assistant Message 反馈已保存。
     SetMessageFeedback(SetMessageFeedbackResult),
     /// Session 模型已切换。
@@ -1369,6 +1473,9 @@ mod tests {
             model_key: ModelKey::new("model-1").expect("model key"),
             reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
+            role: crate::SessionRoleSnapshot::Standard,
+            proxy: None,
+            active_compaction: None,
             current_variant: AgentVariant::Build,
             approval_mode: ApprovalMode::Ask,
             workspace_id: None,
@@ -1738,6 +1845,29 @@ mod tests {
                 "delete_session",
             ),
             (
+                RuntimeCommand::ClearSession(ClearSessionRequest {
+                    session_id: session_id.clone(),
+                    operation_id: IdempotencyKey::new("clear-1").expect("idempotency key"),
+                    expected_generation: 3,
+                }),
+                "clear_session",
+            ),
+            (
+                RuntimeCommand::CompactSession(CompactSessionRequest {
+                    session_id: session_id.clone(),
+                    operation_id: IdempotencyKey::new("compact-1").expect("idempotency key"),
+                    expected_generation: 3,
+                }),
+                "compact_session",
+            ),
+            (
+                RuntimeCommand::CancelSessionCompaction(CancelSessionCompactionRequest {
+                    session_id: session_id.clone(),
+                    operation_id: IdempotencyKey::new("compact-1").expect("idempotency key"),
+                }),
+                "cancel_session_compaction",
+            ),
+            (
                 RuntimeCommand::ListSessions(ListSessionsRequest::default()),
                 "list_sessions",
             ),
@@ -2067,6 +2197,34 @@ mod tests {
                     session_id: session_id.clone(),
                 }),
                 "delete_session",
+            ),
+            (
+                RuntimeCommandResult::ClearSession(ClearSessionResult {
+                    session: session_summary(),
+                    source_generation: 3,
+                    result_generation: 4,
+                    cleanup_status: SessionHistoryCleanupStatus::Completed,
+                }),
+                "clear_session",
+            ),
+            (
+                RuntimeCommandResult::CompactSession(CompactSessionResult {
+                    session: session_summary(),
+                    outcome: CompactSessionOutcome::Compacted {
+                        source_generation: 3,
+                        result_generation: 4,
+                        compacted_message_count: 8,
+                        retained_message_count: 3,
+                    },
+                }),
+                "compact_session",
+            ),
+            (
+                RuntimeCommandResult::CancelSessionCompaction(CancelSessionCompactionResult {
+                    session_id: session_id.clone(),
+                    operation_id: IdempotencyKey::new("compact-1").expect("idempotency key"),
+                }),
+                "cancel_session_compaction",
             ),
             (
                 RuntimeCommandResult::ListSessions(ListSessionsResult {

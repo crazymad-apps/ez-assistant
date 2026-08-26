@@ -46,8 +46,10 @@ pub(super) enum ResponsesInputItem {
         output: ResponsesFunctionOutput,
     },
     Reasoning {
-        id: String,
-        summary: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]

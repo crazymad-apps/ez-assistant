@@ -129,11 +129,13 @@ impl StorageEngine {
             return Err(conflict("run has a pending tool exchange"));
         }
         let goal_effect = settlement.goal_effect.clone();
+        let proxy_report = settlement.proxy_report.clone();
         let purpose = AppendPurpose::RunSettlement {
             status: settlement.status,
             cancel_requested: settlement.cancel_requested,
             error: settlement.error,
             goal_effect: settlement.goal_effect.map(Box::new),
+            proxy_report: settlement.proxy_report,
         };
         if settlement.messages.is_empty() {
             let transaction = self
@@ -150,7 +152,7 @@ impl StorageEngine {
             transaction.commit().map_err(|source| {
                 database_write_error("run settlement could not be committed", source)
             })?;
-            return self.goal_settlement_result(goal_effect.as_ref());
+            return self.run_settlement_result(goal_effect.as_ref(), proxy_report.as_deref());
         }
 
         // JSONL 先写、SQLite 后提交的 staged append 只能承受进程崩溃，不能承受一个
@@ -184,20 +186,21 @@ impl StorageEngine {
             purpose,
         )?;
         self.complete_staged_append(&settlement.operation_id)?;
-        self.goal_settlement_result(goal_effect.as_ref())
+        self.run_settlement_result(goal_effect.as_ref(), proxy_report.as_deref())
     }
 
-    fn goal_settlement_result(
+    fn run_settlement_result(
         &self,
         effect: Option<&assistant_runtime::StoredGoalSettlementEffect>,
+        proxy_report: Option<&assistant_runtime::NewStoredInput>,
     ) -> StorageResult<assistant_runtime::StoredRunSettlementResult> {
-        let Some(effect) = effect else {
-            return Ok(assistant_runtime::StoredRunSettlementResult::default());
-        };
-        match effect {
-            assistant_runtime::StoredGoalSettlementEffect::Continue {
-                goal, next_input, ..
-            } => {
+        let mut result = match effect {
+            None => assistant_runtime::StoredRunSettlementResult::default(),
+            Some(assistant_runtime::StoredGoalSettlementEffect::Continue {
+                goal,
+                next_input,
+                ..
+            }) => {
                 let input = self
                     .load_inputs()?
                     .into_iter()
@@ -208,44 +211,46 @@ impl StorageEngine {
                     .into_iter()
                     .find(|run| run.run_id == next_input.run_id)
                     .ok_or_else(|| super::invalid_data("Goal continuation Run is missing"))?;
-                Ok(assistant_runtime::StoredRunSettlementResult {
+                assistant_runtime::StoredRunSettlementResult {
                     goal: Some(goal.clone()),
                     continuation: Some(assistant_runtime::AcceptedInput {
                         input,
                         run,
                         is_duplicate: false,
                     }),
+                    accepted_proxy_report: None,
                     resume_required: false,
-                })
+                }
             }
-            assistant_runtime::StoredGoalSettlementEffect::Transition {
+            Some(assistant_runtime::StoredGoalSettlementEffect::Transition {
                 goal,
                 resume_required,
                 ..
-            } => Ok(assistant_runtime::StoredRunSettlementResult {
+            }) => assistant_runtime::StoredRunSettlementResult {
                 goal: Some(goal.clone()),
                 continuation: None,
+                accepted_proxy_report: None,
                 resume_required: *resume_required,
-            }),
+            },
+        };
+        if let Some(report) = proxy_report {
+            let input = self
+                .load_inputs()?
+                .into_iter()
+                .find(|input| input.input_id == report.input_id)
+                .ok_or_else(|| super::invalid_data("proxy report input is missing"))?;
+            let run = self
+                .load_runs()?
+                .into_iter()
+                .find(|run| run.run_id == report.run_id)
+                .ok_or_else(|| super::invalid_data("proxy report Run is missing"))?;
+            result.accepted_proxy_report = Some(assistant_runtime::AcceptedInput {
+                input,
+                run,
+                is_duplicate: false,
+            });
         }
-    }
-
-    /// 重启时只中断已经领取或已经提交 User Message 的未终结 Run。
-    pub(super) fn interrupt_nonterminal_runs(&mut self) -> StorageResult<()> {
-        self.connection
-            .execute(
-                "UPDATE runs
-                 SET status = 'interrupted', finished_at_ms = ?1
-                 WHERE status IN ('running', 'cancelling')
-                    OR (status = 'accepted' AND EXISTS (
-                        SELECT 1 FROM inputs WHERE inputs.input_id = runs.input_id AND inputs.state = 'committed'
-                    ))",
-                [system_time_ms()?],
-            )
-            .map_err(|source| {
-                database_write_error("non-terminal runs could not be interrupted", source)
-            })?;
-        Ok(())
+        Ok(result)
     }
 }
 

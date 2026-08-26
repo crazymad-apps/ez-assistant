@@ -321,6 +321,8 @@ export class RuntimeLifecycleCoordinator {
       || event.type === "workspace_changed"
       || event.type === "session_created"
       || event.type === "session_changed"
+      || event.type === "session_compaction_started"
+      || event.type === "session_compaction_finished"
       || event.type === "conversation_committed"
       || event.type === "run_started"
       || event.type === "run_finished"
@@ -435,6 +437,8 @@ function sessionIdForRefresh(event: RuntimeEvent): SessionId | null {
     case "approval_requested":
       return event.approval.session_id;
     case "queue_changed":
+    case "session_compaction_started":
+    case "session_compaction_finished":
     case "work_plan_changed":
     case "goal_changed":
     case "permission_reloaded":

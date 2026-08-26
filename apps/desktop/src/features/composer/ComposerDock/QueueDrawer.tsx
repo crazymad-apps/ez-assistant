@@ -4,17 +4,19 @@ import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ComposerSecondaryDrawer } from "./ComposerSecondaryDrawer";
 import styles from "./index.module.scss";
+import type { QueuePresentation } from "./queuePresentation";
 
 export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
   open: boolean;
   on_open_change: (open: boolean) => void;
   goal: GoalSnapshot | null;
   queue: QueueSnapshot;
+  presentation: QueuePresentation;
   session_id: string;
 }>) {
   const store = useRootStore();
   const needs_resume = props.queue.state !== "automatic";
-  const held_count = props.queue.items.filter((item) => item.held_by_goal).length;
+  const held_count = props.presentation.items.filter((item) => item.held_by_goal).length;
   return (
     <ComposerSecondaryDrawer
       label="输入队列"
@@ -23,7 +25,7 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
       summary={<>
         <Icon name="fork" size={16} />
         <strong>{held_count > 0 ? "待处理指导" : needs_resume ? "待恢复队列" : "待执行队列"}</strong>
-        <b className={styles.secondary_drawer_count}>{props.queue.items.length}</b>
+        <b className={styles.secondary_drawer_count}>{props.presentation.count}</b>
       </>}
     >
       <div className={styles.queue_items}>
@@ -36,11 +38,11 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
               {props.queue.state === "resume_required" ? "确认并继续全部" : "继续全部"}
             </button>
           )}
-          {props.queue.items.map((item) => (
+          {props.presentation.items.map((item) => (
             <div className={styles.queue_item} key={item.input_id}>
               <span>{item.position}</span>
               <p title={item.text_preview}>{item.text_preview}</p>
-              <small>{item.held_by_goal ? "目标暂存" : ""}</small>
+              <small>{queueSourceLabel(item.source, store.projection.application) ?? (item.held_by_goal ? "目标暂存" : "")}</small>
               <div className={styles.queue_actions}>
                 {item.skill && <span className={styles.queue_skill} title={item.skill.name}>{item.skill.name}</span>}
                 <time>{formatTime(item.submitted_at_ms)}</time>
@@ -86,4 +88,19 @@ function formatTime(value: number): string {
     minute: "2-digit",
     hour12: false,
   }).format(value);
+}
+
+function queueSourceLabel(
+  source: import("../../../generated/assistant-protocol").ConversationInputSourceSnapshot,
+  application: import("../../../generated/assistant-protocol").ApplicationSnapshot | null,
+): string | null {
+  if (source.type === "controller_delivery") {
+    return "主控转达";
+  }
+  if (source.type === "proxy_report") {
+    const session = [...(application?.active_sessions ?? []), ...(application?.archived_sessions ?? [])]
+      .find((candidate) => candidate.session_id === source.source_session_id);
+    return `会话报告 · ${session?.title ?? "来源会话"}`;
+  }
+  return null;
 }

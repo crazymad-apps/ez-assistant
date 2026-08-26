@@ -11,6 +11,7 @@ import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { workspaceDisplayName } from "../sessionFormatters";
 import { SessionList, WorkspaceGroup } from "./WorkspaceGroup";
+import { ControllerSection } from "./ControllerSection";
 import styles from "./index.module.scss";
 
 export const SessionSidebar = observer(function SessionSidebar() {
@@ -30,7 +31,8 @@ export const SessionSidebar = observer(function SessionSidebar() {
   const active_workspaces = workspaces.filter((workspace) => workspace.lifecycle === "active");
   const active_workspace_ids = new Set(active_workspaces.map((workspace) => workspace.workspace_id));
   const visible_sessions = sessions.filter((session) => (
-    !session.workspace_id || active_workspace_ids.has(session.workspace_id)
+    session.role !== "controller"
+    && (!session.workspace_id || active_workspace_ids.has(session.workspace_id))
   ));
   const filtered_sessions = normalized_query
     ? visible_sessions.filter((session) => session.title.toLocaleLowerCase().includes(normalized_query))
@@ -166,6 +168,9 @@ export const SessionSidebar = observer(function SessionSidebar() {
       )}
 
       <div className={styles.session_scroll}>
+        {store.navigation.list_mode === "active" && (
+          <ControllerSection application={application} />
+        )}
         {search_open ? (
           <section aria-label="会话搜索结果" className={styles.search_results}>
             <div className={styles.search_summary}>

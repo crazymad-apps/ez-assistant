@@ -74,7 +74,7 @@ pub struct FsReadTool {
 pub struct ReadFileInput {
     /// 绝对路径或相对 Session 工作目录的文件路径。
     pub path: String,
-    /// 1 起始的首行行号。
+    /// 1 起始的首行行号；续读时必须显式传入上一页返回的 `next_offset`，重复调用不会自动翻页。
     pub offset: Option<NonZeroU32>,
     /// 最多返回的行数。
     pub limit: Option<NonZeroU32>,
@@ -106,8 +106,10 @@ impl Tool for FsReadTool {
 
     fn description(&self) -> String {
         format!(
-            "Read a UTF-8 text file with 1-based line numbers. Default offset: {}; default \
-             limit: {}; maximum limit: {}. Use offset/limit for paging.",
+            "Read a UTF-8 text file with 1-based line numbers. Calls are stateless: repeating the \
+             same path and arguments returns the same page and never advances automatically. To \
+             continue reading, explicitly pass the previous result's next_offset as the next \
+             call's offset. Default offset: {}; default limit: {}; maximum limit: {}.",
             self.config.default_offset, self.config.default_limit, self.config.maximum_limit,
         )
     }

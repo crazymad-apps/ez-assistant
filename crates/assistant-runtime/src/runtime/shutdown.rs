@@ -171,8 +171,16 @@ impl AssistantRuntime {
                     state.is_faulted = true;
                     continue;
                 }
-                let settlement =
-                    settle_run(&session, &run_id, None, self.store.as_ref(), None).await?;
+                let controller = self.controller_tool_coordinator();
+                let settlement = settle_run(
+                    &session,
+                    &run_id,
+                    None,
+                    self.store.as_ref(),
+                    controller.as_ref(),
+                    None,
+                )
+                .await?;
                 if let Some(goal) = settlement.goal {
                     self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
                         session_id: session.id().clone(),

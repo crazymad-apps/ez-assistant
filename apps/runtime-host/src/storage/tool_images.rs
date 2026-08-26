@@ -186,7 +186,7 @@ fn collect_tool_images(
     }
 }
 
-fn reference_from_file_name(file_name: &str) -> Option<ToolImageReference> {
+pub(super) fn reference_from_file_name(file_name: &str) -> Option<ToolImageReference> {
     let media_type = match Path::new(file_name).extension()?.to_str()? {
         "jpg" => "image/jpeg",
         "png" => "image/png",

@@ -143,6 +143,24 @@ impl AssistantRuntime {
         Ok(workspace)
     }
 
+    /// 解析既有 Session 已冻结的 Workspace 绑定。
+    ///
+    /// Session 持有的 Workspace ID 缺失表示运行环境已经不可用，而不是一次面向用户的
+    /// Workspace 查询未命中；锁故障仍保留其内部状态错误，不能被降格成 unavailable。
+    pub(super) fn workspace_for_session_context(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> RuntimeResult<StoredWorkspace> {
+        match self.workspace(workspace_id) {
+            Err(RuntimeError::WorkspaceNotFound { .. }) => {
+                Err(RuntimeError::WorkspaceUnavailable {
+                    workspace_id: workspace_id.clone(),
+                })
+            }
+            result => result,
+        }
+    }
+
     fn workspace(&self, workspace_id: &WorkspaceId) -> RuntimeResult<StoredWorkspace> {
         self.workspaces
             .read()

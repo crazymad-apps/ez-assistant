@@ -159,6 +159,23 @@ fn read_schema_resolved_facts_fingerprint_and_execution_share_effective_input() 
         definition.input_schema["properties"]["limit"]["default"],
         serde_json::json!(200)
     );
+    assert!(definition.description.contains("Calls are stateless"));
+    assert!(
+        definition
+            .description
+            .contains("never advances automatically")
+    );
+    assert!(
+        definition
+            .description
+            .contains("previous result's next_offset")
+    );
+    assert!(
+        definition.input_schema["properties"]["offset"]["description"]
+            .as_str()
+            .expect("offset description")
+            .contains("next_offset")
+    );
     let mut batch = Dispatcher::resolve_batch(
         &snapshot,
         &[tool_call(

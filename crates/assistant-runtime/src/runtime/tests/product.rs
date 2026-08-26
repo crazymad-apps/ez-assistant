@@ -150,7 +150,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         .into_iter()
         .find_map(|item| match item {
             ConversationItem::Assistant(message) => Some(message),
-            ConversationItem::User(_) => None,
+            ConversationItem::User(_) | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("assistant message");
 
@@ -268,7 +268,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .into_iter()
         .find_map(|item| match item {
             ConversationItem::Assistant(message) => Some(message.message_id),
-            ConversationItem::User(_) => None,
+            ConversationItem::User(_) | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("assistant message");
     runtime
@@ -320,7 +320,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .into_iter()
         .find_map(|item| match item {
             ConversationItem::Assistant(message) => Some(message.feedback),
-            ConversationItem::User(_) => None,
+            ConversationItem::User(_) | ConversationItem::ContextSummary { .. } => None,
         });
     assert_eq!(cleared, Some(None));
 }

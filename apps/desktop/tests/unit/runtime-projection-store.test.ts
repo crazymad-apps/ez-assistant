@@ -22,6 +22,8 @@ const application: ApplicationSnapshot = {
   workspaces: [],
   active_sessions: [],
   archived_sessions: [],
+  controller_availability: { status: "unavailable" },
+  additional_controller_count: 0,
   capabilities: {
     conversation_paging: true,
     tool_detail: true,
@@ -103,6 +105,7 @@ describe("RuntimeProjectionStore", () => {
     expect(history?.generation).toBe(2);
     expect(history?.items.map(conversationItemId)).toEqual(["new-message"]);
   });
+
 });
 
 function envelope(sequence: number): RuntimeEventEnvelope {

@@ -20,22 +20,38 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(session?.title ?? "");
   const [delete_preview, setDeletePreview] = useState<PrepareDeleteSessionResult | null>(null);
+  const [clear_open, setClearOpen] = useState(false);
+  const [proxy_error, setProxyError] = useState<string | null>(null);
   const cancel_blur_ref = useRef(false);
   const input_method = useInputMethodGuard();
   const recent = [...(store.projection.application?.active_sessions ?? [])]
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
   const is_archived = session?.lifecycle === "archived";
+  const session_view = session ? store.projection.session_views.get(session.session_id) : undefined;
+  const is_controller = session?.role === "controller";
+  const is_proxied = Boolean(session?.proxy);
+  const controller_available = store.projection.application?.controller_availability.status === "available";
   const blocks_archive = Boolean(
     session?.active_run_id
     || session?.queued_input_count
     || session?.pending_approval_count,
+  );
+  const blocks_clear = Boolean(
+    is_archived
+    || session?.active_run_id
+    || session?.queued_input_count
+    || session?.pending_approval_count
+    || session?.active_child_count
+    || session?.active_compaction,
   );
   const status = session ? sessionStatus(session) : null;
 
   useEffect(() => {
     setEditing(false);
     setTitle(session?.title ?? "");
+    setClearOpen(false);
+    setProxyError(null);
   }, [session?.session_id, session?.title]);
 
   function finishEdit() {
@@ -72,6 +88,27 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
     const deleted = await store.deleteSession(delete_preview);
     if (deleted) {
       setDeletePreview(null);
+    }
+  }
+
+  async function confirmClear() {
+    if (!session || !session_view) {
+      return;
+    }
+    const result = await store.clearSession(session.session_id, session_view.conversation_generation);
+    if (result) {
+      setClearOpen(false);
+    }
+  }
+
+  async function toggleProxy() {
+    if (!session || is_controller) {
+      return;
+    }
+    setProxyError(null);
+    const saved = await store.setSessionProxy(session.session_id, !is_proxied);
+    if (!saved) {
+      setProxyError(store.interaction_error ?? "未能更新主控代理状态。");
     }
   }
 
@@ -164,6 +201,34 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             {status.label}
           </span>
         )}
+        {session && is_controller && (
+          <span className={styles.session_role_badge}>主控</span>
+        )}
+        {session && !is_controller && (
+          <div
+            className={styles.proxy_control}
+            title={!controller_available ? "主控会话暂不可用" : undefined}
+          >
+            <span>主控代理</span>
+            <button
+              aria-checked={is_proxied}
+              aria-label="主控代理"
+              disabled={
+                is_archived
+                || !controller_available
+                || store.pending_proxy_session_id === session.session_id
+              }
+              onClick={() => void toggleProxy()}
+              role="switch"
+              type="button"
+            >
+              <i />
+            </button>
+          </div>
+        )}
+        {is_proxied && session && session.queued_input_count > 0 && (
+          <span className={styles.proxy_queue_hint}>现有队列处理完毕后报告最新结果</span>
+        )}
       </div>
       <div className={styles.session_actions}>
         <DropdownMenu>
@@ -180,18 +245,28 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
               </DropdownMenuItem>
             )}
             {!is_archived && session && (
+              <DropdownMenuItem
+                className={styles.clear_action}
+                disabled={blocks_clear || !session_view || store.pending_session_action || store.composer_pending}
+                onSelect={() => setClearOpen(true)}
+                title={blocks_clear ? "请等待运行、审批、队列、子任务或压缩结束" : undefined}
+              >
+                <span>清空会话历史…</span>
+              </DropdownMenuItem>
+            )}
+            {!is_archived && session && (
               <>
                 <DropdownMenuItem onSelect={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}>
                   <span>固定会话</span>
                   {session.is_pinned && <Icon name="check" size={14} />}
                 </DropdownMenuItem>
-                <DropdownMenuItem
+                {!is_controller && <DropdownMenuItem
                   disabled={blocks_archive}
                   onSelect={() => void store.archiveSession(session.session_id)}
                   title={blocks_archive ? "运行、队列或审批尚未结束" : undefined}
                 >
                   <span>归档会话</span>
-                </DropdownMenuItem>
+                </DropdownMenuItem>}
               </>
             )}
             {is_archived && session && (
@@ -199,7 +274,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 <span>恢复会话</span>
               </DropdownMenuItem>
             )}
-            {session && (
+            {session && !is_controller && (
               <DropdownMenuItem
                 className={styles.delete_action}
                 disabled={blocks_archive || store.pending_session_action}
@@ -239,6 +314,23 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
           </p>
         </SessionActionDialog>
       )}
+      {clear_open && session && (
+        <SessionActionDialog
+          confirm_label="清空历史"
+          is_danger
+          is_pending={store.pending_session_action}
+          on_cancel={() => setClearOpen(false)}
+          on_confirm={() => void confirmClear()}
+          pending_label="正在清空…"
+          title="清空这个会话的历史？"
+        >
+          <p>将永久删除 <strong>{session.title}</strong> 的消息、运行、队列、审批和工作状态，并重建系统上下文。</p>
+          <p>会话身份、工作目录、附件文件和私有目录会保留，此操作无法撤销。</p>
+          <p>{is_controller ? "该会话仍保留主控身份。" : is_proxied ? "清空后当前主控代理关系仍保留。" : "该会话仍保持普通会话身份。"}</p>
+          {store.interaction_error && <p role="alert">{store.interaction_error}</p>}
+        </SessionActionDialog>
+      )}
+      {proxy_error && <div className={styles.session_header_error} role="alert">{proxy_error}</div>}
     </header>
   );
 });
@@ -249,6 +341,9 @@ function sessionStatus(session: SessionSummary): Readonly<{
 }> {
   if (session.lifecycle === "archived") {
     return { label: "已归档", tone: "neutral" };
+  }
+  if (session.active_compaction) {
+    return { label: "压缩中", tone: "active" };
   }
   if (session.pending_approval_count > 0) {
     return { label: "等待审批", tone: "warning" };

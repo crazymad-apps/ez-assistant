@@ -202,6 +202,57 @@
   background: var(--ez-surface);
 }
 
+.session_notice,
+.compaction_status {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 5px 8px 5px 10px;
+  border: 1px solid var(--ez-border);
+  border-radius: 8px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font-size: var(--ez-font-base);
+}
+
+.session_notice {
+  justify-content: space-between;
+  &[data-tone="success"] { border-color: #bcdcc5; color: var(--ez-success); }
+  &[data-tone="warning"] { border-color: #ead6a7; }
+  button { display: grid; width: 24px; height: 24px; place-items: center; border: 0; color: inherit; background: transparent; }
+}
+
+.compaction_status {
+  margin-inline: 8px;
+  margin-bottom: -8px;
+  padding-bottom: 12px;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+
+  strong { font-size: var(--ez-font-base); font-weight: 600; }
+}
+
+.loading_ring {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--ez-primary-border);
+  border-top-color: var(--ez-primary);
+  border-radius: 50%;
+  animation: ez-composer-spin 850ms linear infinite;
+}
+
+.proxy_takeover_hint {
+  margin: -2px 0 8px;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+@keyframes ez-composer-spin {
+  to { transform: rotate(360deg); }
+}
+
 .secondary_drawer {
   overflow: hidden;
   /* 水平内收露出输入框两侧边界；收起和展开仍向下铺入圆角区域覆盖中部接缝。 */
@@ -810,6 +861,7 @@
   .todo_detail,
   .todo_message_mask { transition: none; }
   .todo_message_mask_open { animation: none; }
+  .loading_ring { animation: none; }
 }
 
 @media (max-width: 720px) {

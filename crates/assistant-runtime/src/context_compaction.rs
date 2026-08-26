@@ -10,13 +10,17 @@ use agent_core::CompactionReason;
 use agent_core::ExecutionBudget;
 use agent_model::{ModelService, SystemPromptSnapshot};
 use agent_types::ConversationSnapshot;
-use assistant_protocol::RunId;
+use assistant_protocol::{
+    RunId, RuntimeErrorCode, RuntimeEvent, SessionCompactionFinishedOutcome,
+    SessionCompactionReasonSnapshot, SessionCompactionSnapshot, SessionCompactionTriggerSnapshot,
+};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     ContextReplacement, ContextReplacementTarget, RuntimeError, RuntimeStore,
-    session::SessionController,
+    observation::ObservationCoordinator,
+    session::{ActiveSessionCompaction, SessionController},
 };
 
 /// 防止 Provider 持续报告 overflow 时形成无界“压缩—重试”循环。
@@ -41,6 +45,14 @@ impl RuntimeContextCompactor {
         let mut compactor = Self::new(model, system_prompt, PARENT_MINIMUM_RECENT_USER_TURNS);
         compactor.active_turn_fallback = Some(active_turn_strategy());
         compactor
+    }
+
+    /// 手动压缩保留最近一个完整 User Turn，且不启用活动 Turn fallback。
+    pub(crate) fn for_manual(
+        model: Arc<dyn ModelService>,
+        system_prompt: SystemPromptSnapshot,
+    ) -> Self {
+        Self::new(model, system_prompt, PARENT_MINIMUM_RECENT_USER_TURNS)
     }
 
     /// child 只有一条自包含 User Message；保留一个 Turn 会让整段历史永远不可压缩。
@@ -78,16 +90,8 @@ impl RuntimeContextCompactor {
         snapshot: ConversationSnapshot,
         cancellation: CancellationToken,
     ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
-        let layout = ContextLayout::build(&snapshot)
-            .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
-        let input = CompactionInput {
-            model: self.model.clone(),
-            system_prompt: self.system_prompt.clone(),
-            layout,
-        };
         let outcome = self
-            .strategy
-            .compact(input.clone(), cancellation.clone())
+            .compact_once(snapshot.clone(), cancellation.clone())
             .await?;
         match outcome {
             StrategyOutcome::Candidate(candidate) => Ok(candidate.replacement),
@@ -95,7 +99,10 @@ impl RuntimeContextCompactor {
                 let Some(fallback) = &self.active_turn_fallback else {
                     return Err(RuntimeCompactionError::NoCompressibleHistory);
                 };
-                match fallback.compact(input, cancellation).await? {
+                match fallback
+                    .compact(self.compaction_input(&snapshot)?, cancellation)
+                    .await?
+                {
                     StrategyOutcome::Candidate(candidate) => Ok(candidate.replacement),
                     StrategyOutcome::NoOp { .. } => {
                         Err(RuntimeCompactionError::NoCompressibleHistory)
@@ -104,6 +111,66 @@ impl RuntimeContextCompactor {
             }
         }
     }
+
+    pub(crate) async fn compact_manual(
+        &self,
+        snapshot: ConversationSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<ManualCompactionCandidate, RuntimeCompactionError> {
+        let source_message_count = u64::try_from(snapshot.messages.len())
+            .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
+        let outcome = self.compact_once(snapshot, cancellation).await?;
+        match outcome {
+            StrategyOutcome::NoOp { .. } => Ok(ManualCompactionCandidate::NoOp),
+            StrategyOutcome::Candidate(candidate) => {
+                let replacement_message_count = u64::try_from(candidate.replacement.messages.len())
+                    .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
+                // replacement 固定新增一条 Context Summary；其余才是原样保留的源消息。
+                let retained_message_count = replacement_message_count.saturating_sub(1);
+                let compacted_message_count =
+                    source_message_count.saturating_sub(retained_message_count);
+                Ok(ManualCompactionCandidate::Replacement {
+                    conversation: candidate.replacement,
+                    compacted_message_count,
+                    retained_message_count,
+                })
+            }
+        }
+    }
+
+    /// 自动与手动压缩共用的单次 rolling-summary 调用；各入口只解释不同的 NoOp 后续语义。
+    async fn compact_once(
+        &self,
+        snapshot: ConversationSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<StrategyOutcome, RuntimeCompactionError> {
+        Ok(self
+            .strategy
+            .compact(self.compaction_input(&snapshot)?, cancellation)
+            .await?)
+    }
+
+    fn compaction_input(
+        &self,
+        snapshot: &ConversationSnapshot,
+    ) -> Result<CompactionInput, RuntimeCompactionError> {
+        let layout = ContextLayout::build(snapshot)
+            .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
+        Ok(CompactionInput {
+            model: self.model.clone(),
+            system_prompt: self.system_prompt.clone(),
+            layout,
+        })
+    }
+}
+
+pub(crate) enum ManualCompactionCandidate {
+    NoOp,
+    Replacement {
+        conversation: ConversationSnapshot,
+        compacted_message_count: u64,
+        retained_message_count: u64,
+    },
 }
 
 fn active_turn_strategy() -> RollingSummarySameModel {
@@ -129,21 +196,109 @@ pub(crate) enum RuntimeCompactionError {
     Projection,
 }
 
+/// 自动与手动 parent compaction 共用的易失状态和成对事件收口。
+pub(crate) struct SessionCompactionGuard {
+    session: Arc<SessionController>,
+    events: ObservationCoordinator,
+    compaction_id: String,
+    finished: bool,
+}
+
+impl SessionCompactionGuard {
+    pub(crate) fn begin(
+        session: Arc<SessionController>,
+        events: ObservationCoordinator,
+        snapshot: SessionCompactionSnapshot,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<Self, RuntimeCompactionError> {
+        {
+            let mut state = session
+                .lock_state()
+                .map_err(|_| RuntimeCompactionError::Projection)?;
+            if state.active_compaction.is_some() {
+                return Err(RuntimeCompactionError::Projection);
+            }
+            state.active_compaction = Some(ActiveSessionCompaction {
+                snapshot: snapshot.clone(),
+                cancellation,
+            });
+        }
+        let _ = events.send(RuntimeEvent::SessionCompactionStarted {
+            session_id: session.id().clone(),
+            compaction: snapshot.clone(),
+        });
+        Ok(Self {
+            session,
+            events,
+            compaction_id: snapshot.compaction_id,
+            finished: false,
+        })
+    }
+
+    pub(crate) fn finish(&mut self, outcome: SessionCompactionFinishedOutcome) {
+        if !self.finished {
+            self.clear_and_publish(outcome);
+            self.finished = true;
+        }
+    }
+
+    fn clear_and_publish(&self, outcome: SessionCompactionFinishedOutcome) {
+        if let Ok(mut state) = self.session.lock_state()
+            && state
+                .active_compaction
+                .as_ref()
+                .is_some_and(|active| active.snapshot.compaction_id == self.compaction_id)
+        {
+            state.active_compaction = None;
+            let _ = self.events.send(RuntimeEvent::SessionCompactionFinished {
+                session_id: self.session.id().clone(),
+                compaction_id: self.compaction_id.clone(),
+                outcome,
+            });
+        }
+    }
+}
+
+impl Drop for SessionCompactionGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.clear_and_publish(SessionCompactionFinishedOutcome::Failed {
+                code: RuntimeErrorCode::Internal,
+            });
+        }
+    }
+}
+
 impl RuntimeCompactionError {
     pub(crate) fn is_cancelled(&self) -> bool {
         matches!(self, Self::Strategy(CompactionError::Cancelled))
+    }
+
+    /// 与标准 Model Request 保持同一错误边界：模型错误保留原始
+    /// `ModelError` 并由协议层脱敏分类，非模型的压缩错误保留完整 source 链。
+    pub(crate) fn into_runtime_error(self) -> RuntimeError {
+        match self {
+            Self::Strategy(CompactionError::Model(source)) => {
+                RuntimeError::ModelExecutionFailed { source }
+            }
+            source => RuntimeError::ContextCompactionFailed {
+                source: Box::new(source),
+            },
+        }
     }
 }
 
 /// 生成后先切换 Host 权威 generation，再替换 Session 内存 Journal。
 pub(crate) async fn compact_parent_context(
     compactor: &RuntimeContextCompactor,
-    session: &SessionController,
+    session: Arc<SessionController>,
     run_id: &RunId,
+    reason: CompactionReason,
     store: &dyn RuntimeStore,
+    events: ObservationCoordinator,
     cancellation: CancellationToken,
 ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
-    let snapshot = {
+    let (snapshot, source_generation) = {
         let state = session
             .lock_state()
             .map_err(|_| RuntimeCompactionError::Projection)?;
@@ -154,9 +309,44 @@ pub(crate) async fn compact_parent_context(
         if journal.has_pending() {
             return Err(RuntimeCompactionError::Projection);
         }
-        journal.snapshot()
+        (journal.snapshot(), state.body_generation)
     };
-    let replacement = compactor.compact(snapshot.clone(), cancellation).await?;
+    let compaction_id =
+        crate::id::generate("compaction").map_err(|_| RuntimeCompactionError::Projection)?;
+    let started_at_ms = crate::runtime::now_ms().map_err(|_| RuntimeCompactionError::Projection)?;
+    let trigger_reason = match reason {
+        CompactionReason::ThresholdReached => SessionCompactionReasonSnapshot::ThresholdReached,
+        CompactionReason::ProviderOverflow => SessionCompactionReasonSnapshot::ProviderOverflow,
+    };
+    let mut guard = SessionCompactionGuard::begin(
+        session.clone(),
+        events.clone(),
+        SessionCompactionSnapshot {
+            compaction_id,
+            trigger: SessionCompactionTriggerSnapshot::Automatic {
+                run_id: run_id.clone(),
+                reason: trigger_reason,
+            },
+            source_generation,
+            started_at_ms,
+            cancellable: false,
+        },
+        None,
+    )?;
+    let replacement = match compactor.compact(snapshot.clone(), cancellation).await {
+        Ok(replacement) => replacement,
+        Err(error) => {
+            let outcome = if error.is_cancelled() {
+                SessionCompactionFinishedOutcome::Cancelled
+            } else {
+                SessionCompactionFinishedOutcome::Failed {
+                    code: RuntimeErrorCode::ContextCompactionFailed,
+                }
+            };
+            guard.finish(outcome);
+            return Err(error);
+        }
+    };
     let _mutation = session.mutation().await;
     {
         let state = session
@@ -170,7 +360,7 @@ pub(crate) async fn compact_parent_context(
             return Err(RuntimeCompactionError::Projection);
         }
     }
-    store
+    let committed = match store
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::Run {
                 session_id: session.id().clone(),
@@ -181,21 +371,47 @@ pub(crate) async fn compact_parent_context(
                 .map_err(|_| RuntimeCompactionError::Projection)?,
         })
         .await
-        .map_err(|_| RuntimeCompactionError::Persistence)?;
+    {
+        Ok(committed) => committed,
+        Err(_) => {
+            guard.finish(SessionCompactionFinishedOutcome::Failed {
+                code: RuntimeErrorCode::ContextCompactionFailed,
+            });
+            return Err(RuntimeCompactionError::Persistence);
+        }
+    };
 
-    let mut state = session
-        .lock_state()
-        .map_err(|_| RuntimeCompactionError::Projection)?;
-    let journal = state
-        .journal
-        .as_mut()
-        .ok_or(RuntimeCompactionError::Projection)?;
-    journal
-        .replace_completed(replacement.clone())
-        .map_err(|_| RuntimeCompactionError::Projection)?;
-    state.persisted_message_count = journal.message_count();
-    state.message_count = u64::try_from(state.persisted_message_count)
-        .map_err(|_| RuntimeCompactionError::Projection)?;
+    let projection = (|| -> Result<(), RuntimeCompactionError> {
+        let mut state = session
+            .lock_state()
+            .map_err(|_| RuntimeCompactionError::Projection)?;
+        let journal = state
+            .journal
+            .as_mut()
+            .ok_or(RuntimeCompactionError::Projection)?;
+        journal
+            .replace_completed(replacement.clone())
+            .map_err(|_| RuntimeCompactionError::Projection)?;
+        state.persisted_message_count = journal.message_count();
+        state.message_count = u64::try_from(state.persisted_message_count)
+            .map_err(|_| RuntimeCompactionError::Projection)?;
+        state.body_generation = committed.result_generation;
+        Ok(())
+    })();
+    if let Err(error) = projection {
+        let _ = session.mark_faulted();
+        return Err(error);
+    }
+    let _ = events.send(RuntimeEvent::ConversationCommitted {
+        owner: assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.id().clone(),
+        },
+        generation: committed.result_generation,
+    });
+    guard.finish(SessionCompactionFinishedOutcome::Compacted {
+        source_generation: committed.source_generation,
+        result_generation: committed.result_generation,
+    });
     Ok(replacement)
 }
 

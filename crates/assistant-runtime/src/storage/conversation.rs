@@ -1,5 +1,7 @@
 use agent_types::{ConversationSnapshot, MessageId};
-use assistant_protocol::{ChildTaskId, ConversationOwner, GoalId, RunId, SessionId, WorkspaceId};
+use assistant_protocol::{
+    ChildTaskId, ConversationOwner, GoalId, IdempotencyKey, RunId, SessionId, WorkspaceId,
+};
 
 use super::{NewStoredInput, StoredGoal, StoredInput, StoredRun};
 
@@ -32,6 +34,14 @@ pub enum ContextReplacementTarget {
         session_id: SessionId,
         child_task_id: ChildTaskId,
     },
+    /// 不依附业务 Run 的手动 Session 压缩。
+    IdleSession {
+        session_id: SessionId,
+        expected_generation: u64,
+        operation_id: IdempotencyKey,
+        compacted_message_count: u64,
+        retained_message_count: u64,
+    },
 }
 
 /// 使用新 generation 替换当前有效 Conversation，不改写历史 Input/Run/child 关系。
@@ -40,6 +50,13 @@ pub struct ContextReplacement {
     pub target: ContextReplacementTarget,
     pub conversation: ConversationSnapshot,
     pub changed_at_ms: i64,
+}
+
+/// Store 实际提交的 generation 边界；新 generation 可能跳过遗留孤儿文件。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextReplacementResult {
+    pub source_generation: u64,
+    pub result_generation: u64,
 }
 
 /// generation 切换成功后创建的新 Input 与首次 Run。

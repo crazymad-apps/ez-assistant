@@ -4,6 +4,7 @@ import type { RuntimeEvent } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ConversationView } from "../../src/features/conversation/ConversationView";
+import { UserMessage } from "../../src/features/conversation/ConversationView/MessageViews";
 import { thumbnailAttachment } from "../../src/native-bridge/nativeResource";
 
 vi.mock("../../src/native-bridge/nativeResource", async (importOriginal) => ({
@@ -13,10 +14,93 @@ vi.mock("../../src/native-bridge/nativeResource", async (importOriginal) => ({
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("ConversationView scroll anchoring", () => {
+  it("renders structured controller delivery and proxy report metadata", () => {
+    const source_session = {
+      session_id: "source-1",
+      title: "来源会话",
+      lifecycle: "active",
+    } as import("../../src/generated/assistant-protocol").SessionSummary;
+    const open = vi.fn();
+    const { rerender } = render(
+      <UserMessage
+        attachments={[]}
+        message={{
+          message_id: "delivery-1",
+          input_id: null,
+          text: "继续检查构建",
+          attachment_ids: [],
+          source: { type: "controller_delivery", controller_session_id: "source-1", controller_run_id: "run-1" },
+          created_at_ms: 1,
+        }}
+        on_attachment_click={vi.fn()}
+        on_source_open={open}
+        source_session={source_session}
+      />,
+    );
+    expect(screen.getByText("主控转达")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "来源会话" }));
+    expect(open).toHaveBeenCalledWith(source_session);
+
+    rerender(
+      <UserMessage
+        attachments={[]}
+        message={{
+          message_id: "report-1",
+          input_id: null,
+          text: "任务已完成",
+          attachment_ids: [],
+          source: { type: "proxy_report", source_session_id: "source-1", source_run_id: "run-2", source_goal_id: "goal-1", source_run_status: "completed" },
+          created_at_ms: 2,
+        }}
+        on_attachment_click={vi.fn()}
+        on_source_open={open}
+        source_session={source_session}
+      />,
+    );
+    expect(screen.getByText("会话报告 · 已完成")).toBeInTheDocument();
+    expect(screen.getByText("关联目标")).toBeInTheDocument();
+  });
+
+  it("collapses only overflowing proxy reports and allows expanding them", () => {
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(600);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(360);
+
+    render(
+      <UserMessage
+        attachments={[]}
+        message={{
+          message_id: "long-report",
+          input_id: null,
+          text: "较长的会话报告",
+          attachment_ids: [],
+          source: {
+            type: "proxy_report",
+            source_session_id: "source-1",
+            source_run_id: "run-1",
+            source_run_status: "completed",
+          },
+          created_at_ms: 1,
+        }}
+        on_attachment_click={vi.fn()}
+        on_source_open={vi.fn()}
+      />,
+    );
+
+    const expand = screen.getByRole("button", { name: "展开完整会话报告" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    expect(expand.closest("[data-expanded]")).toHaveAttribute("data-expanded", "false");
+
+    fireEvent.click(expand);
+    const collapse = screen.getByRole("button", { name: "收起" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    expect(collapse.closest("[data-expanded]")).toHaveAttribute("data-expanded", "true");
+  });
+
   it("renders user attachments above the message bubble", () => {
     const store = conversationStore();
     store.projection.applySessionSnapshot({
@@ -584,6 +668,72 @@ describe("ConversationView scroll anchoring", () => {
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
     expect(screen.getByText("子智能体尚未产生可展示的消息。")).toBeVisible();
+  });
+
+  it("keeps compacted messages visible and expands the context summary at the boundary", () => {
+    const store = conversationStore();
+    store.projection.applySessionSnapshot({
+      observed_sequence: 1,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 1,
+          items: [{
+            type: "user",
+            message_id: "compacted-message",
+            text: "压缩前仍可见",
+            created_at_ms: 1,
+          }, {
+            type: "user",
+            message_id: "retained-message",
+            text: "压缩后保留的近期消息",
+            created_at_ms: 2,
+          }],
+          previous_cursor: null,
+          has_more: false,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+    store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 2,
+          items: [{
+            type: "context_summary",
+            message_id: "summary-message",
+            text: "这是供模型继续工作的上下文摘要。",
+          }, {
+            type: "user",
+            message_id: "retained-message",
+            text: "压缩后保留的近期消息",
+            created_at_ms: 2,
+          }],
+          previous_cursor: null,
+          has_more: false,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    expect(screen.getByText("压缩前仍可见")).toBeVisible();
+    expect(screen.getByText("压缩后保留的近期消息")).toBeVisible();
+    const toggle = screen.getByRole("button", { name: "查看上下文摘要" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("这是供模型继续工作的上下文摘要。")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(screen.getByText("这是供模型继续工作的上下文摘要。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "收起上下文摘要" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 });
 

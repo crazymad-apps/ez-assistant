@@ -41,6 +41,28 @@ describe("AppShell session header", () => {
     expect(rename).toHaveBeenCalledWith("session-1", "Renamed session");
   });
 
+  it("uses only the switch label to identify a proxied session", () => {
+    const store = new RootStore();
+    const snapshot = applicationSnapshot();
+    snapshot.active_sessions[0] = {
+      ...snapshot.active_sessions[0],
+      proxy: {
+        controller_session_id: "controller-session",
+        changed_at_ms: 2,
+      },
+    };
+    snapshot.controller_availability = {
+      status: "available",
+      session_id: "controller-session",
+    };
+    store.projection.applyApplicationSnapshot({ observed_sequence: 1, value: snapshot });
+    store.navigation.selectSession("session-1");
+    renderShell(store);
+
+    expect(screen.getAllByText("主控代理")).toHaveLength(1);
+    expect(screen.getByRole("switch", { name: "主控代理" })).toBeChecked();
+  });
+
   it("does not finish title editing when Enter only confirms input method composition", () => {
     const store = storeWithSessions();
     const rename = vi.spyOn(store, "renameSession").mockResolvedValue(true);
@@ -177,6 +199,8 @@ function applicationSnapshot(): ApplicationSnapshot {
       sessionSummary("session-2", "Second session", 1),
     ],
     archived_sessions: [],
+    controller_availability: { status: "unavailable" },
+    additional_controller_count: 0,
     capabilities: {
       conversation_paging: true,
       tool_detail: true,
@@ -194,6 +218,7 @@ function sessionSummary(session_id: string, title: string, updated_at_ms: number
     title,
     model_key: "fixture",
     lifecycle: "active",
+    role: "standard",
     current_variant: "build",
     approval_mode: "ask",
     workspace_id: null,

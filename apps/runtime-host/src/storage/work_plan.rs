@@ -189,12 +189,12 @@ impl StorageEngine {
             .checked_add(1)
             .ok_or_else(|| conflict("work plan revision exhausted"))?;
         let revision_sql = to_i64(revision, "work plan revision exceeds storage range")?;
-        let completed = !mutation.items.is_empty()
-            && mutation
+        let cleared = mutation.items.is_empty()
+            || mutation
                 .items
                 .iter()
                 .all(|item| item.status == StoredTodoItemStatus::Completed);
-        if completed {
+        if cleared {
             transaction
                 .execute(
                     "INSERT INTO work_plan_completion_receipts (
@@ -255,7 +255,7 @@ impl StorageEngine {
                 last_operation_id: mutation.operation_id,
                 updated_at_ms: mutation.updated_at_ms,
             },
-            cleared: completed,
+            cleared,
         })
     }
 

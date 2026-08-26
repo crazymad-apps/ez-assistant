@@ -336,6 +336,7 @@ mod tests {
                 },
                 current_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
+                role: crate::SessionRole::Standard,
                 created_at_ms: 1,
             })
             .await
@@ -349,6 +350,7 @@ mod tests {
                 agent_variant: AgentVariant::Build,
                 origin: crate::InputOrigin::User,
                 goal_binding: None,
+                cross_session_binding: None,
                 skill_activation: None,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),

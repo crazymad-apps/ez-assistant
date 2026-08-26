@@ -336,6 +336,8 @@ function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
     workspaces: [],
     active_sessions: [session],
     archived_sessions: [],
+    controller_availability: { status: "unavailable" },
+    additional_controller_count: 0,
     capabilities: {
       conversation_paging: true,
       tool_detail: true,
@@ -353,6 +355,7 @@ function modelSession(active_run_id: string | null): SessionSummary {
     title: "模型引用会话",
     model_key: "secondary",
     lifecycle: "active",
+    role: "standard",
     current_variant: "build",
     approval_mode: "ask",
     workspace_id: null,

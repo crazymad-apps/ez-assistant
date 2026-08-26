@@ -136,7 +136,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             1
         );
         assert!(state.goal_inputs.is_empty(), "first Goal input was claimed");
-        assert!(state.user_inputs.is_empty());
+        assert!(state.session_inputs.is_empty());
     }
 
     let requests = model.take_requests();
@@ -830,7 +830,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
     let controller = runtime.session(&session_id).expect("session");
     let state = controller.lock_state().expect("state");
     assert_eq!(state.inputs.len(), 2, "held Input is reused, not copied");
-    assert!(state.user_inputs.is_empty());
+    assert!(state.session_inputs.is_empty());
     assert!(state.goal.is_none());
 }
 

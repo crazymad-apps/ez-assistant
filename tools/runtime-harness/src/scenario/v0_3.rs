@@ -549,12 +549,7 @@ async fn run_context_failure_boundaries() -> Result<ScenarioReport, HarnessError
         [
             events(text_message("invalid_first", "first", 20)?),
             events(text_message("invalid_second", "second", 20)?),
-            events(message_with_reason(
-                "invalid_summary",
-                "invalid",
-                FinishReason::Length,
-                10,
-            )?),
+            events(tool_message("invalid_summary", "invalid_summary_call", 10)?),
         ],
     ));
     let invalid_service: Arc<dyn ModelService> = invalid_model.clone();

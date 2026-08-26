@@ -9,13 +9,16 @@ use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, ReasoningEffortKey, RunId,
-    RunSnapshot, SessionId, SessionLifecycle, SessionSummary, SessionTitleOrigin,
+    RunSnapshot, SessionCompactionSnapshot, SessionId, SessionLifecycle, SessionSummary,
+    SessionTitleOrigin,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment, SessionSkillCatalog,
-    StoredConversationState, StoredInput, StoredInputState, StoredRun, StoredSession,
+    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment, SessionProxyState,
+    SessionRole, SessionSkillCatalog, StoredConversationState, StoredInput, StoredInputState,
+    StoredRun, StoredSession,
     goal::{GoalControl, GoalState},
     id,
     journal::InMemoryJournal,
@@ -42,6 +45,8 @@ pub(crate) struct SessionState {
     pub(crate) current_variant: AgentVariant,
     pub(crate) approval_mode: ApprovalMode,
     pub(crate) lifecycle: SessionLifecycle,
+    pub(crate) role: SessionRole,
+    pub(crate) proxy: Option<SessionProxyState>,
     pub(crate) journal: Option<InMemoryJournal>,
     pub(crate) persisted_message_count: usize,
     pub(crate) message_count: u64,
@@ -49,8 +54,8 @@ pub(crate) struct SessionState {
     pub(crate) is_conversation_available: bool,
     pub(crate) runs: BTreeMap<RunId, RunRecord>,
     pub(crate) inputs: BTreeMap<InputId, InputRecord>,
-    /// 产品 Queue 中的普通用户输入。
-    pub(crate) user_inputs: VecDeque<InputId>,
+    /// 所有无 Goal binding 的 Session 输入，包括用户输入与跨会话 Runtime 输入。
+    pub(crate) session_inputs: VecDeque<InputId>,
     /// 当前 Goal 专用输入；可靠状态下最多一条。
     pub(crate) goal_inputs: VecDeque<InputId>,
     pub(crate) queue_revision: u64,
@@ -58,6 +63,8 @@ pub(crate) struct SessionState {
     pub(crate) resume_required: bool,
     pub(crate) is_queue_driver_running: bool,
     pub(crate) active_run: Option<ActiveRun>,
+    /// 仅属于当前 Runtime 进程；不得进入 Store 或恢复投影。
+    pub(crate) active_compaction: Option<ActiveSessionCompaction>,
     pub(crate) is_faulted: bool,
     pub(crate) updated_at_ms: i64,
     pub(crate) archived_at_ms: Option<i64>,
@@ -65,6 +72,12 @@ pub(crate) struct SessionState {
     pub(crate) goal: Option<GoalControl>,
     /// 规范 Conversation 的结构化 Skill Activation 账本。
     pub(crate) skill_activations: Vec<crate::StoredSkillActivation>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveSessionCompaction {
+    pub(crate) snapshot: SessionCompactionSnapshot,
+    pub(crate) cancellation: Option<CancellationToken>,
 }
 
 #[derive(Clone)]
@@ -82,7 +95,7 @@ impl SessionState {
                 if self.queue_paused_by_user || self.resume_required {
                     None
                 } else {
-                    self.user_inputs.front().cloned()
+                    self.session_inputs.front().cloned()
                 }
             }
             Some(goal) if matches!(goal.state, GoalState::Running) => self
@@ -107,8 +120,8 @@ impl SessionState {
             self.goal_inputs.pop_front();
             return Some(false);
         }
-        if self.user_inputs.front() == Some(input_id) {
-            self.user_inputs.pop_front();
+        if self.session_inputs.front() == Some(input_id) {
+            self.session_inputs.pop_front();
             return Some(true);
         }
         None
@@ -153,6 +166,8 @@ impl SessionController {
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
+                role: stored.role,
+                proxy: stored.proxy,
                 journal: Some(InMemoryJournal::new()),
                 persisted_message_count: 0,
                 message_count: stored.message_count,
@@ -160,13 +175,14 @@ impl SessionController {
                 is_conversation_available: true,
                 runs: BTreeMap::new(),
                 inputs: BTreeMap::new(),
-                user_inputs: VecDeque::new(),
+                session_inputs: VecDeque::new(),
                 goal_inputs: VecDeque::new(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required: false,
                 is_queue_driver_running: false,
                 active_run: None,
+                active_compaction: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
@@ -192,7 +208,7 @@ impl SessionController {
             .map(|run| (run.run_id.clone(), RunRecord::recovered(run)))
             .collect::<BTreeMap<_, _>>();
         let mut input_records = BTreeMap::new();
-        let mut user_inputs = Vec::new();
+        let mut session_inputs = Vec::new();
         let mut goal_inputs = Vec::new();
         for input in inputs {
             let mut owned_runs = run_records
@@ -207,7 +223,7 @@ impl SessionController {
                     if input.goal_binding.is_some() {
                         goal_inputs.push((input.queue_order, input.input_id.clone()));
                     } else {
-                        user_inputs.push((input.queue_order, input.input_id.clone()));
+                        session_inputs.push((input.queue_order, input.input_id.clone()));
                     }
                 }
                 input_records.insert(
@@ -220,9 +236,9 @@ impl SessionController {
                 );
             }
         }
-        user_inputs.sort_by_key(|(order, _)| *order);
+        session_inputs.sort_by_key(|(order, _)| *order);
         goal_inputs.sort_by_key(|(order, _)| *order);
-        let resume_required = !user_inputs.is_empty();
+        let resume_required = !session_inputs.is_empty();
         Self {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
@@ -239,6 +255,8 @@ impl SessionController {
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
                 lifecycle: map_lifecycle(stored.lifecycle),
+                role: stored.role,
+                proxy: stored.proxy,
                 journal: None,
                 persisted_message_count: 0,
                 message_count: stored.message_count,
@@ -246,13 +264,14 @@ impl SessionController {
                 is_conversation_available,
                 runs: run_records,
                 inputs: input_records,
-                user_inputs: user_inputs.into_iter().map(|(_, id)| id).collect(),
+                session_inputs: session_inputs.into_iter().map(|(_, id)| id).collect(),
                 goal_inputs: goal_inputs.into_iter().map(|(_, id)| id).collect(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required,
                 is_queue_driver_running: false,
                 active_run: None,
+                active_compaction: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
@@ -271,6 +290,21 @@ impl SessionController {
             model_key: state.model_key.clone(),
             reasoning_effort: state.reasoning_effort,
             lifecycle: state.lifecycle,
+            role: match state.role {
+                SessionRole::Standard => assistant_protocol::SessionRoleSnapshot::Standard,
+                SessionRole::Controller => assistant_protocol::SessionRoleSnapshot::Controller,
+            },
+            proxy: state
+                .proxy
+                .as_ref()
+                .map(|proxy| assistant_protocol::SessionProxySnapshot {
+                    controller_session_id: proxy.controller_session_id.clone(),
+                    changed_at_ms: proxy.changed_at_ms,
+                }),
+            active_compaction: state
+                .active_compaction
+                .as_ref()
+                .map(|active| active.snapshot.clone()),
             current_variant: state.current_variant,
             approval_mode: state.approval_mode,
             workspace_id: self.environment.workspace_id.clone(),
@@ -317,6 +351,19 @@ impl SessionController {
         Ok(self.lock_state()?.reasoning_effort)
     }
 
+    pub(crate) fn role(&self) -> RuntimeResult<SessionRole> {
+        Ok(self.lock_state()?.role)
+    }
+
+    pub(crate) fn ensure_standard_role(&self) -> RuntimeResult<()> {
+        if self.role()? == SessionRole::Controller {
+            return Err(RuntimeError::SessionRoleRestricted {
+                session_id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn find_idempotent(
         &self,
         key: &IdempotencyKey,
@@ -357,9 +404,14 @@ impl SessionController {
     /// 归档、模型切换和历史重写共用的完全空闲判定。
     pub(crate) fn ensure_idle(&self) -> RuntimeResult<()> {
         let state = self.lock_state()?;
+        if state.active_compaction.is_some() {
+            return Err(RuntimeError::SessionCompactionInProgress {
+                session_id: self.id.clone(),
+            });
+        }
         let has_nonterminal_run = state.runs.values().any(|run| !run.status().is_terminal());
         if state.active_run.is_some()
-            || !state.user_inputs.is_empty()
+            || !state.session_inputs.is_empty()
             || !state.goal_inputs.is_empty()
             || has_nonterminal_run
             || state
@@ -368,6 +420,15 @@ impl SessionController {
                 .any(|input| input.stored.state == StoredInputState::Queued)
         {
             return Err(RuntimeError::SessionNotIdle {
+                session_id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_not_compacting(&self) -> RuntimeResult<()> {
+        if self.lock_state()?.active_compaction.is_some() {
+            return Err(RuntimeError::SessionCompactionInProgress {
                 session_id: self.id.clone(),
             });
         }
@@ -406,6 +467,10 @@ impl SessionController {
 
     pub(crate) fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    pub(crate) fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
     }
 
     pub(crate) fn model_key(&self) -> RuntimeResult<ModelKey> {

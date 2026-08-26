@@ -1,8 +1,9 @@
 use agent_model::SystemPromptSnapshot;
 use agent_types::{ConversationSnapshot, ToolImageReference};
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, AttachmentId, MessageFeedback, ModelKey, ReasoningEffortKey,
-    SessionId, SessionTitleOrigin,
+    AgentVariant, ApprovalMode, AttachmentId, CompactSessionOutcome, IdempotencyKey,
+    MessageFeedback, ModelKey, ReasoningEffortKey, SessionHistoryCleanupStatus, SessionId,
+    SessionTitleOrigin,
 };
 
 use crate::{SessionExecutionEnvironment, SessionSkillCatalog, StoredSkillActivation};
@@ -16,6 +17,21 @@ pub enum StoredSessionLifecycle {
     Active,
     /// 只允许查询、等待显式恢复的归档 Session。
     Archived,
+}
+
+/// Session 的持久产品角色。存储允许存在多个 Controller，产品层只选择一个当前主控。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SessionRole {
+    #[default]
+    Standard,
+    Controller,
+}
+
+/// 普通 Session 当前绑定的主控代理事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionProxyState {
+    pub controller_session_id: SessionId,
+    pub changed_at_ms: i64,
 }
 
 /// 启动恢复后正文是否可以安全加载。
@@ -40,6 +56,7 @@ pub struct NewStoredSession {
     pub environment: SessionExecutionEnvironment,
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
+    pub role: SessionRole,
     pub created_at_ms: i64,
 }
 
@@ -86,6 +103,65 @@ pub struct SessionDeletion {
     pub expected_impact: assistant_protocol::DeleteSessionImpact,
 }
 
+/// Runtime 已在 Session mutation gate 内准备完成的历史清空事实。
+///
+/// Store 必须先可靠创建新空 generation，再于单一事务中切换
+/// Session 指针、替换冻结上下文并删除旧历史结构事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionHistoryClear {
+    pub operation_id: IdempotencyKey,
+    pub session_id: SessionId,
+    pub expected_generation: u64,
+    pub system_prompt: SystemPromptSnapshot,
+    pub skill_catalog: SessionSkillCatalog,
+    /// 重建后的环境必须与 Session 现有稳定资源身份完全一致。
+    pub environment: SessionExecutionEnvironment,
+    pub expected_role: SessionRole,
+    pub changed_at_ms: i64,
+}
+
+/// clear 的权威切换结果；不携带任何旧正文。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionHistoryClearResult {
+    pub session: StoredSession,
+    pub source_generation: u64,
+    pub result_generation: u64,
+    pub cleanup_status: SessionHistoryCleanupStatus,
+}
+
+/// 在模型调用前可靠占用一个手动压缩 operation ID。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionHistoryCompactionPreparation {
+    pub operation_id: IdempotencyKey,
+    pub session_id: SessionId,
+    pub expected_generation: u64,
+    pub created_at_ms: i64,
+}
+
+/// prepare 要么取得本次执行权，要么返回同一 operation 的既有终态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionHistoryCompactionPreparationResult {
+    Prepared,
+    Completed(CompactSessionOutcome),
+}
+
+/// 未提交 replacement 的手动压缩收敛状态。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionHistoryCompactionFinishKind {
+    NoOp,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionHistoryCompactionFinish {
+    pub operation_id: IdempotencyKey,
+    pub session_id: SessionId,
+    pub expected_generation: u64,
+    pub kind: SessionHistoryCompactionFinishKind,
+    pub finished_at_ms: i64,
+}
+
 /// 从存储恢复或创建完成的 Session 投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSession {
@@ -99,6 +175,8 @@ pub struct StoredSession {
     pub lifecycle: StoredSessionLifecycle,
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
+    pub role: SessionRole,
+    pub proxy: Option<SessionProxyState>,
     pub body_generation: u64,
     pub message_count: u64,
     pub created_at_ms: i64,
@@ -132,6 +210,15 @@ pub struct StoredSessionUsage {
 pub struct ArchiveChange {
     pub session_id: SessionId,
     pub archived: bool,
+    pub changed_at_ms: i64,
+}
+
+/// 显式设置普通 Session 的代理终态；不使用 toggle 或修订号。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionProxyChange {
+    pub target_session_id: SessionId,
+    pub controller_session_id: SessionId,
+    pub enabled: bool,
     pub changed_at_ms: i64,
 }
 

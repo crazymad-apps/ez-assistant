@@ -17,7 +17,9 @@ mod snapshot;
 pub use command::{
     ArchiveSessionRequest, ArchiveSessionResult, CancelChildTaskRequest, CancelChildTaskResult,
     CancelQueuedInputRequest, CancelQueuedInputResult, CancelRunRequest, CancelRunResult,
-    ClearGoalRequest, ClearGoalResult, ClearWorkPlanRequest, ClearWorkPlanResult,
+    CancelSessionCompactionRequest, CancelSessionCompactionResult, ClearGoalRequest,
+    ClearGoalResult, ClearSessionRequest, ClearSessionResult, ClearWorkPlanRequest,
+    ClearWorkPlanResult, CompactSessionOutcome, CompactSessionRequest, CompactSessionResult,
     ConfigurationMutationResult, ConnectionValidationFailure, ConnectionValidationFailureKind,
     ConnectionValidationOutcome, CreateModelRequest, CreatePinnedMemoryRequest,
     CreateSessionRequest, CreateSessionResult, DecideApprovalRequest, DecideApprovalResult,
@@ -42,14 +44,15 @@ pub use command::{
     RenameSessionResult, ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult,
     RestoreSessionRequest, RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult,
     ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
-    RuntimeCommandResult, SecretValue, SetAuxiliaryVisionModelRequest, SetDefaultModelRequest,
-    SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest, SetPersonaResult,
-    SetSessionApprovalModeRequest, SetSessionApprovalModeResult, SetSessionModelRequest,
-    SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
-    SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
-    SetSessionVariantResult, SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest,
-    ShutdownRuntimeResult, StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest,
-    SubmitInputResult, UpdateModelRequest, UpdatePinnedMemoryRequest, UploadAttachmentResult,
+    RuntimeCommandResult, SecretValue, SessionHistoryCleanupStatus, SetAuxiliaryVisionModelRequest,
+    SetDefaultModelRequest, SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest,
+    SetPersonaResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
+    SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
+    SetSessionProxyRequest, SetSessionProxyResult, SetSessionReasoningEffortRequest,
+    SetSessionReasoningEffortResult, SetSessionVariantRequest, SetSessionVariantResult,
+    SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest, ShutdownRuntimeResult,
+    StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
+    UpdateModelRequest, UpdatePinnedMemoryRequest, UploadAttachmentResult,
     ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 pub use config::{
@@ -57,7 +60,9 @@ pub use config::{
     ModelConfiguration, ModelConfigurationOrigin,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
-pub use event::{ChildTaskEvent, RuntimeEvent, RuntimeEventEnvelope};
+pub use event::{
+    ChildTaskEvent, RuntimeEvent, RuntimeEventEnvelope, SessionCompactionFinishedOutcome,
+};
 pub use host::{
     RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
 };
@@ -82,23 +87,24 @@ pub use product::{
     AssistantSegment, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot, ChildTaskViewSnapshot,
     ComposerCapabilitiesSnapshot, ContextUsageSnapshot, ConversationFileReference,
     ConversationHistoryHit, ConversationHistoryMatchKind, ConversationHistoryScope,
-    ConversationItem, ConversationOwner, ConversationPage, GetApplicationSnapshotRequest,
-    GetApplicationSnapshotResult, GetChildTaskViewRequest, GetChildTaskViewResult,
-    GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
-    GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
-    GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
-    GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot,
-    GoalPauseReasonSnapshot, GoalSnapshot, GoalStateSnapshot, ImageHandlingMode,
-    ImageInspectionDetailSnapshot, InterruptRunRequest, InterruptRunResult,
-    ListConversationPageRequest, ListConversationPageResult, MessageFeedback, ObservedSnapshot,
-    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot,
-    QueuedInputSnapshot, ReasoningEffortOptionSnapshot, RecallNavigationTarget,
-    RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot,
-    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
-    ResumeQueuedInputResult, SearchConversationHistoryRequest, SearchConversationHistoryResult,
-    SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
-    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    ConversationInputSourceSnapshot, ConversationItem, ConversationOwner, ConversationPage,
+    GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
+    GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
+    GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
+    GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
+    GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
+    GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ImageInspectionDetailSnapshot,
+    InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
+    ListConversationPageResult, MessageFeedback, ObservedSnapshot, PrioritizeQueuedInputRequest,
+    PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
+    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
+    RecallToolDetailItem, RecallToolDetailSnapshot, RejectApprovalAndStopRunRequest,
+    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
+    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionUsageSnapshot,
+    SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot, ToolEventSnapshot,
+    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
+    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use skill::{
     ActiveSkillSnapshot, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
@@ -108,12 +114,14 @@ pub use skill::{
 };
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
-    AttachmentState, AttachmentSummary, ChildTaskSnapshot, ChildTaskStatus, GuardrailKind,
-    GuardrailMode, PermissionDiagnostic, PermissionDiagnosticCode, PermissionFileStatus,
-    PermissionFileSummary, PermissionScope, ReasoningEffortKey, RunSnapshot, RunStatus,
-    RuntimeLifecycle, SessionLifecycle, SessionListFilter, SessionSummary, SessionTitleOrigin,
-    TokenUsageSnapshot, ToolActivitySnapshot, ToolActivityStatus, ToolApprovalSubject,
-    ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
+    AttachmentState, AttachmentSummary, ChildTaskSnapshot, ChildTaskStatus,
+    ControllerAvailabilitySnapshot, GuardrailKind, GuardrailMode, PermissionDiagnostic,
+    PermissionDiagnosticCode, PermissionFileStatus, PermissionFileSummary, PermissionScope,
+    ReasoningEffortKey, RunSnapshot, RunStatus, RuntimeLifecycle, SessionCompactionReasonSnapshot,
+    SessionCompactionSnapshot, SessionCompactionTriggerSnapshot, SessionLifecycle,
+    SessionListFilter, SessionProxySnapshot, SessionRoleSnapshot, SessionSummary,
+    SessionTitleOrigin, TokenUsageSnapshot, ToolActivitySnapshot, ToolActivityStatus,
+    ToolApprovalSubject, ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
 };
 
 /// 客户端与 Runtime Host 当前共同理解的应用协议版本。

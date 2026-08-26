@@ -76,6 +76,14 @@ function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: bool
       </article>
     );
   }
+  if (props.item.type === "context_summary") {
+    return (
+      <article className={styles.message} data-anchor={props.is_anchor} data-role="summary">
+        <small>上下文摘要</small>
+        <MarkdownContent text={props.item.text} />
+      </article>
+    );
+  }
   const text = props.item.segments
     .filter((segment) => segment.type === "text")
     .map((segment) => segment.text)

@@ -3,7 +3,7 @@
 use assistant_protocol::{
     ChildTaskId, ChildTaskStatus, RunId, RunStatus, RuntimeErrorInfo, SessionId,
 };
-use assistant_runtime::{StoredGoalSettlementEffect, StoredSkillActivation};
+use assistant_runtime::{NewStoredInput, StoredGoalSettlementEffect, StoredSkillActivation};
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,8 @@ pub(super) enum AppendPurpose {
         error: Option<RuntimeErrorInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal_effect: Option<Box<StoredGoalSettlementEffect>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proxy_report: Option<Box<NewStoredInput>>,
     },
     /// 子任务初始 User Message 已写入，切换到 running。
     ChildStart,
@@ -310,6 +312,7 @@ pub(super) fn apply_run_settlement(
         cancel_requested,
         error,
         goal_effect,
+        proxy_report,
     } = purpose
     else {
         return Err(invalid_data("run settlement purpose is invalid"));
@@ -394,6 +397,9 @@ pub(super) fn apply_run_settlement(
                 )?;
             }
         }
+    }
+    if let Some(report) = proxy_report.as_deref() {
+        super::input_state::insert_proxy_report(transaction, session_id, run_id, *status, report)?;
     }
     let session_updated = transaction
         .execute(

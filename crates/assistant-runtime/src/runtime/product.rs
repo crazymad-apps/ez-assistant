@@ -12,9 +12,9 @@ use assistant_protocol::{
     AssistantMessageSnapshot, AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot,
     ChildTaskUsageSnapshot, ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot,
     ConversationFileReference, ConversationHistoryHit, ConversationHistoryMatchKind,
-    ConversationHistoryScope, ConversationItem, ConversationOwner, ConversationPage,
-    GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
-    GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    ConversationHistoryScope, ConversationInputSourceSnapshot, ConversationItem, ConversationOwner,
+    ConversationPage, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
+    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
     GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 use super::AssistantRuntime;
 use crate::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, RuntimeError, RuntimeResult,
-    StoreErrorKind, StoredConversationWindow,
+    ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding, RuntimeError,
+    RuntimeResult, StoreErrorKind, StoredConversationWindow,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 30;
@@ -58,6 +58,7 @@ struct ConversationCursor {
 pub(super) struct ProjectionContext {
     run_by_message: HashMap<String, MessageRunProjection>,
     input_by_message: HashMap<String, assistant_protocol::InputId>,
+    source_by_message: HashMap<String, ConversationInputSourceSnapshot>,
     skill_by_message: HashMap<String, SkillActivationTagSnapshot>,
     attachment_by_path: HashMap<String, AttachmentId>,
     feedback_by_message: HashMap<String, assistant_protocol::MessageFeedback>,
@@ -196,6 +197,16 @@ impl AssistantRuntime {
                     .active_count_for_session(&session.session_id)?;
             }
             let runtime_lifecycle = self.lifecycle()?;
+            let controllers = self.controller_sessions()?;
+            let controller_availability = controllers
+                .first()
+                .map(
+                    |controller| assistant_protocol::ControllerAvailabilitySnapshot::Available {
+                        session_id: controller.id().clone(),
+                    },
+                )
+                .unwrap_or_default();
+            let additional_controller_count = controllers.len().saturating_sub(1) as u64;
             let end = self.event_sender.sequence();
             if start == end {
                 return Ok(GetApplicationSnapshotResult {
@@ -208,6 +219,8 @@ impl AssistantRuntime {
                             workspaces,
                             active_sessions,
                             archived_sessions,
+                            controller_availability,
+                            additional_controller_count,
                             capabilities: ApplicationCapabilities {
                                 conversation_paging: true,
                                 conversation_search: true,
@@ -273,12 +286,12 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) => continue,
                 Err(error) => return Err(error),
             };
+            let conversation_snapshot = conversation_snapshot_for_usage(&session)?;
             let conversation = page_from_window(
                 owner,
                 &window,
                 project_conversation(&window.conversation, &projection)?,
             )?;
-            let conversation_snapshot = conversation_snapshot_for_usage(&session)?;
             let stored_usage = self
                 .store
                 .get_session_usage(&request.session_id)
@@ -308,6 +321,7 @@ impl AssistantRuntime {
                         observed_sequence: end,
                         value: SessionViewSnapshot {
                             session: summary,
+                            conversation_generation: generation,
                             composer_capabilities,
                             work_plan,
                             goal,
@@ -1078,7 +1092,7 @@ impl AssistantRuntime {
         session: &crate::session::SessionController,
         attachments: &[assistant_protocol::AttachmentSummary],
     ) -> RuntimeResult<ProjectionContext> {
-        let (run_by_message, input_by_message, skill_by_message) = {
+        let (run_by_message, input_by_message, source_by_message, skill_by_message) = {
             let state = session.lock_state()?;
             let mut run_by_message = HashMap::new();
             for run in state.runs.values() {
@@ -1104,12 +1118,27 @@ impl AssistantRuntime {
                     )
                 })
                 .collect();
+            let source_by_message = state
+                .inputs
+                .values()
+                .map(|input| {
+                    (
+                        input.stored.user_message_id.as_str().to_owned(),
+                        project_input_source(input.stored.cross_session_binding.as_ref()),
+                    )
+                })
+                .collect();
             let skill_by_message = state
                 .skill_activations
                 .iter()
                 .map(|activation| (activation.message_id.as_str().to_owned(), activation.tag()))
                 .collect();
-            (run_by_message, input_by_message, skill_by_message)
+            (
+                run_by_message,
+                input_by_message,
+                source_by_message,
+                skill_by_message,
+            )
         };
         let attachment_by_path = attachments
             .iter()
@@ -1131,6 +1160,7 @@ impl AssistantRuntime {
         Ok(ProjectionContext {
             run_by_message,
             input_by_message,
+            source_by_message,
             skill_by_message,
             attachment_by_path,
             feedback_by_message,
@@ -1410,6 +1440,7 @@ pub(super) fn empty_child_projection() -> ProjectionContext {
     ProjectionContext {
         run_by_message: HashMap::new(),
         input_by_message: HashMap::new(),
+        source_by_message: HashMap::new(),
         skill_by_message: HashMap::new(),
         attachment_by_path: HashMap::new(),
         feedback_by_message: HashMap::new(),
@@ -1423,7 +1454,7 @@ pub(super) fn queue_snapshot(
     let state = session.lock_state()?;
     let held_by_goal = state.goal.is_some();
     let items = state
-        .user_inputs
+        .session_inputs
         .iter()
         .enumerate()
         .filter_map(|(position, input_id)| {
@@ -1440,6 +1471,7 @@ pub(super) fn queue_snapshot(
                 submitted_at_ms: input.stored.accepted_at_ms,
                 position: u32::try_from(position).unwrap_or(u32::MAX),
                 is_prioritized: position == 0,
+                source: project_input_source(input.stored.cross_session_binding.as_ref()),
                 held_by_goal,
                 skill: input
                     .stored
@@ -1589,6 +1621,11 @@ pub(super) fn project_conversation(
                     input_id: context.input_by_message.get(user.id.as_str()).cloned(),
                     text: user_text(user),
                     attachment_ids,
+                    source: context
+                        .source_by_message
+                        .get(user.id.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
                     skill: context.skill_by_message.get(user.id.as_str()).cloned(),
                     created_at_ms: None,
                 }));
@@ -1655,9 +1692,14 @@ pub(super) fn project_conversation(
                         .copied(),
                 }));
             }
+            ConversationMessage::ContextSummary(summary) => {
+                items.push(ConversationItem::ContextSummary {
+                    message_id: protocol_message_id(summary.id.as_str())?,
+                    text: summary.text.clone(),
+                });
+            }
             ConversationMessage::User(_)
             | ConversationMessage::System(_)
-            | ConversationMessage::ContextSummary(_)
             | ConversationMessage::Tool(_) => {}
         }
     }
@@ -2158,6 +2200,33 @@ fn decode_cursor(cursor: &str) -> RuntimeResult<ConversationCursor> {
         })
 }
 
+fn project_input_source(
+    binding: Option<&CrossSessionInputBinding>,
+) -> ConversationInputSourceSnapshot {
+    match binding {
+        None => ConversationInputSourceSnapshot::User,
+        Some(CrossSessionInputBinding::ControllerDelivery {
+            controller_session_id,
+            controller_run_id,
+            ..
+        }) => ConversationInputSourceSnapshot::ControllerDelivery {
+            controller_session_id: controller_session_id.clone(),
+            controller_run_id: controller_run_id.clone(),
+        },
+        Some(CrossSessionInputBinding::ProxyReport {
+            source_session_id,
+            source_run_id,
+            source_goal_id,
+            source_run_status,
+        }) => ConversationInputSourceSnapshot::ProxyReport {
+            source_session_id: source_session_id.clone(),
+            source_run_id: source_run_id.clone(),
+            source_goal_id: source_goal_id.clone(),
+            source_run_status: *source_run_status,
+        },
+    }
+}
+
 fn user_text(message: &agent_types::UserMessage) -> String {
     message
         .parts
@@ -2280,6 +2349,7 @@ fn item_message_id(item: &ConversationItem) -> &MessageId {
     match item {
         ConversationItem::User(message) => &message.message_id,
         ConversationItem::Assistant(message) => &message.message_id,
+        ConversationItem::ContextSummary { message_id, .. } => message_id,
     }
 }
 

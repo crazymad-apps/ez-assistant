@@ -10,30 +10,35 @@ use agent_types::{
     TokenUsage, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, ChildTaskStatus, ConversationOwner, InputId, MessageFeedback,
-    MessageId as ProtocolMessageId, RunId, RunStatus, SessionId, SessionTitleOrigin, WorkspaceId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner,
+    IdempotencyKey, InputId, MessageFeedback, MessageId as ProtocolMessageId, RunId, RunStatus,
+    SessionHistoryCleanupStatus, SessionId, SessionTitleOrigin, WorkspaceId,
 };
 
 use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementTarget, ConversationMessageLocationRequest, ConversationRawWindowRequest,
-    ConversationRewrite, ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, GoalClear, GoalHeldInputResume,
+    ContextReplacementResult, ContextReplacementTarget, ConversationMessageLocationRequest,
+    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
+    ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
+    ConversationWindowRequest, CrossSessionInputBinding, GoalClear, GoalHeldInputResume,
     GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
     ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
     NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
     QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionPinnedChange, SessionTitleChange, StoreError,
-    StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationState, StoredConversationWindow, StoredGoal, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredRunSettlementResult,
-    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage,
-    StoredTodoItemStatus, StoredWorkPlan, StoredWorkspace, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkPlanMutationResult, WorkspaceRemoval, validate_input_message,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
+    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
+    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
+    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredGoal,
+    StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState, StoredInput,
+    StoredInputState, StoredMessageFeedback, StoredRun, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionUsage, StoredTodoItemStatus, StoredWorkPlan, StoredWorkspace,
+    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
+    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, validate_input_message,
 };
 use crate::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
@@ -55,6 +60,12 @@ struct VolatileChildPendingExchange {
     step: u32,
     assistant: AssistantMessage,
     started_calls: BTreeSet<String>,
+}
+
+struct VolatileCompactionReceipt {
+    session_id: SessionId,
+    source_generation: u64,
+    outcome: Option<CompactSessionOutcome>,
 }
 
 #[derive(Default)]
@@ -80,6 +91,8 @@ struct State {
     goals: BTreeMap<SessionId, StoredGoal>,
     skill_activations: BTreeMap<String, StoredSkillActivation>,
     usage_request_ids: BTreeSet<(SessionId, String)>,
+    session_history_clears: BTreeMap<IdempotencyKey, SessionHistoryClearResult>,
+    session_history_compactions: BTreeMap<IdempotencyKey, VolatileCompactionReceipt>,
     next_queue_order: u64,
 }
 
@@ -213,12 +226,12 @@ impl RuntimeStore for VolatileRuntimeStore {
                 last_operation_id: mutation.operation_id,
                 updated_at_ms: mutation.updated_at_ms,
             };
-            let completed = !stored.items.is_empty()
-                && stored
+            let cleared = stored.items.is_empty()
+                || stored
                     .items
                     .iter()
                     .all(|item| item.status == StoredTodoItemStatus::Completed);
-            if completed {
+            if cleared {
                 state.work_plans.remove(&mutation.session_id);
                 state
                     .work_plan_completion_receipts
@@ -228,7 +241,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             Ok(WorkPlanMutationResult {
                 plan: stored,
-                cleared: completed,
+                cleared,
             })
         })
     }
@@ -487,8 +500,13 @@ impl RuntimeStore for VolatileRuntimeStore {
                     is_duplicate: true,
                 });
             }
-            validate_input_message(input.origin, input.goal_binding.as_ref(), &input.message)
-                .map_err(|_| conflict("input message origin or Goal binding is invalid"))?;
+            validate_input_message(
+                input.origin,
+                input.goal_binding.as_ref(),
+                input.cross_session_binding.as_ref(),
+                &input.message,
+            )
+            .map_err(|_| conflict("input message origin or Goal binding is invalid"))?;
             validate_volatile_input_activation(&state, &input)?;
             if input.new_goal.is_some() && input.resumed_goal.is_some() {
                 return Err(conflict("input cannot start and resume a Goal together"));
@@ -549,6 +567,91 @@ impl RuntimeStore for VolatileRuntimeStore {
                     return Err(conflict("resumed Goal projection is invalid"));
                 }
             }
+            match input.cross_session_binding.as_ref() {
+                Some(CrossSessionInputBinding::ControllerDelivery {
+                    controller_session_id,
+                    controller_run_id,
+                    ..
+                }) => {
+                    let source_valid =
+                        state
+                            .sessions
+                            .get(controller_session_id)
+                            .is_some_and(|session| {
+                                session.role == SessionRole::Controller
+                                    && session.lifecycle == StoredSessionLifecycle::Active
+                            })
+                            && state.runs.get(controller_run_id).is_some_and(|run| {
+                                run.session_id == *controller_session_id
+                                    && matches!(
+                                        run.status,
+                                        RunStatus::Running | RunStatus::Cancelling
+                                    )
+                            });
+                    let target_valid =
+                        state
+                            .sessions
+                            .get(&input.session_id)
+                            .is_some_and(|session| {
+                                session.role == SessionRole::Standard
+                                    && session.lifecycle == StoredSessionLifecycle::Active
+                                    && session.proxy.as_ref().is_some_and(|proxy| {
+                                        proxy.controller_session_id == *controller_session_id
+                                    })
+                            });
+                    let queue_exists = state.inputs.values().any(|candidate| {
+                        candidate.session_id == input.session_id
+                            && candidate.state == StoredInputState::Queued
+                    });
+                    if input.origin != InputOrigin::Runtime
+                        || input.goal_binding.is_some()
+                        || input.skill_activation.is_some()
+                        || input.new_goal.is_some()
+                        || input.resumed_goal.is_some()
+                        || input.generated_title.is_some()
+                        || input.idempotency_key.is_none()
+                        || !source_valid
+                        || !target_valid
+                        || queue_exists
+                    {
+                        return Err(conflict("controller delivery is not currently accepted"));
+                    }
+                }
+                Some(CrossSessionInputBinding::ProxyReport { .. }) => {
+                    return Err(conflict(
+                        "proxy reports must be accepted through run settlement",
+                    ));
+                }
+                None if input.origin == InputOrigin::User => {
+                    let removed = state
+                        .inputs
+                        .values()
+                        .filter(|candidate| {
+                            candidate.session_id == input.session_id
+                                && candidate.state == StoredInputState::Queued
+                                && matches!(
+                                    candidate.cross_session_binding,
+                                    Some(CrossSessionInputBinding::ControllerDelivery { .. })
+                                )
+                        })
+                        .map(|candidate| candidate.input_id.clone())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    state
+                        .inputs
+                        .retain(|input_id, _| !removed.contains(input_id));
+                    state.runs.retain(|_, run| !removed.contains(&run.input_id));
+                    state.skill_activations.retain(|_, activation| {
+                        !activation
+                            .input_id
+                            .as_ref()
+                            .is_some_and(|input_id| removed.contains(input_id))
+                    });
+                    if let Some(session) = state.sessions.get_mut(&input.session_id) {
+                        session.proxy = None;
+                    }
+                }
+                None => {}
+            }
             state.next_queue_order += 1;
             let stored = StoredInput {
                 queue_order: state.next_queue_order,
@@ -558,6 +661,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 agent_variant: input.agent_variant,
                 origin: input.origin,
                 goal_binding: input.goal_binding,
+                cross_session_binding: input.cross_session_binding,
                 skill_activation: input.skill_activation.clone(),
                 user_message_id: input.message.id.clone(),
                 state: StoredInputState::Queued,
@@ -740,6 +844,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: session.current_variant,
                 approval_mode: session.approval_mode,
+                role: session.role,
+                proxy: None,
                 body_generation: 1,
                 message_count: 0,
                 created_at_ms: session.created_at_ms,
@@ -771,6 +877,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .sessions
                 .get(&fork.source_session_id)
                 .ok_or_else(|| conflict("fork source session does not exist"))?;
+            if source.role != SessionRole::Standard || fork.session.role != SessionRole::Standard {
+                return Err(conflict("session role cannot be forked"));
+            }
             if source.body_generation != fork.source_generation {
                 return Err(conflict("fork source generation changed"));
             }
@@ -882,6 +991,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,
                 approval_mode: fork.session.approval_mode,
+                role: fork.session.role,
+                proxy: None,
                 body_generation: 1,
                 message_count,
                 created_at_ms: fork.session.created_at_ms,
@@ -982,6 +1093,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .sessions
                 .get(&deletion.session_id)
                 .ok_or_else(|| conflict("delete session does not exist"))?;
+            if session.role != SessionRole::Standard {
+                return Err(conflict("session role cannot be deleted"));
+            }
             let current = assistant_protocol::DeleteSessionImpact {
                 message_count: session.message_count,
                 run_count: count_u64(
@@ -1056,6 +1170,219 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .pending_child_tool_exchanges
                 .retain(|_, exchange| exchange.session_id != deletion.session_id);
+            Ok(())
+        })
+    }
+
+    fn clear_session_history(
+        &self,
+        clear: SessionHistoryClear,
+    ) -> StoreFuture<'_, SessionHistoryClearResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if let Some(existing) = state.session_history_clears.get(&clear.operation_id) {
+                if existing.session.session_id != clear.session_id
+                    || existing.source_generation != clear.expected_generation
+                {
+                    return Err(conflict(
+                        "session history clear operation identity was reused",
+                    ));
+                }
+                return Ok(existing.clone());
+            }
+
+            let current = state
+                .sessions
+                .get(&clear.session_id)
+                .cloned()
+                .ok_or_else(|| conflict("clear session does not exist"))?;
+            if current.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("clear session is archived"));
+            }
+            if current.role != clear.expected_role {
+                return Err(conflict("clear session role changed"));
+            }
+            if current.body_generation != clear.expected_generation {
+                return Err(conflict("clear session generation changed"));
+            }
+            if current.environment != clear.environment {
+                return Err(conflict("clear session environment changed"));
+            }
+            ensure_idle(&state, &clear.session_id)?;
+
+            let result_generation = current
+                .body_generation
+                .checked_add(1)
+                .ok_or_else(|| conflict("clear session generation exhausted"))?;
+            let mut cleared = current;
+            cleared.system_prompt = clear.system_prompt;
+            cleared.skill_catalog = clear.skill_catalog;
+            cleared.environment = clear.environment;
+            cleared.body_generation = result_generation;
+            cleared.message_count = 0;
+            cleared.updated_at_ms = clear.changed_at_ms;
+            cleared.conversation_state = StoredConversationState::Available;
+            if cleared.title_origin == SessionTitleOrigin::Generated {
+                cleared.title = match cleared.role {
+                    SessionRole::Standard => "New Session",
+                    SessionRole::Controller => "主控会话",
+                }
+                .to_owned();
+            }
+            if cleared.role == SessionRole::Standard {
+                cleared.proxy = None;
+            }
+
+            let child_ids = state
+                .child_tasks
+                .values()
+                .filter(|task| task.session_id == clear.session_id)
+                .map(|task| task.child_task_id.clone())
+                .collect::<BTreeSet<_>>();
+            state
+                .inputs
+                .retain(|_, input| input.session_id != clear.session_id);
+            state
+                .runs
+                .retain(|_, run| run.session_id != clear.session_id);
+            state
+                .child_tasks
+                .retain(|_, task| task.session_id != clear.session_id);
+            state
+                .child_conversations
+                .retain(|child_id, _| !child_ids.contains(child_id));
+            state
+                .message_feedback
+                .retain(|(session_id, _), _| session_id != &clear.session_id);
+            state
+                .pending_tool_exchanges
+                .retain(|_, exchange| exchange.session_id != clear.session_id);
+            state
+                .pending_child_tool_exchanges
+                .retain(|_, exchange| exchange.session_id != clear.session_id);
+            state.work_plans.remove(&clear.session_id);
+            state
+                .work_plan_completion_receipts
+                .retain(|(session_id, _), _| session_id != &clear.session_id);
+            state.goals.remove(&clear.session_id);
+            state
+                .skill_activations
+                .retain(|_, activation| activation.session_id != clear.session_id);
+            state
+                .usage_request_ids
+                .retain(|(session_id, _)| session_id != &clear.session_id);
+            state
+                .session_history_clears
+                .retain(|_, result| result.session.session_id != clear.session_id);
+            state.conversations.insert(
+                clear.session_id.clone(),
+                ConversationSnapshot::new(Vec::new()),
+            );
+            state
+                .session_usage
+                .insert(clear.session_id.clone(), StoredSessionUsage::default());
+            state
+                .sessions
+                .insert(clear.session_id.clone(), cleared.clone());
+
+            let result = SessionHistoryClearResult {
+                session: cleared,
+                source_generation: clear.expected_generation,
+                result_generation,
+                cleanup_status: SessionHistoryCleanupStatus::Completed,
+            };
+            state
+                .session_history_clears
+                .insert(clear.operation_id, result.clone());
+            Ok(result)
+        })
+    }
+
+    fn prepare_session_compaction(
+        &self,
+        preparation: SessionHistoryCompactionPreparation,
+    ) -> StoreFuture<'_, SessionHistoryCompactionPreparationResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if let Some(existing) = state
+                .session_history_compactions
+                .get(&preparation.operation_id)
+            {
+                if existing.session_id != preparation.session_id
+                    || existing.source_generation != preparation.expected_generation
+                {
+                    return Err(conflict("session compaction operation identity was reused"));
+                }
+                return existing.outcome.clone().map_or_else(
+                    || Err(conflict("session compaction is already preparing")),
+                    |outcome| {
+                        Ok(SessionHistoryCompactionPreparationResult::Completed(
+                            outcome,
+                        ))
+                    },
+                );
+            }
+            let session = state
+                .sessions
+                .get(&preparation.session_id)
+                .ok_or_else(|| conflict("compact session does not exist"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active
+                || session.body_generation != preparation.expected_generation
+            {
+                return Err(conflict("compact session snapshot changed"));
+            }
+            ensure_idle(&state, &preparation.session_id)?;
+            state.session_history_compactions.insert(
+                preparation.operation_id,
+                VolatileCompactionReceipt {
+                    session_id: preparation.session_id,
+                    source_generation: preparation.expected_generation,
+                    outcome: None,
+                },
+            );
+            Ok(SessionHistoryCompactionPreparationResult::Prepared)
+        })
+    }
+
+    fn finish_session_compaction(
+        &self,
+        finish: SessionHistoryCompactionFinish,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let current_generation = state
+                .sessions
+                .get(&finish.session_id)
+                .ok_or_else(|| conflict("compact session does not exist"))?
+                .body_generation;
+            if current_generation != finish.expected_generation {
+                return Err(conflict("compact generation changed before finish"));
+            }
+            let receipt = state
+                .session_history_compactions
+                .get_mut(&finish.operation_id)
+                .ok_or_else(|| conflict("compact receipt does not exist"))?;
+            if receipt.session_id != finish.session_id
+                || receipt.source_generation != finish.expected_generation
+            {
+                return Err(conflict("session compaction operation identity was reused"));
+            }
+            let outcome = match finish.kind {
+                SessionHistoryCompactionFinishKind::NoOp => Some(CompactSessionOutcome::NoOp),
+                SessionHistoryCompactionFinishKind::Cancelled => {
+                    Some(CompactSessionOutcome::Cancelled)
+                }
+                SessionHistoryCompactionFinishKind::Interrupted => None,
+            };
+            if finish.kind == SessionHistoryCompactionFinishKind::Interrupted {
+                state
+                    .session_history_compactions
+                    .remove(&finish.operation_id);
+            } else if receipt.outcome.is_none() {
+                receipt.outcome = outcome;
+            } else if receipt.outcome != outcome {
+                return Err(conflict("compact receipt already has a different outcome"));
+            }
             Ok(())
         })
     }
@@ -1357,7 +1684,10 @@ impl RuntimeStore for VolatileRuntimeStore {
         })
     }
 
-    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()> {
+    fn replace_context(
+        &self,
+        replacement: ContextReplacement,
+    ) -> StoreFuture<'_, ContextReplacementResult> {
         Box::pin(async move {
             replacement
                 .conversation
@@ -1374,9 +1704,13 @@ impl RuntimeStore for VolatileRuntimeStore {
                     replacement.conversation.messages.clone(),
                 )),
                 ContextReplacementTarget::ChildTask { .. } => None,
+                ContextReplacementTarget::IdleSession { session_id, .. } => Some((
+                    session_id.clone(),
+                    replacement.conversation.messages.clone(),
+                )),
             };
             let mut state = self.lock()?;
-            match replacement.target {
+            let result = match replacement.target {
                 ContextReplacementTarget::Run { session_id, run_id } => {
                     let run = state
                         .runs
@@ -1411,6 +1745,10 @@ impl RuntimeStore for VolatileRuntimeStore {
                         .checked_add(1)
                         .ok_or_else(|| conflict("conversation generation is exhausted"))?;
                     session.message_count = message_count;
+                    ContextReplacementResult {
+                        source_generation: session.body_generation.saturating_sub(1),
+                        result_generation: session.body_generation,
+                    }
                 }
                 ContextReplacementTarget::ChildTask {
                     session_id,
@@ -1445,12 +1783,77 @@ impl RuntimeStore for VolatileRuntimeStore {
                         .checked_add(1)
                         .ok_or_else(|| conflict("child conversation generation is exhausted"))?;
                     task.message_count = message_count;
+                    ContextReplacementResult {
+                        source_generation: task.body_generation.saturating_sub(1),
+                        result_generation: task.body_generation,
+                    }
                 }
-            }
+                ContextReplacementTarget::IdleSession {
+                    session_id,
+                    expected_generation,
+                    operation_id,
+                    compacted_message_count,
+                    retained_message_count,
+                } => {
+                    ensure_idle(&state, &session_id)?;
+                    let session = state
+                        .sessions
+                        .get(&session_id)
+                        .ok_or_else(|| conflict("compact session does not exist"))?;
+                    if session.lifecycle != StoredSessionLifecycle::Active
+                        || session.body_generation != expected_generation
+                    {
+                        return Err(conflict("compact session snapshot changed"));
+                    }
+                    let receipt = state
+                        .session_history_compactions
+                        .get(&operation_id)
+                        .ok_or_else(|| conflict("compact receipt does not exist"))?;
+                    if receipt.session_id != session_id
+                        || receipt.source_generation != expected_generation
+                        || receipt.outcome.is_some()
+                    {
+                        return Err(conflict("compact receipt is not preparing"));
+                    }
+                    let result_generation = expected_generation
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("conversation generation is exhausted"))?;
+                    let message_count = u64::try_from(replacement.conversation.messages.len())
+                        .map_err(|_| {
+                            StoreError::new(
+                                StoreErrorKind::InvalidInput,
+                                "replacement conversation is too large",
+                            )
+                        })?;
+                    state
+                        .conversations
+                        .insert(session_id.clone(), replacement.conversation);
+                    let session = state
+                        .sessions
+                        .get_mut(&session_id)
+                        .expect("checked compact session");
+                    session.body_generation = result_generation;
+                    session.message_count = message_count;
+                    state
+                        .session_history_compactions
+                        .get_mut(&operation_id)
+                        .expect("checked compact receipt")
+                        .outcome = Some(CompactSessionOutcome::Compacted {
+                        source_generation: expected_generation,
+                        result_generation,
+                        compacted_message_count,
+                        retained_message_count,
+                    });
+                    ContextReplacementResult {
+                        source_generation: expected_generation,
+                        result_generation,
+                    }
+                }
+            };
             if let Some((session_id, messages)) = committed_main {
                 record_session_usage(&mut state, &session_id, &messages);
             }
-            Ok(())
+            Ok(result)
         })
     }
 
@@ -1645,6 +2048,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("run has a pending tool exchange"));
             }
             validate_volatile_goal_effect(&state, &settlement)?;
+            validate_volatile_proxy_report(&state, &settlement)?;
+            let proxy_report = settlement.proxy_report.clone();
             append(&mut state, &settlement.session_id, &settlement.messages)?;
             let run = state
                 .runs
@@ -1670,7 +2075,12 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .expect("run session exists");
             session.updated_at_ms = settlement.finished_at_ms;
             record_session_usage(&mut state, &settlement.session_id, &settlement.messages);
-            apply_volatile_goal_effect(&mut state, settlement.goal_effect)
+            let mut result = apply_volatile_goal_effect(&mut state, settlement.goal_effect)?;
+            if let Some(report) = proxy_report {
+                result.accepted_proxy_report =
+                    Some(insert_volatile_proxy_report(&mut state, *report)?);
+            }
+            Ok(result)
         })
     }
 
@@ -1845,7 +2255,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 generation: goal.generation,
                 turn: goal.turn,
             };
-            validate_input_message(InputOrigin::User, Some(&binding), &resume.message)
+            validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
                 .map_err(|_| conflict("held Goal resume message is invalid"))?;
             let run = state
                 .runs
@@ -2126,6 +2536,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .sessions
                 .get_mut(&change.session_id)
                 .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.role != SessionRole::Standard {
+                return Err(conflict("session role cannot be archived"));
+            }
             match (session.lifecycle, change.archived) {
                 (StoredSessionLifecycle::Active, true) => {
                     session.lifecycle = StoredSessionLifecycle::Archived;
@@ -2136,6 +2549,49 @@ impl RuntimeStore for VolatileRuntimeStore {
                     session.archived_at_ms = None;
                 }
                 _ => return Err(conflict("session lifecycle cannot be changed")),
+            }
+            Ok(())
+        })
+    }
+
+    fn set_session_proxy(&self, change: SessionProxyChange) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let controller = state
+                .sessions
+                .get(&change.controller_session_id)
+                .ok_or_else(|| conflict("controller session does not exist"))?;
+            if controller.role != SessionRole::Controller
+                || controller.lifecycle != StoredSessionLifecycle::Active
+                || change.target_session_id == change.controller_session_id
+            {
+                return Err(conflict("controller session is invalid"));
+            }
+            let target = state
+                .sessions
+                .get_mut(&change.target_session_id)
+                .ok_or_else(|| conflict("proxy target session does not exist"))?;
+            if target.role != SessionRole::Standard
+                || target.lifecycle != StoredSessionLifecycle::Active
+            {
+                return Err(conflict("proxy target session is invalid"));
+            }
+            match (&target.proxy, change.enabled) {
+                (Some(current), true)
+                    if current.controller_session_id == change.controller_session_id => {}
+                (None, true) => {
+                    target.proxy = Some(SessionProxyState {
+                        controller_session_id: change.controller_session_id,
+                        changed_at_ms: change.changed_at_ms,
+                    });
+                }
+                (Some(current), false)
+                    if current.controller_session_id == change.controller_session_id =>
+                {
+                    target.proxy = None;
+                }
+                (None, false) => {}
+                _ => return Err(conflict("proxy target is bound to another controller")),
             }
             Ok(())
         })
@@ -2374,6 +2830,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 agent_variant: rewrite.input.agent_variant,
                 origin: rewrite.input.origin,
                 goal_binding: rewrite.input.goal_binding,
+                cross_session_binding: rewrite.input.cross_session_binding,
                 skill_activation: rewrite.input.skill_activation,
                 user_message_id: new_message.id.clone(),
                 state: StoredInputState::Committed,
@@ -2569,6 +3026,7 @@ fn validate_volatile_goal_effect(
             validate_input_message(
                 next_input.origin,
                 next_input.goal_binding.as_ref(),
+                next_input.cross_session_binding.as_ref(),
                 &next_input.message,
             )
             .map_err(|_| conflict("Goal continuation message is invalid"))?;
@@ -2584,6 +3042,139 @@ fn validate_volatile_goal_effect(
         _ => return Err(conflict("Goal settlement effect is inconsistent")),
     }
     Ok(())
+}
+
+fn validate_volatile_proxy_report(
+    state: &State,
+    settlement: &StoredRunSettlement,
+) -> Result<(), StoreError> {
+    let Some(report) = settlement.proxy_report.as_deref() else {
+        return Ok(());
+    };
+    validate_input_message(
+        report.origin,
+        report.goal_binding.as_ref(),
+        report.cross_session_binding.as_ref(),
+        &report.message,
+    )
+    .map_err(|_| conflict("proxy report message is invalid"))?;
+    let Some(CrossSessionInputBinding::ProxyReport {
+        source_session_id,
+        source_run_id,
+        source_goal_id,
+        source_run_status,
+    }) = report.cross_session_binding.as_ref()
+    else {
+        return Err(conflict("proxy report binding is missing"));
+    };
+    let source_run = state
+        .runs
+        .get(&settlement.run_id)
+        .ok_or_else(|| conflict("proxy report source Run does not exist"))?;
+    let source_input = state
+        .inputs
+        .get(&source_run.input_id)
+        .ok_or_else(|| conflict("proxy report source Input does not exist"))?;
+    let source = state
+        .sessions
+        .get(&settlement.session_id)
+        .ok_or_else(|| conflict("proxy report source Session does not exist"))?;
+    let target_valid = state
+        .sessions
+        .get(&report.session_id)
+        .is_some_and(|target| {
+            target.role == SessionRole::Controller
+                && target.lifecycle == StoredSessionLifecycle::Active
+        });
+    let source_queue_empty = !state.inputs.values().any(|input| {
+        input.session_id == settlement.session_id
+            && input.state == StoredInputState::Queued
+            && input.input_id != source_input.input_id
+    });
+    if report.origin != InputOrigin::Runtime
+        || report.goal_binding.is_some()
+        || report.skill_activation.is_some()
+        || report.new_goal.is_some()
+        || report.resumed_goal.is_some()
+        || report.generated_title.is_some()
+        || report.idempotency_key.is_none()
+        || source_session_id != &settlement.session_id
+        || source_run_id != &settlement.run_id
+        || *source_run_status != settlement.status
+        || source_goal_id.as_ref()
+            != source_input
+                .goal_binding
+                .as_ref()
+                .map(|binding| &binding.goal_id)
+        || source.role != SessionRole::Standard
+        || source.lifecycle != StoredSessionLifecycle::Active
+        || source
+            .proxy
+            .as_ref()
+            .map(|proxy| &proxy.controller_session_id)
+            != Some(&report.session_id)
+        || !target_valid
+        || !source_queue_empty
+        || matches!(
+            settlement.goal_effect,
+            Some(StoredGoalSettlementEffect::Continue { .. })
+        )
+        || state.inputs.contains_key(&report.input_id)
+        || state.runs.contains_key(&report.run_id)
+    {
+        return Err(conflict("proxy report is not currently accepted"));
+    }
+    Ok(())
+}
+
+fn insert_volatile_proxy_report(
+    state: &mut State,
+    report: NewStoredInput,
+) -> Result<AcceptedInput, StoreError> {
+    state.next_queue_order = state.next_queue_order.saturating_add(1);
+    let stored_input = StoredInput {
+        queue_order: state.next_queue_order,
+        input_id: report.input_id.clone(),
+        session_id: report.session_id.clone(),
+        idempotency_key: report.idempotency_key,
+        agent_variant: report.agent_variant,
+        origin: report.origin,
+        goal_binding: None,
+        cross_session_binding: report.cross_session_binding,
+        skill_activation: None,
+        user_message_id: report.message.id.clone(),
+        state: StoredInputState::Queued,
+        queued_message: Some(report.message),
+        accepted_at_ms: report.accepted_at_ms,
+    };
+    let stored_run = StoredRun {
+        run_id: report.run_id,
+        session_id: report.session_id,
+        input_id: report.input_id,
+        attempt: 1,
+        status: RunStatus::Accepted,
+        agent_variant: report.agent_variant,
+        approval_mode: report.approval_mode,
+        reasoning_effort: None,
+        cancel_requested: false,
+        error: None,
+        message_ids: Vec::new(),
+        message_steps: std::collections::HashMap::new(),
+        created_at_ms: report.accepted_at_ms,
+        started_at_ms: None,
+        finished_at_ms: None,
+    };
+    state
+        .inputs
+        .insert(stored_input.input_id.clone(), stored_input.clone());
+    state
+        .runs
+        .insert(stored_run.run_id.clone(), stored_run.clone());
+    Ok(AcceptedInput {
+        input: stored_input,
+        run: stored_run,
+        is_duplicate: false,
+    })
 }
 
 fn apply_volatile_goal_effect(
@@ -2606,6 +3197,7 @@ fn apply_volatile_goal_effect(
                 agent_variant: next_input.agent_variant,
                 origin: next_input.origin,
                 goal_binding: next_input.goal_binding,
+                cross_session_binding: next_input.cross_session_binding,
                 skill_activation: next_input.skill_activation,
                 user_message_id: next_input.message.id.clone(),
                 state: StoredInputState::Queued,
@@ -2643,6 +3235,7 @@ fn apply_volatile_goal_effect(
                     run: stored_run,
                     is_duplicate: false,
                 }),
+                accepted_proxy_report: None,
                 resume_required: false,
             })
         }
@@ -2659,6 +3252,7 @@ fn apply_volatile_goal_effect(
             Ok(StoredRunSettlementResult {
                 goal: Some(goal),
                 continuation: None,
+                accepted_proxy_report: None,
                 resume_required,
             })
         }
@@ -2820,6 +3414,14 @@ fn ensure_idle(state: &State, session_id: &SessionId) -> Result<(), StoreError> 
             .pending_tool_exchanges
             .values()
             .any(|exchange| exchange.session_id == *session_id)
+        || state
+            .child_tasks
+            .values()
+            .any(|task| task.session_id == *session_id && !task.status.is_terminal())
+        || state
+            .pending_child_tool_exchanges
+            .values()
+            .any(|exchange| exchange.session_id == *session_id)
     {
         return Err(conflict("session is not idle"));
     }
@@ -2834,7 +3436,11 @@ fn conversation_window(
         .messages
         .iter()
         .enumerate()
-        .filter_map(|(index, message)| message.is_transcript_visible().then_some(index))
+        .filter_map(|(index, message)| {
+            (message.is_transcript_visible()
+                || matches!(message, ConversationMessage::ContextSummary(_)))
+            .then_some(index)
+        })
         .collect::<Vec<_>>();
     let total = display_indices.len();
     let end = request.end.unwrap_or(total).min(total);

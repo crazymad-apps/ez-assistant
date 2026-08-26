@@ -213,7 +213,9 @@ fn build_offsets(path: &Path) -> StorageResult<(Vec<u64>, Vec<u64>)> {
         let message: ConversationMessage = serde_json::from_slice(&line[..line.len() - 1])
             .map_err(|source| invalid_data_with_source("conversation JSONL is invalid", source))?;
         message_offsets.push(offset);
-        if message.is_transcript_visible() {
+        if message.is_transcript_visible()
+            || matches!(message, ConversationMessage::ContextSummary(_))
+        {
             display_offsets.push(offset);
         }
         offset = offset

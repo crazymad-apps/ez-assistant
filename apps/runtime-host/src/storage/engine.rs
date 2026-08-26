@@ -125,15 +125,18 @@ impl StorageEngine {
     }
 
     pub(super) fn load_runtime(&mut self) -> StorageResult<RecoveredRuntime> {
+        let pending_clear_sessions = self.recover_session_history_operations()?;
         let mut unavailable = self.recover_body_appends()?;
         self.unavailable_child_tasks = self.recover_child_storage()?;
         self.interrupt_nonterminal_child_tasks()?;
         // parent delegate result 必须在 child 工具交换和 child 终态修复之后重建。
         unavailable.extend(self.recover_pending_tool_exchanges()?);
         self.unavailable_sessions = unavailable;
-        let tool_image_diagnostics = self.recover_tool_images()?;
+        let mut tool_image_diagnostics = self.recover_tool_images()?;
+        // clear 已切换到空 Conversation 后，遗留 tool image 只代表精确物理清理尚未
+        // 收敛，不能反过来把新的空 generation 标记为不可用。
+        tool_image_diagnostics.retain(|session_id| !pending_clear_sessions.contains(session_id));
         self.unavailable_sessions.extend(tool_image_diagnostics);
-        self.interrupt_nonterminal_runs()?;
         self.pause_running_goals_for_recovery()?;
         self.backfill_session_usage()?;
         Ok(RecoveredRuntime {
@@ -176,9 +179,9 @@ impl StorageEngine {
                 .execute(
                     "INSERT INTO sessions (
                         session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
-                        approval_mode, lifecycle, body_generation, message_count, created_at_ms,
+                        approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 1, 0, ?9, ?9, NULL, 0, ?10)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11)",
                     params![
                         session.session_id.as_str(),
                         session.title,
@@ -188,6 +191,10 @@ impl StorageEngine {
                         skill_catalog_json,
                         agent_variant_value(session.current_variant),
                         approval_mode_value(session.approval_mode),
+                        match session.role {
+                            assistant_runtime::SessionRole::Standard => "standard",
+                            assistant_runtime::SessionRole::Controller => "controller",
+                        },
                         session.created_at_ms,
                         match session.title_origin {
                             SessionTitleOrigin::Generated => "generated",
@@ -236,6 +243,8 @@ impl StorageEngine {
             lifecycle: StoredSessionLifecycle::Active,
             current_variant: session.current_variant,
             approval_mode: session.approval_mode,
+            role: session.role,
+            proxy: None,
             body_generation: 1,
             message_count: 0,
             created_at_ms: session.created_at_ms,
@@ -398,12 +407,13 @@ impl StorageEngine {
             .transpose()
     }
 
-    fn load_sessions(&self) -> StorageResult<Vec<StoredSession>> {
+    pub(super) fn load_sessions(&self) -> StorageResult<Vec<StoredSession>> {
         let mut statement = self
             .connection
             .prepare(
                 "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
-                        approval_mode, lifecycle, body_generation, message_count, created_at_ms,
+                        approval_mode, role, proxy_controller_session_id, proxy_changed_at_ms,
+                        lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
                         archived_at_ms, is_pinned, title_origin
@@ -423,13 +433,16 @@ impl StorageEngine {
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, String>(11)?,
                     row.get::<_, i64>(12)?,
-                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, i64>(13)?,
                     row.get::<_, i64>(14)?,
-                    row.get::<_, String>(15)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, String>(18)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -445,6 +458,9 @@ impl StorageEngine {
                 skill_catalog_json,
                 current_variant,
                 approval_mode,
+                role,
+                proxy_controller_session_id,
+                proxy_changed_at_ms,
                 lifecycle,
                 body_generation,
                 message_count,
@@ -493,6 +509,28 @@ impl StorageEngine {
                 lifecycle,
                 current_variant: parse_agent_variant(&current_variant)?,
                 approval_mode: parse_approval_mode(&approval_mode)?,
+                role: match role.as_str() {
+                    "standard" => assistant_runtime::SessionRole::Standard,
+                    "controller" => assistant_runtime::SessionRole::Controller,
+                    _ => return Err(invalid_data("stored session role is invalid")),
+                },
+                proxy: match (proxy_controller_session_id, proxy_changed_at_ms) {
+                    (Some(controller_session_id), Some(changed_at_ms)) => {
+                        Some(assistant_runtime::SessionProxyState {
+                            controller_session_id: SessionId::new(controller_session_id).map_err(
+                                |source| {
+                                    invalid_data_with_source(
+                                        "stored proxy controller id is invalid",
+                                        source,
+                                    )
+                                },
+                            )?,
+                            changed_at_ms,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => return Err(invalid_data("stored session proxy is incomplete")),
+                },
                 body_generation: positive_u64(
                     body_generation,
                     "stored body generation is invalid",
@@ -517,6 +555,23 @@ impl StorageEngine {
                     StoredConversationState::Available
                 },
             });
+        }
+        let roles = sessions
+            .iter()
+            .map(|session| (session.session_id.clone(), session.role))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for session in &sessions {
+            if session.role == assistant_runtime::SessionRole::Controller && session.proxy.is_some()
+            {
+                return Err(invalid_data("controller session cannot be proxied"));
+            }
+            if let Some(proxy) = &session.proxy
+                && (proxy.controller_session_id == session.session_id
+                    || roles.get(&proxy.controller_session_id)
+                        != Some(&assistant_runtime::SessionRole::Controller))
+            {
+                return Err(invalid_data("stored session proxy target is invalid"));
+            }
         }
         Ok(sessions)
     }

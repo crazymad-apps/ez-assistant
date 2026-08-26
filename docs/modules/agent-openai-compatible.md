@@ -89,6 +89,13 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - `OpenAiResponsesService` 首版固定请求 `/responses`、`store: false`、`stream: true`，每次从本地
   规范 Conversation 编码完整历史；不发送 `previous_response_id`、远端 `conversation`、后台模式
   或其他服务端会话状态。
+- 规范 `ReasoningPart.id` 只用于本地片段聚合，不等同于 Provider 原生 Responses item ID。
+  精确原生 item 只能从相容的 `ProviderState` 恢复；DeepSeek 的无状态 Responses 历史使用无
+  `id`/`summary` 的明文 `reasoning_text` content，不能把本地 ID 冒充为 Provider item ID。
+  其他方言只沿用各自已经验证的普通 reasoning 投影。
+- Responses 编码单个规范 Assistant Turn 时，不能把 Chat 流式 part 的到达顺序直接解释为原生
+  item 边界；必须稳定投影为 reasoning、assistant text、完整 function-call 批次，再由外层追加
+  对应 function-call outputs。中间 reasoning/message 不得切断同一批工具调用。
 - Responses 的 `instructions`、用户/助手文本、图片输入、Context Summary、function call/output、
   reasoning、refusal、usage 和终态均由独立 item 状态机映射。并行 function call 按
   `output_index` 稳定完成；未知 item、缺失终态、坏参数、终态后额外数据和身份冲突均 fail-closed。
@@ -101,7 +108,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - DeepSeek/OpenAI 类非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
   `ReasoningPart`。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
   完全相容的状态；相容 payload 损坏或与规范 reasoning 矛盾时 fail-closed，路由不相容时跳过
-  opaque item 并从规范 part 重建。Qwen/Kimi 的 `encrypted_content: null` 不生成空状态。
+  opaque item，并只按目标方言明确声明的普通 reasoning 形状投影规范 part。Qwen/Kimi 的
+  `encrypted_content: null` 不生成空状态。
 - Responses 流状态机同时接受专用 reasoning 事件和 DeepSeek 使用的通用
   `response.content_part.added/done` reasoning 边界。OpenAI-compatible 工具 Schema 降级对无字段
   object 显式输出 `properties: {}`，满足 DashScope 的 Responses 校验而不改变规范 ToolDefinition。

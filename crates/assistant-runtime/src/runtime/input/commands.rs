@@ -30,7 +30,7 @@ impl AssistantRuntime {
                 return Err(RuntimeError::QueueConflict);
             }
             let position = state
-                .user_inputs
+                .session_inputs
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or_else(|| RuntimeError::InputNotFound {
@@ -49,17 +49,17 @@ impl AssistantRuntime {
                 .map_err(|source| RuntimeError::from_store("prioritize queued input", source))?;
             let mut state = session.lock_state()?;
             let position = state
-                .user_inputs
+                .session_inputs
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or(RuntimeError::QueueConflict)?;
-            let input_id = state.user_inputs.remove(position).ok_or(
+            let input_id = state.session_inputs.remove(position).ok_or(
                 RuntimeError::InternalStateUnavailable {
                     component: "queued input priority",
                 },
             )?;
-            state.user_inputs.push_front(input_id);
-            let ordered_ids = state.user_inputs.iter().cloned().collect::<Vec<_>>();
+            state.session_inputs.push_front(input_id);
+            let ordered_ids = state.session_inputs.iter().cloned().collect::<Vec<_>>();
             for (queue_order, input_id) in ordered_ids.into_iter().enumerate() {
                 if let Some(input) = state.inputs.get_mut(&input_id) {
                     input.stored.queue_order = u64::try_from(queue_order).map_err(|_| {
@@ -102,7 +102,7 @@ impl AssistantRuntime {
                 .as_ref()
                 .map(|input_id| {
                     state
-                        .user_inputs
+                        .session_inputs
                         .iter()
                         .position(|candidate| candidate == input_id)
                         .ok_or_else(|| RuntimeError::InputNotFound {
@@ -128,16 +128,16 @@ impl AssistantRuntime {
             if should_move {
                 let target = request.input_id.as_ref().expect("move requires target");
                 let position = state
-                    .user_inputs
+                    .session_inputs
                     .iter()
                     .position(|candidate| candidate == target)
                     .ok_or(RuntimeError::QueueConflict)?;
-                let input_id = state.user_inputs.remove(position).ok_or(
+                let input_id = state.session_inputs.remove(position).ok_or(
                     RuntimeError::InternalStateUnavailable {
                         component: "queued input resume",
                     },
                 )?;
-                state.user_inputs.push_front(input_id);
+                state.session_inputs.push_front(input_id);
             }
             state.resume_required = false;
             state.queue_paused_by_user = false;
@@ -189,7 +189,7 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("cancel queued input", source))?;
         let mut state = session.lock_state()?;
-        state.user_inputs.retain(|id| id != &request.input_id);
+        state.session_inputs.retain(|id| id != &request.input_id);
         state
             .runs
             .retain(|_, run| run.input_id() != &request.input_id);
@@ -330,7 +330,7 @@ impl AssistantRuntime {
                 .expect("checked input")
                 .latest_run_id = stored.run_id.clone();
             let position = state
-                .user_inputs
+                .session_inputs
                 .iter()
                 .position(|id| {
                     state
@@ -338,8 +338,8 @@ impl AssistantRuntime {
                         .get(id)
                         .is_some_and(|input| input.stored.queue_order > queue_order)
                 })
-                .unwrap_or(state.user_inputs.len());
-            state.user_inputs.insert(position, input_id.clone());
+                .unwrap_or(state.session_inputs.len());
+            state.session_inputs.insert(position, input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
             snapshot
         };

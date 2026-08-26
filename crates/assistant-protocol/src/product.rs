@@ -157,6 +157,12 @@ pub struct ApplicationSnapshot {
     pub workspaces: Vec<WorkspaceSummary>,
     pub active_sessions: Vec<SessionSummary>,
     pub archived_sessions: Vec<SessionSummary>,
+    /// 当前按稳定顺序选定的主控；创建失败或配置不可用时为 unavailable。
+    #[serde(default)]
+    pub controller_availability: crate::ControllerAvailabilitySnapshot,
+    /// 除当前主控外还恢复出的 Controller 数量，只作为数据诊断。
+    #[serde(default)]
+    pub additional_controller_count: u64,
     pub capabilities: ApplicationCapabilities,
 }
 
@@ -181,20 +187,46 @@ pub struct ConversationPage {
     pub owner: ConversationOwner,
     /// cursor 所绑定的 Conversation 代次。
     pub generation: u64,
-    /// 从旧到新排序的消息。
+    /// 从旧到新排序的产品会话项。
     pub items: Vec<ConversationItem>,
     /// 用于继续向更早历史加载的不透明 cursor。
     pub previous_cursor: Option<String>,
     pub has_more: bool,
 }
 
-/// Conversation 中一条用户或助手消息。
+/// Conversation 中的用户消息、助手消息或已有 Context Summary 分割项。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationItem {
     User(UserMessageSnapshot),
     Assistant(AssistantMessageSnapshot),
+    /// 复用规范 Conversation 中已有的 Context Summary，只改变产品呈现。
+    ContextSummary {
+        message_id: MessageId,
+        text: String,
+    },
+}
+
+/// 可见 Input 的产品来源；旧记录与旧客户端缺省为真实用户。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConversationInputSourceSnapshot {
+    #[default]
+    User,
+    ControllerDelivery {
+        controller_session_id: SessionId,
+        controller_run_id: RunId,
+    },
+    ProxyReport {
+        source_session_id: SessionId,
+        source_run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        source_goal_id: Option<GoalId>,
+        source_run_status: RunStatus,
+    },
 }
 
 /// 可靠提交的用户消息。
@@ -206,6 +238,8 @@ pub struct UserMessageSnapshot {
     pub input_id: Option<InputId>,
     pub text: String,
     pub attachment_ids: Vec<AttachmentId>,
+    #[serde(default)]
+    pub source: ConversationInputSourceSnapshot,
     /// 用户接受输入时冻结的单个 Skill 标签。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -495,6 +529,8 @@ pub struct QueuedInputSnapshot {
     pub submitted_at_ms: i64,
     pub position: u32,
     pub is_prioritized: bool,
+    #[serde(default)]
+    pub source: ConversationInputSourceSnapshot,
     /// Goal 存在时该用户输入只暂存于 Queue，必须由用户显式选择恢复或退出 Goal 后处理。
     #[serde(default)]
     pub held_by_goal: bool,
@@ -527,6 +563,8 @@ pub struct ApprovalQueueSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SessionViewSnapshot {
     pub session: SessionSummary,
+    /// 发起 clear/compact 时使用的当前权威 Conversation generation。
+    pub conversation_generation: u64,
     pub composer_capabilities: ComposerCapabilitiesSnapshot,
     #[serde(default)]
     pub work_plan: Option<WorkPlanSnapshot>,

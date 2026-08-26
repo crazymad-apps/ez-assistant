@@ -14,7 +14,7 @@ use crate::shared::{encode_tool_schema, image_data_url};
 
 use super::{
     ResponsesProtocolAdapter,
-    adapter::FunctionOutputShape,
+    adapter::{FunctionOutputShape, NormalizedReasoningShape},
     schema::{
         ResponsesContent, ResponsesFunctionOutput, ResponsesFunctionTool, ResponsesInputItem,
         ResponsesReasoningConfig, ResponsesRequest, ResponsesRole, ResponsesToolChoice,
@@ -345,26 +345,34 @@ fn encode_assistant_message(
         opaque_items.insert(part_index, item);
     }
 
-    for (part_index, part) in message.parts.iter().enumerate() {
-        match part {
-            AssistantPart::Reasoning(part) if opaque_reasoning_parts.contains_key(&part.id) => {}
-            AssistantPart::Reasoning(part) => input.push(ResponsesInputItem::Reasoning {
-                id: part.id.as_str().to_owned(),
-                summary: serde_json::json!([{
-                    "type": "summary_text",
-                    "text": part.text,
-                }]),
-                content: None,
-                encrypted_content: None,
-                extra: BTreeMap::new(),
-            }),
-            AssistantPart::Text(part) => input.push(message_item(
+    // Chat Completions 的单个 Assistant Message 可能按流事件到达顺序保存为
+    // `tool_call -> reasoning/text -> tool_call`。Responses 会把中间的 reasoning/message
+    // 解释为工具调用批次边界，因此必须按同一规范 Turn 的语义分组后再投影。
+    for part in &message.parts {
+        let AssistantPart::Reasoning(part) = part else {
+            continue;
+        };
+        if let Some(state_index) = opaque_reasoning_parts.get(&part.id)
+            && let Some(item) = opaque_items.remove(state_index)
+        {
+            input.push(item);
+        } else if !opaque_reasoning_parts.contains_key(&part.id) {
+            input.push(encode_normalized_reasoning(part, adapter));
+        }
+    }
+    for part in &message.parts {
+        if let AssistantPart::Text(part) = part {
+            input.push(message_item(
                 ResponsesRole::Assistant,
                 ResponsesContent::OutputText {
                     text: part.text.clone(),
                 },
-            )),
-            AssistantPart::ToolCall(call) => input.push(ResponsesInputItem::FunctionCall {
+            ));
+        }
+    }
+    for part in &message.parts {
+        if let AssistantPart::ToolCall(call) = part {
+            input.push(ResponsesInputItem::FunctionCall {
                 call_id: call.id.as_str().to_owned(),
                 name: call.name.as_str().to_owned(),
                 arguments: serde_json::to_string(&call.arguments).map_err(|error| {
@@ -373,15 +381,41 @@ fn encode_assistant_message(
                         call.id
                     ))
                 })?,
-            }),
-            AssistantPart::ProviderState(_) => {
-                if let Some(item) = opaque_items.remove(&part_index) {
-                    input.push(item);
-                }
-            }
+            });
         }
     }
     Ok(())
+}
+
+/// 把规范 reasoning 投影为目标 Responses 方言。相容 `ProviderState` 存在时由上层分支
+/// 精确恢复原生 item；普通 DeepSeek 历史使用无 ID 的明文 content，不能把本地 PartId
+/// 冒充为该接口的 Provider item ID。其他已验证方言继续使用既有 summary-only 投影。
+fn encode_normalized_reasoning(
+    part: &agent_types::ReasoningPart,
+    adapter: &ResponsesProtocolAdapter,
+) -> ResponsesInputItem {
+    match adapter.normalized_reasoning_shape {
+        NormalizedReasoningShape::SummaryWithItemId => ResponsesInputItem::Reasoning {
+            id: Some(part.id.as_str().to_owned()),
+            summary: Some(serde_json::json!([{
+                "type": "summary_text",
+                "text": part.text,
+            }])),
+            content: None,
+            encrypted_content: None,
+            extra: BTreeMap::new(),
+        },
+        NormalizedReasoningShape::PlainTextContent => ResponsesInputItem::Reasoning {
+            id: None,
+            summary: None,
+            content: Some(serde_json::json!([{
+                "type": "reasoning_text",
+                "text": part.text,
+            }])),
+            encrypted_content: None,
+            extra: BTreeMap::new(),
+        },
+    }
 }
 
 fn decode_opaque_reasoning_item(
@@ -433,8 +467,8 @@ fn decode_opaque_reasoning_item(
     }
     Ok((
         ResponsesInputItem::Reasoning {
-            id,
-            summary,
+            id: Some(id),
+            summary: Some(summary),
             content,
             encrypted_content,
             extra: object.into_iter().collect(),

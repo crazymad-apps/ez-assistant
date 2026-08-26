@@ -5,8 +5,9 @@ use std::{collections::BTreeSet, fs};
 use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, MessageFeedbackChange, ModelChange,
-    ReasoningEffortChange, RewriteResult, SessionPinnedChange, SessionTitleChange, StoredInput,
-    StoredInputState, StoredMessageFeedback, StoredRun, VariantChange,
+    ReasoningEffortChange, RewriteResult, SessionPinnedChange, SessionProxyChange,
+    SessionTitleChange, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
+    VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -32,7 +33,7 @@ impl StorageEngine {
             .execute(
                 "UPDATE sessions
                  SET lifecycle = ?1, archived_at_ms = ?2
-                 WHERE session_id = ?3 AND lifecycle = ?4
+                 WHERE session_id = ?3 AND lifecycle = ?4 AND role = 'standard'
                    AND (?1 = 'active' OR (
                      NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
                      AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
@@ -46,6 +47,78 @@ impl StorageEngine {
         if changed != 1 {
             return Err(conflict("session lifecycle cannot be changed"));
         }
+        Ok(())
+    }
+
+    pub(super) fn set_session_proxy(&mut self, change: SessionProxyChange) -> StorageResult<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("session proxy transaction could not be started", source)
+            })?;
+        let controller_role = transaction
+            .query_row(
+                "SELECT role FROM sessions WHERE session_id = ?1 AND lifecycle = 'active'",
+                [change.controller_session_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| internal_error("controller session could not be queried", source))?;
+        if controller_role.as_deref() != Some("controller")
+            || change.controller_session_id == change.target_session_id
+        {
+            return Err(conflict("controller session is invalid"));
+        }
+        let target = transaction
+            .query_row(
+                "SELECT role, proxy_controller_session_id
+                 FROM sessions WHERE session_id = ?1 AND lifecycle = 'active'",
+                [change.target_session_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(|source| internal_error("proxy target session could not be queried", source))?
+            .ok_or_else(|| conflict("proxy target session does not exist"))?;
+        if target.0 != "standard" {
+            return Err(conflict("proxy target session is invalid"));
+        }
+        match (target.1.as_deref(), change.enabled) {
+            (Some(current), true) if current == change.controller_session_id.as_str() => {}
+            (None, true) => {
+                transaction
+                    .execute(
+                        "UPDATE sessions
+                         SET proxy_controller_session_id = ?1, proxy_changed_at_ms = ?2
+                         WHERE session_id = ?3",
+                        params![
+                            change.controller_session_id.as_str(),
+                            change.changed_at_ms,
+                            change.target_session_id.as_str(),
+                        ],
+                    )
+                    .map_err(|source| {
+                        database_write_error("session proxy could not be enabled", source)
+                    })?;
+            }
+            (Some(current), false) if current == change.controller_session_id.as_str() => {
+                transaction
+                    .execute(
+                        "UPDATE sessions
+                         SET proxy_controller_session_id = NULL, proxy_changed_at_ms = NULL
+                         WHERE session_id = ?1",
+                        [change.target_session_id.as_str()],
+                    )
+                    .map_err(|source| {
+                        database_write_error("session proxy could not be disabled", source)
+                    })?;
+            }
+            (None, false) => {}
+            _ => return Err(conflict("proxy target is bound to another controller")),
+        }
+        transaction.commit().map_err(|source| {
+            database_write_error("session proxy transaction could not be committed", source)
+        })?;
         Ok(())
     }
 
@@ -423,6 +496,7 @@ impl StorageEngine {
             agent_variant: rewrite.input.agent_variant,
             origin: rewrite.input.origin,
             goal_binding: rewrite.input.goal_binding.clone(),
+            cross_session_binding: rewrite.input.cross_session_binding.clone(),
             skill_activation: None,
             user_message_id: new_message_id.clone(),
             state: StoredInputState::Committed,

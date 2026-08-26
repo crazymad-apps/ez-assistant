@@ -39,12 +39,12 @@ impl StorageEngine {
                     source,
                 )
             })?;
-        let source_generation = self
+        let (source_generation, source_role) = self
             .connection
             .query_row(
-                "SELECT body_generation FROM sessions WHERE session_id = ?1",
+                "SELECT body_generation, role FROM sessions WHERE session_id = ?1",
                 [fork.source_session_id.as_str()],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|source| {
@@ -53,6 +53,11 @@ impl StorageEngine {
             .ok_or_else(|| conflict("fork source session does not exist"))?;
         if u64::try_from(source_generation).ok() != Some(fork.source_generation) {
             return Err(conflict("fork source generation changed"));
+        }
+        if source_role != "standard"
+            || fork.session.role != assistant_runtime::SessionRole::Standard
+        {
+            return Err(conflict("session role cannot be forked"));
         }
         if fork
             .work_plan
@@ -224,9 +229,9 @@ impl StorageEngine {
                 .execute(
                     "INSERT INTO sessions (
                         session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
-                        approval_mode, lifecycle, body_generation, message_count, created_at_ms,
+                        approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 1, ?9, ?10, ?10, NULL, 0, ?11)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
@@ -236,6 +241,10 @@ impl StorageEngine {
                         skill_catalog_json,
                         agent_variant_value(fork.session.current_variant),
                         approval_mode_value(fork.session.approval_mode),
+                        match fork.session.role {
+                            assistant_runtime::SessionRole::Standard => "standard",
+                            assistant_runtime::SessionRole::Controller => "controller",
+                        },
                         to_i64(message_count, "fork message count exceeds SQLite range")?,
                         fork.session.created_at_ms,
                         match fork.session.title_origin {
@@ -329,6 +338,8 @@ impl StorageEngine {
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,
                 approval_mode: fork.session.approval_mode,
+                role: fork.session.role,
+                proxy: None,
                 body_generation: 1,
                 message_count,
                 created_at_ms: fork.session.created_at_ms,
@@ -391,6 +402,19 @@ impl StorageEngine {
 
     pub(super) fn delete_session(&mut self, deletion: SessionDeletion) -> StorageResult<()> {
         super::filesystem::validate_session_component(&deletion.session_id)?;
+        let role = self
+            .connection
+            .query_row(
+                "SELECT role FROM sessions WHERE session_id = ?1",
+                [deletion.session_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| internal_error("delete session role could not be queried", source))?
+            .ok_or_else(|| conflict("delete session does not exist"))?;
+        if role != "standard" {
+            return Err(conflict("session role cannot be deleted"));
+        }
         self.ensure_session_idle_for_transfer(&deletion.session_id)?;
         if self.inspect_session_deletion(&deletion.session_id)? != deletion.expected_impact {
             return Err(conflict("delete session impact changed"));

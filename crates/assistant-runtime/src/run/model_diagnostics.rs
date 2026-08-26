@@ -165,3 +165,21 @@ pub(crate) fn model_failure_kind(error: &ModelError) -> ModelFailureKind {
         ModelError::Cancelled => ModelFailureKind::Cancelled,
     }
 }
+
+pub(crate) fn model_failure_kind_value(kind: ModelFailureKind) -> &'static str {
+    match kind {
+        ModelFailureKind::Configuration => "configuration",
+        ModelFailureKind::Authentication => "authentication",
+        ModelFailureKind::Connection => "connection",
+        ModelFailureKind::Timeout => "timeout",
+        ModelFailureKind::StreamInterrupted => "stream_interrupted",
+        ModelFailureKind::ProviderRejected => "provider_rejected",
+        ModelFailureKind::RateLimited => "rate_limited",
+        ModelFailureKind::ServiceUnavailable => "service_unavailable",
+        ModelFailureKind::ContextOverflow => "context_overflow",
+        ModelFailureKind::Protocol => "protocol",
+        ModelFailureKind::ToolArguments => "tool_arguments",
+        ModelFailureKind::Resource => "resource",
+        ModelFailureKind::Cancelled => "cancelled",
+    }
+}

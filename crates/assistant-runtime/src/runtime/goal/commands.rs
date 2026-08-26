@@ -15,8 +15,10 @@ use crate::{
         inject_resume_context, inject_start_context,
     },
     run::{RunRecord, allocate_run_id},
-    session::{InputRecord, SessionController},
+    session::SessionController,
 };
+
+use super::super::input::projection::project_accepted_input;
 
 /// 通用 Input 准入完成后需要附加的 Goal 行为。
 pub(in crate::runtime) enum GoalSubmission {
@@ -171,7 +173,7 @@ impl AssistantRuntime {
                     .map(|active| active.cancellation.clone())
             });
             state.goal = Some(authoritative);
-            state.resume_required = !state.user_inputs.is_empty();
+            state.resume_required = !state.session_inputs.is_empty();
             (cancellation, run_snapshot)
         };
         if result.cancelling_run_id.is_some() && cancellation.is_none() {
@@ -251,7 +253,7 @@ impl AssistantRuntime {
         let mut state = session.lock_state()?;
         state.goal = None;
         state.goal_inputs.clear();
-        state.resume_required = !state.user_inputs.is_empty();
+        state.resume_required = !state.session_inputs.is_empty();
         drop(state);
         self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
             session_id: request.session_id,
@@ -338,6 +340,7 @@ impl AssistantRuntime {
                     generation: resumed.generation,
                     turn: resumed.turn,
                 }),
+                cross_session_binding: None,
                 skill_activation: None,
                 approval_mode,
                 message,
@@ -351,28 +354,16 @@ impl AssistantRuntime {
 
         // 只有持久化成功后才一次性投影 Goal、队列、Input 和 Run，Store 结果保持为权威事实。
         let goal = super::super::product::project_goal(&resumed)?;
-        let snapshot = {
+        let projection = {
             let mut state = session.lock_state()?;
-            let record = RunRecord::accepted(&accepted.run, Vec::new());
-            let snapshot = record.snapshot();
             state.goal = Some(resumed);
-            state.goal_inputs.push_back(accepted.input.input_id.clone());
-            state.runs.insert(accepted.run.run_id.clone(), record);
-            state.inputs.insert(
-                accepted.input.input_id.clone(),
-                InputRecord {
-                    stored: accepted.input,
-                    first_run_id: accepted.run.run_id.clone(),
-                    latest_run_id: accepted.run.run_id,
-                },
-            );
-            snapshot
+            project_accepted_input(&mut state, accepted)
         };
 
         // 事件发布和队列唤醒必须晚于内存投影，使观察者看到 RunAccepted 时已能读取完整状态。
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
             session_id: request.session_id.clone(),
-            run_id: snapshot.run_id.clone(),
+            run_id: projection.run.run_id.clone(),
         });
         self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
             session_id: request.session_id,
@@ -382,7 +373,7 @@ impl AssistantRuntime {
         self.wake_queue(session.clone())?;
         Ok(ResumeGoalResult {
             goal,
-            run: snapshot,
+            run: projection.run,
         })
     }
 
@@ -425,7 +416,7 @@ impl AssistantRuntime {
                     session_id: request.session_id.clone(),
                     input_id: input_id.clone(),
                 })?;
-            if !state.user_inputs.contains(&input_id)
+            if !state.session_inputs.contains(&input_id)
                 || input.stored.state != crate::StoredInputState::Queued
                 || input.stored.origin != InputOrigin::User
                 || input.stored.goal_binding.is_some()
@@ -472,16 +463,16 @@ impl AssistantRuntime {
         let (snapshot, revision) = {
             let mut state = session.lock_state()?;
             let position = state
-                .user_inputs
+                .session_inputs
                 .iter()
                 .position(|candidate| candidate == &input_id)
                 .ok_or(RuntimeError::InternalStateUnavailable {
                     component: "held input queue position",
                 })?;
-            state.user_inputs.remove(position);
+            state.session_inputs.remove(position);
             state.goal_inputs.push_back(input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
-            state.resume_required = !state.user_inputs.is_empty();
+            state.resume_required = !state.session_inputs.is_empty();
             state.goal = Some(authoritative);
             state
                 .inputs

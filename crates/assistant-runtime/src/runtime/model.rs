@@ -17,6 +17,7 @@ use agent_types::ToolChoice;
 use assistant_protocol::{AgentVariant, ApprovalMode, ModelKey};
 
 use super::AssistantRuntime;
+use super::tool_assembly::{RunToolAssembly, RunToolContribution};
 use crate::{
     ChildTaskWorkspaceFactory, ModelProtocol, ModelServiceFactoryRequest,
     ResolvedModelCapabilities, RunToolFactory, RunToolFactoryErrorKind, RuntimeError,
@@ -393,6 +394,8 @@ pub(super) struct RunAuthorizationInput {
     pub(super) cancellation: tokio_util::sync::CancellationToken,
     pub(super) events: ObservationCoordinator,
     pub(super) goal_binding: Option<GoalRunBinding>,
+    pub(super) input_origin: crate::InputOrigin,
+    pub(super) cross_session_binding: Option<crate::CrossSessionInputBinding>,
 }
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
@@ -404,6 +407,7 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) child_tasks: Arc<ChildTaskRegistry>,
     pub(super) store: Arc<dyn RuntimeStore>,
     pub(super) recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
+    pub(super) controller_tools: Arc<super::controller::ControllerToolCoordinator>,
 }
 
 impl AssistantRuntime {
@@ -414,6 +418,22 @@ impl AssistantRuntime {
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<CompiledModelService> {
         compile_model_service(snapshot, model_key, self.model_factory.as_ref())
+    }
+
+    /// 为独立手动压缩冻结当前 Session 的模型服务；不装配 Agent 或工具。
+    pub(super) fn compile_session_compactor(
+        &self,
+        session: &SessionController,
+    ) -> RuntimeResult<RuntimeContextCompactor> {
+        let snapshot = self.config_registry.snapshot()?;
+        let model_key = session.model_key()?;
+        let mut compiled =
+            compile_model_service(&snapshot, &model_key, self.model_factory.as_ref())?;
+        bind_image_preparation(&mut compiled, session.environment());
+        Ok(RuntimeContextCompactor::for_manual(
+            compiled.model,
+            session.system_prompt().clone(),
+        ))
     }
 }
 
@@ -593,28 +613,52 @@ pub(super) fn compile_run_agent(
     // 不具备 Tool Call 能力的模型维持历史纯文本路径。父 Agent 在这里加入 Run 级
     // Runtime 工具；child 保留 Base ToolSet，并在具体 child execution 创建后追加绑定
     // 独立 ActivationLatch 的 load_skill，避免 sibling 共享激活状态。
-    let parent_tools = if compiled.model.capabilities().tool_calls {
-        let parent_tools = base_tools
-            .clone()
-            .try_with_tool(LoadSkillTool::new(
+    let mut tool_assembly = RunToolAssembly::default();
+    tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
+    if compiled.model.capabilities().tool_calls {
+        tool_assembly.contribute(
+            RunToolContribution::tool(LoadSkillTool::new(
                 session.skill_catalog().clone(),
                 skill_activation_latch.clone(),
             ))
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "load skill tool definition",
-            })?
-            .try_with_tool(UpdatePlanTool::new(
+            })?,
+        );
+        tool_assembly.contribute(
+            RunToolContribution::tool(UpdatePlanTool::new(
                 session.clone(),
                 resources.store.clone(),
                 authorization.events.clone(),
             ))
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "update plan tool definition",
-            })?
-            .try_with_tool(UpdateGoalTool::new(goal_signal_latch.clone()))
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "update goal tool definition",
-            })?;
+            })?,
+        );
+        tool_assembly.contribute(
+            RunToolContribution::tool(UpdateGoalTool::new(goal_signal_latch.clone())).map_err(
+                |_| RuntimeError::InternalStateUnavailable {
+                    component: "update goal tool definition",
+                },
+            )?,
+        );
+        let controller_tools = if session.role()? == crate::SessionRole::Controller
+            && authorization.input_origin == crate::InputOrigin::User
+            && authorization.cross_session_binding.is_none()
+        {
+            Some(
+                super::controller::controller_tool_set(
+                    resources.controller_tools.clone(),
+                    session.id().clone(),
+                    authorization.run_id.clone(),
+                )
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "controller tool definitions",
+                })?,
+            )
+        } else {
+            None
+        };
         let delegation = active.delegation();
         let mut child_generation = model_request.generation.clone();
         child_generation.max_output_tokens = Some(
@@ -687,14 +731,23 @@ pub(super) fn compile_run_agent(
                 limits: delegation,
                 skill_catalog: session.skill_catalog().clone(),
             }));
-        parent_tools
-            .try_with_tool(DelegateTaskTool::new(delegation_controller))
+        tool_assembly.contribute(
+            RunToolContribution::tool(DelegateTaskTool::new(delegation_controller)).map_err(
+                |_| RuntimeError::InternalStateUnavailable {
+                    component: "delegate task tool definition",
+                },
+            )?,
+        );
+        if let Some(controller_tools) = controller_tools {
+            tool_assembly.contribute(RunToolContribution::frozen(controller_tools));
+        }
+    }
+    let parent_tools =
+        tool_assembly
+            .freeze()
             .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "delegate task tool definition",
-            })?
-    } else {
-        base_tools
-    };
+                component: "run tool assembly",
+            })?;
 
     let mut builder = AgentBuilder::new(
         compiled.model,

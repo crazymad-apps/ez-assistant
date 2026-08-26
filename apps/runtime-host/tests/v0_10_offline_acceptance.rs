@@ -80,8 +80,17 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     let second_host = HostProcess::start(runtime_home.path());
     let mut client = second_host.connect();
     let sessions = client.runtime("list_sessions", json!({}));
-    assert_eq!(sessions["sessions"].as_array().expect("sessions").len(), 1);
-    let summary = &sessions["sessions"][0];
+    let sessions = sessions["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert!(
+        sessions
+            .iter()
+            .any(|summary| summary["role"] == "controller")
+    );
+    let summary = sessions
+        .iter()
+        .find(|summary| summary["session_id"] == session_id)
+        .expect("recovered standard session");
     assert_eq!(summary["session_id"], session_id);
     assert_eq!(summary["resume_required"], true);
     assert_eq!(summary["queued_input_count"], 1);
@@ -232,12 +241,12 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
 
     let archived = client.runtime("archive_session", json!({ "session_id": session_id }));
     assert_eq!(archived["session"]["lifecycle"], "archived");
-    assert!(
-        client.runtime("list_sessions", json!({}))["sessions"]
-            .as_array()
-            .expect("active sessions")
-            .is_empty()
-    );
+    let active_sessions = client.runtime("list_sessions", json!({}));
+    let active_sessions = active_sessions["sessions"]
+        .as_array()
+        .expect("active sessions");
+    assert_eq!(active_sessions.len(), 1);
+    assert_eq!(active_sessions[0]["role"], "controller");
     assert_eq!(
         client.runtime("list_sessions", json!({ "filter": "archived" }))["sessions"]
             .as_array()

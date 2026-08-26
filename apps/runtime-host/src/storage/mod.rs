@@ -25,6 +25,7 @@ mod recovery;
 mod run_projection;
 mod run_state;
 mod schema;
+mod session_history;
 mod session_management;
 mod session_resources;
 mod session_transfer;

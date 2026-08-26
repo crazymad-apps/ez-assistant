@@ -7,6 +7,7 @@ import type {
   ToolCallId,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { MarkdownContent } from "../../../components/MarkdownContent";
 import type { LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ToolDetailDialog, type ToolDetailView } from "../ToolDetailDialog";
@@ -14,7 +15,7 @@ import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { AttachmentPreviewDialog } from "../../context-panel/AttachmentPreviewDialog";
 import { mergeChildTaskItems } from "../childTaskPresentation";
 import { ChildTaskTree } from "./ChildTaskTree";
-import { groupConversationTurns } from "./conversationRows";
+import { groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { AssistantTurn, EmptyConversation, LiveAssistantMessage, UserMessage } from "./MessageViews";
 import styles from "./index.module.scss";
 
@@ -44,6 +45,7 @@ export const ConversationView = observer(function ConversationView() {
   } | null>(null);
   const [fork_point, setForkPoint] = useState<MessageId | null>(null);
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
+  const [summary_expanded, setSummaryExpanded] = useState(false);
   const conversation_rows = useMemo(
     () => groupConversationTurns(history?.items ?? [], child_task_id !== null),
     [child_task_id, history?.items],
@@ -54,6 +56,10 @@ export const ConversationView = observer(function ConversationView() {
     : null);
   const session = store.projection.application?.active_sessions.find((item) => item.session_id === session_id)
     ?? store.projection.application?.archived_sessions.find((item) => item.session_id === session_id);
+  const all_sessions = [
+    ...(store.projection.application?.active_sessions ?? []),
+    ...(store.projection.application?.archived_sessions ?? []),
+  ];
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const child_task_items = session_id
     ? mergeChildTaskItems(
@@ -235,6 +241,69 @@ export const ConversationView = observer(function ConversationView() {
     });
   }, []);
 
+  useEffect(() => {
+    setSummaryExpanded(false);
+  }, [history?.generation, session_id]);
+
+  const renderConversationRows = (rows: readonly ConversationRow[]) => (
+    rows.map((row) => row.type === "context_summary"
+      ? (
+          <div className={styles.context_summary_boundary} key={row.message.message_id}>
+            <span className={styles.context_summary_line} />
+            <button
+              aria-expanded={summary_expanded}
+              onClick={() => setSummaryExpanded((current) => !current)}
+              type="button"
+            >
+              {summary_expanded ? "收起上下文摘要" : "查看上下文摘要"}
+            </button>
+            <span className={styles.context_summary_line} />
+            {summary_expanded && (
+              <div className={styles.context_summary_text}>
+                <MarkdownContent text={row.message.text} />
+              </div>
+            )}
+          </div>
+        )
+      : row.type === "user"
+      ? (
+          <UserMessage
+            attachments={(row.message.attachment_ids ?? []).flatMap((id) => {
+              const attachment = attachment_by_id.get(id);
+              return attachment ? [attachment] : [];
+            })}
+            key={row.message.message_id}
+            message={row.message}
+            on_attachment_click={setPreviewAttachment}
+            on_source_open={(source_session) => {
+              store.navigation.setListMode(source_session.lifecycle === "archived" ? "archived" : "active");
+              void store.selectSession(source_session.session_id);
+            }}
+            source_session={all_sessions.find(
+              (item) => item.session_id === sourceSessionId(row.message.source),
+            )}
+          />
+        )
+      : (
+          <div className={styles.turn_with_tasks} key={row.key}>
+            <AssistantTurn
+              child_tasks={!child_task_id && row.run_id
+                ? child_task_items.filter((item) => item.task.parent_run_id === row.run_id)
+                : []}
+              live_run={row.run_id === live_run?.run_id ? live_run : null}
+              messages={row.messages}
+              on_child_open={!child_task_id && session_id
+                ? (item) => void store.openChildTask(session_id, item.task.child_task_id)
+                : undefined}
+              onFork={setForkPoint}
+              show_fork={session?.role !== "controller"}
+              onLiveToolClick={openLiveToolDetail}
+              onToolClick={openToolDetail}
+            />
+          </div>
+        ))
+  );
+
   if (!session_id) {
     return <EmptyConversation title="选择一个会话" detail="从左侧工作空间中选择会话以查看消息。" />;
   }
@@ -287,35 +356,7 @@ export const ConversationView = observer(function ConversationView() {
             </button>
           )}
           {history.load_error && <p className={styles.load_error}>{history.load_error}</p>}
-          {conversation_rows.map((row) => row.type === "user"
-            ? (
-                <UserMessage
-                  attachments={(row.message.attachment_ids ?? []).flatMap((id) => {
-                    const attachment = attachment_by_id.get(id);
-                    return attachment ? [attachment] : [];
-                  })}
-                  key={row.message.message_id}
-                  message={row.message}
-                  on_attachment_click={setPreviewAttachment}
-                />
-              )
-            : (
-                <div className={styles.turn_with_tasks} key={row.key}>
-                  <AssistantTurn
-                    child_tasks={!child_task_id && row.run_id
-                      ? child_task_items.filter((item) => item.task.parent_run_id === row.run_id)
-                      : []}
-                    live_run={row.run_id === live_run?.run_id ? live_run : null}
-                    messages={row.messages}
-                    on_child_open={!child_task_id && session_id
-                      ? (item) => void store.openChildTask(session_id, item.task.child_task_id)
-                      : undefined}
-                    onFork={setForkPoint}
-                    onLiveToolClick={openLiveToolDetail}
-                    onToolClick={openToolDetail}
-                  />
-                </div>
-              ))}
+          {renderConversationRows(conversation_rows)}
           {!child_task_id && session_id && (
             <ChildTaskTree
               items={unmatched_child_tasks}
@@ -380,3 +421,12 @@ export const ConversationView = observer(function ConversationView() {
     </div>
   );
 });
+
+function sourceSessionId(
+  source: import("../../../generated/assistant-protocol").ConversationInputSourceSnapshot | undefined,
+): string | null {
+  if (!source) return null;
+  if (source.type === "controller_delivery") return source.controller_session_id;
+  if (source.type === "proxy_report") return source.source_session_id;
+  return null;
+}

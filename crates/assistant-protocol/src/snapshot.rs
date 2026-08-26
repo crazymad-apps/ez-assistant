@@ -32,6 +32,70 @@ pub enum SessionLifecycle {
     Archived,
 }
 
+/// Session 在产品中的稳定职责。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRoleSnapshot {
+    /// 普通工作会话。
+    #[default]
+    Standard,
+    /// 用户统一协调入口。
+    Controller,
+}
+
+/// 普通 Session 当前绑定的主控代理。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionProxySnapshot {
+    pub controller_session_id: SessionId,
+    pub changed_at_ms: i64,
+}
+
+/// 当前产品可使用的主控会话。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ControllerAvailabilitySnapshot {
+    Available {
+        session_id: SessionId,
+    },
+    #[default]
+    Unavailable,
+}
+
+/// 当前 Session 正在执行的易失压缩操作。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionCompactionSnapshot {
+    pub compaction_id: String,
+    pub trigger: SessionCompactionTriggerSnapshot,
+    pub source_generation: u64,
+    pub started_at_ms: i64,
+    pub cancellable: bool,
+}
+
+/// Session 压缩的发起来源。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionCompactionTriggerSnapshot {
+    Manual,
+    Automatic {
+        run_id: RunId,
+        reason: SessionCompactionReasonSnapshot,
+    },
+}
+
+/// 自动压缩的稳定触发原因。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCompactionReasonSnapshot {
+    ThresholdReached,
+    ProviderOverflow,
+}
+
 /// 跨 Provider 稳定的推理强度 key。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -431,6 +495,17 @@ pub struct SessionSummary {
     pub reasoning_effort: Option<ReasoningEffortKey>,
     /// Session 当前是活动还是归档状态。
     pub lifecycle: SessionLifecycle,
+    /// Session 的持久产品角色；旧快照安全缺省为普通会话。
+    #[serde(default)]
+    pub role: SessionRoleSnapshot,
+    /// 普通 Session 当前代理归属；主控自身始终为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub proxy: Option<SessionProxySnapshot>,
+    /// 只存在于当前 Runtime 进程内；重启后必然为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_compaction: Option<SessionCompactionSnapshot>,
     /// UI 当前选中的 Agent 变体；具体 Run 仍以提交 Input 携带的值为准。
     #[serde(default)]
     pub current_variant: AgentVariant,
@@ -705,6 +780,8 @@ mod tests {
         let session: SessionSummary = serde_json::from_value(session).expect("legacy session");
         assert_eq!(session.current_variant, AgentVariant::Build);
         assert_eq!(session.approval_mode, ApprovalMode::Ask);
+        assert_eq!(session.role, SessionRoleSnapshot::Standard);
+        assert_eq!(session.proxy, None);
 
         let run = serde_json::json!({
             "run_id": "run-1",

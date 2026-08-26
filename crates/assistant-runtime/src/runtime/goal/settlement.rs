@@ -150,6 +150,7 @@ pub(crate) fn prepare_goal_run_settlement(
             generation: goal.generation,
             turn: goal.turn,
         }),
+        cross_session_binding: None,
         skill_activation: None,
         approval_mode: run.approval_mode(),
         message,
@@ -232,7 +233,7 @@ fn transition(
         expected_goal_id: current.id.clone(),
         expected_generation: current.generation,
         goal: goal.to_stored(session_id.clone()),
-        resume_required: !session.user_inputs.is_empty(),
+        resume_required: !session.session_inputs.is_empty(),
     }))
 }
 

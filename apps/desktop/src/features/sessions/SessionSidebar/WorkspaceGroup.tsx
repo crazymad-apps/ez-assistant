@@ -127,7 +127,15 @@ export const SessionList = observer(function SessionList(props: Readonly<{
           <span className={styles.session_title}>{session.title}</span>
           {session.is_pinned && <Icon className={styles.pin_icon} name="pin" size={13} />}
           {session.active_run_id ? (
-            <span className={styles.loading_ring} aria-label="正在运行" />
+            <svg
+              aria-label="正在运行"
+              className={styles.loading_ring}
+              role="img"
+              viewBox="0 0 16 16"
+            >
+              <circle className={styles.loading_ring_track} cx="8" cy="8" r="6" />
+              <circle className={styles.loading_ring_arc} cx="8" cy="8" r="6" />
+            </svg>
           ) : (
             <time className={styles.session_time}>{sessionTime(session)}</time>
           )}

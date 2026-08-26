@@ -18,6 +18,14 @@ pub enum RuntimeErrorCode {
     SessionArchived,
     /// Session 尚未达到归档、模型切换或历史重新输入要求的完全空闲状态。
     SessionNotIdle,
+    /// Session 已有自动或手动上下文压缩正在执行。
+    SessionCompactionInProgress,
+    /// 指定的手动压缩已经结束或不存在。
+    SessionCompactionNotFound,
+    /// 当前没有可用的主控会话。
+    ControllerUnavailable,
+    /// Session 的持久角色不允许当前生命周期操作。
+    SessionRoleRestricted,
     /// 指定 Run 不存在。
     RunNotFound,
     /// 指定子任务不存在于目标 Session。
@@ -107,6 +115,8 @@ pub enum RuntimeErrorCode {
     QueueConflict,
     /// Conversation generation 或快照依赖已经变化。
     SnapshotStale,
+    /// clear 已切换到权威空历史，但物理清理尚待恢复收敛。
+    SessionHistoryCleanupPending,
     /// 组合快照在有界重试内无法取得同一观察水位。
     SnapshotBusy,
     /// 当前资源状态不允许执行请求的操作。
@@ -174,6 +184,14 @@ mod tests {
             (RuntimeErrorCode::SessionBusy, "session_busy"),
             (RuntimeErrorCode::SessionArchived, "session_archived"),
             (RuntimeErrorCode::SessionNotIdle, "session_not_idle"),
+            (
+                RuntimeErrorCode::SessionCompactionInProgress,
+                "session_compaction_in_progress",
+            ),
+            (
+                RuntimeErrorCode::SessionCompactionNotFound,
+                "session_compaction_not_found",
+            ),
             (RuntimeErrorCode::RunNotFound, "run_not_found"),
             (RuntimeErrorCode::ChildTaskNotFound, "child_task_not_found"),
             (RuntimeErrorCode::InputNotFound, "input_not_found"),
@@ -280,6 +298,10 @@ mod tests {
             ),
             (RuntimeErrorCode::QueueConflict, "queue_conflict"),
             (RuntimeErrorCode::SnapshotStale, "snapshot_stale"),
+            (
+                RuntimeErrorCode::SessionHistoryCleanupPending,
+                "session_history_cleanup_pending",
+            ),
             (RuntimeErrorCode::SnapshotBusy, "snapshot_busy"),
             (
                 RuntimeErrorCode::OperationNotAllowed,

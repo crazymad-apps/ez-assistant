@@ -362,9 +362,9 @@ Runtime Host 进程
   conflict 不做容错覆盖。
 - WorkPlan 通过 `RuntimeStore` 的 load/mutate/clear 业务操作持久化。易失 Store 与正式 Store 必须保持
   相同的 revision、幂等、归档、Fork 和删除约束；非法恢复内容令 Runtime 启动 fail-closed。
-- `update_plan` 提交至少一个且全部 Completed 的 item 时，Store 必须在同一事务保存 ToolCallId
-  完成回执并删除当前 WorkPlan；重放返回首次计划结果，SessionView 与后续 claim 均视为无计划。
-  空 item 的总体目标计划不触发自动清除。
+- `update_plan` 提交空 item 列表，或提交至少一个且全部 Completed 的 item 时，Store 必须在同一事务
+  保存 ToolCallId 完成回执并删除当前 WorkPlan；重放返回首次计划结果，SessionView 与后续 claim
+  均视为无计划。
 - 排队输入不提前冻结计划。queue driver 在实际领取一条新用户输入、首次提交 Journal 前，把当时最新
   WorkPlan 追加为版本化 `WORK_PLAN_CONTEXT_V1` Injected Part；已进入 Conversation 的历史消息不回写，
   retry 继续沿用已有历史上下文。

@@ -8,13 +8,15 @@ use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use crate::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
-    ConversationSearchPage, ConversationSearchRequest, ConversationWindowRequest,
-    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
-    NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
+    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
+    ConversationWindowRequest, MemoryContextSnapshot, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PersonaMutation,
     PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
     RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
     SessionPinnedChange, SessionTitleChange, SkillNameState, SkillNameStateChange, StoreError,
     StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
@@ -153,6 +155,31 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.delete_session(deletion)
     }
 
+    fn clear_session_history(
+        &self,
+        clear: SessionHistoryClear,
+    ) -> StoreFuture<'_, SessionHistoryClearResult> {
+        self.inner.clear_session_history(clear)
+    }
+
+    fn prepare_session_compaction(
+        &self,
+        preparation: SessionHistoryCompactionPreparation,
+    ) -> StoreFuture<'_, SessionHistoryCompactionPreparationResult> {
+        self.inner.prepare_session_compaction(preparation)
+    }
+
+    fn finish_session_compaction(
+        &self,
+        finish: SessionHistoryCompactionFinish,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.finish_session_compaction(finish)
+    }
+
+    fn set_session_proxy(&self, change: crate::SessionProxyChange) -> StoreFuture<'_, ()> {
+        self.inner.set_session_proxy(change)
+    }
+
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
         self.inner.create_child_task(task)
     }
@@ -201,7 +228,10 @@ impl RuntimeStore for FaultInjectingStore {
             .load_child_conversation(session_id, child_task_id)
     }
 
-    fn replace_context(&self, replacement: ContextReplacement) -> StoreFuture<'_, ()> {
+    fn replace_context(
+        &self,
+        replacement: ContextReplacement,
+    ) -> StoreFuture<'_, ContextReplacementResult> {
         self.inner.replace_context(replacement)
     }
 

@@ -88,6 +88,23 @@ pub struct GoalInputBinding {
     pub turn: u32,
 }
 
+/// 可见 Runtime Input 的冻结跨会话来源；不是回复链或通用消息信封。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CrossSessionInputBinding {
+    ControllerDelivery {
+        controller_session_id: SessionId,
+        controller_run_id: RunId,
+        controller_tool_call_id: ToolCallId,
+    },
+    ProxyReport {
+        source_session_id: SessionId,
+        source_run_id: RunId,
+        source_goal_id: Option<GoalId>,
+        source_run_status: RunStatus,
+    },
+}
+
 /// Runtime 从 Store 恢复的 Input 投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredInput {
@@ -98,6 +115,7 @@ pub struct StoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
+    pub cross_session_binding: Option<CrossSessionInputBinding>,
     /// 用户接受输入时冻结的单个 Skill；Runtime continuation 恒为空。
     pub skill_activation: Option<StoredSkillActivation>,
     pub user_message_id: MessageId,
@@ -116,6 +134,7 @@ pub struct NewStoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
+    pub cross_session_binding: Option<CrossSessionInputBinding>,
     /// 与 Input、首次 Run 和 queued message 同事务写入的用户 Skill Activation。
     pub skill_activation: Option<StoredSkillActivation>,
     pub approval_mode: ApprovalMode,
@@ -137,13 +156,14 @@ pub struct InputMessageValidationError;
 pub fn validate_input_message(
     origin: InputOrigin,
     goal_binding: Option<&GoalInputBinding>,
+    cross_session_binding: Option<&CrossSessionInputBinding>,
     message: &UserMessage,
 ) -> Result<(), InputMessageValidationError> {
     if goal_binding.is_some_and(|binding| binding.generation == 0 || binding.turn == 0) {
         return Err(InputMessageValidationError);
     }
-    match origin {
-        InputOrigin::User => {
+    match (origin, cross_session_binding) {
+        (InputOrigin::User, None) => {
             if message.origin != UserMessageOrigin::User
                 || message.transcript_visibility != TranscriptVisibility::Visible
                 || !message
@@ -154,7 +174,7 @@ pub fn validate_input_message(
                 return Err(InputMessageValidationError);
             }
         }
-        InputOrigin::Runtime => {
+        (InputOrigin::Runtime, None) => {
             if goal_binding.is_none()
                 || message.origin != UserMessageOrigin::Runtime
                 || message.transcript_visibility != TranscriptVisibility::Hidden
@@ -166,6 +186,44 @@ pub fn validate_input_message(
                 return Err(InputMessageValidationError);
             }
         }
+        (InputOrigin::Runtime, Some(binding)) => {
+            let expected_kind = match binding {
+                CrossSessionInputBinding::ControllerDelivery { .. } => "controller_delivery",
+                CrossSessionInputBinding::ProxyReport {
+                    source_run_status, ..
+                } => {
+                    if !matches!(
+                        source_run_status,
+                        RunStatus::Completed
+                            | RunStatus::Failed
+                            | RunStatus::Cancelled
+                            | RunStatus::Interrupted
+                    ) {
+                        return Err(InputMessageValidationError);
+                    }
+                    "proxy_report"
+                }
+            };
+            let source_parts = message
+                .parts
+                .iter()
+                .filter(|part| {
+                    matches!(part, UserPart::InternalContext(part) if part.kind == expected_kind)
+                })
+                .count();
+            if goal_binding.is_some()
+                || message.origin != UserMessageOrigin::Runtime
+                || message.transcript_visibility != TranscriptVisibility::Visible
+                || !message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, UserPart::Text(_)))
+                || source_parts != 1
+            {
+                return Err(InputMessageValidationError);
+            }
+        }
+        (InputOrigin::User, Some(_)) => return Err(InputMessageValidationError),
     }
     Ok(())
 }
@@ -208,6 +266,8 @@ pub struct StoredRunSettlement {
     /// 本批最终 AssistantMessage 的可靠 step；旧调用方或无消息结算时为空。
     pub message_step: Option<u32>,
     pub goal_effect: Option<StoredGoalSettlementEffect>,
+    /// 源 Run 结算时，同事务可靠接受到 Controller 的可见代理报告。
+    pub proxy_report: Option<Box<NewStoredInput>>,
     pub finished_at_ms: i64,
 }
 
@@ -234,6 +294,7 @@ pub enum StoredGoalSettlementEffect {
 pub struct StoredRunSettlementResult {
     pub goal: Option<StoredGoal>,
     pub continuation: Option<AcceptedInput>,
+    pub accepted_proxy_report: Option<AcceptedInput>,
     pub resume_required: bool,
 }
 

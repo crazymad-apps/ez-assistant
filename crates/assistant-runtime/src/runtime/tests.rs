@@ -276,6 +276,41 @@ impl SessionEnvironmentFactory for CountingSystemPromptFactory {
 
 struct StaticSystemPromptFactory;
 
+struct FailingClearSystemPromptFactory {
+    created: AtomicUsize,
+}
+
+impl FailingClearSystemPromptFactory {
+    fn new() -> Self {
+        Self {
+            created: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SessionEnvironmentFactory for FailingClearSystemPromptFactory {
+    fn create_environment(
+        &self,
+        request: SessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
+        if self.created.fetch_add(1, Ordering::Relaxed) == 0 {
+            Ok(test_environment(
+                request,
+                SystemPromptSnapshot::new(vec!["Initial prompt".to_owned()]),
+            ))
+        } else {
+            Err(SessionEnvironmentFactoryError::new())
+        }
+    }
+
+    fn create_fork_environment(
+        &self,
+        request: ForkSessionEnvironmentFactoryRequest<'_>,
+    ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
+        Ok(test_fork_environment(request))
+    }
+}
+
 impl SessionEnvironmentFactory for StaticSystemPromptFactory {
     fn create_environment(
         &self,
@@ -814,9 +849,11 @@ async fn wait_for_pending_approval(
 
 mod approval;
 mod attachment;
+mod compaction;
 mod concurrency;
 mod config;
 mod connection_validation;
+mod controller;
 mod delegation;
 mod failures;
 mod goal_input;

@@ -82,7 +82,7 @@ impl Tool for UpdatePlanTool {
     }
 
     fn description(&self) -> String {
-        "Replace the current session work plan with the complete objective and ordered item list. Always provide objective; when only updating items, repeat the current objective unchanged. Item ids are Runtime-managed and must not be supplied. Keep at most one item in_progress. This records progress but does not enable automatic continuation."
+        "Replace the current session work plan with the complete objective and ordered item list. Submit an empty item list to clear the work plan. Always provide objective; when only updating items, repeat the current objective unchanged. Item ids are Runtime-managed and must not be supplied. Keep at most one item in_progress. This records progress but does not enable automatic continuation."
             .to_owned()
     }
 

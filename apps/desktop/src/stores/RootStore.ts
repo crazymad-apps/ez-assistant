@@ -6,6 +6,8 @@ import type {
   ApprovalId,
   ApprovalMode,
   ChildTaskId,
+  ClearSessionResult,
+  CompactSessionOutcome,
   ConversationOwner,
   ConversationHistoryHit,
   GoalId,
@@ -52,6 +54,14 @@ export class RootStore {
   interaction_error: string | null = null;
   pending_queue_input_id: InputId | null = null;
   pending_approval_id: ApprovalId | null = null;
+  pending_proxy_session_id: SessionId | null = null;
+  pending_compaction_session_id: SessionId | null = null;
+  pending_compaction_cancel_session_id: SessionId | null = null;
+  session_notice: Readonly<{
+    session_id: SessionId;
+    tone: "success" | "warning" | "neutral";
+    message: string;
+  }> | null = null;
 
   readonly #runtime: RuntimeLifecycleCoordinator;
   readonly #run_interaction: RunInteractionController;
@@ -121,6 +131,10 @@ export class RootStore {
       interaction_error: observable,
       pending_queue_input_id: observable,
       pending_approval_id: observable,
+      pending_proxy_session_id: observable,
+      pending_compaction_session_id: observable,
+      pending_compaction_cancel_session_id: observable,
+      session_notice: observable,
       connect: action,
       retryConnection: action,
       initializePreferences: action,
@@ -138,6 +152,11 @@ export class RootStore {
       forkSession: action,
       prepareDeleteSession: action,
       deleteSession: action,
+      clearSession: action,
+      compactSession: action,
+      cancelSessionCompaction: action,
+      setSessionProxy: action,
+      clearSessionNotice: action,
       addWorkspace: action,
       removeWorkspace: action,
       openWorkspace: action,
@@ -374,6 +393,28 @@ export class RootStore {
 
   async deleteSession(prepared: PrepareDeleteSessionResult): Promise<boolean> {
     return this.#session_management.deleteSession(prepared);
+  }
+
+  clearSession(session_id: SessionId, expected_generation: number): Promise<ClearSessionResult | null> {
+    return this.#session_management.clearSession(session_id, expected_generation);
+  }
+
+  compactSession(session_id: SessionId, expected_generation: number): Promise<CompactSessionOutcome | null> {
+    return this.#session_management.compactSession(session_id, expected_generation);
+  }
+
+  cancelSessionCompaction(session_id: SessionId, operation_id: string): Promise<boolean> {
+    return this.#session_management.cancelSessionCompaction(session_id, operation_id);
+  }
+
+  setSessionProxy(session_id: SessionId, enabled: boolean): Promise<boolean> {
+    return this.#session_management.setSessionProxy(session_id, enabled);
+  }
+
+  clearSessionNotice(session_id?: SessionId): void {
+    if (!session_id || this.session_notice?.session_id === session_id) {
+      this.session_notice = null;
+    }
   }
 
   async addWorkspace(): Promise<void> {

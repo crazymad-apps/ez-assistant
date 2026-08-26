@@ -20,18 +20,19 @@ pub use child_task::{
 };
 pub use contract::{RecoveredRuntime, RuntimeStore};
 pub use conversation::{
-    ContextReplacement, ContextReplacementTarget, ConversationMessageLocationRequest,
-    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
-    ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
-    ConversationWindowRequest, RewriteGoalEffect, RewriteResult, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationWindow,
+    ContextReplacement, ContextReplacementResult, ContextReplacementTarget,
+    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
+    ConversationSearchScope, ConversationWindowRequest, RewriteGoalEffect, RewriteResult,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
 };
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
-    AcceptedInput, CompletedToolExchange, GoalInputBinding, InputMessageValidationError,
-    InputOrigin, NewStoredInput, NewStoredRunAttempt, PendingToolExchange, QueuePriorityChange,
-    StoredGoalSettlementEffect, StoredInput, StoredInputState, StoredRun, StoredRunSettlement,
-    StoredRunSettlementResult, ToolExecutionStart, UserMessageCommit, validate_input_message,
+    AcceptedInput, CompletedToolExchange, CrossSessionInputBinding, GoalInputBinding,
+    InputMessageValidationError, InputOrigin, NewStoredInput, NewStoredRunAttempt,
+    PendingToolExchange, QueuePriorityChange, StoredGoalSettlementEffect, StoredInput,
+    StoredInputState, StoredRun, StoredRunSettlement, StoredRunSettlementResult,
+    ToolExecutionStart, UserMessageCommit, validate_input_message,
 };
 pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
@@ -41,8 +42,12 @@ pub use goal::{
 pub use session::{
     ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, MessageFeedbackChange,
     ModelChange, NewStoredSession, ReasoningEffortChange, SessionDeletion, SessionFork,
-    SessionPinnedChange, SessionTitleChange, StoredConversationState, StoredMessageFeedback,
-    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, VariantChange,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionProxyState, SessionRole, SessionTitleChange, StoredConversationState,
+    StoredMessageFeedback, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionUsage, VariantChange,
 };
 pub(crate) use volatile::VolatileRuntimeStore;
 pub use work_plan::{

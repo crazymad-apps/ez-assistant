@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS sessions (
                             CHECK (current_variant IN ('plan', 'build')),
     approval_mode       TEXT NOT NULL DEFAULT 'ask'
                             CHECK (approval_mode IN ('ask', 'auto')),
+    role                TEXT NOT NULL DEFAULT 'standard'
+                            CHECK (role IN ('standard', 'controller')),
+    proxy_controller_session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL,
+    proxy_changed_at_ms INTEGER,
     lifecycle           TEXT NOT NULL CHECK (lifecycle IN ('active', 'archived')),
     body_generation     INTEGER NOT NULL CHECK (body_generation > 0),
     message_count       INTEGER NOT NULL CHECK (message_count >= 0),
@@ -26,6 +30,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     title_origin        TEXT NOT NULL DEFAULT 'generated'
                             CHECK (title_origin IN ('generated', 'user'))
 );
+
+CREATE TABLE IF NOT EXISTS session_history_operations (
+    operation_id      TEXT PRIMARY KEY,
+    session_id        TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    kind              TEXT NOT NULL CHECK (kind IN ('clear', 'compact')),
+    state             TEXT NOT NULL CHECK (state IN (
+                          'preparing', 'no_op', 'cleanup_pending', 'completed',
+                          'cancelled', 'interrupted')),
+    source_generation INTEGER NOT NULL CHECK (source_generation > 0),
+    result_generation INTEGER CHECK (result_generation IS NULL OR result_generation > 0),
+    compacted_message_count INTEGER CHECK (
+        compacted_message_count IS NULL OR compacted_message_count >= 0
+    ),
+    retained_message_count INTEGER CHECK (
+        retained_message_count IS NULL OR retained_message_count >= 0
+    ),
+    created_at_ms     INTEGER NOT NULL,
+    finished_at_ms    INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS session_history_operations_session
+    ON session_history_operations(session_id, created_at_ms, operation_id);
 
 CREATE TABLE IF NOT EXISTS persona (
     singleton_key      INTEGER PRIMARY KEY CHECK (singleton_key = 1),
@@ -181,6 +207,7 @@ CREATE TABLE IF NOT EXISTS inputs (
     goal_generation     INTEGER CHECK (goal_generation IS NULL OR goal_generation > 0),
     goal_turn           INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0),
     skill_activation_json TEXT,
+    cross_session_binding_json TEXT,
     CHECK ((goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL)
         OR (goal_id IS NOT NULL AND goal_generation IS NOT NULL AND goal_turn IS NOT NULL)),
     UNIQUE (session_id, idempotency_key)
@@ -419,6 +446,7 @@ END;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT operation_id, session_id, kind, state, source_generation, result_generation, compacted_message_count, retained_message_count, created_at_ms, finished_at_ms FROM session_history_operations LIMIT 0",
     "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
     "SELECT name, enabled, updated_at_ms FROM skill_name_states LIMIT 0",
@@ -431,7 +459,7 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json, cross_session_binding_json FROM inputs LIMIT 0",
     "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
@@ -461,8 +489,7 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     transaction
         .execute_batch(
             "DELETE FROM session_work_plans
-             WHERE json_array_length(items_json) > 0
-               AND NOT EXISTS (
+             WHERE NOT EXISTS (
                    SELECT 1 FROM json_each(session_work_plans.items_json)
                    WHERE json_extract(value, '$.status') != 'completed'
                );
@@ -471,6 +498,18 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         .map_err(|source| {
             internal_error("completed control state could not be migrated", source)
         })?;
+    ensure_column(
+        &transaction,
+        "session_history_operations",
+        "compacted_message_count",
+        "ALTER TABLE session_history_operations ADD COLUMN compacted_message_count INTEGER CHECK (compacted_message_count IS NULL OR compacted_message_count >= 0)",
+    )?;
+    ensure_column(
+        &transaction,
+        "session_history_operations",
+        "retained_message_count",
+        "ALTER TABLE session_history_operations ADD COLUMN retained_message_count INTEGER CHECK (retained_message_count IS NULL OR retained_message_count >= 0)",
+    )?;
     ensure_column(
         &transaction,
         "attachment_blobs",
@@ -566,6 +605,24 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     )?;
     ensure_column(
         &transaction,
+        "sessions",
+        "role",
+        "ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'standard' CHECK (role IN ('standard', 'controller'))",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "proxy_controller_session_id",
+        "ALTER TABLE sessions ADD COLUMN proxy_controller_session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "proxy_changed_at_ms",
+        "ALTER TABLE sessions ADD COLUMN proxy_changed_at_ms INTEGER",
+    )?;
+    ensure_column(
+        &transaction,
         "inputs",
         "agent_variant",
         "ALTER TABLE inputs ADD COLUMN agent_variant TEXT NOT NULL DEFAULT 'build' CHECK (agent_variant IN ('plan', 'build'))",
@@ -599,6 +656,12 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "inputs",
         "skill_activation_json",
         "ALTER TABLE inputs ADD COLUMN skill_activation_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "cross_session_binding_json",
+        "ALTER TABLE inputs ADD COLUMN cross_session_binding_json TEXT",
     )?;
     transaction
         .execute(
@@ -774,20 +837,29 @@ mod tests {
             )
             .expect("legacy-compatible run insert");
 
-        let values: (String, String, String, String, Option<i64>) = connection
+        let values = connection
             .query_row(
                 "SELECT sessions.current_variant, sessions.approval_mode,
-                        inputs.agent_variant, runs.approval_mode, inputs.priority_order
+                        inputs.agent_variant, runs.approval_mode, inputs.priority_order,
+                        sessions.role, sessions.proxy_controller_session_id,
+                        sessions.proxy_changed_at_ms
                  FROM sessions JOIN inputs ON inputs.session_id = sessions.session_id
                  JOIN runs ON runs.input_id = inputs.input_id",
                 [],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
+                        (
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ),
+                        (
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<i64>>(7)?,
+                        ),
                     ))
                 },
             )
@@ -795,11 +867,8 @@ mod tests {
         assert_eq!(
             values,
             (
-                "build".into(),
-                "ask".into(),
-                "build".into(),
-                "ask".into(),
-                None,
+                ("build".into(), "ask".into(), "build".into(), "ask".into(),),
+                (None, "standard".into(), None, None),
             )
         );
         let persona: (i64, String, i64, i64) = connection

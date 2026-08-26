@@ -326,6 +326,20 @@ async fn dispatch_runtime(
             RuntimeCommandResult::DeleteSession(runtime.delete_session(request).await?),
             false,
         ),
+        RuntimeCommand::ClearSession(request) => (
+            RuntimeCommandResult::ClearSession(runtime.clear_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::CompactSession(request) => (
+            RuntimeCommandResult::CompactSession(runtime.compact_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::CancelSessionCompaction(request) => (
+            RuntimeCommandResult::CancelSessionCompaction(
+                runtime.cancel_session_compaction(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::ListSessions(request) => (
             RuntimeCommandResult::ListSessions(runtime.list_sessions(request)?),
             false,
@@ -412,6 +426,10 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetSessionPinned(request) => (
             RuntimeCommandResult::SetSessionPinned(runtime.set_session_pinned(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetSessionProxy(request) => (
+            RuntimeCommandResult::SetSessionProxy(runtime.set_session_proxy(request).await?),
             false,
         ),
         RuntimeCommand::SetMessageFeedback(request) => (

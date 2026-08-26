@@ -97,8 +97,9 @@
 - Todo 详情以摘要条中线居中，采用紧凑宽高上限；位置必须由 trigger/overlay 实测 DOM 尺寸计算并
   保留视口夹取，不能写死相对偏移。详情是 `pointer-events: none` 的纯检视层，不提供清空计划入口，
   鼠标离开摘要后立即关闭；objective 标题允许换行并驱动 header 自动增高。摘要使用浅色 primary
-  surface；详情使用实色 surface 和中等阴影，并在会话区背层生成与详情高度联动、向上渐隐的 message list
-  底部模糊遮罩，不创建全屏蒙层或第二份 JavaScript 高度状态。
+  surface；loading 只在 Session 存在活动 Run 时显示，空闲时保留摘要但隐藏动画。详情使用实色 surface
+  和中等阴影，并在会话区背层生成与详情高度联动、向上渐隐的 message list 底部模糊遮罩，不创建
+  全屏蒙层或第二份 JavaScript 高度状态。
 - Goal 与 Queue 复用 Composer 私有二级抽屉外壳和无局部 hover 的 header；Goal 详情不重复
   objective header、generation 或操作 footer，Paused 的退出收敛为摘要行 `×`，二次确认后才发送
   ClearGoal。收起和展开态都必须用相同负 margin/padding 覆盖下一区域圆角；展开态再增加外壳和正文
@@ -108,7 +109,8 @@
 - 底栏常驻视觉项固定为添加、执行设置、上下文用量、模型设置、发送/停止。执行 variant 与 approval、
   model 与 reasoning effort 各自独立，只能以分类级联组织，不得在客户端构造排列组合状态。
 - Runtime Goal 的 Running/Paused、budget、pause reason 和 held Queue 都以 SessionView 为准；Goal
-  完成和全完成 WorkPlan 均由 Runtime 自动清除，Desktop 只响应快照移除对应 UI，不自行判断完成。
+  完成、空 item WorkPlan 和全完成 WorkPlan 均由 Runtime 自动清除，Desktop 只响应快照移除对应 UI，
+  不自行判断完成。对旧版本已经投影的空 item WorkPlan，Desktop 仅隐藏 Todo UI 作为兼容兜底。
   Desktop 只调用 Stop/Resume/Clear/ClearPlan，不预测 generation 或 continuation。
 - image handling 只在 Context Panel 作为模型能力说明展示，不占 Composer 底栏；标准宽度与 `720px`
   窄宽度必须保持主操作、Ask/Auto 状态可辨认且无主区域水平滚动。

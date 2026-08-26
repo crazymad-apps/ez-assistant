@@ -48,11 +48,10 @@ impl ContextLayout {
                 }
                 ConversationMessage::User(_) => {
                     if let Some(turn) = current_turn.take() {
-                        let block = ContextBlock::user_turn(turn);
-                        if block.is_active() {
-                            return Err(ContextLayoutError::UnfinishedTurnBeforeNextUser);
-                        }
-                        blocks.push(block);
+                        // 下一条 User 已经开始，说明前一轮无论以普通 Assistant 回复还是
+                        // 中断后的 Tool Result 结束，都已成为历史轮次。只有快照末尾的
+                        // User Turn 才需要根据末条消息判断是否仍在执行。
+                        blocks.push(ContextBlock::completed_user_turn(turn));
                     }
                     conversation_started = true;
                     current_turn = Some(vec![message.clone()]);
@@ -212,6 +211,14 @@ impl ContextBlock {
         }
     }
 
+    fn completed_user_turn(messages: Vec<ConversationMessage>) -> Self {
+        Self {
+            kind: ContextBlockKind::UserTurn,
+            messages,
+            active: false,
+        }
+    }
+
     fn user_turn(messages: Vec<ConversationMessage>) -> Self {
         let active = !matches!(
             messages.last(),
@@ -291,9 +298,6 @@ pub enum ContextLayoutError {
     /// Assistant/Tool 消息必须归属于一个 User Turn。
     #[error("assistant or tool message appears outside a user turn")]
     MessageOutsideUserTurn,
-    /// 只有最后一个 User Turn 可以仍在执行中。
-    #[error("a new user turn starts before the previous turn completed")]
-    UnfinishedTurnBeforeNextUser,
 }
 
 #[cfg(test)]
@@ -481,6 +485,23 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_tool_turn_becomes_completed_when_the_next_user_turn_starts() {
+        let layout = ContextLayout::build(&ConversationSnapshot::new(vec![
+            user("user_1"),
+            tool_call("assistant_1", "call_1"),
+            tool_result("tool_1", "call_1"),
+            user("user_2"),
+            assistant("assistant_2"),
+        ]))
+        .expect("interrupted historical turn remains compactable");
+
+        assert_eq!(layout.blocks().len(), 2);
+        assert!(!layout.blocks()[0].is_active());
+        assert!(!layout.blocks()[1].is_active());
+        assert_eq!(layout.partition(1).compressible_head().len(), 1);
+    }
+
+    #[test]
     fn minimum_recent_turns_never_split_a_user_turn() {
         let layout = ContextLayout::build(&ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
@@ -561,12 +582,6 @@ mod tests {
         assert_eq!(
             ContextLayout::build(&assistant_without_user),
             Err(ContextLayoutError::MessageOutsideUserTurn)
-        );
-
-        let unfinished = ConversationSnapshot::new(vec![user("user_1"), user("user_2")]);
-        assert_eq!(
-            ContextLayout::build(&unfinished),
-            Err(ContextLayoutError::UnfinishedTurnBeforeNextUser)
         );
 
         let duplicate_summary = ConversationSnapshot::new(vec![

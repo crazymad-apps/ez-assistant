@@ -368,6 +368,58 @@ async fn completing_every_todo_clears_the_current_work_plan_automatically() {
 }
 
 #[tokio::test]
+async fn empty_item_list_clears_the_current_work_plan() {
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("non-zero")),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let active = store
+        .mutate_work_plan(crate::WorkPlanMutation {
+            session_id: session_id.clone(),
+            expected_revision: 0,
+            operation_id: "work-plan-active".to_owned(),
+            objective: "finish the work".to_owned(),
+            items: vec![crate::StoredWorkPlanItem {
+                id: assistant_protocol::TodoItemId::new("todo-active").expect("todo id"),
+                text: "finish implementation".to_owned(),
+                status: crate::StoredTodoItemStatus::InProgress,
+            }],
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("create work plan");
+    let cleared = store
+        .mutate_work_plan(crate::WorkPlanMutation {
+            session_id: session_id.clone(),
+            expected_revision: active.plan.revision,
+            operation_id: "work-plan-empty".to_owned(),
+            objective: active.plan.objective,
+            items: Vec::new(),
+            updated_at_ms: 2,
+        })
+        .await
+        .expect("clear work plan with an empty item list");
+
+    assert!(cleared.cleared);
+    assert!(
+        store
+            .load_work_plan(&session_id)
+            .await
+            .expect("load work plan")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
     let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
     let first_runtime = runtime_with_store(

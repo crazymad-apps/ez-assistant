@@ -26,6 +26,14 @@ pub enum RegisterToolError {
     },
 }
 
+/// 两份不可变工具快照无法安全合并。
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum MergeToolSetError {
+    /// 同名贡献不是同一份已经冻结的工具，不能静默覆盖或猜测等价。
+    #[error("conflicting contributions for tool `{0}`")]
+    ConflictingName(ToolName),
+}
+
 /// 装配阶段使用的类型化工具注册表。
 ///
 /// 完成注册后通过 [`ToolRegistry::snapshot`] 消费注册表，进入执行期不可变快照。
@@ -96,6 +104,28 @@ impl ToolSetSnapshot {
             .insert(definition.name.as_str().to_owned(), index);
         self.definitions.push(definition);
         self.tools.push(tool);
+        Ok(self)
+    }
+
+    /// 按稳定顺序合并另一份不可变快照。
+    ///
+    /// 只有定义相同且共享同一冻结执行句柄的重复项才会被折叠；其他同名项均视为冲突。
+    /// 该原语不解释贡献来源，也不改变任一输入快照。
+    pub fn try_merge(mut self, contribution: Self) -> Result<Self, MergeToolSetError> {
+        for (definition, tool) in contribution.definitions.into_iter().zip(contribution.tools) {
+            if let Some(index) = self.by_name.get(definition.name.as_str()).copied() {
+                if self.definitions[index] == definition && Arc::ptr_eq(&self.tools[index], &tool) {
+                    continue;
+                }
+                return Err(MergeToolSetError::ConflictingName(definition.name));
+            }
+
+            let index = self.tools.len();
+            self.by_name
+                .insert(definition.name.as_str().to_owned(), index);
+            self.definitions.push(definition);
+            self.tools.push(tool);
+        }
         Ok(self)
     }
 
@@ -186,6 +216,46 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
         assert!(empty.definitions().is_empty());
+    }
+
+    #[test]
+    fn snapshot_merge_preserves_order_and_deduplicates_the_same_frozen_tool() {
+        let mut first = ToolRegistry::new();
+        first.register(FailTool).expect("register fail tool");
+        let shared = first.snapshot();
+
+        let mut second = ToolRegistry::new();
+        second.register(AddTool).expect("register add tool");
+        let merged = shared
+            .clone()
+            .try_merge(second.snapshot())
+            .expect("different names merge")
+            .try_merge(shared)
+            .expect("same frozen contribution deduplicates");
+
+        let names: Vec<&str> = merged
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert_eq!(names, ["fail", "add"]);
+    }
+
+    #[test]
+    fn snapshot_merge_rejects_a_same_name_with_a_different_execution_handle() {
+        let mut first = ToolRegistry::new();
+        first.register(AddTool).expect("register first add tool");
+        let mut second = ToolRegistry::new();
+        second.register(AddTool).expect("register second add tool");
+
+        let error = match first.snapshot().try_merge(second.snapshot()) {
+            Ok(_) => panic!("separately frozen implementations must conflict"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            MergeToolSetError::ConflictingName(ToolName::new("add").expect("tool name"))
+        );
     }
 
     struct InvalidDefaultTool {

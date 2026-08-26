@@ -86,6 +86,10 @@ function controllerFixture(restored: boolean) {
     interaction_error: null,
     pending_session_action: false,
     pending_workspace_action: false,
+    pending_proxy_session_id: null,
+    pending_compaction_session_id: null,
+    pending_compaction_cancel_session_id: null,
+    session_notice: null,
   };
   const controller = new SessionManagementController({
     connection,

@@ -149,6 +149,58 @@
   padding: 4px 12px 18px;
 }
 
+.controller_section {
+  margin: 0 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ez-border);
+}
+
+.controller_heading {
+  padding: 5px 8px;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+  font-weight: 650;
+}
+
+.controller_row {
+  display: grid;
+  width: 100%;
+  min-height: 38px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary);
+  background: transparent;
+  text-align: left;
+
+  > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  &:hover { color: var(--ez-text); background: var(--ez-surface-muted); }
+  &[aria-current="page"] { color: #3157d7; background: var(--ez-primary-soft); font-weight: 600; }
+}
+
+.controller_unavailable {
+  padding: 9px 8px;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+.controller_skeleton {
+  height: 38px;
+  margin: 5px 0 13px;
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-muted);
+  opacity: 0.65;
+}
+
 .settings_button {
   display: grid;
   min-height: 40px;
@@ -395,14 +447,32 @@
 }
 
 .loading_ring {
+  display: block;
   grid-column: 3;
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
   justify-self: end;
-  border: 2px solid var(--ez-primary-border);
-  border-top-color: var(--ez-primary);
-  border-radius: 50%;
-  animation: ez-spin 850ms linear infinite;
+  overflow: visible;
+  animation: session-loading-spin 900ms linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.loading_ring_track,
+.loading_ring_arc {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.loading_ring_track {
+  stroke: var(--ez-primary-border);
+}
+
+.loading_ring_arc {
+  stroke: var(--ez-primary);
+  stroke-dasharray: 10 28;
+  stroke-linecap: round;
 }
 
 .empty_list {
@@ -415,6 +485,6 @@
   text-align: center;
 }
 
-@keyframes ez-spin {
+@keyframes session-loading-spin {
   to { transform: rotate(360deg); }
 }

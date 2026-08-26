@@ -17,6 +17,7 @@ import type {
 
 export type ConversationRow =
   | { type: "user"; message: UserMessageSnapshot }
+  | { type: "context_summary"; message: Extract<ConversationItem, { type: "context_summary" }> }
   | { type: "assistant_turn"; key: string; run_id: string | null; messages: AssistantMessageSnapshot[] };
 
 export function groupConversationTurns(
@@ -25,6 +26,10 @@ export function groupConversationTurns(
 ): ConversationRow[] {
   const rows: ConversationRow[] = [];
   for (const item of items) {
+    if (item.type === "context_summary") {
+      rows.push({ type: "context_summary", message: item });
+      continue;
+    }
     if (item.type === "user") {
       rows.push({ type: "user", message: item });
       continue;

@@ -622,7 +622,100 @@ fn deepseek_opaque_reasoning_round_trips_only_on_the_exact_route() {
         .collect::<Vec<_>>();
     assert_eq!(reasoning_items.len(), 1);
     assert!(reasoning_items[0].get("encrypted_content").is_none());
-    assert_eq!(reasoning_items[0]["summary"][0]["text"], "Need the tool");
+    assert!(reasoning_items[0].get("id").is_none());
+    assert!(reasoning_items[0].get("summary").is_none());
+    assert_eq!(
+        reasoning_items[0]["content"][0],
+        json!({"type":"reasoning_text","text":"Need the tool"})
+    );
+}
+
+#[test]
+fn deepseek_canonicalizes_interleaved_chat_parts_before_tool_outputs() {
+    let history = request(vec![
+        user("user_chat_1", "review"),
+        ConversationMessage::Assistant(AssistantMessage {
+            id: message_id("assistant_chat_1"),
+            model: ModelIdentity::new(provider("deepseek"), "deepseek-v4-flash"),
+            parts: vec![
+                AssistantPart::ToolCall(ToolCall {
+                    id: call_id("call_chat_1"),
+                    name: tool_name("read_file"),
+                    arguments: json!({"path":"one.rs"}),
+                }),
+                AssistantPart::Reasoning(ReasoningPart {
+                    id: part_id("part_1"),
+                    text: "Checked the files".to_owned(),
+                }),
+                AssistantPart::Text(TextPart {
+                    id: part_id("part_2"),
+                    text: "Review complete".to_owned(),
+                }),
+                AssistantPart::ToolCall(ToolCall {
+                    id: call_id("call_chat_2"),
+                    name: tool_name("read_file"),
+                    arguments: json!({"path":"two.rs"}),
+                }),
+            ],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        }),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("tool_chat_1"),
+            result: ToolResult {
+                call_id: call_id("call_chat_1"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::text("one"),
+                metadata: None,
+            },
+        }),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("tool_chat_2"),
+            result: ToolResult {
+                call_id: call_id("call_chat_2"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::text("two"),
+                metadata: None,
+            },
+        }),
+        user("user_chat_2", "continue"),
+    ]);
+    let deepseek = bound_adapter(
+        ResponsesProtocolAdapter::deepseek(),
+        "https://api.deepseek.com/v1",
+        "deepseek-v4-flash",
+    );
+    let value = serde_json::to_value(
+        encode_request_with_images(
+            &history,
+            &agent_model::PreparedModelImages::default(),
+            &deepseek,
+            "deepseek-v4-flash",
+        )
+        .expect("encode migrated Chat history"),
+    )
+    .expect("request JSON");
+    let input = value["input"].as_array().expect("input");
+    let reasoning = &input[1];
+
+    assert!(reasoning.get("id").is_none());
+    assert!(reasoning.get("summary").is_none());
+    assert!(reasoning.get("encrypted_content").is_none());
+    assert_eq!(
+        reasoning["content"][0],
+        json!({"type":"reasoning_text","text":"Checked the files"})
+    );
+    assert_eq!(input[2]["role"], "assistant");
+    assert_eq!(input[2]["content"][0]["text"], "Review complete");
+    assert_eq!(input[3]["type"], "function_call");
+    assert_eq!(input[3]["call_id"], "call_chat_1");
+    assert_eq!(input[4]["type"], "function_call");
+    assert_eq!(input[4]["call_id"], "call_chat_2");
+    assert_eq!(input[5]["type"], "function_call_output");
+    assert_eq!(input[5]["call_id"], "call_chat_1");
+    assert_eq!(input[6]["type"], "function_call_output");
+    assert_eq!(input[6]["call_id"], "call_chat_2");
+    assert_eq!(input[7]["role"], "user");
 }
 
 #[test]

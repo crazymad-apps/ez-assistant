@@ -7,7 +7,9 @@ mod supervisor;
 
 use std::{collections::HashMap, sync::Arc};
 
-pub(crate) use model_diagnostics::{ModelFailureDiagnostics, RunModelDiagnostics};
+pub(crate) use model_diagnostics::{
+    ModelFailureDiagnostics, RunModelDiagnostics, model_failure_kind, model_failure_kind_value,
+};
 pub(crate) use recorder::RuntimeRecorder;
 pub(crate) use settlement::{RunSettlementResult, settle_run, settle_run_with_error};
 pub(crate) use supervisor::observe_run_execution;

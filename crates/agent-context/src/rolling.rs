@@ -6,9 +6,8 @@ use agent_model::{
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ContextInsertionPayload, ContextInsertionPlan,
-    ContextSummaryMessage, ConversationMessage, ConversationSnapshot, FinishReason,
-    InternalContextPart, MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage,
-    UserMessageOrigin, UserPart,
+    ContextSummaryMessage, ConversationMessage, ConversationSnapshot, InternalContextPart,
+    MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
 use futures_util::StreamExt;
 use thiserror::Error;
@@ -256,11 +255,6 @@ fn map_model_error(error: ModelError) -> CompactionError {
 }
 
 fn summary_text(message: &AssistantMessage) -> Result<String, CompactionError> {
-    if message.finish_reason != FinishReason::Stop {
-        return Err(CompactionError::InvalidResponse {
-            message: "compression response did not finish with stop".to_owned(),
-        });
-    }
     if message
         .parts
         .iter()
@@ -1026,7 +1020,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_summary_responses_never_form_candidates() {
+    async fn length_limited_summary_with_text_forms_a_candidate() {
+        let snapshot = ConversationSnapshot::new(vec![
+            user("user_1"),
+            assistant("assistant_1", Some(usage(20))),
+            user("user_2"),
+            assistant("assistant_2", Some(usage(30))),
+        ]);
+        let model = Arc::new(ScriptedModel::new([Script::Events(message_events(
+            &summary_message(
+                "summary_length",
+                vec![AssistantPart::Text(TextPart {
+                    id: part_id("text_length"),
+                    text: "truncated but usable".to_owned(),
+                })],
+                FinishReason::Length,
+            ),
+        ))]));
+        let strategy =
+            RollingSummarySameModel::new(RollingSummaryPolicy::new(64, 1).expect("valid policy"));
+
+        assert!(matches!(
+            strategy
+                .compact(input(model, &snapshot), CancellationToken::new())
+                .await,
+            Ok(StrategyOutcome::Candidate(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_summary_responses_never_form_candidates() {
         let snapshot = ConversationSnapshot::new(vec![
             user("user_1"),
             assistant("assistant_1", Some(usage(20))),
@@ -1034,14 +1057,6 @@ mod tests {
             assistant("assistant_2", Some(usage(30))),
         ]);
         let invalid_messages = [
-            summary_message(
-                "summary_length",
-                vec![AssistantPart::Text(TextPart {
-                    id: part_id("text_length"),
-                    text: "truncated".to_owned(),
-                })],
-                FinishReason::Length,
-            ),
             summary_message(
                 "summary_empty",
                 vec![

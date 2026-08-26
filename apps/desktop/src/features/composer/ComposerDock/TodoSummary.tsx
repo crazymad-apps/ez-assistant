@@ -10,6 +10,7 @@ const TODO_EXIT_MOTION_MS = 110;
 type TodoSummaryProps = Readonly<{
   on_open_change: (open: boolean) => void;
   open: boolean;
+  running: boolean;
   work_plan: WorkPlanSnapshot;
 }>;
 
@@ -121,7 +122,7 @@ export function TodoSummary(props: TodoSummaryProps) {
           ref={trigger_ref}
           type="button"
         >
-          <span aria-hidden="true" className={styles.todo_loading} />
+          {props.running && <span aria-hidden="true" className={styles.todo_loading} />}
           <strong title={current_step_text}>{current_step_text}</strong>
           <Icon name={props.open ? "chevron-up" : "chevron-down"} size={13} />
         </button>

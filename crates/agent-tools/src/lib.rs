@@ -40,7 +40,7 @@ pub use capability::{
 };
 pub use dispatch::{DispatchError, Dispatcher};
 pub use path::{AbsolutePath, PathResolutionError, SessionPathResolver};
-pub use registry::{RegisterToolError, ToolRegistry, ToolSetSnapshot};
+pub use registry::{MergeToolSetError, RegisterToolError, ToolRegistry, ToolSetSnapshot};
 pub use resolution::{
     GeneralAuthorizationFacts, ResolvedBatchItemRef, ResolvedToolBatch, ResolvedToolInvocation,
     ToolAuthorizationFacts, ToolFingerprint, ToolResolution,

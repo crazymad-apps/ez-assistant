@@ -13,9 +13,10 @@ use crate::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
     run::{RunRecord, allocate_run_id, create_user_message},
-    session::InputRecord,
     skill::render_user_activation,
 };
+
+use super::projection::project_accepted_input;
 
 impl AssistantRuntime {
     /// 先持久化 Input 与首次 Run，再把它加入目标 Session 的执行 lane。
@@ -39,6 +40,7 @@ impl AssistantRuntime {
         {
             return Ok(SubmitInputResult { input_id, run });
         }
+        session.ensure_not_compacting()?;
         session.ensure_healthy()?;
         let model_key = session.model_key()?;
         let configuration = self.config_registry.snapshot()?;
@@ -130,6 +132,7 @@ impl AssistantRuntime {
             .filter(|goal| matches!(goal.persistence, GoalSubmissionPersistence::Resume))
             .map(|goal| goal.control.to_stored(session.id().clone()));
         let generated_title = should_generate_title.then_some(generated_title);
+        let was_proxied = session.lock_state()?.proxy.is_some();
         let accepted = self
             .store
             .accept_input(NewStoredInput {
@@ -140,6 +143,7 @@ impl AssistantRuntime {
                 agent_variant: request.variant,
                 origin: InputOrigin::User,
                 goal_binding: goal_binding.clone(),
+                cross_session_binding: None,
                 skill_activation: skill_activation.clone(),
                 approval_mode,
                 message,
@@ -168,45 +172,53 @@ impl AssistantRuntime {
             .as_ref()
             .map(|prepared| super::super::product::project_goal(&prepared.control))
             .transpose()?;
-        let snapshot = {
+        let (projection, queue_revision) = {
             let mut state = session.lock_state()?;
-            let record = RunRecord::accepted(&accepted.run, Vec::new());
-            let snapshot = record.snapshot();
-            state.current_variant = accepted.input.agent_variant;
+            let removed_deliveries = state
+                .inputs
+                .values()
+                .filter(|candidate| {
+                    candidate.stored.state == crate::StoredInputState::Queued
+                        && matches!(
+                            candidate.stored.cross_session_binding,
+                            Some(crate::CrossSessionInputBinding::ControllerDelivery { .. })
+                        )
+                })
+                .map(|candidate| candidate.stored.input_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            if was_proxied {
+                state.proxy = None;
+            }
+            if !removed_deliveries.is_empty() {
+                state
+                    .session_inputs
+                    .retain(|input_id| !removed_deliveries.contains(input_id));
+                state
+                    .inputs
+                    .retain(|input_id, _| !removed_deliveries.contains(input_id));
+                state
+                    .runs
+                    .retain(|_, run| !removed_deliveries.contains(run.input_id()));
+            }
             if let Some(title) = generated_title {
                 state.title = title;
             }
-            state.runs.insert(accepted.run.run_id.clone(), record);
-            let changes_user_queue = accepted.input.goal_binding.is_none();
-            if changes_user_queue {
-                state.user_inputs.push_back(accepted.input.input_id.clone());
-                state.queue_revision = state.queue_revision.saturating_add(1);
-                if state.goal.is_some() {
-                    state.resume_required = true;
-                }
-            } else {
-                state.goal_inputs.push_back(accepted.input.input_id.clone());
-            }
+            let changes_session_queue = accepted.input.goal_binding.is_none();
             if let Some(PreparedGoalSubmission { control, .. }) = prepared_goal {
                 state.goal = Some(control);
             }
             state.queue_paused_by_user = false;
-            state.inputs.insert(
-                accepted.input.input_id.clone(),
-                InputRecord {
-                    stored: accepted.input.clone(),
-                    first_run_id: accepted.run.run_id.clone(),
-                    latest_run_id: accepted.run.run_id.clone(),
-                },
-            );
-            if let Some(activation) = skill_activation {
-                state.skill_activations.push(activation);
+            let projection = project_accepted_input(&mut state, accepted);
+            if !changes_session_queue && !removed_deliveries.is_empty() {
+                state.queue_revision = state.queue_revision.saturating_add(1);
             }
-            snapshot
+            let queue_revision = (changes_session_queue || !removed_deliveries.is_empty())
+                .then_some(state.queue_revision);
+            (projection, queue_revision)
         };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
             session_id: session.id().clone(),
-            run_id: snapshot.run_id.clone(),
+            run_id: projection.run.run_id.clone(),
         });
         if let Some(goal) = goal_snapshot {
             self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
@@ -215,8 +227,12 @@ impl AssistantRuntime {
                 generation: goal.generation,
             });
         }
-        if goal_binding.is_none() {
-            let revision = session.lock_state()?.queue_revision;
+        if was_proxied {
+            self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
+                session_id: session.id().clone(),
+            });
+        }
+        if let Some(revision) = queue_revision {
             self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
                 session_id: session.id().clone(),
                 revision,
@@ -224,8 +240,8 @@ impl AssistantRuntime {
         }
         self.wake_queue(session.clone())?;
         Ok(SubmitInputResult {
-            input_id: accepted.input.input_id,
-            run: snapshot,
+            input_id: projection.input_id,
+            run: projection.run,
         })
     }
 }

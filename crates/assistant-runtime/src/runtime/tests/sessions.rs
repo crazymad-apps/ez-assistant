@@ -29,6 +29,143 @@ impl SkillPackageSource for StaticSkillPackageSource {
 }
 
 #[tokio::test]
+async fn config_reload_ensures_one_controller_and_role_restricts_lifecycle_operations() {
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        source,
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+
+    runtime
+        .reload_config(assistant_protocol::ReloadConfigRequest::default())
+        .await
+        .expect("reload creates controller");
+    runtime
+        .reload_config(assistant_protocol::ReloadConfigRequest::default())
+        .await
+        .expect("second reload reuses controller");
+    let application = runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .expect("application snapshot")
+        .snapshot
+        .value;
+    assert_eq!(application.active_sessions.len(), 1);
+    let controller = &application.active_sessions[0];
+    assert_eq!(controller.title, "主控会话");
+    assert_eq!(
+        controller.role,
+        assistant_protocol::SessionRoleSnapshot::Controller
+    );
+    assert_eq!(controller.proxy, None);
+    assert_eq!(
+        application.controller_availability,
+        assistant_protocol::ControllerAvailabilitySnapshot::Available {
+            session_id: controller.session_id.clone(),
+        }
+    );
+    assert_eq!(application.additional_controller_count, 0);
+
+    let archive = runtime
+        .archive_session(assistant_protocol::ArchiveSessionRequest {
+            session_id: controller.session_id.clone(),
+        })
+        .await
+        .expect_err("controller cannot be archived");
+    assert_eq!(
+        archive.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::SessionRoleRestricted
+    );
+    let deletion = runtime
+        .prepare_delete_session(assistant_protocol::PrepareDeleteSessionRequest {
+            session_id: controller.session_id.clone(),
+        })
+        .await
+        .expect_err("controller cannot be deleted");
+    assert_eq!(
+        deletion.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::SessionRoleRestricted
+    );
+    let fork = runtime
+        .fork_session(assistant_protocol::ForkSessionRequest {
+            session_id: controller.session_id.clone(),
+            fork_point: assistant_protocol::MessageId::new("missing").expect("message id"),
+            expected_generation: 1,
+        })
+        .await
+        .expect_err("controller cannot be forked");
+    assert_eq!(
+        fork.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::SessionRoleRestricted
+    );
+
+    runtime
+        .create_session_inner(
+            assistant_protocol::CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "Secondary Controller",
+        )
+        .await
+        .expect("storage permits another controller");
+    let application = runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .expect("multi-controller snapshot")
+        .snapshot
+        .value;
+    let mut controllers = application
+        .active_sessions
+        .iter()
+        .filter(|session| session.role == assistant_protocol::SessionRoleSnapshot::Controller)
+        .collect::<Vec<_>>();
+    controllers.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    assert_eq!(controllers.len(), 2);
+    assert_eq!(application.additional_controller_count, 1);
+    assert_eq!(
+        application.controller_availability,
+        assistant_protocol::ControllerAvailabilitySnapshot::Available {
+            session_id: controllers[0].session_id.clone(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn missing_configuration_keeps_controller_unavailable_without_a_placeholder_session() {
+    let runtime = AssistantRuntime::new(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+        Arc::new(MissingConfigSource),
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+    );
+    runtime
+        .reload_config(assistant_protocol::ReloadConfigRequest::default())
+        .await
+        .expect("missing configuration is a diagnostic result");
+    let application = runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .expect("application snapshot")
+        .snapshot
+        .value;
+    assert!(application.active_sessions.is_empty());
+    assert_eq!(
+        application.controller_availability,
+        assistant_protocol::ControllerAvailabilitySnapshot::Unavailable
+    );
+    assert_eq!(application.additional_controller_count, 0);
+}
+
+#[tokio::test]
 async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     let system_prompt_factory = Arc::new(CountingSystemPromptFactory::new());
     let runtime = runtime_with_factories(
@@ -87,6 +224,175 @@ async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
         .clone();
     assert_ne!(first_prompt, second_prompt);
     assert_eq!(first.session.model_key.as_str(), "fixture");
+}
+
+#[tokio::test]
+async fn clear_session_rebuilds_context_and_replaces_the_in_memory_generation() {
+    let system_prompt_factory = Arc::new(CountingSystemPromptFactory::new());
+    let runtime = runtime_with_factories(
+        Arc::new(StaticModelFactory::new(empty_model())),
+        system_prompt_factory.clone(),
+        ToolSetSnapshot::default(),
+        32,
+    );
+    let created = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create clear session");
+    let original_prompt = runtime
+        .session_for_test(&created.session.session_id)
+        .system_prompt()
+        .clone();
+
+    let request = assistant_protocol::ClearSessionRequest {
+        session_id: created.session.session_id.clone(),
+        operation_id: assistant_protocol::IdempotencyKey::new("runtime-clear-1")
+            .expect("operation id"),
+        expected_generation: 1,
+    };
+    let cleared = runtime
+        .clear_session(request.clone())
+        .await
+        .expect("clear session");
+
+    assert_eq!(system_prompt_factory.created(), 2);
+    assert_eq!(cleared.source_generation, 1);
+    assert_eq!(cleared.result_generation, 2);
+    assert_eq!(
+        cleared.cleanup_status,
+        assistant_protocol::SessionHistoryCleanupStatus::Completed
+    );
+    assert_eq!(cleared.session.message_count, 0);
+    assert_eq!(cleared.session.title, "New Session");
+    let replacement = runtime.session_for_test(&created.session.session_id);
+    assert_ne!(replacement.system_prompt(), &original_prompt);
+    assert_eq!(
+        replacement
+            .system_prompt()
+            .parts()
+            .last()
+            .map(String::as_str),
+        Some("Session prompt 2")
+    );
+    assert!(
+        runtime
+            .conversation_snapshot(&created.session.session_id)
+            .await
+            .expect("cleared conversation")
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        runtime
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: created.session.session_id.clone(),
+            })
+            .await
+            .expect("cleared session view")
+            .snapshot
+            .value
+            .conversation
+            .generation,
+        2
+    );
+
+    let replay = runtime
+        .clear_session(request)
+        .await
+        .expect("replay clear session");
+    assert_eq!(replay, cleared);
+    let stale = runtime
+        .clear_session(assistant_protocol::ClearSessionRequest {
+            session_id: created.session.session_id,
+            operation_id: assistant_protocol::IdempotencyKey::new("runtime-clear-2")
+                .expect("operation id"),
+            expected_generation: 1,
+        })
+        .await
+        .expect_err("new operation cannot reuse an old generation");
+    assert_eq!(
+        stale.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::SnapshotStale
+    );
+}
+
+#[tokio::test]
+async fn controller_session_can_be_cleared_without_changing_its_role() {
+    let runtime = runtime(empty_model());
+    let created = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "主控会话",
+        )
+        .await
+        .expect("create controller");
+    let cleared = runtime
+        .clear_session(assistant_protocol::ClearSessionRequest {
+            session_id: created.session.session_id.clone(),
+            operation_id: assistant_protocol::IdempotencyKey::new("controller-clear")
+                .expect("operation id"),
+            expected_generation: 1,
+        })
+        .await
+        .expect("clear controller");
+    assert_eq!(cleared.result_generation, 2);
+    assert_eq!(cleared.session.title, "主控会话");
+    assert_eq!(
+        cleared.session.role,
+        assistant_protocol::SessionRoleSnapshot::Controller
+    );
+    assert_eq!(runtime.controller_sessions().expect("controllers").len(), 1);
+}
+
+#[tokio::test]
+async fn clear_context_preparation_failure_preserves_the_existing_generation() {
+    let runtime = runtime_with_factories(
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(FailingClearSystemPromptFactory::new()),
+        ToolSetSnapshot::default(),
+        32,
+    );
+    let created = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create clear preparation fixture");
+    let original_prompt = runtime
+        .session_for_test(&created.session.session_id)
+        .system_prompt()
+        .clone();
+    let error = runtime
+        .clear_session(assistant_protocol::ClearSessionRequest {
+            session_id: created.session.session_id.clone(),
+            operation_id: assistant_protocol::IdempotencyKey::new("failing-clear")
+                .expect("operation id"),
+            expected_generation: 1,
+        })
+        .await
+        .expect_err("clear preparation must fail");
+    assert_eq!(
+        error.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::AgentBuildFailed
+    );
+    assert_eq!(
+        runtime
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: created.session.session_id.clone(),
+            })
+            .await
+            .expect("unchanged session view")
+            .snapshot
+            .value
+            .conversation
+            .generation,
+        1
+    );
+    assert_eq!(
+        runtime
+            .session_for_test(&created.session.session_id)
+            .system_prompt(),
+        &original_prompt
+    );
 }
 
 #[tokio::test]
