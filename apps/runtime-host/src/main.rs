@@ -6,6 +6,8 @@ mod config;
 #[cfg(unix)]
 mod config_source;
 #[cfg(unix)]
+mod device;
+#[cfg(unix)]
 mod endpoint;
 #[cfg(unix)]
 mod http;
@@ -18,11 +20,15 @@ mod resources;
 #[cfg(unix)]
 mod server;
 #[cfg(unix)]
+mod speech;
+#[cfg(unix)]
 mod storage;
+#[cfg(unix)]
+mod supervisor;
 
 use std::error::Error;
 #[cfg(unix)]
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use assistant_protocol::{ReloadConfigRequest, ShutdownRuntimeRequest};
@@ -36,16 +42,21 @@ use crate::config::{CliAction, parse_cli};
 use crate::{
     config::{LaunchConfig, ServeConfig},
     config_source::{LocalConfigSource, prepare_runtime_home},
+    device::{DeviceChannelOutputDispatcher, DeviceGatewayService},
     endpoint::RuntimeInstanceGuard,
     resources::HostResources,
     server::RuntimeServer,
+    speech::SpeechService,
     storage::LocalRuntimeStore,
+    supervisor::{FailurePolicy, HostSupervisor, SupervisorError},
 };
 
 #[cfg(unix)]
 const STORAGE_QUEUE_CAPACITY: usize = 64;
 #[cfg(unix)]
 const MODEL_CATALOG_JSON: &str = include_str!("../resources/model-catalog.json");
+#[cfg(unix)]
+const HOST_SUBSYSTEM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() {
@@ -89,9 +100,11 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 let store = Arc::new(
                     LocalRuntimeStore::open(&config.runtime_home, STORAGE_QUEUE_CAPACITY).await?,
                 );
+                let device_output_dispatcher = Arc::new(DeviceChannelOutputDispatcher::new());
+                let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
                 let runtime = match AssistantRuntime::open_with_recall_key(
                     RuntimeConfig::new(config.event_capacity),
-                    Arc::new(LocalConfigSource::new(config.config_path)),
+                    config_source.clone(),
                     model_catalog,
                     resources.model_factory,
                     resources.session_environment_factory,
@@ -104,7 +117,9 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 )
                 .await
                 {
-                    Ok(runtime) => Arc::new(runtime),
+                    Ok(runtime) => Arc::new(
+                        runtime.with_channel_output_dispatcher(device_output_dispatcher.clone()),
+                    ),
                     Err(error) => {
                         store.shutdown().await?;
                         return Err(Box::new(error));
@@ -126,10 +141,57 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     endpoint.base_url(),
                     endpoint.discovery_path().display()
                 );
-                RuntimeServer::new(endpoint, runtime, config.runtime_home)
-                    .serve()
-                    .await?;
-                Ok(())
+                let (speech_service, speech_handle) = SpeechService::new(config_source);
+                let (device_gateway, device_gateway_handle) = DeviceGatewayService::new(
+                    config.runtime_home.clone(),
+                    runtime.clone(),
+                    device_output_dispatcher.as_ref(),
+                    speech_handle.clone(),
+                );
+                let server = RuntimeServer::new(
+                    endpoint,
+                    runtime.clone(),
+                    config.runtime_home,
+                    device_gateway_handle,
+                    speech_handle,
+                );
+                let mut supervisor = HostSupervisor::new(HOST_SUBSYSTEM_SHUTDOWN_TIMEOUT);
+                let host_shutdown = supervisor.shutdown_handle();
+                let command_shutdown = host_shutdown.clone();
+                supervisor.spawn_subsystem(
+                    "desktop_http",
+                    FailurePolicy::ShutdownHost,
+                    move |subsystem_shutdown| {
+                        server.serve_until(subsystem_shutdown, command_shutdown)
+                    },
+                );
+                supervisor.spawn_subsystem(
+                    "speech_service",
+                    FailurePolicy::Degrade,
+                    move |subsystem_shutdown| speech_service.run_until(subsystem_shutdown),
+                );
+                supervisor.spawn_subsystem(
+                    "device_gateway",
+                    FailurePolicy::Degrade,
+                    move |subsystem_shutdown| device_gateway.run_until(subsystem_shutdown),
+                );
+
+                let supervisor_result = supervisor
+                    .run_until(async { tokio::signal::ctrl_c().await })
+                    .await;
+                // Host 入口已经停止或被 deadline 强制回收；无论 Supervisor 是否报错，都必须
+                // 让 Runtime 结算活动 Run 并 flush/join Store，不能因主入口故障遗留 worker。
+                let runtime_result = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
+                match (supervisor_result, runtime_result) {
+                    (Ok(()), Ok(_)) => Ok(()),
+                    (Err(supervisor), Ok(_)) => Err(Box::new(supervisor) as Box<dyn Error>),
+                    (Ok(()), Err(runtime)) => Err(Box::new(runtime) as Box<dyn Error>),
+                    (Err(supervisor), Err(runtime)) => Err(Box::new(HostShutdownError {
+                        supervisor,
+                        runtime,
+                    })
+                        as Box<dyn Error>),
+                }
             }
             #[cfg(not(unix))]
             {
@@ -138,6 +200,14 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+#[error("Host supervisor failed ({supervisor}); Runtime shutdown also failed ({runtime})")]
+struct HostShutdownError {
+    supervisor: SupervisorError,
+    runtime: assistant_runtime::RuntimeError,
 }
 
 #[cfg(not(unix))]

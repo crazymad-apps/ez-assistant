@@ -15,10 +15,10 @@ use tempfile::TempDir;
 use support::HostProcess;
 
 /// 显式人工入口：只读复制既有模型配置，在隔离 Runtime Home 中验证真实模型能够
-/// 先更新工作计划，再由 Runtime 跨 Run 自动续跑并通过 `update_goal` 可靠结束 Goal。
+/// 先更新工作计划，再由 Runtime 在同一 Run 内启动下一 AgentExecution，并通过 `update_goal` 可靠结束 Goal。
 #[test]
 #[ignore = "uses the configured real Provider and may incur model charges"]
-fn configured_model_auto_continues_a_goal_across_runs() {
+fn configured_model_auto_continues_a_goal_across_agent_executions() {
     let source_config = real_config_path();
     let config_text =
         fs::read_to_string(&source_config).expect("read explicitly configured real LLM config");
@@ -52,7 +52,7 @@ fn configured_model_auto_continues_a_goal_across_runs() {
         "submit_input",
         json!({
             "session_id": session_id,
-            "message": "Run a deterministic Goal lifecycle smoke test. During the first Goal Run, call update_plan exactly once with objective 'Validate real Goal continuation' and one in_progress item named 'Complete the second Goal Run'. After the tool result, end the Run with a short ordinary final answer and do not call update_goal. When the Runtime automatically starts the next Goal Run, call update_goal as the only tool call with status complete and a short summary. Do not call any other tool.",
+            "message": "Run a deterministic Goal lifecycle smoke test. During the first AgentExecution, call update_plan exactly once with objective 'Validate real Goal continuation' and one in_progress item named 'Complete the next AgentExecution'. After the tool result, finish with a short ordinary answer and do not call update_goal. When the Runtime automatically continues the same Run with the next AgentExecution, call update_goal as the only tool call with status complete and a short summary. Do not call any other tool.",
             "variant": "build",
             "mode": "start_goal",
             "idempotency_key": "real-v018-goal-continuation"
@@ -65,11 +65,8 @@ fn configured_model_auto_continues_a_goal_across_runs() {
         .as_array()
         .expect("Run list")
         .clone();
-    assert!(runs.len() >= 2, "real Goal did not cross a Run boundary");
-    assert!(
-        runs.iter().any(|run| run["run_id"] == first_run_id),
-        "first Goal Run is missing"
-    );
+    assert_eq!(runs.len(), 1, "automatic Goal progress created another Run");
+    assert_eq!(runs[0]["run_id"], first_run_id);
 
     let mut observed_update_plan = false;
     let mut observed_update_goal = false;
@@ -80,7 +77,10 @@ fn configured_model_auto_continues_a_goal_across_runs() {
             json!({ "session_id": session_id, "run_id": run_id }),
         )["run"]
             .clone();
-        assert_eq!(detail["status"], "completed", "a Goal Run did not complete");
+        assert_eq!(
+            detail["status"], "completed",
+            "the Goal Run did not complete"
+        );
         for tool in detail["tools"].as_array().expect("tool activities") {
             observed_update_plan |=
                 tool["tool_name"] == "update_plan" && tool["status"] == "completed";

@@ -79,6 +79,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
   await expectModelCatalogForm(page);
+  await expectDeviceGatewayManagement(page);
   const navigation = page.getByRole("complementary", { name: "会话导航" });
   const session_header = page.locator('header[aria-label="会话标题栏"]');
   const seeded_session = navigation.getByRole("button", { name: /^M2 临时会话(?:\s|$)/ });
@@ -185,7 +186,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await composer.fill("TOOL_CASE");
   await composer.press("Enter");
   await expect(page.getByText("工具执行完成。", { exact: true })).toBeVisible();
-  await expect(session_header.getByText("空闲", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(session_header.getByText("空闲", { exact: true })).toHaveCount(0);
 
   const context_panel = page.getByRole("complementary", { name: "当前上下文" });
   await expect(context_panel.getByText("图片理解").locator("xpath=following-sibling::*[1]")).toContainText("当前不可用");
@@ -309,6 +310,31 @@ async function expectModelCatalogForm(page: Page): Promise<void> {
 
   page.once("dialog", (dialog) => dialog.accept());
   await settings.getByRole("button", { name: "取消" }).click();
+  await settings.getByRole("button", { name: "关闭设置" }).click();
+}
+
+async function expectDeviceGatewayManagement(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByRole("button", { name: "智能终端", exact: true }).click();
+  await expect(settings.getByText("语音识别").locator("xpath=following-sibling::*[1]"))
+    .toHaveText("不可用");
+  await expect(settings.getByText("语音播放").locator("xpath=following-sibling::*[1]"))
+    .toHaveText("不可用");
+
+  const access = settings.getByRole("switch", { name: "智能终端接入" });
+  await expect(access).toHaveAttribute("aria-checked", "false");
+  await access.click();
+  await expect(access).toHaveAttribute("aria-checked", "true");
+
+  await settings.getByRole("button", { name: "添加设备", exact: true }).click();
+  await expect(settings.getByText("正在等待终端发起配对…", { exact: true })).toBeVisible();
+  await settings.getByRole("button", { name: "结束添加", exact: true }).click();
+  await expect(settings.getByText("点击“添加设备”后，附近未配对终端才能申请接入。", { exact: true }))
+    .toBeVisible();
+
+  await access.click();
+  await expect(access).toHaveAttribute("aria-checked", "false");
   await settings.getByRole("button", { name: "关闭设置" }).click();
 }
 

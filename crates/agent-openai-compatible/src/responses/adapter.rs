@@ -21,6 +21,15 @@ pub(crate) enum NormalizedReasoningShape {
     PlainTextContent,
 }
 
+/// `response.reasoning_text.*` 事件在最终 reasoning item 中对应的字段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReasoningTextProjection {
+    /// 事件流对应最终 item 的 `content[].reasoning_text`。
+    Content,
+    /// 事件流是最终 item `summary[]` 的增量表达。
+    Summary,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpaqueReasoningPolicy {
     None,
@@ -44,6 +53,7 @@ pub struct ResponsesProtocolAdapter {
     pub(crate) tool_image_projection: ToolImageProjection,
     pub(crate) tool_schema_dialect: ToolSchemaDialect,
     pub(crate) normalized_reasoning_shape: NormalizedReasoningShape,
+    pub(crate) reasoning_text_projection: ReasoningTextProjection,
     pub(crate) include_encrypted_reasoning: bool,
     pub(crate) opaque_reasoning: OpaqueReasoningPolicy,
     pub(crate) route_fingerprint: Option<String>,
@@ -66,6 +76,7 @@ impl ResponsesProtocolAdapter {
             tool_image_projection: ToolImageProjection::Unsupported,
             tool_schema_dialect: ToolSchemaDialect::OpenAiFunctionSubset,
             normalized_reasoning_shape: NormalizedReasoningShape::SummaryWithItemId,
+            reasoning_text_projection: ReasoningTextProjection::Content,
             include_encrypted_reasoning: false,
             opaque_reasoning: OpaqueReasoningPolicy::None,
             route_fingerprint: None,
@@ -101,6 +112,7 @@ impl ResponsesProtocolAdapter {
     pub fn qwen() -> Self {
         Self {
             tool_image_projection: ToolImageProjection::AggregatedUserInput,
+            reasoning_text_projection: ReasoningTextProjection::Summary,
             ..Self::openai_compatible(
                 ProviderId::new("dashscope").expect("static DashScope provider id"),
             )
@@ -108,10 +120,15 @@ impl ResponsesProtocolAdapter {
     }
 
     /// 已由本地真实验证锁定的 Kimi Code Responses 方言。
+    ///
+    /// K3 的 reasoning 完成 item 会携带非空 `encrypted_content`；该原生 item 必须按精确路由
+    /// 保存并在后续模型 step 回放，不能只保留可见 reasoning summary。
     pub fn kimi() -> Self {
         Self {
             function_output_shape: FunctionOutputShape::ContentParts,
             tool_image_projection: ToolImageProjection::NativeFunctionOutput,
+            include_encrypted_reasoning: true,
+            opaque_reasoning: OpaqueReasoningPolicy::PreserveEncryptedItem,
             ..Self::openai_compatible(
                 ProviderId::new("moonshot").expect("static Moonshot provider id"),
             )

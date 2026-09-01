@@ -1,4 +1,7 @@
 import type {
+  DeviceGatewayCommand,
+  DeviceGatewayCommandResult,
+  DeviceGatewayEvent,
   RuntimeCommand,
   RuntimeCommandResult,
   RuntimeErrorInfo,
@@ -7,11 +10,19 @@ import type {
 } from "../generated/assistant-protocol";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
-type CommandResponse = {
+type RuntimeCommandResponse = {
   readonly request_id: string;
   readonly result: {
     readonly scope: "runtime";
     readonly payload: RuntimeCommandResult;
+  };
+};
+
+type DeviceGatewayCommandResponse = {
+  readonly request_id: string;
+  readonly result: {
+    readonly scope: "device_gateway";
+    readonly payload: DeviceGatewayCommandResult;
   };
 };
 
@@ -32,6 +43,7 @@ export class RuntimeClientError extends Error {
 
 export type RuntimeEventListener = {
   readonly onEvent: (event: RuntimeEventEnvelope) => void;
+  readonly onDeviceGatewayEvent: (event: DeviceGatewayEvent) => void;
   readonly onGap: () => void;
 };
 
@@ -72,7 +84,7 @@ export class RuntimeClient {
     if (!response.ok) {
       throw await decodeCommandFailure(response);
     }
-    const body = (await response.json()) as CommandResponse;
+    const body = (await response.json()) as RuntimeCommandResponse;
     if (
       body.request_id !== request_id ||
       body.result.scope !== "runtime" ||
@@ -81,6 +93,30 @@ export class RuntimeClient {
       throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了不匹配的命令结果。");
     }
     return body.result.payload as Extract<RuntimeCommandResult, { readonly type: TType }>;
+  }
+
+  async deviceGatewayCommand(command: DeviceGatewayCommand): Promise<DeviceGatewayCommandResult> {
+    const request_id = createRequestId();
+    const response = await fetch(`${this.#base_url}/commands`, {
+      method: "POST",
+      headers: this.#headers(true),
+      body: JSON.stringify({
+        request_id,
+        command: { scope: "device_gateway", payload: command },
+      }),
+    });
+    if (!response.ok) {
+      throw await decodeCommandFailure(response);
+    }
+    const body = (await response.json()) as DeviceGatewayCommandResponse;
+    if (
+      body.request_id !== request_id
+      || body.result.scope !== "device_gateway"
+      || body.result.payload.type !== command.type
+    ) {
+      throw new RuntimeClientError("protocol_mismatch", "Host 返回了不匹配的设备命令结果。");
+    }
+    return body.result.payload;
   }
 
   async connectEvents(
@@ -162,11 +198,15 @@ function dispatchFrame(frame: string, listener: RuntimeEventListener): void {
     listener.onGap();
     return;
   }
-  if (event_name !== "runtime_event" || data.length === 0) {
+  if (data.length === 0) {
     return;
   }
   try {
-    listener.onEvent(JSON.parse(data.join("\n")) as RuntimeEventEnvelope);
+    if (event_name === "runtime_event") {
+      listener.onEvent(JSON.parse(data.join("\n")) as RuntimeEventEnvelope);
+    } else if (event_name === "device_gateway_event") {
+      listener.onDeviceGatewayEvent(JSON.parse(data.join("\n")) as DeviceGatewayEvent);
+    }
   } catch {
     listener.onGap();
   }

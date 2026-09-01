@@ -30,7 +30,6 @@ pub(crate) fn inject_start_context(
         InternalBoundarySource::SkillActivation,
         InternalBoundaryRequest {
             source: InternalBoundarySource::GoalStart,
-            retention_key: Some(format!("goal:{}", goal_id.as_str())),
             text,
         },
     )?;
@@ -63,7 +62,6 @@ pub(crate) fn inject_resume_context(
         InternalBoundarySource::SkillActivation,
         InternalBoundaryRequest {
             source: InternalBoundarySource::GoalResume,
-            retention_key: Some(format!("goal:{}", goal.id.as_str())),
             text: format!(
                 "{GOAL_RESUME_INJECTION_V1}\nResume autonomous work toward the frozen Goal objective. Treat this visible user message as additional guidance, not as a replacement objective. A normal final answer does not end the Goal.\n{json}"
             ),
@@ -110,7 +108,6 @@ pub(crate) fn create_continuation_message(
     );
     InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
         source: InternalBoundarySource::GoalContinuation,
-        retention_key: Some(format!("goal:{}", goal.id.as_str())),
         text,
     })
     .map(|(message, _)| message)

@@ -6,25 +6,49 @@ use agent_types::{ConversationMessage, ConversationSnapshot};
 use assistant_protocol::{RunId, RunStatus, SessionId};
 
 use crate::{
-    GoalInputBinding, InputOrigin, NewStoredInput, RuntimeError, RuntimeResult,
-    StoredGoalSettlementEffect,
+    RuntimeError, RuntimeResult, StoredGoalSettlementEffect,
     goal::{GoalAgentStatus, GoalControl, GoalPauseReason, GoalState, create_continuation_message},
-    run::allocate_run_id,
     session::SessionState,
 };
 
-/// 当前 Run 已形成可靠终态前，冻结同一事务需要应用的 Goal effect。
-pub(crate) fn prepare_goal_run_settlement(
-    state: &SessionState,
-    session_id: &SessionId,
-    run_id: &RunId,
-    status: RunStatus,
-    conversation: &ConversationSnapshot,
-    new_messages: &[ConversationMessage],
-    finished_at_ms: i64,
-) -> RuntimeResult<Option<StoredGoalSettlementEffect>> {
+/// Goal 门禁对当前 AgentExecution 结果作出的领域决策。
+pub(crate) enum GoalRunDecision {
+    /// 提交 Goal 进度和隐藏推进消息后，在同一 Run 内启动下一次 AgentExecution。
+    Continue {
+        effect: StoredGoalSettlementEffect,
+        message: agent_types::UserMessage,
+    },
+    /// 当前 Run 可以进入后续门禁或最终结算；可选 effect 是终态 Goal 转换。
+    Settle(Option<StoredGoalSettlementEffect>),
+}
+
+/// Goal 门禁判断一次 AgentExecution 结果所需的权威事实。
+pub(crate) struct GoalRunFacts<'a> {
+    pub(crate) state: &'a SessionState,
+    pub(crate) session_id: &'a SessionId,
+    pub(crate) run_id: &'a RunId,
+    pub(crate) status: RunStatus,
+    pub(crate) conversation: &'a ConversationSnapshot,
+    pub(crate) new_messages: &'a [ConversationMessage],
+    /// 本次 AgentExecution 在所属 Run 全局 step 序列中的闭区间。
+    pub(crate) execution_steps: (u32, u32),
+    pub(crate) finished_at_ms: i64,
+}
+
+/// 当前 AgentExecution 结束后，由 Goal 领域决定是否继续同一 Run。
+pub(crate) fn prepare_goal_run_decision(facts: GoalRunFacts<'_>) -> RuntimeResult<GoalRunDecision> {
+    let GoalRunFacts {
+        state,
+        session_id,
+        run_id,
+        status,
+        conversation,
+        new_messages,
+        execution_steps: (execution_start_step, execution_end_step),
+        finished_at_ms,
+    } = facts;
     if matches!(status, RunStatus::Cancelled | RunStatus::Interrupted) {
-        return Ok(None);
+        return Ok(GoalRunDecision::Settle(None));
     }
     let run = state
         .runs
@@ -39,16 +63,16 @@ pub(crate) fn prepare_goal_run_settlement(
             component: "Goal settlement Input",
         })?;
     let Some(binding) = input.stored.goal_binding.as_ref() else {
-        return Ok(None);
+        return Ok(GoalRunDecision::Settle(None));
     };
     let Some(current) = state.goal.as_ref() else {
-        return Ok(None);
+        return Ok(GoalRunDecision::Settle(None));
     };
     if !matches!(current.state, GoalState::Running)
         || current.id != binding.goal_id
         || current.generation != binding.generation
     {
-        return Ok(None);
+        return Ok(GoalRunDecision::Settle(None));
     }
     let signal = state
         .active_run
@@ -62,7 +86,14 @@ pub(crate) fn prepare_goal_run_settlement(
                 && signal.binding.run_id == *run_id
         });
     let mut goal = current.clone();
-    apply_usage(&mut goal, run, conversation, new_messages)?;
+    apply_usage(
+        &mut goal,
+        run,
+        conversation,
+        new_messages,
+        execution_start_step,
+        execution_end_step,
+    )?;
     goal.updated_at_ms = finished_at_ms;
     if status == RunStatus::Failed {
         goal.consecutive_failures = goal.consecutive_failures.checked_add(1).ok_or(
@@ -85,7 +116,8 @@ pub(crate) fn prepare_goal_run_settlement(
                 state,
                 session_id,
                 finished_at_ms,
-            ),
+            )
+            .map(GoalRunDecision::Settle),
             GoalAgentStatus::Blocked => transition(
                 current,
                 goal,
@@ -95,7 +127,8 @@ pub(crate) fn prepare_goal_run_settlement(
                 state,
                 session_id,
                 finished_at_ms,
-            ),
+            )
+            .map(GoalRunDecision::Settle),
         };
     }
     if goal.budget.used_runs >= goal.budget.max_runs {
@@ -106,7 +139,8 @@ pub(crate) fn prepare_goal_run_settlement(
             state,
             session_id,
             finished_at_ms,
-        );
+        )
+        .map(GoalRunDecision::Settle);
     }
     if goal.budget.used_total_tokens >= goal.budget.max_total_tokens {
         return transition(
@@ -116,7 +150,8 @@ pub(crate) fn prepare_goal_run_settlement(
             state,
             session_id,
             finished_at_ms,
-        );
+        )
+        .map(GoalRunDecision::Settle);
     }
     if goal.consecutive_failures >= goal.budget.max_consecutive_failures {
         return transition(
@@ -126,7 +161,8 @@ pub(crate) fn prepare_goal_run_settlement(
             state,
             session_id,
             finished_at_ms,
-        );
+        )
+        .map(GoalRunDecision::Settle);
     }
 
     goal.turn = goal
@@ -136,35 +172,14 @@ pub(crate) fn prepare_goal_run_settlement(
             component: "Goal turn",
         })?;
     let message = create_continuation_message(&goal, run_status_label(status))?;
-    let input_id = allocate_input_id(state)?;
-    let next_run_id = allocate_run_id(state)?;
-    let next_input = NewStoredInput {
-        input_id,
-        run_id: next_run_id,
-        session_id: session_id.clone(),
-        idempotency_key: None,
-        agent_variant: run.variant(),
-        origin: InputOrigin::Runtime,
-        goal_binding: Some(GoalInputBinding {
-            goal_id: goal.id.clone(),
-            generation: goal.generation,
-            turn: goal.turn,
-        }),
-        cross_session_binding: None,
-        skill_activation: None,
-        approval_mode: run.approval_mode(),
+    Ok(GoalRunDecision::Continue {
+        effect: StoredGoalSettlementEffect::Progress {
+            expected_goal_id: current.id.clone(),
+            expected_generation: current.generation,
+            goal: goal.to_stored(session_id.clone()),
+        },
         message,
-        new_goal: None,
-        resumed_goal: None,
-        generated_title: None,
-        accepted_at_ms: finished_at_ms,
-    };
-    Ok(Some(StoredGoalSettlementEffect::Continue {
-        expected_goal_id: current.id.clone(),
-        expected_generation: current.generation,
-        goal: goal.to_stored(session_id.clone()),
-        next_input: Box::new(next_input),
-    }))
+    })
 }
 
 fn apply_usage(
@@ -172,6 +187,8 @@ fn apply_usage(
     run: &crate::run::RunRecord,
     conversation: &ConversationSnapshot,
     new_messages: &[ConversationMessage],
+    execution_start_step: u32,
+    execution_end_step: u32,
 ) -> RuntimeResult<()> {
     goal.budget.used_runs =
         goal.budget
@@ -183,6 +200,10 @@ fn apply_usage(
     let ids = run
         .message_ids()
         .iter()
+        .filter(|message_id| {
+            run.message_step(message_id)
+                .is_some_and(|step| (execution_start_step..=execution_end_step).contains(&step))
+        })
         .cloned()
         .chain(new_messages.iter().map(message_id).cloned())
         .collect::<BTreeSet<_>>();
@@ -235,26 +256,6 @@ fn transition(
         goal: goal.to_stored(session_id.clone()),
         resume_required: !session.session_inputs.is_empty(),
     }))
-}
-
-fn allocate_input_id(state: &SessionState) -> RuntimeResult<assistant_protocol::InputId> {
-    for _ in 0..crate::id::GENERATION_ATTEMPTS {
-        let value =
-            crate::id::generate("i").map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "Goal continuation input id random source",
-            })?;
-        let id = assistant_protocol::InputId::new(value).map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "Goal continuation input id",
-            }
-        })?;
-        if !state.inputs.contains_key(&id) {
-            return Ok(id);
-        }
-    }
-    Err(RuntimeError::InternalStateUnavailable {
-        component: "Goal continuation input id collision",
-    })
 }
 
 fn run_status_label(status: RunStatus) -> &'static str {

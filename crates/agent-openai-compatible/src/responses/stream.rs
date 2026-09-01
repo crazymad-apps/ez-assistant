@@ -8,7 +8,7 @@ use agent_types::{
 };
 use serde_json::Value;
 
-use super::{ResponsesProtocolAdapter, schema::ResponsesUsage};
+use super::{ResponsesProtocolAdapter, adapter::ReasoningTextProjection, schema::ResponsesUsage};
 
 /// Responses SSE item/event 的有序状态机。
 pub(super) struct ResponsesAssembler {
@@ -120,9 +120,11 @@ impl ResponsesAssembler {
             "response.reasoning_summary_text.done" => {
                 self.reasoning_done(event, 0, "summary_index", "text")
             }
-            "response.reasoning_text.delta" => self.reasoning_delta(event, 1, "content_index"),
+            "response.reasoning_text.delta" => {
+                self.reasoning_delta(event, self.reasoning_text_kind(), "content_index")
+            }
             "response.reasoning_text.done" => {
-                self.reasoning_done(event, 1, "content_index", "text")
+                self.reasoning_done(event, self.reasoning_text_kind(), "content_index", "text")
             }
             "response.completed" => self.success_terminal(event, false),
             "response.incomplete" => self.success_terminal(event, true),
@@ -236,7 +238,12 @@ impl ResponsesAssembler {
             "output_text" => TextKind::Output,
             "refusal" => TextKind::Refusal,
             "reasoning_text" => {
-                return self.ensure_reasoning_state(output_index, item_id, 1, content_index);
+                return self.ensure_reasoning_state(
+                    output_index,
+                    item_id,
+                    self.reasoning_text_kind(),
+                    content_index,
+                );
             }
             other => {
                 return Err(protocol(format!(
@@ -256,7 +263,7 @@ impl ResponsesAssembler {
                 return self.finish_reasoning_text(
                     integer(event, "output_index")?,
                     string(event, "item_id")?,
-                    1,
+                    self.reasoning_text_kind(),
                     integer(event, "content_index")?,
                     optional_string(part, "text").unwrap_or_default(),
                 );
@@ -685,7 +692,7 @@ impl ResponsesAssembler {
                             self.finish_reasoning_text(
                                 output_index,
                                 item_id,
-                                1,
+                                self.reasoning_text_kind(),
                                 u64::try_from(content_index)
                                     .map_err(|_| protocol("reasoning content index overflow"))?,
                                 string(part, "text")?,
@@ -710,6 +717,17 @@ impl ResponsesAssembler {
         }
         item.done = true;
         Ok(events)
+    }
+
+    /// 把通用 `reasoning_text` 事件投影到当前方言声明的最终 item 字段。
+    ///
+    /// DashScope Qwen 通过 `reasoning_text` 流式发送内容，却在 `output_item.done` 中把同一内容
+    /// 放入 `summary`；从首个增量开始使用同一 segment，避免生成两份规范 ReasoningPart。
+    fn reasoning_text_kind(&self) -> u8 {
+        match self.adapter.reasoning_text_projection {
+            ReasoningTextProjection::Content => 1,
+            ReasoningTextProjection::Summary => 0,
+        }
     }
 
     fn success_terminal(

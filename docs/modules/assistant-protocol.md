@@ -210,3 +210,29 @@
 cargo test -p assistant-protocol
 cargo clippy -p assistant-protocol --all-targets --all-features -- -D warnings
 ```
+
+## v0.21.0 M1 设备来源与托管增量
+
+- 新增透明字符串 `DeviceId`；它只表示 Runtime 已登记设备的稳定身份，不承载 connection、地址、
+  在线状态或能力摘要。当前设备 Registry 仍是 Runtime/Host 内部领域，公共设备管理 DTO 在 Gateway
+  与 Desktop 管理里程碑按实际调用方补充。
+- `ConversationInputSourceSnapshot` 增加 Desktop 与 Device 变体，Device 投影包含稳定 Device ID、
+  当前展示名、输入模态和本轮冻结输出偏好；来源标签不写入 UserMessage 正文。旧 `user` 变体继续
+  可读，旧持久 User Input 由 Store 安全解释为 Desktop Text/Text。
+- `SessionSummary` 增加可选 `pc_output_hosting`，只投影 Device ID 与当前名称；缺失字段按未托管读取。
+  `SetCurrentControllerOutputHosting` 只接受可空 Device ID，不接受 Session ID、toggle、revision 或
+  changed time，结果返回 Runtime 权威 Session 摘要和 `changed`。
+- 公共协议不包含 OutputCycle、`ReplyRoute`、`ResolvedChannelDelivery`、Dispatcher、连接 capability、在线状态、音频帧或
+  Delivery Store。Desktop 规范 Conversation/SSE 仍是所有显式输入和最终输出的完整展示基线；
+  设备附加投递属于 Runtime 与 Host 的内部端口。
+
+## v0.21.0 M4 Desktop Gateway 投影
+
+- `DeviceGatewaySnapshot` 是 Desktop 设备管理的单一 Host 投影：稳定设备与 PC 托管来自 Runtime，
+  接入状态、候选、认证连接和协商能力来自 Gateway；Desktop 不组合或持久化第二套业务事实。
+- `DeviceGatewayEvent::Changed` 只表示组合快照失效，不承载候选、设备正文或状态增量。客户端收到后
+  重新读取快照；事件丢失或 SSE gap 仍由同一权威读取恢复。
+- `DeviceSpeechServicesSnapshot` 只公开 ASR/TTS 的 `ready | degraded | unavailable` 状态，不公开
+  Provider、模型、声音、密钥或内部错误。M4 尚未装配语音服务，因此 Host 明确投影 unavailable。
+- Gateway Command 是用户管理设备接入的 Host 交互意图，不属于 Agent 指令；配对码继续使用脱敏
+  类型并只出现在确认请求中，不进入快照、事件或 TypeScript 调试输出。

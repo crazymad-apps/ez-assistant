@@ -69,6 +69,18 @@ fn model_catalog() -> ModelCatalog {
 }
 
 #[test]
+fn host_speech_table_is_tolerated_but_not_compiled_into_runtime_config() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"fixture\"\n{}\n\
+         [speech.asr]\nprovider = \"dashscope\"\nmodel = \"asr\"\ncredential = \"secret\"\ntimeout_ms = 30000\n",
+        model_table("fixture", "fixture", 4096)
+    );
+    let compilation = compile_runtime_config(&document);
+    assert!(compilation.active().is_some());
+    assert!(compilation.projection().issues.is_empty());
+}
+
+#[test]
 fn catalog_match_and_complete_reasoning_override_follow_precedence() {
     let document = format!(
         "schema_version = 1\ndefault_model = \"reasoner\"\n{}",

@@ -17,6 +17,7 @@ use agent_types::ToolChoice;
 use assistant_protocol::{AgentVariant, ApprovalMode, ModelKey};
 
 use super::AssistantRuntime;
+use super::channel::SpeakTool;
 use super::tool_assembly::{RunToolAssembly, RunToolContribution};
 use crate::{
     ChildTaskWorkspaceFactory, ModelProtocol, ModelServiceFactoryRequest,
@@ -361,6 +362,7 @@ pub(super) struct CompiledRunAgent {
     reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
     skill_activation_latch: Arc<SkillActivationLatch>,
+    can_speak: bool,
 }
 
 pub(super) struct CompiledRunParts {
@@ -370,6 +372,7 @@ pub(super) struct CompiledRunParts {
     pub(super) reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     pub(super) goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
     pub(super) skill_activation_latch: Arc<SkillActivationLatch>,
+    pub(super) can_speak: bool,
 }
 
 impl CompiledRunAgent {
@@ -381,6 +384,7 @@ impl CompiledRunAgent {
             reasoning_effort: self.reasoning_effort,
             goal_signal_latch: self.goal_signal_latch,
             skill_activation_latch: self.skill_activation_latch,
+            can_speak: self.can_speak,
         }
     }
 }
@@ -395,7 +399,7 @@ pub(super) struct RunAuthorizationInput {
     pub(super) events: ObservationCoordinator,
     pub(super) goal_binding: Option<GoalRunBinding>,
     pub(super) input_origin: crate::InputOrigin,
-    pub(super) cross_session_binding: Option<crate::CrossSessionInputBinding>,
+    pub(super) cross_session: Option<crate::CrossSessionInputEnvelope>,
 }
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
@@ -408,6 +412,7 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) store: Arc<dyn RuntimeStore>,
     pub(super) recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     pub(super) controller_tools: Arc<super::controller::ControllerToolCoordinator>,
+    pub(super) output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
 }
 
 impl AssistantRuntime {
@@ -613,9 +618,23 @@ pub(super) fn compile_run_agent(
     // 不具备 Tool Call 能力的模型维持历史纯文本路径。父 Agent 在这里加入 Run 级
     // Runtime 工具；child 保留 Base ToolSet，并在具体 child execution 创建后追加绑定
     // 独立 ActivationLatch 的 load_skill，避免 sibling 共享激活状态。
+    let can_speak = compiled.model.capabilities().tool_calls
+        && session.role()? == crate::SessionRole::Controller;
     let mut tool_assembly = RunToolAssembly::default();
     tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
     if compiled.model.capabilities().tool_calls {
+        if session.role()? == crate::SessionRole::Controller {
+            tool_assembly.contribute(
+                RunToolContribution::tool(SpeakTool::new(
+                    session.clone(),
+                    authorization.run_id.clone(),
+                    resources.output_dispatcher.clone(),
+                ))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "speak tool definition",
+                })?,
+            );
+        }
         tool_assembly.contribute(
             RunToolContribution::tool(LoadSkillTool::new(
                 session.skill_catalog().clone(),
@@ -644,7 +663,7 @@ pub(super) fn compile_run_agent(
         );
         let controller_tools = if session.role()? == crate::SessionRole::Controller
             && authorization.input_origin == crate::InputOrigin::User
-            && authorization.cross_session_binding.is_none()
+            && authorization.cross_session.is_none()
         {
             Some(
                 super::controller::controller_tool_set(
@@ -772,6 +791,7 @@ pub(super) fn compile_run_agent(
         reasoning_effort: frozen_reasoning_effort,
         goal_signal_latch,
         skill_activation_latch,
+        can_speak,
     })
 }
 

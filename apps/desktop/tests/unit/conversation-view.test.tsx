@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEvent } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
@@ -64,6 +64,42 @@ describe("ConversationView scroll anchoring", () => {
     );
     expect(screen.getByText("会话报告 · 已完成")).toBeInTheDocument();
     expect(screen.getByText("关联目标")).toBeInTheDocument();
+
+    rerender(
+      <UserMessage
+        attachments={[]}
+        message={{
+          message_id: "device-1",
+          input_id: "input-1",
+          text: "从终端发起的问题",
+          attachment_ids: [],
+          source: {
+            type: "device",
+            device_id: "device-1",
+            device_name: "客厅终端",
+            modality: "speech_transcript",
+            requested_output: "audio",
+          },
+          created_at_ms: 3,
+        }}
+        on_attachment_click={vi.fn()}
+        on_source_open={open}
+      />,
+    );
+    const message = screen.getByText("从终端发起的问题");
+    const source_label = screen.getByRole("button", { name: "查看消息来源：客厅终端" });
+    expect(source_label).toHaveTextContent(/^客厅终端$/);
+    expect(screen.queryByText("客厅终端 · 语音")).not.toBeInTheDocument();
+    expect(message.compareDocumentPosition(source_label) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    fireEvent.click(source_label);
+    const detail = screen.getByRole("dialog", { name: "消息来源详情" });
+    expect(detail).toHaveTextContent("客厅终端");
+    expect(within(detail).getByText("设备 ID").nextElementSibling).toHaveTextContent("device-1");
+    expect(within(detail).getByText("输入方式").nextElementSibling).toHaveTextContent("语音转写");
+    expect(within(detail).getByText("回复偏好").nextElementSibling).toHaveTextContent("语音");
+    fireEvent.click(within(detail).getByRole("button", { name: "关闭消息来源详情" }));
+    expect(screen.queryByRole("dialog", { name: "消息来源详情" })).not.toBeInTheDocument();
   });
 
   it("collapses only overflowing proxy reports and allows expanding them", () => {
@@ -531,6 +567,80 @@ describe("ConversationView scroll anchoring", () => {
     expect(store.navigation.selected_child_task_id).toBe("child-1");
   });
 
+  it("does not render a child task without its parent tool call in the loaded message list", () => {
+    const store = conversationStore();
+    store.projection.applySessionSnapshot({
+      observed_sequence: 4,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        child_tasks: [childTaskItem()],
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 1,
+          items: [{
+            type: "assistant",
+            message_id: "assistant-other-run",
+            run_id: "run-other",
+            attempt: 1,
+            created_at_ms: 1,
+            finished_at_ms: 2,
+            status: "completed",
+            segments: [{ type: "text", part_id: "other-text", text: "当前分页内容" }],
+            usage: null,
+            can_fork: true,
+            fork_point: "assistant-other-run",
+            feedback: null,
+          }],
+          previous_cursor: "older-page",
+          has_more: true,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    expect(screen.getByText("当前分页内容")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看子任务：检查恢复一致性" })).not.toBeInTheDocument();
+  });
+
+  it("does not attach a child task to its parent run when the exact tool call is absent", () => {
+    const store = conversationStore();
+    store.projection.applySessionSnapshot({
+      observed_sequence: 4,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        child_tasks: [childTaskItem()],
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 1,
+          items: [{
+            type: "assistant",
+            message_id: "assistant-parent-without-tool",
+            run_id: "run-parent",
+            attempt: 1,
+            created_at_ms: 1,
+            finished_at_ms: 2,
+            status: "completed",
+            segments: [{ type: "text", part_id: "parent-text", text: "父回合没有对应工具调用" }],
+            usage: null,
+            can_fork: true,
+            fork_point: "assistant-parent-without-tool",
+            feedback: null,
+          }],
+          previous_cursor: null,
+          has_more: false,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    expect(screen.getByText("父回合没有对应工具调用")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看子任务：检查恢复一致性" })).not.toBeInTheDocument();
+  });
+
   it("groups child-agent steps into one execution-level action bar", () => {
     const store = conversationStore();
     store.navigation.openChildTask("child-1");
@@ -606,7 +716,7 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.getAllByRole("button", { name: "收起消息" })).toHaveLength(1);
   });
 
-  it("shows and opens a live child task before the session snapshot settles", () => {
+  it("shows and opens a live child task from its live parent tool call", () => {
     let frame: FrameRequestCallback | null = null;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       frame = callback;
@@ -616,6 +726,17 @@ describe("ConversationView scroll anchoring", () => {
     const store = conversationStore();
 
     emitLive(store, [{
+      type: "run_started",
+      session_id: "session-1",
+      run_id: "run-live-parent",
+    }, {
+      type: "tool_proposed",
+      session_id: "session-1",
+      run_id: "run-live-parent",
+      step: 1,
+      call_id: "call-delegate",
+      tool_name: "delegate_task",
+    }, {
       type: "child_task_event",
       session_id: "session-1",
       parent_run_id: "run-live-parent",
@@ -642,7 +763,6 @@ describe("ConversationView scroll anchoring", () => {
 
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
-    expect(screen.getByText("当前主会话")).toBeVisible();
     const entry = screen.getByRole("button", { name: "查看子任务：实时检查两个项目" });
     fireEvent.click(entry);
     expect(store.navigation.selected_child_task_id).toBe("child-live");
@@ -705,6 +825,11 @@ describe("ConversationView scroll anchoring", () => {
           owner: { type: "main_session", session_id: "session-1" },
           generation: 2,
           items: [{
+            type: "user",
+            message_id: "compacted-message",
+            text: "压缩前仍可见",
+            created_at_ms: 1,
+          }, {
             type: "context_summary",
             message_id: "summary-message",
             text: "这是供模型继续工作的上下文摘要。",

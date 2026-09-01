@@ -900,25 +900,20 @@ fn validate_model_activations(
     }) {
         return Err(invalid_data("model skill activation is inconsistent"));
     }
-    for activation in activations {
-        let count = message
-            .parts
-            .iter()
-            .filter(|part| {
-                matches!(
-                    part,
-                    UserPart::InternalContext(part)
-                        if part.kind == "skill_activation"
-                            && part.retention_key.as_deref()
-                                == Some(&format!("skill:{}", activation.name.as_str()))
-                )
-            })
-            .count();
-        if count != 1 {
-            return Err(invalid_data(
-                "model skill activation boundary is inconsistent",
-            ));
-        }
+    let boundary_count = message
+        .parts
+        .iter()
+        .filter(|part| {
+            matches!(
+                part,
+                UserPart::InternalContext(part) if part.kind == "skill_activation"
+            )
+        })
+        .count();
+    if boundary_count != activations.len() {
+        return Err(invalid_data(
+            "model skill activation boundary is inconsistent",
+        ));
     }
     Ok(())
 }

@@ -86,17 +86,16 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
         </article>
       </div>
       <article className={styles.diagnostic_card}>
-        <div>
+        <div className={styles.diagnostic_heading}>
           <h4>诊断信息</h4>
-          <p>{status?.config_path ?? "尚未创建运行时配置文件"}</p>
+          <p title={status?.config_path ?? undefined}>
+            {status?.config_path ?? "尚未创建运行时配置文件"}
+          </p>
         </div>
         <button onClick={() => void copyDiagnostics()} type="button">复制诊断</button>
       </article>
       <article className={styles.lifecycle_card}>
-        <div>
-          <h4>桌面生命周期</h4>
-          <p>关闭窗口不会默认停止运行时。</p>
-        </div>
+        <h4>桌面生命周期</h4>
         <SelectionPopover
           aria_label="关闭主窗口时"
           content_width="content"

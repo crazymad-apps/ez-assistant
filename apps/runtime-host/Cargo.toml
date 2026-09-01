@@ -25,27 +25,40 @@ agent-types = { path = "../../crates/agent-types" }
 assistant-protocol = { path = "../../crates/assistant-protocol" }
 assistant-runtime = { path = "../../crates/assistant-runtime" }
 async-stream.workspace = true
-axum = { workspace = true, features = ["multipart"] }
+axum = { workspace = true, features = ["multipart", "ws"] }
+axum-server = { workspace = true, features = ["tls-rustls"] }
 base64.workspace = true
 clap.workspace = true
 dirs.workspace = true
 futures-core.workspace = true
+futures-util.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
 image.workspace = true
 infer.workspace = true
 libc.workspace = true
+mdns-sd = { version = "0.21.0", default-features = false, features = ["async"] }
+pakery-core = "0.2.1"
+pakery-crypto = { version = "0.2.1", default-features = false, features = ["std", "p256", "spake2"] }
+pakery-spake2 = { version = "0.2.1", features = ["os_rng"] }
+rand_core.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+rustls-pki-types = { version = "1.14.0", features = ["std"] }
 rusqlite = { version = "0.40.1", features = ["bundled"], default-features = false }
 schemars = "1.2.1"
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
 sha2 = "0.10.9"
+ed25519-dalek = "3.0.0"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt-multi-thread", "signal"] }
 tokio-util.workspace = true
 tempfile.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 agent-testkit = { path = "../../crates/agent-testkit" }
+pakery-spake2 = { version = "0.2.1", features = ["test-utils"] }
 reqwest = { workspace = true, features = ["blocking", "multipart"] }
-toml.workspace = true

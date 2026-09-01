@@ -4,6 +4,7 @@ import type {
   ConversationItem,
   ConversationPage,
   RuntimeEventEnvelope,
+  SessionViewSnapshot,
 } from "../../src/generated/assistant-protocol";
 import { conversationItemId, RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
 
@@ -106,6 +107,30 @@ describe("RuntimeProjectionStore", () => {
     expect(history?.items.map(conversationItemId)).toEqual(["new-message"]);
   });
 
+  it("uses the server page as authority after a compacted generation change", () => {
+    const store = new RuntimeProjectionStore();
+    store.applyLocatedConversationPage("session-1", {
+      observed_sequence: 4,
+      value: page(1, [assistant("old-memory-only-message")], null, false),
+    });
+    const compacted = page(
+      2,
+      [contextSummary("summary-1"), assistant("retained-message")],
+      "server-history-cursor",
+      true,
+    );
+
+    store.applySessionSnapshot({
+      observed_sequence: 5,
+      value: { session: { session_id: "session-1" }, conversation: compacted } as unknown as SessionViewSnapshot,
+    });
+
+    const history = store.conversation_histories.get("session-1");
+    expect(history?.items.map(conversationItemId)).toEqual(["summary-1", "retained-message"]);
+    expect(history?.previous_cursor).toBe("server-history-cursor");
+    expect(history?.has_more).toBe(true);
+  });
+
 });
 
 function envelope(sequence: number): RuntimeEventEnvelope {
@@ -145,5 +170,13 @@ function assistant(message_id: string): ConversationItem {
     can_fork: false,
     fork_point: null,
     feedback: null,
+  };
+}
+
+function contextSummary(message_id: string): ConversationItem {
+  return {
+    type: "context_summary",
+    message_id,
+    text: "summary",
   };
 }

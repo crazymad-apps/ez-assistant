@@ -71,6 +71,29 @@ describe("ContextPanel", () => {
     expect(screen.getByText("综合命中率").nextElementSibling).toHaveTextContent("42.5%");
   });
 
+  it("does not duplicate PC output hosting controls in the context panel", () => {
+    const store = contextStore();
+    const application = store.projection.application!;
+    const controller = {
+      ...application.active_sessions[0]!,
+      role: "controller" as const,
+      pc_output_hosting: { device_id: "device-1", device_name: "客厅终端" },
+    };
+    store.projection.refreshApplicationSnapshot({
+      observed_sequence: 2,
+      value: { ...application, active_sessions: [controller] },
+    });
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: { ...view, session: controller },
+    });
+    renderPanel(store);
+
+    expect(screen.queryByRole("button", { name: "PC 输出托管" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "PC 输出托管目标" })).not.toBeInTheDocument();
+  });
+
   it("previews the frozen System Context as Markdown and can reveal its source text", async () => {
     const store = contextStore();
     const get_system_context = vi.spyOn(store, "getSystemContext").mockResolvedValue({

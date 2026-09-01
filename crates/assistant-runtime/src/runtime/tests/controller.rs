@@ -37,6 +37,58 @@ impl ModelService for FirstCallGatedModel {
     }
 }
 
+/// 首次调用用于挂起主控 Run，后续调用依次驱动目标 Goal 续跑、完成和代理报告。
+struct GatedControllerGoalModel {
+    capabilities: ModelCapabilities,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    calls: AtomicUsize,
+}
+
+impl ModelService for GatedControllerGoalModel {
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn context_window_tokens(&self) -> u64 {
+        8_192
+    }
+
+    fn stream(&self, _request: ModelRequest, _context: ModelCallContext) -> ModelStreamFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        let message = match call {
+            0 => assistant_text("controller-goal-source-final", "controller source finished"),
+            1 => assistant_text("delegated-goal-first-final", "first delegated run finished"),
+            2 => AssistantMessage {
+                id: MessageId::new("delegated-goal-complete-signal").expect("message id"),
+                model: ModelIdentity::new(
+                    ProviderId::new("fixture").expect("provider id"),
+                    "fixture-model",
+                ),
+                parts: vec![AssistantPart::ToolCall(ToolCall {
+                    id: ToolCallId::new("delegated-goal-complete-call").expect("call id"),
+                    name: ToolName::new("update_goal").expect("tool name"),
+                    arguments: json!({"status": "complete", "summary": "delegated work done"}),
+                })],
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+            3 => assistant_text("delegated-goal-completed-final", "delegated Goal completed"),
+            _ => assistant_text("delegated-goal-report-final", "proxy report handled"),
+        };
+        let events = message_events(&message);
+        Box::pin(async move {
+            if call == 0 {
+                entered.notify_one();
+                release.notified().await;
+            }
+            Ok(Box::pin(futures_util::stream::iter(events)) as agent_model::ModelEventStream)
+        })
+    }
+}
+
 #[tokio::test]
 async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
     let model = Arc::new(ScriptedModelService::new(
@@ -186,6 +238,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
             &assistant_protocol::ToolCallId::new("controller-call-1").expect("call id"),
             &target.session.session_id,
             "delegated work".to_owned(),
+            false,
         )
         .await
         .expect("delivery");
@@ -198,13 +251,14 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
             &assistant_protocol::ToolCallId::new("controller-call-1").expect("call id"),
             &target.session.session_id,
             "ignored duplicate body".to_owned(),
+            false,
         )
         .await
         .expect("delivery retry");
     assert_eq!(duplicate.status, "already_accepted");
     assert_eq!(duplicate.input_id, receipt.input_id);
     assert_eq!(
-        crate::runtime::product::queue_snapshot(&target_controller)
+        crate::runtime::product::queue_snapshot(&target_controller, &Default::default())
             .expect("queued delivery")
             .items[0]
             .source,
@@ -253,10 +307,12 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         let state = target_controller.lock_state().expect("target state");
         assert!(state.proxy.is_none());
         assert!(!state.inputs.values().any(|input| {
-            matches!(
-                input.stored.cross_session_binding,
-                Some(crate::CrossSessionInputBinding::ControllerDelivery { .. })
-            )
+            input.stored.cross_session.as_ref().is_some_and(|envelope| {
+                matches!(
+                    envelope.binding,
+                    crate::CrossSessionInputBinding::ControllerDelivery { .. }
+                )
+            })
         }));
         assert!(
             !state
@@ -271,6 +327,173 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         .shutdown(ShutdownRuntimeRequest {})
         .await
         .expect("shutdown");
+}
+
+#[tokio::test]
+async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_report() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let runtime = runtime(Arc::new(GatedControllerGoalModel {
+        capabilities: model_capabilities(true),
+        entered: entered.clone(),
+        release: release.clone(),
+        calls: AtomicUsize::new(0),
+    }));
+    let controller = runtime
+        .create_session_inner(
+            assistant_protocol::CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "主控会话",
+        )
+        .await
+        .expect("controller");
+    let target = runtime
+        .create_session(assistant_protocol::CreateSessionRequest::default())
+        .await
+        .expect("target");
+    let source = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: controller.session.session_id.clone(),
+            message: "delegate a long task".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("controller source input");
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("controller source started");
+    runtime
+        .set_session_proxy(assistant_protocol::SetSessionProxyRequest {
+            session_id: target.session.session_id.clone(),
+            enabled: true,
+        })
+        .await
+        .expect("enable proxy");
+    let target_controller = runtime.session_for_test(&target.session.session_id);
+    target_controller
+        .lock_state()
+        .expect("target state")
+        .queue_paused_by_user = true;
+    let receipt = runtime
+        .controller_tool_coordinator()
+        .deliver(
+            &controller.session.session_id,
+            &source.run.run_id,
+            &assistant_protocol::ToolCallId::new("controller-goal-call").expect("call id"),
+            &target.session.session_id,
+            "complete the delegated long task".to_owned(),
+            true,
+        )
+        .await
+        .expect("start delegated Goal");
+    let target_input_id = assistant_protocol::InputId::new(receipt.input_id).expect("input id");
+    {
+        let state = target_controller.lock_state().expect("target state");
+        assert!(state.goal.is_some());
+        let input = state.inputs.get(&target_input_id).expect("delegated input");
+        assert_eq!(
+            input
+                .stored
+                .goal_binding
+                .as_ref()
+                .expect("Goal binding")
+                .reply_route,
+            Some(crate::ReplyRoute::SessionDefault)
+        );
+        assert_eq!(
+            input
+                .stored
+                .cross_session
+                .as_ref()
+                .expect("cross-session envelope")
+                .reply_route,
+            crate::ReplyRoute::SessionDefault
+        );
+    }
+
+    release.notify_one();
+    assert_eq!(
+        wait_for_terminal(&runtime, &controller.session.session_id, &source.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    target_controller
+        .lock_state()
+        .expect("target state")
+        .queue_paused_by_user = false;
+    runtime
+        .wake_queue(target_controller.clone())
+        .expect("wake delegated Goal");
+    let target_run_id = assistant_protocol::RunId::new(receipt.run_id).expect("run id");
+    assert_eq!(
+        wait_for_terminal(&runtime, &target.session.session_id, &target_run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if target_controller
+                .lock_state()
+                .expect("target state")
+                .goal
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("delegated Goal completed");
+    {
+        let state = target_controller.lock_state().expect("target state");
+        let bindings = state
+            .inputs
+            .values()
+            .filter_map(|input| input.stored.goal_binding.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bindings.len(),
+            1,
+            "delegated Goal continues inside its original Input and Run"
+        );
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| { binding.reply_route == Some(crate::ReplyRoute::SessionDefault) })
+        );
+    }
+    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let report_route = controller_session
+                .lock_state()
+                .expect("controller state")
+                .inputs
+                .values()
+                .find_map(|input| {
+                    let envelope = input.stored.cross_session.as_ref()?;
+                    matches!(
+                        envelope.binding,
+                        crate::CrossSessionInputBinding::ProxyReport { .. }
+                    )
+                    .then_some(envelope.reply_route.clone())
+                });
+            if let Some(route) = report_route {
+                assert_eq!(route, crate::ReplyRoute::SessionDefault);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("delegated Goal proxy report");
 }
 
 #[tokio::test]
@@ -370,14 +593,22 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
                 .expect("controller state")
                 .inputs
                 .values()
-                .find_map(|input| match &input.stored.cross_session_binding {
-                    Some(crate::CrossSessionInputBinding::ProxyReport {
-                        source_run_id, ..
-                    }) => {
-                        assert_eq!(source_run_id, &last.run.run_id);
-                        Some(input.latest_run_id.clone())
+                .find_map(|input| {
+                    match input
+                        .stored
+                        .cross_session
+                        .as_ref()
+                        .map(|envelope| &envelope.binding)
+                    {
+                        Some(crate::CrossSessionInputBinding::ProxyReport {
+                            source_run_id,
+                            ..
+                        }) => {
+                            assert_eq!(source_run_id, &last.run.run_id);
+                            Some(input.latest_run_id.clone())
+                        }
+                        _ => None,
                     }
-                    _ => None,
                 })
             {
                 break run_id;
@@ -399,10 +630,12 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
         .inputs
         .values()
         .filter(|input| {
-            matches!(
-                input.stored.cross_session_binding,
-                Some(crate::CrossSessionInputBinding::ProxyReport { .. })
-            )
+            input.stored.cross_session.as_ref().is_some_and(|envelope| {
+                matches!(
+                    envelope.binding,
+                    crate::CrossSessionInputBinding::ProxyReport { .. }
+                )
+            })
         })
         .count();
     assert_eq!(report_inputs, 1);
@@ -510,13 +743,20 @@ async fn recovery_interrupts_source_and_accepts_proxy_report_before_registry_pub
         .expect("controller state")
         .inputs
         .values()
-        .find_map(|input| match &input.stored.cross_session_binding {
-            Some(crate::CrossSessionInputBinding::ProxyReport {
-                source_run_id,
-                source_run_status,
-                ..
-            }) => Some((source_run_id.clone(), *source_run_status)),
-            _ => None,
+        .find_map(|input| {
+            match input
+                .stored
+                .cross_session
+                .as_ref()
+                .map(|envelope| &envelope.binding)
+            {
+                Some(crate::CrossSessionInputBinding::ProxyReport {
+                    source_run_id,
+                    source_run_status,
+                    ..
+                }) => Some((source_run_id.clone(), *source_run_status)),
+                _ => None,
+            }
         })
         .expect("recovery proxy report");
     assert_eq!(report.0, accepted.run.run_id);
@@ -583,13 +823,15 @@ async fn enabling_proxy_during_an_active_run_reports_that_run_at_settlement() {
                 .inputs
                 .values()
                 .any(|input| {
-                    matches!(
-                        &input.stored.cross_session_binding,
-                        Some(crate::CrossSessionInputBinding::ProxyReport {
-                            source_run_id,
-                            ..
-                        }) if source_run_id == &source.run.run_id
-                    )
+                    input.stored.cross_session.as_ref().is_some_and(|envelope| {
+                        matches!(
+                            &envelope.binding,
+                            crate::CrossSessionInputBinding::ProxyReport {
+                                source_run_id,
+                                ..
+                            } if source_run_id == &source.run.run_id
+                        )
+                    })
                 })
             {
                 break;
@@ -749,10 +991,14 @@ async fn disabling_proxy_during_an_active_run_suppresses_its_report() {
                 .expect("session state")
                 .inputs
                 .values()
-                .any(|input| matches!(
-                    input.stored.cross_session_binding,
-                    Some(crate::CrossSessionInputBinding::ProxyReport { .. })
-                )))
+                .any(
+                    |input| input.stored.cross_session.as_ref().is_some_and(|envelope| {
+                        matches!(
+                            envelope.binding,
+                            crate::CrossSessionInputBinding::ProxyReport { .. }
+                        )
+                    })
+                ))
     );
 }
 
@@ -830,15 +1076,22 @@ async fn wait_for_proxy_report_status(
                 .expect("controller state")
                 .inputs
                 .values()
-                .find_map(|input| match &input.stored.cross_session_binding {
-                    Some(crate::CrossSessionInputBinding::ProxyReport {
-                        source_run_id: candidate,
-                        source_run_status,
-                        ..
-                    }) if candidate == source_run_id => {
-                        Some((*source_run_status, input.latest_run_id.clone()))
+                .find_map(|input| {
+                    match input
+                        .stored
+                        .cross_session
+                        .as_ref()
+                        .map(|envelope| &envelope.binding)
+                    {
+                        Some(crate::CrossSessionInputBinding::ProxyReport {
+                            source_run_id: candidate,
+                            source_run_status,
+                            ..
+                        }) if candidate == source_run_id => {
+                            Some((*source_run_status, input.latest_run_id.clone()))
+                        }
+                        _ => None,
                     }
-                    _ => None,
                 })
             {
                 break status;

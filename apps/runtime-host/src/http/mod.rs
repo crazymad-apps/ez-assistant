@@ -32,10 +32,14 @@ use self::{
         resolve_child_tool_file_native_path, resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
+use crate::{device::DeviceGatewayHandle, speech::SpeechServiceHandle};
 
 pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Desktop HTTP 路由共享的应用状态。
+///
+/// Runtime 持有业务权威状态，Gateway/Speech 句柄只桥接 Host 子系统；本结构不缓存它们的第二份投影。
 #[derive(Clone)]
 pub(crate) struct HttpState {
     runtime: Arc<AssistantRuntime>,
@@ -43,24 +47,60 @@ pub(crate) struct HttpState {
     authority: Arc<str>,
     base_url: Arc<str>,
     upload_staging_directory: Arc<PathBuf>,
+    device_gateway: DeviceGatewayHandle,
+    speech: SpeechServiceHandle,
     shutdown: CancellationToken,
+}
+
+/// HTTP listener 建立前即可冻结的端点与认证配置。
+///
+/// 它不含 Runtime、Gateway 等服务句柄，便于 Server 先绑定端口再完成应用状态装配。
+#[derive(Clone)]
+pub(crate) struct HttpEndpointState {
+    access_token: Arc<str>,
+    authority: Arc<str>,
+    base_url: Arc<str>,
+    upload_staging_directory: Arc<PathBuf>,
+}
+
+impl HttpEndpointState {
+    pub(crate) fn new(
+        access_token: &str,
+        authority: String,
+        base_url: String,
+        runtime_home: PathBuf,
+    ) -> Self {
+        Self {
+            access_token: Arc::from(access_token),
+            authority: Arc::from(authority),
+            base_url: Arc::from(base_url),
+            upload_staging_directory: Arc::new(runtime_home.join("data/staging/uploads")),
+        }
+    }
 }
 
 impl HttpState {
     pub(crate) fn new(
         runtime: Arc<AssistantRuntime>,
-        access_token: &str,
-        authority: String,
-        base_url: String,
-        runtime_home: PathBuf,
+        endpoint: HttpEndpointState,
+        device_gateway: DeviceGatewayHandle,
+        speech: SpeechServiceHandle,
         shutdown: CancellationToken,
     ) -> Self {
+        let HttpEndpointState {
+            access_token,
+            authority,
+            base_url,
+            upload_staging_directory,
+        } = endpoint;
         Self {
             runtime,
-            access_token: Arc::from(access_token),
-            authority: Arc::from(authority),
-            base_url: Arc::from(base_url),
-            upload_staging_directory: Arc::new(runtime_home.join("data/staging/uploads")),
+            access_token,
+            authority,
+            base_url,
+            upload_staging_directory,
+            device_gateway,
+            speech,
             shutdown,
         }
     }

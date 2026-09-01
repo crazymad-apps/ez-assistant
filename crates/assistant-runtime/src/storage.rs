@@ -25,14 +25,16 @@ pub use conversation::{
     ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
     ConversationSearchScope, ConversationWindowRequest, RewriteGoalEffect, RewriteResult,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    execution_context_from_product_history, merge_context_replacement_with_product_history,
 };
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
-    AcceptedInput, CompletedToolExchange, CrossSessionInputBinding, GoalInputBinding,
-    InputMessageValidationError, InputOrigin, NewStoredInput, NewStoredRunAttempt,
-    PendingToolExchange, QueuePriorityChange, StoredGoalSettlementEffect, StoredInput,
-    StoredInputState, StoredRun, StoredRunSettlement, StoredRunSettlementResult,
-    ToolExecutionStart, UserMessageCommit, validate_input_message,
+    AcceptedInput, CompletedToolExchange, CrossSessionInputBinding, CrossSessionInputEnvelope,
+    GoalInputBinding, InputMessageValidationError, InputOrigin, NewStoredInput,
+    NewStoredRunAttempt, PendingToolExchange, QueuePriorityChange, StoredGoalSettlementEffect,
+    StoredInput, StoredInputState, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, StoredRunSettlementResult, ToolExecutionStart, UserMessageCommit,
+    validate_input_message, validate_input_message_with_channel_source,
 };
 pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,

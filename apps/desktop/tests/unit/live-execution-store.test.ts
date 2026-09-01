@@ -82,6 +82,52 @@ describe("LiveExecutionStore", () => {
     expect(store.childTasksForSession("session-1")[0]?.title).toBe("实时子任务");
   });
 
+  it("removes child task projections absent from the authoritative session view", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.buffer(envelope(1, {
+      type: "child_task_event",
+      session_id: "session-1",
+      parent_run_id: "run-parent",
+      child_task_id: "child-stale",
+      event: {
+        type: "created",
+        task: {
+          child_task_id: "child-stale",
+          session_id: "session-1",
+          parent_run_id: "run-parent",
+          parent_tool_call_id: "call-delegate",
+          title: "待清理子任务",
+          status: "accepted",
+          variant: "build",
+          cancel_requested: false,
+          final_text: "",
+          error: null,
+          created_at_ms: 1,
+          started_at_ms: null,
+          finished_at_ms: null,
+        },
+      },
+    }));
+
+    expect(store.childTasksForSession("session-1")).toHaveLength(1);
+    expect(store.runForChildTask("child-stale")).not.toBeNull();
+
+    store.reconcileSession({
+      session: { session_id: "session-1" },
+      active_run: null,
+      child_tasks: [],
+      conversation: { items: [] },
+    } as unknown as SessionViewSnapshot);
+
+    expect(store.childTasksForSession("session-1")).toHaveLength(0);
+    expect(store.runForChildTask("child-stale")).toBeNull();
+  });
+
   it("preserves reasoning, text and tool groups in event order", () => {
     let frame: FrameRequestCallback | null = null;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

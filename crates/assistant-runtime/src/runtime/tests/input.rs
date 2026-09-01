@@ -79,6 +79,13 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         panic!("variant context must follow user-visible parts")
     };
     assert_eq!(injected.text, crate::agent_variant::PLAN_INJECTION_V1);
+    assert!(
+        user.parts.iter().all(|part| !matches!(
+            part,
+            UserPart::InternalContext(part) if part.kind == "channel_input"
+        )),
+        "Desktop input must not receive channel metadata injection"
+    );
 }
 
 #[tokio::test]

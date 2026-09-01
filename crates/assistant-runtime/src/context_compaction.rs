@@ -26,15 +26,13 @@ use crate::{
 /// 防止 Provider 持续报告 overflow 时形成无界“压缩—重试”循环。
 pub(crate) const MAX_AUTOMATIC_COMPACTIONS: u32 = 2;
 const SUMMARY_OUTPUT_TOKENS: u32 = 1_024;
-const PARENT_MINIMUM_RECENT_USER_TURNS: u32 = 1;
-const CHILD_MINIMUM_RECENT_USER_TURNS: u32 = 0;
+const MINIMUM_RECENT_USER_TURNS: u32 = 1;
 
 /// 父、子 Agent 共用的冻结压缩能力；它复用本 Run 的模型服务和 System Prompt。
 pub(crate) struct RuntimeContextCompactor {
     model: Arc<dyn ModelService>,
     system_prompt: SystemPromptSnapshot,
     strategy: RollingSummarySameModel,
-    active_turn_fallback: Option<RollingSummarySameModel>,
 }
 
 impl RuntimeContextCompactor {
@@ -42,46 +40,32 @@ impl RuntimeContextCompactor {
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
     ) -> Self {
-        let mut compactor = Self::new(model, system_prompt, PARENT_MINIMUM_RECENT_USER_TURNS);
-        compactor.active_turn_fallback = Some(active_turn_strategy());
-        compactor
+        Self::new(model, system_prompt)
     }
 
-    /// 手动压缩保留最近一个完整 User Turn，且不启用活动 Turn fallback。
+    /// 手动压缩与自动压缩都原样保留最近一个 User Turn。
     pub(crate) fn for_manual(
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
     ) -> Self {
-        Self::new(model, system_prompt, PARENT_MINIMUM_RECENT_USER_TURNS)
+        Self::new(model, system_prompt)
     }
 
-    /// child 只有一条自包含 User Message；保留一个 Turn 会让整段历史永远不可压缩。
+    /// child 与 parent 使用相同的最近一轮规则；单轮自身溢出的压缩留待后续版本完善。
     pub(crate) fn for_child(
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
     ) -> Self {
-        Self::new(model, system_prompt, CHILD_MINIMUM_RECENT_USER_TURNS)
+        Self::new(model, system_prompt)
     }
 
-    fn new(
-        model: Arc<dyn ModelService>,
-        system_prompt: SystemPromptSnapshot,
-        minimum_recent_user_turns: u32,
-    ) -> Self {
-        let policy = if minimum_recent_user_turns == CHILD_MINIMUM_RECENT_USER_TURNS {
-            RollingSummaryPolicy::for_active_continuation(
-                SUMMARY_OUTPUT_TOKENS,
-                minimum_recent_user_turns,
-            )
-        } else {
-            RollingSummaryPolicy::new(SUMMARY_OUTPUT_TOKENS, minimum_recent_user_turns)
-        }
-        .expect("static Runtime compaction policy must be valid");
+    fn new(model: Arc<dyn ModelService>, system_prompt: SystemPromptSnapshot) -> Self {
+        let policy = RollingSummaryPolicy::new(SUMMARY_OUTPUT_TOKENS, MINIMUM_RECENT_USER_TURNS)
+            .expect("static Runtime compaction policy must be valid");
         Self {
             model,
             system_prompt,
             strategy: RollingSummarySameModel::new(policy),
-            active_turn_fallback: None,
         }
     }
 
@@ -90,25 +74,10 @@ impl RuntimeContextCompactor {
         snapshot: ConversationSnapshot,
         cancellation: CancellationToken,
     ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
-        let outcome = self
-            .compact_once(snapshot.clone(), cancellation.clone())
-            .await?;
+        let outcome = self.compact_once(snapshot, cancellation).await?;
         match outcome {
             StrategyOutcome::Candidate(candidate) => Ok(candidate.replacement),
-            StrategyOutcome::NoOp { .. } => {
-                let Some(fallback) = &self.active_turn_fallback else {
-                    return Err(RuntimeCompactionError::NoCompressibleHistory);
-                };
-                match fallback
-                    .compact(self.compaction_input(&snapshot)?, cancellation)
-                    .await?
-                {
-                    StrategyOutcome::Candidate(candidate) => Ok(candidate.replacement),
-                    StrategyOutcome::NoOp { .. } => {
-                        Err(RuntimeCompactionError::NoCompressibleHistory)
-                    }
-                }
-            }
+            StrategyOutcome::NoOp { .. } => Err(RuntimeCompactionError::NoCompressibleHistory),
         }
     }
 
@@ -171,15 +140,6 @@ pub(crate) enum ManualCompactionCandidate {
         compacted_message_count: u64,
         retained_message_count: u64,
     },
-}
-
-fn active_turn_strategy() -> RollingSummarySameModel {
-    let policy = RollingSummaryPolicy::for_active_continuation(
-        SUMMARY_OUTPUT_TOKENS,
-        CHILD_MINIMUM_RECENT_USER_TURNS,
-    )
-    .expect("static active-turn compaction policy must be valid");
-    RollingSummarySameModel::new(policy)
 }
 
 #[derive(Debug, Error)]
@@ -393,8 +353,7 @@ pub(crate) async fn compact_parent_context(
             .replace_completed(replacement.clone())
             .map_err(|_| RuntimeCompactionError::Projection)?;
         state.persisted_message_count = journal.message_count();
-        state.message_count = u64::try_from(state.persisted_message_count)
-            .map_err(|_| RuntimeCompactionError::Projection)?;
+        state.message_count = committed.product_message_count;
         state.body_generation = committed.result_generation;
         Ok(())
     })();
@@ -421,7 +380,7 @@ pub(crate) async fn compact_child_context(
     task: &crate::delegation::ChildTaskRecord,
     store: &dyn RuntimeStore,
     cancellation: CancellationToken,
-) -> Result<ConversationSnapshot, RuntimeCompactionError> {
+) -> Result<(ConversationSnapshot, u64), RuntimeCompactionError> {
     let snapshot = {
         let state = task
             .lock_state()
@@ -449,7 +408,7 @@ pub(crate) async fn compact_child_context(
             return Err(RuntimeCompactionError::Projection);
         }
     }
-    store
+    let committed = store
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::ChildTask {
                 session_id: task.session_id().clone(),
@@ -462,7 +421,7 @@ pub(crate) async fn compact_child_context(
         .await
         .map_err(|_| RuntimeCompactionError::Persistence)?;
     task.replace_conversation(replacement.clone())?;
-    Ok(replacement)
+    Ok((replacement, committed.product_message_count))
 }
 
 pub(crate) fn compaction_reason_label(reason: CompactionReason) -> &'static str {

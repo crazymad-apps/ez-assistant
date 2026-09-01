@@ -41,6 +41,9 @@
 - 库 crate 不得为了方便依赖应用 crate、具体 UI、进程入口或测试宿主；dev-dependency 不能泄漏到
   正式公共 API。
 - `Cargo.lock` 由 workspace 统一维护。不得手工编辑 lockfile，也不得提交 `target/` 等构建产物。
+- 根 `Cargo.toml` 的开发 profile 统一使用行号级调试信息、packed split debuginfo，并关闭增量
+  编译。该设置用于约束多 package workspace 的 `target/` 占用；日常异常回溯仍保留文件与行号，
+  需要变量级调试时应对单次命令显式覆盖，不能把全量调试产物重新设为仓库默认值。
 - 若项目声明 MSRV，提升 MSRV 属于兼容性变化，必须在版本设计中显式记录并验证。
 
 参考：[Cargo Workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html)、
@@ -183,6 +186,9 @@
 - crate 根使用 `//!` 说明职责、边界和主要入口；公共 API 使用 `///` 说明契约，而不是复述签名。
 - 注释重点解释“为什么”、不变量、所有权、背压、取消安全和兼容取舍；代码已经清楚表达的“做什么”
   不需要逐行翻译。
+- `State`、`Context`、`Result`、`Command`、`Entry`、`Record`、`Pending` 等短词组类型名若不能仅凭
+  所在模块明确其业务阶段和边界，必须在定义处补充 rustdoc，说明它代表哪一阶段、由谁持有、
+  是否持久化，以及与相邻短词组类型的区别；名称与类型签名已经完整自解释时不机械补注释。
 - 下列位置必须有必要的中文注释或模块文档：跨 crate 能力边界、权威状态与所有权、异步任务生命周期、
   取消与背压、安全与权限、序列化兼容、迁移与恢复、非显然的执行顺序或失败语义，以及平台兼容绕行。
 - 即使函数只具有 `pub(crate)`、`pub(super)` 或私有可见性，只要它跨越持久化事实与内存投影、

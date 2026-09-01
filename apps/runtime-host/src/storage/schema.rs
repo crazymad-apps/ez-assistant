@@ -5,6 +5,16 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use super::{StorageResult, internal_error};
 
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS devices (
+    device_id       TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    public_key      BLOB NOT NULL UNIQUE,
+    lifecycle       TEXT NOT NULL CHECK (lifecycle IN ('paired', 'revoked')),
+    paired_at_ms    INTEGER NOT NULL,
+    updated_at_ms   INTEGER NOT NULL,
+    revoked_at_ms   INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
     title               TEXT NOT NULL,
@@ -20,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
                             CHECK (role IN ('standard', 'controller')),
     proxy_controller_session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL,
     proxy_changed_at_ms INTEGER,
+    pc_output_device_id TEXT REFERENCES devices(device_id) ON DELETE SET NULL,
     lifecycle           TEXT NOT NULL CHECK (lifecycle IN ('active', 'archived')),
     body_generation     INTEGER NOT NULL CHECK (body_generation > 0),
     message_count       INTEGER NOT NULL CHECK (message_count >= 0),
@@ -206,8 +217,10 @@ CREATE TABLE IF NOT EXISTS inputs (
     goal_id             TEXT,
     goal_generation     INTEGER CHECK (goal_generation IS NULL OR goal_generation > 0),
     goal_turn           INTEGER CHECK (goal_turn IS NULL OR goal_turn > 0),
+    goal_reply_route_json TEXT,
     skill_activation_json TEXT,
-    cross_session_binding_json TEXT,
+    cross_session_json TEXT,
+    channel_source_json TEXT,
     CHECK ((goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL)
         OR (goal_id IS NOT NULL AND goal_generation IS NOT NULL AND goal_turn IS NOT NULL)),
     UNIQUE (session_id, idempotency_key)
@@ -445,7 +458,8 @@ END;
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
-    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin FROM sessions LIMIT 0",
+    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin, pc_output_device_id FROM sessions LIMIT 0",
+    "SELECT device_id, display_name, public_key, lifecycle, paired_at_ms, updated_at_ms, revoked_at_ms FROM devices LIMIT 0",
     "SELECT operation_id, session_id, kind, state, source_generation, result_generation, compacted_message_count, retained_message_count, created_at_ms, finished_at_ms FROM session_history_operations LIMIT 0",
     "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
@@ -459,7 +473,7 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, skill_activation_json, cross_session_binding_json FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs LIMIT 0",
     "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
@@ -654,14 +668,32 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     ensure_column(
         &transaction,
         "inputs",
+        "goal_reply_route_json",
+        "ALTER TABLE inputs ADD COLUMN goal_reply_route_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
         "skill_activation_json",
         "ALTER TABLE inputs ADD COLUMN skill_activation_json TEXT",
     )?;
     ensure_column(
         &transaction,
         "inputs",
-        "cross_session_binding_json",
-        "ALTER TABLE inputs ADD COLUMN cross_session_binding_json TEXT",
+        "cross_session_json",
+        "ALTER TABLE inputs ADD COLUMN cross_session_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "channel_source_json",
+        "ALTER TABLE inputs ADD COLUMN channel_source_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "pc_output_device_id",
+        "ALTER TABLE sessions ADD COLUMN pc_output_device_id TEXT REFERENCES devices(device_id) ON DELETE SET NULL",
     )?;
     transaction
         .execute(

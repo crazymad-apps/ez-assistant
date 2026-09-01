@@ -362,11 +362,7 @@ async fn commit_manual_replacement(
             }
         })?;
         state.persisted_message_count = journal.message_count();
-        state.message_count = u64::try_from(state.persisted_message_count).map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "manual compaction message count",
-            }
-        })?;
+        state.message_count = committed.product_message_count;
         state.body_generation = committed.result_generation;
         Ok(())
     })();

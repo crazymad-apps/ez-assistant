@@ -1,6 +1,6 @@
 //! replacement 特有完整性校验，复用 `agent-types` 的 Tool 配对校验。
 
-use agent_types::{ConversationMessage, ConversationSnapshot, MessageId};
+use agent_types::{ConversationMessage, ConversationSnapshot};
 use thiserror::Error;
 
 use crate::{ContextBlockKind, ContextLayout, ContextLayoutError};
@@ -8,7 +8,7 @@ use crate::{ContextBlockKind, ContextLayout, ContextLayoutError};
 /// 校验压缩策略生成的候选 replacement。
 ///
 /// replacement 必须是 `System prefix → 一条非空 Context Summary → recent User Turn`
-/// 的合法快照，并且派生快照中的旧 Assistant usage 已被清空。
+/// 的合法快照。
 pub fn validate_replacement(
     replacement: &ConversationSnapshot,
 ) -> Result<(), ReplacementValidationError> {
@@ -27,16 +27,6 @@ pub fn validate_replacement(
     if summary.text.trim().is_empty() {
         return Err(ReplacementValidationError::EmptyContextSummary);
     }
-
-    for message in &replacement.messages {
-        if let ConversationMessage::Assistant(message) = message
-            && message.usage.is_some()
-        {
-            return Err(ReplacementValidationError::RetainedAssistantUsage {
-                message_id: message.id.clone(),
-            });
-        }
-    }
     Ok(())
 }
 
@@ -52,19 +42,13 @@ pub enum ReplacementValidationError {
     /// Context Summary 不能是空白文本。
     #[error("replacement context summary must not be empty")]
     EmptyContextSummary,
-    /// replacement 中保留的旧 Assistant Result 不能继续携带压缩前 usage。
-    #[error("replacement retains usage on assistant message `{message_id}`")]
-    RetainedAssistantUsage {
-        /// 仍携带 usage 的消息。
-        message_id: MessageId,
-    },
 }
 
 #[cfg(test)]
 mod tests {
     use agent_types::{
-        AssistantMessage, AssistantPart, ContextSummaryMessage, FinishReason, ModelIdentity,
-        ProviderId, TokenUsage, ToolCall, ToolCallId, ToolName, UserMessage,
+        AssistantMessage, AssistantPart, ContextSummaryMessage, FinishReason, MessageId,
+        ModelIdentity, ProviderId, TokenUsage, ToolCall, ToolCallId, ToolName, UserMessage,
     };
 
     use super::*;
@@ -132,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_assistant_usage_is_rejected() {
+    fn retained_assistant_usage_is_accepted() {
         let usage = TokenUsage {
             input_tokens: 8,
             output_tokens: 2,
@@ -142,9 +126,7 @@ mod tests {
         };
         assert_eq!(
             validate_replacement(&replacement("summary", Some(usage))),
-            Err(ReplacementValidationError::RetainedAssistantUsage {
-                message_id: id("assistant_1"),
-            })
+            Ok(())
         );
     }
 

@@ -345,6 +345,15 @@ impl StorageEngine {
         new_message_id: &agent_types::MessageId,
     ) -> StorageResult<RewriteResult> {
         let session_directory = self.session_directory(&rewrite.session_id)?;
+        let channel_source_json = rewrite
+            .input
+            .channel_source
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|source| {
+                internal_error("replacement channel source could not be encoded", source)
+            })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -456,8 +465,8 @@ impl StorageEngine {
                 database_write_error("replaced inputs could not be removed", source)
             })?;
         transaction.execute(
-            "INSERT INTO inputs (input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant)
-             VALUES (?1, ?2, ?3, ?4, 'committed', NULL, ?5, ?6)",
+            "INSERT INTO inputs (input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, channel_source_json)
+             VALUES (?1, ?2, ?3, ?4, 'committed', NULL, ?5, ?6, 'user', ?7)",
             params![
                 rewrite.input.input_id.as_str(),
                 rewrite.session_id.as_str(),
@@ -465,6 +474,7 @@ impl StorageEngine {
                 new_message_id.as_str(),
                 rewrite.input.accepted_at_ms,
                 agent_variant_value(rewrite.input.agent_variant),
+                channel_source_json,
             ],
         ).map_err(|source| database_write_error("replacement input could not be created", source))?;
         let queue_order = u64::try_from(transaction.last_insert_rowid())
@@ -496,7 +506,8 @@ impl StorageEngine {
             agent_variant: rewrite.input.agent_variant,
             origin: rewrite.input.origin,
             goal_binding: rewrite.input.goal_binding.clone(),
-            cross_session_binding: rewrite.input.cross_session_binding.clone(),
+            cross_session: rewrite.input.cross_session.clone(),
+            channel_source: rewrite.input.channel_source.clone(),
             skill_activation: None,
             user_message_id: new_message_id.clone(),
             state: StoredInputState::Committed,

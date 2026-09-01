@@ -20,6 +20,7 @@ import {
 import { ExecutionSettingsPopover } from "./ExecutionSettingsPopover";
 import { GoalStatusRow } from "./GoalStatusRow";
 import { ModelSettingsPopover } from "./ModelSettingsPopover";
+import { OutputHostingMenu } from "./OutputHostingMenu";
 import { QueueDrawer } from "./QueueDrawer";
 import { queuePresentation } from "./queuePresentation";
 import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
@@ -458,7 +459,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             rows={2}
             value={draft}
           />
-          <footer className={styles.composer_actions}>
+          <footer className={styles.composer_actions} data-has-hosting={session.role === "controller"}>
             <Tooltip content="添加附件">
               <button
                 aria-label="添加附件"
@@ -485,6 +486,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               trigger_class_name={styles.execution_selector}
               variant={session.current_variant}
             />
+            {session.role === "controller" && <OutputHostingMenu session={session} />}
             <span className={styles.action_spacer} />
             <ContextUsageRing view={session_view} />
             <ModelSettingsPopover

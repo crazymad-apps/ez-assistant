@@ -502,6 +502,10 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub proxy: Option<SessionProxySnapshot>,
+    /// Controller 的 PC 输出当前附加托管目标；普通 Session 始终为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pc_output_hosting: Option<PcOutputHostingSnapshot>,
     /// 只存在于当前 Runtime 进程内；重启后必然为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -542,6 +546,14 @@ pub struct SessionSummary {
     pub active_child_count: u64,
     #[serde(default)]
     pub active_run_status: Option<RunStatus>,
+}
+
+/// Controller 当前稳定的 PC 输出托管目标。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct PcOutputHostingSnapshot {
+    pub device_id: crate::DeviceId,
+    pub device_name: String,
 }
 
 /// Run 中一个工具调用的当前观察快照。
@@ -782,6 +794,7 @@ mod tests {
         assert_eq!(session.approval_mode, ApprovalMode::Ask);
         assert_eq!(session.role, SessionRoleSnapshot::Standard);
         assert_eq!(session.proxy, None);
+        assert_eq!(session.pc_output_hosting, None);
 
         let run = serde_json::json!({
             "run_id": "run-1",

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApplicationSnapshot, SessionSummary } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
@@ -27,12 +27,12 @@ describe("AppShell session header", () => {
     await waitFor(() => expect(opener).toHaveFocus());
   });
 
-  it("renames inline and exposes the compact status", () => {
+  it("renames inline without restoring the removed idle status tag", () => {
     const store = storeWithSessions();
     const rename = vi.spyOn(store, "renameSession").mockResolvedValue(true);
     renderShell(store);
 
-    expect(screen.getByLabelText("会话标题栏")).toHaveTextContent("空闲");
+    expect(screen.getByLabelText("会话标题栏")).not.toHaveTextContent("空闲");
     fireEvent.click(screen.getByRole("button", { name: "First session" }));
     const input = screen.getByRole("textbox", { name: "会话标题" });
     fireEvent.change(input, { target: { value: "Renamed session" } });
@@ -61,6 +61,24 @@ describe("AppShell session header", () => {
 
     expect(screen.getAllByText("主控代理")).toHaveLength(1);
     expect(screen.getByRole("switch", { name: "主控代理" })).toBeChecked();
+  });
+
+  it("does not duplicate output hosting state in the session header", () => {
+    const store = new RootStore();
+    const snapshot = applicationSnapshot();
+    snapshot.active_sessions[0] = {
+      ...snapshot.active_sessions[0]!,
+      role: "controller",
+      pc_output_hosting: { device_id: "device-1", device_name: "客厅终端" },
+    };
+    snapshot.controller_availability = { status: "available", session_id: "session-1" };
+    store.projection.applyApplicationSnapshot({ observed_sequence: 1, value: snapshot });
+    store.navigation.selectSession("session-1");
+    renderShell(store);
+
+    expect(within(screen.getByLabelText("会话标题栏")).queryByRole("button", {
+      name: "PC 输出已托管至 客厅终端",
+    })).not.toBeInTheDocument();
   });
 
   it("does not finish title editing when Enter only confirms input method composition", () => {

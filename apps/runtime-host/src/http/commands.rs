@@ -1,7 +1,10 @@
 //! 有界 JSON Command ingress 与 Runtime 薄 dispatch。
 
-use assistant_protocol::{RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo};
-use assistant_runtime::{AssistantRuntime, RuntimeError};
+use assistant_protocol::{
+    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayMutationResult, RuntimeCommand,
+    RuntimeCommandResult, RuntimeErrorInfo,
+};
+use assistant_runtime::RuntimeError;
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
@@ -14,30 +17,39 @@ use super::{HttpState, error::runtime_status};
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
+/// Desktop HTTP Command 的关联 ID 与 Host 级命令外壳。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct CommandRequest {
     pub(crate) request_id: String,
     pub(crate) command: HostCommand,
 }
 
+/// Host 接受的顶层命令域。
+///
+/// Device Gateway 管理动作在 Host 处理；只有 Runtime 分支进入业务 Runtime。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
 pub(crate) enum HostCommand {
     Runtime(RuntimeCommand),
+    DeviceGateway(DeviceGatewayCommand),
 }
 
+/// Host Command 成功后的关联响应。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct CommandResponse {
     pub(crate) request_id: String,
     pub(crate) result: HostCommandResult,
 }
 
+/// 与 [`HostCommand`] 分域对应的成功结果。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
 pub(crate) enum HostCommandResult {
     Runtime(Box<RuntimeCommandResult>),
+    DeviceGateway(DeviceGatewayCommandResult),
 }
 
+/// Command 失败时返回的脱敏响应体。
 #[derive(Serialize)]
 struct CommandErrorBody {
     request_id: Option<String>,
@@ -70,7 +82,7 @@ pub(super) async fn handle_command(
         );
     }
 
-    match dispatch(&state.runtime, request.command).await {
+    match dispatch(&state, request.command).await {
         Ok((result, shutdown_requested)) => {
             let response = (
                 StatusCode::OK,
@@ -85,7 +97,7 @@ pub(super) async fn handle_command(
             }
             response
         }
-        Err(error) => command_error(Some(request.request_id), error.to_protocol_info()),
+        Err(error) => command_error(Some(request.request_id), error),
     }
 }
 
@@ -95,18 +107,124 @@ fn command_error(request_id: Option<String>, error: RuntimeErrorInfo) -> Respons
 }
 
 async fn dispatch(
-    runtime: &AssistantRuntime,
+    state: &HttpState,
     command: HostCommand,
-) -> Result<(HostCommandResult, bool), RuntimeError> {
+) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
     match command {
-        HostCommand::Runtime(command) => dispatch_runtime(runtime, command).await,
+        HostCommand::Runtime(command) => dispatch_runtime(state, command)
+            .await
+            .map_err(|error| error.to_protocol_info()),
+        HostCommand::DeviceGateway(command) => dispatch_device_gateway(state, command).await,
     }
 }
 
+async fn dispatch_device_gateway(
+    state: &HttpState,
+    command: DeviceGatewayCommand,
+) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
+    let result = match command {
+        DeviceGatewayCommand::GetSnapshot(_) => DeviceGatewayCommandResult::GetSnapshot(
+            state
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?,
+        ),
+        DeviceGatewayCommand::SetAccessEnabled(request) => {
+            state
+                .device_gateway
+                .set_enabled(request.enabled)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::SetAccessEnabled(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+        DeviceGatewayCommand::OpenPairingWindow(_) => {
+            state
+                .device_gateway
+                .open_pairing_window()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::OpenPairingWindow(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+        DeviceGatewayCommand::ClosePairingWindow(_) => {
+            state.device_gateway.close_pairing_window().await;
+            DeviceGatewayCommandResult::ClosePairingWindow(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+        DeviceGatewayCommand::ConfirmPairing(request) => {
+            state
+                .device_gateway
+                .confirm_pairing(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::ConfirmPairing(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+        DeviceGatewayCommand::RenameDevice(request) => {
+            state
+                .runtime
+                .rename_paired_device(request.device_id, request.display_name)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            state.device_gateway.notify_changed();
+            DeviceGatewayCommandResult::RenameDevice(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+        DeviceGatewayCommand::RevokeDevice(request) => {
+            state
+                .runtime
+                .revoke_paired_device(request.device_id.clone())
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            state
+                .device_gateway
+                .revoke_connection(&request.device_id)
+                .await;
+            state.device_gateway.notify_changed();
+            DeviceGatewayCommandResult::RevokeDevice(DeviceGatewayMutationResult {
+                snapshot: state
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
+    };
+    Ok((HostCommandResult::DeviceGateway(result), false))
+}
+
 async fn dispatch_runtime(
-    runtime: &AssistantRuntime,
+    state: &HttpState,
     command: RuntimeCommand,
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
+    let runtime = state.runtime.as_ref();
     let (result, shutdown) = match command {
         RuntimeCommand::GetApplicationSnapshot(request) => (
             RuntimeCommandResult::GetApplicationSnapshot(
@@ -194,10 +312,12 @@ async fn dispatch_runtime(
             RuntimeCommandResult::GetModel(runtime.get_model(request)?),
             false,
         ),
-        RuntimeCommand::ReloadConfig(request) => (
-            RuntimeCommandResult::ReloadConfig(runtime.reload_config(request).await?),
-            false,
-        ),
+        RuntimeCommand::ReloadConfig(request) => {
+            let result = runtime.reload_config(request).await?;
+            state.speech.reload().await;
+            state.device_gateway.notify_changed();
+            (RuntimeCommandResult::ReloadConfig(result), false)
+        }
         RuntimeCommand::CreateModel(request) => (
             RuntimeCommandResult::CreateModel(runtime.create_model(request).await?),
             false,
@@ -361,7 +481,14 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::SubmitInput(request) => (
-            RuntimeCommandResult::SubmitInput(runtime.submit_input(request).await?),
+            RuntimeCommandResult::SubmitInput(
+                runtime
+                    .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
+                        input: request,
+                        source: assistant_runtime::InputChannelSource::desktop_text(),
+                    })
+                    .await?,
+            ),
             false,
         ),
         RuntimeCommand::ClearWorkPlan(request) => (
@@ -430,6 +557,14 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::SetSessionProxy(request) => (
             RuntimeCommandResult::SetSessionProxy(runtime.set_session_proxy(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetCurrentControllerOutputHosting(request) => (
+            RuntimeCommandResult::SetCurrentControllerOutputHosting(
+                runtime
+                    .set_current_controller_output_hosting(request)
+                    .await?,
+            ),
             false,
         ),
         RuntimeCommand::SetMessageFeedback(request) => (

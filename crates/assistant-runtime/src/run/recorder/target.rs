@@ -190,7 +190,7 @@ impl RecorderTarget {
                     )
                     .map_err(|_| record_error("journal rejected persisted tool exchange"))?;
                 let persisted_message_count = journal.message_count();
-                let message_count = u64::try_from(persisted_message_count)
+                let message_count_delta = u64::try_from(batch.len())
                     .map_err(|_| record_error("conversation message count is exhausted"))?;
                 let run = state
                     .runs
@@ -199,7 +199,10 @@ impl RecorderTarget {
                 run.extend_message_ids_at_step(message_ids, step);
                 state.skill_activations.extend(skill_activations);
                 state.persisted_message_count = persisted_message_count;
-                state.message_count = message_count;
+                state.message_count = state
+                    .message_count
+                    .checked_add(message_count_delta)
+                    .ok_or_else(|| record_error("conversation message count is exhausted"))?;
                 Ok(())
             }
             Self::Child { task, session } => {

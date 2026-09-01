@@ -600,6 +600,65 @@ describe("ComposerDock", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消目标标记" })).not.toBeInTheDocument();
   });
+
+  it("offers only online reply channels with category icons and no subtitles", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer({ session: { role: "controller" } });
+    store.device_gateway.stale = false;
+    store.device_gateway.snapshot = {
+      enabled: true,
+      available: true,
+      installation_id: "installation-1",
+      certificate_fingerprint: "fingerprint",
+      pending_pairings: [],
+      devices: [{
+        device_id: "device-1",
+        display_name: "客厅终端",
+        lifecycle: "paired",
+        paired_at_ms: 1,
+        updated_at_ms: 1,
+        revoked_at_ms: null,
+        connection: {
+          connected_at_ms: 2,
+          output_preference: "text",
+          capabilities: {
+            input_text: true,
+            input_pcm16_16k_mono: false,
+            output_text: true,
+            output_pcm16_16k_mono: false,
+            playback_cancel: false,
+            display_status: true,
+            display_transcript: true,
+          },
+        },
+      }, {
+        device_id: "device-2",
+        display_name: "离线终端",
+        lifecycle: "paired",
+        paired_at_ms: 1,
+        updated_at_ms: 1,
+        revoked_at_ms: null,
+      }],
+      speech_services: { asr: "unavailable", tts: "unavailable" },
+    };
+    const set_hosting = vi.spyOn(store.device_gateway, "setOutputHosting").mockResolvedValue(true);
+
+    const trigger = screen.getByRole("button", { name: "选择回复频道" });
+    expect(trigger.querySelector("svg")).toHaveAttribute("data-icon", "channel");
+    await user.click(trigger);
+
+    const menu = screen.getByRole("menu", { name: "选择回复频道" });
+    const desktop = within(menu).getByRole("menuitem", { name: "仅在 Desktop 显示" });
+    const device = within(menu).getByRole("menuitem", { name: "客厅终端" });
+    expect(desktop.querySelector("svg")).toHaveAttribute("data-icon", "desktop");
+    expect(device.querySelector("svg")).toHaveAttribute("data-icon", "device");
+    expect(within(menu).queryByRole("menuitem", { name: "离线终端" })).not.toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "管理智能终端" })).toBeVisible();
+    expect(menu.querySelector("small")).not.toBeInTheDocument();
+
+    await user.click(device);
+    expect(set_hosting).toHaveBeenCalledWith("device-1");
+  });
 });
 
 function renderComposer(overrides: Readonly<{

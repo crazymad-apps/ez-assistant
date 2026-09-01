@@ -11,7 +11,6 @@ import type {
 import { Icon } from "../../../components/Icon";
 import { thumbnailAttachment } from "../../../native-bridge/nativeResource";
 import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
-import { ChildTaskTree } from "./ChildTaskTree";
 import {
   collapsedSummary,
   formatDateTime,
@@ -21,6 +20,7 @@ import {
   segmentStateKey,
 } from "./conversationRows";
 import { AssistantSegmentView, LiveSteps } from "./ToolSegments";
+import { DeviceMessageSourceDialog } from "./DeviceMessageSourceDialog";
 import styles from "./index.module.scss";
 
 export function UserMessage(props: Readonly<{
@@ -33,7 +33,8 @@ export function UserMessage(props: Readonly<{
   const images = props.attachments.filter((attachment) => attachment.media_type?.startsWith("image/"));
   const files = props.attachments.filter((attachment) => !attachment.media_type?.startsWith("image/"));
   const source = props.message.source ?? { type: "user" as const };
-  const is_external = source.type !== "user";
+  const is_external = source.type === "controller_delivery" || source.type === "proxy_report";
+  const [device_source_open, setDeviceSourceOpen] = useState(false);
   return (
     <article
       className={`${styles.user_message}${is_external ? ` ${styles.external_message}` : ""}`}
@@ -84,12 +85,26 @@ export function UserMessage(props: Readonly<{
       ) : (
         <div className={styles.user_bubble}>{props.message.text}</div>
       )}
+      {source.type === "device" && (
+        <button
+          aria-label={`查看消息来源：${source.device_name}`}
+          className={styles.device_source_label}
+          onClick={() => setDeviceSourceOpen(true)}
+          type="button"
+        >
+          <Icon name="device" size={12} />
+          <span>{source.device_name}</span>
+        </button>
+      )}
       {props.message.skill && (
         <div className={styles.user_skill}>
           <span title={props.message.skill.name}>{props.message.skill.name}</span>
         </div>
       )}
       <time>{formatTime(props.message.created_at_ms)}</time>
+      {source.type === "device" && device_source_open ? (
+        <DeviceMessageSourceDialog on_close={() => setDeviceSourceOpen(false)} source={source} />
+      ) : null}
     </article>
   );
 }
@@ -187,14 +202,6 @@ export function AssistantTurn(props: Readonly<{
     [props.messages],
   );
   const all_segments = useMemo(() => props.messages.flatMap((message) => message.segments), [props.messages]);
-  const represented_tool_calls = useMemo(() => new Set([
-    ...props.messages.flatMap((message) => message.segments)
-      .flatMap((segment) => segment.type === "tool_group" ? segment.tools.map((tool) => tool.call_id) : []),
-    ...(props.live_run?.steps.flatMap((step) => step.segments)
-      .flatMap((segment) => segment.type === "tool_group" ? segment.tools.map((tool) => tool.call_id) : []) ?? []),
-  ]), [props.live_run, props.messages]);
-  const unattached_child_tasks = props.child_tasks.filter((item) => !represented_tool_calls.has(item.task.parent_tool_call_id));
-
   return (
     <article className={`${styles.assistant_message}${props.live_run ? ` ${styles.live_message}` : ""}`} data-message-id={last_message.message_id}>
       {collapsed ? (
@@ -228,7 +235,6 @@ export function AssistantTurn(props: Readonly<{
             <LiveSteps child_tasks={props.child_tasks} on_child_open={props.on_child_open} onToolClick={props.onLiveToolClick} run={props.live_run} />
           )}
           {props.live_run?.status === "failed" && <RunFailure run={props.live_run} />}
-          {props.on_child_open && <ChildTaskTree embedded items={unattached_child_tasks} on_open={props.on_child_open} />}
         </div>
       )}
       {props.live_run?.status === "failed" ? null : props.live_run ? (

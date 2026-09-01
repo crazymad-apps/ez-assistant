@@ -2,9 +2,10 @@ use agent_types::ConversationSnapshot;
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
 
 use crate::{
-    MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
-    PinnedMemoryMutationResult, SkillNameState, SkillNameStateChange, StoredPinnedMemory,
-    StoredSkillActivation,
+    DeviceNameChange, DeviceRevocation, DeviceRevocationResult, MemoryContextSnapshot,
+    NewPairedDevice, PairedDevice, PcOutputHostingChange, PersonaMutation, PersonaSnapshot,
+    PinnedMemoryMutation, PinnedMemoryMutationResult, SkillNameState, SkillNameStateChange,
+    StoredPinnedMemory, StoredSkillActivation,
 };
 
 use super::{
@@ -21,15 +22,17 @@ use super::{
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
     SessionTitleChange, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionUsage,
-    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecoveredRuntime {
+    pub devices: Vec<PairedDevice>,
     pub workspaces: Vec<StoredWorkspace>,
     pub attachments: Vec<StoredAttachment>,
     pub sessions: Vec<StoredSession>,
@@ -47,6 +50,14 @@ pub struct RecoveredRuntime {
 pub trait RuntimeStore: Send + Sync {
     /// 恢复未完成提交并加载 Runtime 的结构化启动投影。
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime>;
+
+    fn register_paired_device(&self, device: NewPairedDevice) -> StoreFuture<'_, PairedDevice>;
+
+    fn rename_device(&self, change: DeviceNameChange) -> StoreFuture<'_, PairedDevice>;
+
+    fn revoke_device(&self, change: DeviceRevocation) -> StoreFuture<'_, DeviceRevocationResult>;
+
+    fn set_pc_output_hosting(&self, change: PcOutputHostingChange) -> StoreFuture<'_, bool>;
 
     /// 为新 Session 一致读取当前 Persona 与 Pinned Memory。
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot>;
@@ -171,7 +182,7 @@ pub trait RuntimeStore: Send + Sync {
         child_task_id: &ChildTaskId,
     ) -> StoreFuture<'_, ConversationSnapshot>;
 
-    /// 可靠切换父 Run 或 child 的压缩后有效正文 generation。
+    /// 把父 Run、child 或空闲 Session 的压缩上下文合并进完整产品历史并可靠切换 generation。
     fn replace_context(
         &self,
         replacement: ContextReplacement,
@@ -204,6 +215,12 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 保存完整结果、整批提交正文并清除对应 pending 事实。
     fn complete_tool_exchange(&self, completed: CompletedToolExchange) -> StoreFuture<'_, ()>;
+
+    /// 在活动 Run 保持 running 时可靠追加下一次 AgentExecution 所需的消息与领域效果。
+    fn commit_run_continuation(
+        &self,
+        continuation: StoredRunContinuation,
+    ) -> StoreFuture<'_, StoredRunContinuationResult>;
 
     /// 可靠写入本 Run 尚未提交的完整消息，并同时结算 Run 终态。
     fn settle_run(

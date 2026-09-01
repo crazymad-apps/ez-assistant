@@ -105,7 +105,7 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   Kimi `k3`；未知兼容端点仍使用保守通用方言。Qwen 工具图片固定使用批次聚合 User Image，Kimi
   与 DeepSeek `deepseek-v4-flash-vision-exp` 固定使用原生 content-parts function output；DeepSeek
   非视觉 Flash/Pro 不启用图片，不得运行期试错切换。
-- DeepSeek/OpenAI 类非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
+- OpenAI、DeepSeek 与 Kimi 的非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
   `ReasoningPart`。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
   完全相容的状态；相容 payload 损坏或与规范 reasoning 矛盾时 fail-closed，路由不相容时跳过
   opaque item，并只按目标方言明确声明的普通 reasoning 形状投影规范 part。Qwen/Kimi 的
@@ -113,6 +113,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - Responses 流状态机同时接受专用 reasoning 事件和 DeepSeek 使用的通用
   `response.content_part.added/done` reasoning 边界。OpenAI-compatible 工具 Schema 降级对无字段
   object 显式输出 `properties: {}`，满足 DashScope 的 Responses 校验而不改变规范 ToolDefinition。
+- DashScope Qwen 使用 `response.reasoning_text.*` 流式发送最终 `summary`，Decoder 必须从首个
+  增量开始将两者归入同一规范 `ReasoningPart`，不能把流式正文和完成快照重复落账。
 
 ## 验证
 

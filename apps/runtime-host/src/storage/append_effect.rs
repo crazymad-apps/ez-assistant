@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use super::{
     StorageResult, conflict,
     goal::apply_goal_settlement,
-    input_state::insert_goal_continuation,
     internal_error, invalid_data, invalid_data_with_source,
     run_projection::{error_code_value, run_status_value},
 };
@@ -31,6 +30,11 @@ pub(super) enum AppendPurpose {
         receipt_id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skill_activations: Vec<StoredSkillActivation>,
+    },
+    /// 活动 Run 追加下一次 AgentExecution 所需消息，并保持 Run 为 running。
+    RunContinuation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_effect: Option<Box<StoredGoalSettlementEffect>>,
     },
     /// 最终消息已写入，结算 Run 终态。
     RunSettlement {
@@ -136,6 +140,10 @@ pub(super) fn apply_purpose(
             AppendPurpose::RunSettlement { .. },
             ConversationStorageTarget::Session { session_id, run_id },
         ) => apply_run_settlement(transaction, run_id, session_id, purpose, created_at_ms),
+        (
+            AppendPurpose::RunContinuation { .. },
+            ConversationStorageTarget::Session { session_id, run_id },
+        ) => apply_run_continuation(transaction, run_id, session_id, purpose, created_at_ms),
         (
             AppendPurpose::ChildStart,
             ConversationStorageTarget::ChildTask {
@@ -338,66 +346,12 @@ pub(super) fn apply_run_settlement(
     if updated != 1 {
         return Err(conflict("run is not in a settleable state"));
     }
-    if let Some(effect) = goal_effect.as_deref() {
-        match effect {
-            StoredGoalSettlementEffect::Continue {
-                expected_goal_id,
-                expected_generation,
-                goal,
-                next_input,
-            } => {
-                let binding = next_input
-                    .goal_binding
-                    .as_ref()
-                    .ok_or_else(|| invalid_data("Goal continuation has no binding"))?;
-                if goal.state != assistant_runtime::StoredGoalState::Running
-                    || goal.pause_reason.is_some()
-                    || goal.generation != *expected_generation
-                    || goal.turn == 0
-                    || next_input.session_id != *session_id
-                    || next_input.origin != assistant_runtime::InputOrigin::Runtime
-                    || next_input.new_goal.is_some()
-                    || next_input.resumed_goal.is_some()
-                    || next_input.accepted_at_ms != finished_at_ms
-                    || binding.goal_id != goal.goal_id
-                    || binding.generation != goal.generation
-                    || binding.turn != goal.turn
-                {
-                    return Err(invalid_data("Goal continuation projection is invalid"));
-                }
-                apply_goal_settlement(
-                    transaction,
-                    expected_goal_id,
-                    *expected_generation,
-                    goal,
-                    finished_at_ms,
-                )?;
-                insert_goal_continuation(transaction, next_input)?;
-            }
-            StoredGoalSettlementEffect::Transition {
-                expected_goal_id,
-                expected_generation,
-                goal,
-                ..
-            } => {
-                if goal.state == assistant_runtime::StoredGoalState::Running
-                    || goal.generation
-                        != expected_generation
-                            .checked_add(1)
-                            .ok_or_else(|| invalid_data("Goal generation is exhausted"))?
-                {
-                    return Err(invalid_data("Goal transition projection is invalid"));
-                }
-                apply_goal_settlement(
-                    transaction,
-                    expected_goal_id,
-                    *expected_generation,
-                    goal,
-                    finished_at_ms,
-                )?;
-            }
-        }
-    }
+    apply_goal_effect(
+        transaction,
+        session_id,
+        goal_effect.as_deref(),
+        finished_at_ms,
+    )?;
     if let Some(report) = proxy_report.as_deref() {
         super::input_state::insert_proxy_report(transaction, session_id, run_id, *status, report)?;
     }
@@ -411,4 +365,99 @@ pub(super) fn apply_run_settlement(
         return Err(conflict("run session does not exist"));
     }
     Ok(())
+}
+
+pub(super) fn apply_run_continuation(
+    transaction: &Transaction<'_>,
+    run_id: &RunId,
+    session_id: &SessionId,
+    purpose: &AppendPurpose,
+    committed_at_ms: i64,
+) -> StorageResult<()> {
+    let AppendPurpose::RunContinuation { goal_effect } = purpose else {
+        return Err(invalid_data("run continuation purpose is invalid"));
+    };
+    let running: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?1 AND session_id = ?2 AND status = 'running'",
+            params![run_id.as_str(), session_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|source| internal_error("active run could not be queried", source))?;
+    if running != 1 {
+        return Err(conflict("run is not active"));
+    }
+    apply_goal_effect(
+        transaction,
+        session_id,
+        goal_effect.as_deref(),
+        committed_at_ms,
+    )?;
+    let updated = transaction
+        .execute(
+            "UPDATE sessions SET updated_at_ms = ?1 WHERE session_id = ?2",
+            params![committed_at_ms, session_id.as_str()],
+        )
+        .map_err(|source| internal_error("session activity time could not be updated", source))?;
+    if updated != 1 {
+        return Err(conflict("run session does not exist"));
+    }
+    Ok(())
+}
+
+fn apply_goal_effect(
+    transaction: &Transaction<'_>,
+    session_id: &SessionId,
+    effect: Option<&StoredGoalSettlementEffect>,
+    changed_at_ms: i64,
+) -> StorageResult<()> {
+    let Some(effect) = effect else {
+        return Ok(());
+    };
+    match effect {
+        StoredGoalSettlementEffect::Progress {
+            expected_goal_id,
+            expected_generation,
+            goal,
+        } => {
+            if goal.session_id != *session_id
+                || goal.state != assistant_runtime::StoredGoalState::Running
+                || goal.pause_reason.is_some()
+                || goal.generation != *expected_generation
+                || goal.turn == 0
+            {
+                return Err(invalid_data("Goal progress projection is invalid"));
+            }
+            apply_goal_settlement(
+                transaction,
+                expected_goal_id,
+                *expected_generation,
+                goal,
+                changed_at_ms,
+            )
+        }
+        StoredGoalSettlementEffect::Transition {
+            expected_goal_id,
+            expected_generation,
+            goal,
+            ..
+        } => {
+            if goal.session_id != *session_id
+                || goal.state == assistant_runtime::StoredGoalState::Running
+                || goal.generation
+                    != expected_generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_data("Goal generation is exhausted"))?
+            {
+                return Err(invalid_data("Goal transition projection is invalid"));
+            }
+            apply_goal_settlement(
+                transaction,
+                expected_goal_id,
+                *expected_generation,
+                goal,
+                changed_at_ms,
+            )
+        }
+    }
 }

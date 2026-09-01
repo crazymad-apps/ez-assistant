@@ -251,12 +251,7 @@ export class RuntimeProjectionStore {
       return;
     }
     if (current.generation !== page.generation) {
-      this.conversation_histories.set(
-        session_id,
-        page.items.some((item) => item.type === "context_summary")
-          ? { ...historyFromPage(page), items: mergeCompactedHistory(current.items, page.items) }
-          : historyFromPage(page),
-      );
+      this.conversation_histories.set(session_id, historyFromPage(page));
       return;
     }
     const first_latest_id = page.items[0] ? conversationItemId(page.items[0]) : null;
@@ -314,23 +309,6 @@ function isMainOwner(owner: ConversationOwner, session_id: SessionId): boolean {
 
 export function conversationItemId(item: ConversationItem): string {
   return item.message_id;
-}
-
-function mergeCompactedHistory(
-  previous: readonly ConversationItem[],
-  compacted: readonly ConversationItem[],
-): readonly ConversationItem[] {
-  const summary_index = compacted.findIndex((item) => item.type === "context_summary");
-  const first_retained = compacted.slice(summary_index + 1)
-    .map(conversationItemId)
-    .find((message_id) => previous.some((item) => conversationItemId(item) === message_id));
-  const retained_index = first_retained
-    ? previous.findIndex((item) => conversationItemId(item) === first_retained)
-    : previous.length;
-  const previous_messages = previous
-    .slice(0, retained_index)
-    .filter((item) => item.type !== "context_summary");
-  return mergeConversationItems(previous_messages, compacted);
 }
 
 function mergeConversationItems(

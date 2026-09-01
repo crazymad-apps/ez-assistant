@@ -3,6 +3,7 @@
 use std::{env, error::Error, fs, path::PathBuf, process};
 
 use assistant_protocol::{
+    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
@@ -39,6 +40,9 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         UploadAttachmentResult,
         RuntimeCommand,
         RuntimeCommandResult,
+        DeviceGatewayCommand,
+        DeviceGatewayCommandResult,
+        DeviceGatewayEvent,
         RuntimeEventEnvelope,
         GetApplicationSnapshotRequest,
         GetApplicationSnapshotResult,

@@ -45,7 +45,6 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
     || session?.active_child_count
     || session?.active_compaction,
   );
-  const status = session ? sessionStatus(session) : null;
 
   useEffect(() => {
     setEditing(false);
@@ -195,12 +194,6 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             {session?.title ?? "新会话"}
           </button>
         )}
-        {status && (
-          <span className={styles.session_status} data-tone={status.tone}>
-            <i aria-hidden="true" />
-            {status.label}
-          </span>
-        )}
         {session && is_controller && (
           <span className={styles.session_role_badge}>主控</span>
         )}
@@ -334,25 +327,3 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
     </header>
   );
 });
-
-function sessionStatus(session: SessionSummary): Readonly<{
-  label: string;
-  tone: "neutral" | "success" | "warning" | "active";
-}> {
-  if (session.lifecycle === "archived") {
-    return { label: "已归档", tone: "neutral" };
-  }
-  if (session.active_compaction) {
-    return { label: "压缩中", tone: "active" };
-  }
-  if (session.pending_approval_count > 0) {
-    return { label: "等待审批", tone: "warning" };
-  }
-  if (session.active_run_id) {
-    return { label: "运行中", tone: "active" };
-  }
-  if (session.queued_input_count > 0) {
-    return { label: "排队", tone: "active" };
-  }
-  return { label: "空闲", tone: "success" };
-}

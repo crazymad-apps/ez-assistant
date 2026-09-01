@@ -37,11 +37,12 @@ impl StorageEngine {
                 if active != 1 {
                     return Err(conflict("run context is not replaceable"));
                 }
-                let plan = self.begin_replacement(
-                    session_id,
-                    replacement.conversation,
-                    replacement.changed_at_ms,
+                let product_history = self.load_conversation(&session_id)?;
+                let merged = assistant_runtime::merge_context_replacement_with_product_history(
+                    &product_history,
+                    &replacement.conversation,
                 )?;
+                let plan = self.begin_replacement(session_id, merged, replacement.changed_at_ms)?;
                 if let Err(error) = self.commit_replacement(&plan) {
                     if let Ok(directory) = self.session_directory(&plan.session_id) {
                         let _ = fs::remove_file(body_path(&directory, plan.new_generation));
@@ -51,6 +52,7 @@ impl StorageEngine {
                 Ok(ContextReplacementResult {
                     source_generation: plan.previous_generation,
                     result_generation: plan.new_generation,
+                    product_message_count: plan.message_count,
                 })
             }
             ContextReplacementTarget::ChildTask {
@@ -87,7 +89,12 @@ impl StorageEngine {
         snapshot: agent_types::ConversationSnapshot,
         changed_at_ms: i64,
     ) -> StorageResult<ContextReplacementResult> {
-        let payload = conversation::encode_messages(&snapshot.messages)?;
+        let product_history = self.load_child_conversation(&session_id, &child_task_id)?;
+        let merged = assistant_runtime::merge_context_replacement_with_product_history(
+            &product_history,
+            &snapshot,
+        )?;
+        let payload = conversation::encode_messages(&merged.messages)?;
         conversation::decode(std::io::BufReader::new(payload.as_slice()))?;
         let previous_generation = self.child_generation(&session_id, &child_task_id)?;
         let task_directory =
@@ -104,7 +111,7 @@ impl StorageEngine {
         conversation::write_replacement(&new_path, &payload)?;
         sync_directory(&task_directory)?;
 
-        let message_count = u64::try_from(snapshot.messages.len()).map_err(|source| {
+        let message_count = u64::try_from(merged.messages.len()).map_err(|source| {
             assistant_runtime::StoreError::with_source(
                 assistant_runtime::StoreErrorKind::InvalidInput,
                 "replacement child conversation is too large",
@@ -154,7 +161,6 @@ impl StorageEngine {
             None,
             &snapshot.messages,
             changed_at_ms,
-            false,
         )?;
         transaction.commit().map_err(|source| {
             database_write_error("child context replacement could not be committed", source)
@@ -168,13 +174,14 @@ impl StorageEngine {
             new_generation,
         );
 
-        // SQLite 已指向新 generation；旧文件只做 best-effort 清理。
+        // 新 generation 已包含完整产品历史；旧 generation 只做 best-effort 清理。
         if fs::remove_file(child_body_path(&task_directory, previous_generation)).is_ok() {
             let _ = sync_directory(&task_directory);
         }
         Ok(ContextReplacementResult {
             source_generation: previous_generation,
             result_generation: new_generation,
+            product_message_count: message_count,
         })
     }
 
@@ -189,7 +196,12 @@ impl StorageEngine {
         snapshot: agent_types::ConversationSnapshot,
         changed_at_ms: i64,
     ) -> StorageResult<ContextReplacementResult> {
-        let plan = self.begin_replacement(session_id.clone(), snapshot, changed_at_ms)?;
+        let product_history = self.load_conversation(&session_id)?;
+        let merged = assistant_runtime::merge_context_replacement_with_product_history(
+            &product_history,
+            &snapshot,
+        )?;
+        let plan = self.begin_replacement(session_id.clone(), merged, changed_at_ms)?;
         if plan.previous_generation != expected_generation {
             let _ = fs::remove_file(body_path(
                 &self.session_directory(&session_id)?,
@@ -211,6 +223,7 @@ impl StorageEngine {
         result.map(|()| ContextReplacementResult {
             source_generation: plan.previous_generation,
             result_generation: plan.new_generation,
+            product_message_count: plan.message_count,
         })
     }
 
@@ -290,7 +303,6 @@ impl StorageEngine {
             None,
             &replacement.messages,
             plan.changed_at_ms,
-            false,
         )?;
         transaction.commit().map_err(|source| {
             database_write_error("idle context replacement could not commit", source)

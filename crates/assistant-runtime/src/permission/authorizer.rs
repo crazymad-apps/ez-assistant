@@ -21,7 +21,7 @@ use super::{
 use crate::{
     RuntimeError, RuntimeResult, SessionExecutionEnvironment,
     goal::{GoalRunSignalLatch, GoalSignalAuthorizationFacts, UPDATE_GOAL_TOOL_NAME},
-    runtime::controller::ControllerAuthorizationFacts,
+    runtime::{SpeakAuthorizationFacts, controller::ControllerAuthorizationFacts},
     skill::LoadSkillAuthorizationFacts,
     work_plan::WorkPlanAuthorizationFacts,
 };
@@ -173,6 +173,11 @@ impl RuntimeToolAuthorizer {
             {
                 return deny("this Run already reported a Goal terminal signal");
             }
+            return ToolAuthorization::Allow;
+        }
+        // Goal 终态信号后仍允许本输出周期完成播报；speak 不改变 Goal 或其他持久业务状态。
+        // 这也使同一 Run 的隐藏补播 Loop 不必为绕过 latch 另建 Input/Run。
+        if invocation.facts::<SpeakAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
         }
         if self

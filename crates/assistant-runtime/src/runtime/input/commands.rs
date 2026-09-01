@@ -71,7 +71,7 @@ impl AssistantRuntime {
             }
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
-        let queue = super::super::product::queue_snapshot(&session)?;
+        let queue = super::super::product::queue_snapshot(&session, &self.device_names()?)?;
         if should_move {
             self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
                 session_id: request.session_id,
@@ -143,7 +143,7 @@ impl AssistantRuntime {
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
-        let queue = super::super::product::queue_snapshot(&session)?;
+        let queue = super::super::product::queue_snapshot(&session, &self.device_names()?)?;
         self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
             session_id: request.session_id,
             revision: queue.revision,
@@ -176,6 +176,11 @@ impl AssistantRuntime {
             if input.stored.state != StoredInputState::Queued {
                 return Err(RuntimeError::InvalidRequest {
                     reason: "input is not queued",
+                });
+            }
+            if input.stored.origin != crate::InputOrigin::User {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "Runtime-owned input is not part of the user queue",
                 });
             }
             if input.stored.goal_binding.is_some() {

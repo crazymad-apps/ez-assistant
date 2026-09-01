@@ -27,6 +27,8 @@ type RuntimeLifecycleDependencies = Readonly<{
   navigation: NavigationStore;
   projection: RuntimeProjectionStore;
   report_interaction_error: (message: string) => void;
+  refresh_device_gateway: () => void;
+  mark_device_gateway_stale: () => void;
 }>;
 
 /** Owns Runtime transport, snapshot/event synchronization, and reconnect timers. */
@@ -82,6 +84,7 @@ export class RuntimeLifecycleCoordinator {
     this.#clearReconnectTimer();
     this.dependencies.connection.beginRuntimeMutation(kind);
     this.dependencies.projection.markStale();
+    this.dependencies.mark_device_gateway_stale();
   }
 
   reconnectAfterNativeRuntimeMutation(bootstrap?: RuntimeBootstrap): Promise<void> {
@@ -240,6 +243,7 @@ export class RuntimeLifecycleCoordinator {
               this.#applyEvent(event);
             }
           },
+          onDeviceGatewayEvent: () => this.dependencies.refresh_device_gateway(),
           onGap: () => this.#handleStreamGap(),
         },
         event_abort.signal,
@@ -261,6 +265,7 @@ export class RuntimeLifecycleCoordinator {
         );
         this.#reconnect_attempt = 0;
       });
+      this.dependencies.refresh_device_gateway();
       await this.selectInitialSession();
       void stream.closed.then(
         () => this.#handleStreamClosed(event_abort),
@@ -278,6 +283,7 @@ export class RuntimeLifecycleCoordinator {
           this.dependencies.connection.markDisconnected(failure.message, failure.code);
         }
         this.dependencies.projection.markStale();
+        this.dependencies.mark_device_gateway_stale();
       });
       this.#scheduleReconnect();
     }
@@ -357,6 +363,8 @@ export class RuntimeLifecycleCoordinator {
 
   #handleStreamGap(): void {
     this.dependencies.projection.markStale();
+    this.dependencies.mark_device_gateway_stale();
+    this.dependencies.refresh_device_gateway();
     void this.loadApplication(true);
     const session_id = this.dependencies.navigation.selected_session_id;
     if (session_id) {
@@ -371,6 +379,7 @@ export class RuntimeLifecycleCoordinator {
     runInAction(() => {
       this.dependencies.connection.markDisconnected("Runtime 连接已中断，正在尝试恢复。");
       this.dependencies.projection.markStale();
+      this.dependencies.mark_device_gateway_stale();
     });
     this.#scheduleReconnect();
   }

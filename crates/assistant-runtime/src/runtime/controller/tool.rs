@@ -43,6 +43,8 @@ struct SetSessionProxyOutput {
 struct SendSessionMessageInput {
     session_id: String,
     message: String,
+    /// `true` 时把投递正文作为目标 Session 的新 Goal objective，而不是单轮任务。
+    start_goal: bool,
 }
 
 struct ListManagedSessionsTool {
@@ -170,7 +172,7 @@ impl Tool for SetSessionProxyTool {
 
 impl Tool for SendSessionMessageTool {
     type Input = SendSessionMessageInput;
-    type ResolvedInput = (SessionId, String);
+    type ResolvedInput = (SessionId, String, bool);
     type Output = DeliveryReceipt;
 
     fn name(&self) -> ToolName {
@@ -178,7 +180,7 @@ impl Tool for SendSessionMessageTool {
     }
 
     fn description(&self) -> String {
-        "Deliver one text task to a session currently proxied by this controller. The target rejects delivery while it still has queued input and executes with its own model and permissions.".to_owned()
+        "Deliver one text task to a session currently proxied by this controller. Set start_goal=true for a long-running task that may continue across multiple runs; use false for one run. The target rejects delivery while it has queued input; starting a Goal also requires that no Goal already exists. It executes with its own model and permissions.".to_owned()
     }
 
     fn resolve(
@@ -187,10 +189,13 @@ impl Tool for SendSessionMessageTool {
     ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
         let session_id = SessionId::new(input.session_id)
             .map_err(|_| ToolError::invalid_input("session_id is invalid"))?;
-        let semantic =
-            serde_json::json!({"session_id": session_id.as_str(), "message": &input.message});
+        let semantic = serde_json::json!({
+            "session_id": session_id.as_str(),
+            "message": &input.message,
+            "start_goal": input.start_goal,
+        });
         Ok(ToolResolution::with_facts(
-            (session_id, input.message),
+            (session_id, input.message, input.start_goal),
             ControllerAuthorizationFacts,
             semantic,
         ))
@@ -214,6 +219,7 @@ impl Tool for SendSessionMessageTool {
                     &call_id,
                     &input.0,
                     input.1,
+                    input.2,
                 )
                 .await
                 .map_err(|_| ToolError::execution("session message could not be delivered"))

@@ -1,7 +1,7 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
-import { Icon } from "../../../components/Icon";
+import { Icon, type IconName } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import type { SettingsPage } from "../../../stores/SettingsStore";
 import { ModelsSettingsPage } from "./ModelsSettingsPage";
@@ -9,11 +9,13 @@ import { MemorySettingsPage } from "./MemorySettingsPage";
 import { PermissionSettingsPage } from "./PermissionSettingsPage";
 import { RuntimeSettingsPage } from "./RuntimeSettingsPage";
 import { SkillSettingsPage } from "./SkillSettingsPage";
+import { DeviceSettingsPage } from "./DeviceSettingsPage";
 import styles from "./index.module.scss";
 
-const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: "terminal" | "bot" | "shield" | "pin" | "folder" }> = [
+const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
   { id: "runtime", label: "运行时", icon: "terminal" },
-  { id: "models", label: "模型", icon: "bot" },
+  { id: "devices", label: "智能终端", icon: "device" },
+  { id: "models", label: "模型", icon: "model" },
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
   { id: "skills", label: "技能", icon: "folder" },
@@ -75,6 +77,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
           </nav>
           <div className={styles.content}>
             {settings.page === "runtime" && <RuntimeSettingsPage />}
+            {settings.page === "devices" && <DeviceSettingsPage />}
             {settings.page === "models" && (
               <ModelsSettingsPage onDirtyChange={setFormDirty} />
             )}

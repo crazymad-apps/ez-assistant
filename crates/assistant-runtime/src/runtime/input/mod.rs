@@ -46,6 +46,7 @@ struct QueueDriverContext {
     child_tasks: Arc<crate::delegation::ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
+    output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     events: ObservationCoordinator,
     root_cancellation: CancellationToken,
@@ -75,6 +76,7 @@ impl AssistantRuntime {
             child_tasks: self.child_tasks.clone(),
             context_window: self.context_window.clone(),
             store: self.store.clone(),
+            output_dispatcher: self.output_dispatcher.clone(),
             recall_reference_codec: self.recall_reference_codec.clone(),
             events: self.event_sender.clone(),
             root_cancellation: self.root_cancellation.clone(),
@@ -90,6 +92,7 @@ fn controller_tool_coordinator_from(
     let tasks = context.tasks.clone();
     Arc::new(super::controller::ControllerToolCoordinator::new(
         context.sessions.clone(),
+        context.config_registry.clone(),
         context.store.clone(),
         context.events.clone(),
         Arc::new(move |session| wake_queue_with(wake_context.clone(), tasks.clone(), session)),
@@ -157,13 +160,17 @@ async fn recover_panicked_queue_inner(
         &session,
         &run_id,
         None,
-        context.store.as_ref(),
-        controller.as_ref(),
+        crate::run::RunSettlementContext::new(
+            context.store.as_ref(),
+            controller.as_ref(),
+            context.output_dispatcher.as_ref(),
+            false,
+        ),
         None,
     )
     .await
     {
-        publish_settlement_events(&context.events, &session, settlement);
+        publish_settlement_events(&context, &session, settlement);
     }
     // Runtime supervisor 已异常退出，而 Core completion 的 observer 有意独立存在。
     // 在没有重新取得旧 Core 退出事实前，不能直接启动下一条输入；由下次启动从
@@ -229,6 +236,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     store: context.store.clone(),
                     recall_reference_codec: context.recall_reference_codec.clone(),
                     controller_tools,
+                    output_dispatcher: context.output_dispatcher.clone(),
                 },
                 RunAuthorizationInput {
                     permission_coordinator: context.permission_coordinator.clone(),
@@ -246,7 +254,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         }
                     }),
                     input_origin: next.1.stored.origin,
-                    cross_session_binding: next.1.stored.cross_session_binding.clone(),
+                    cross_session: next.1.stored.cross_session.clone(),
                 },
                 Some(model_diagnostics.clone()),
             )
@@ -259,6 +267,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     reasoning_effort,
                     goal_signal_latch,
                     skill_activation_latch,
+                    can_speak,
                 } = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     let plan = match session.lock_state() {
@@ -356,6 +365,28 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             .extend_message_ids([message.id]);
                     }
                     let cancellation = run_cancellation;
+                    let starts_output_cycle = next.1.stored.origin == crate::InputOrigin::User
+                        || next
+                            .1
+                            .stored
+                            .cross_session
+                            .as_ref()
+                            .is_some_and(|envelope| {
+                                matches!(
+                                    envelope.binding,
+                                    crate::CrossSessionInputBinding::ProxyReport { .. }
+                                )
+                            });
+                    if starts_output_cycle && state.output_cycle.is_none() {
+                        state.output_cycle = Some(crate::OutputCycleState {
+                            source_input_id: next.0.clone(),
+                            has_speech: false,
+                            speech_segment_count: 0,
+                            speech_cancelled: false,
+                            speech_reminder_issued: false,
+                            pending_assistant_text: None,
+                        });
+                    }
                     state.active_run = Some(ActiveRun {
                         run_id: next.2.run_id.clone(),
                         cancellation: cancellation.clone(),
@@ -402,6 +433,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 let mut compaction_count = 0_u32;
                 let mut remaining_budget = agent.execution_budget().clone();
                 let mut next_step = std::num::NonZeroU32::MIN;
+                let mut final_execution_steps = None;
                 let (outcome, forced_error) = loop {
                     let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                         agent.start_with_budget_at_step(
@@ -442,6 +474,84 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             consumption,
                             ..
                         }) => (consumption, None),
+                        Some(agent_core::ExecutionOutcome::Completed { consumption, .. })
+                        | Some(agent_core::ExecutionOutcome::Failed { consumption, .. }) => {
+                            let consumption = *consumption;
+                            let outcome = observed.outcome.expect("matched execution outcome");
+                            consume_execution_budget(
+                                &mut remaining_budget,
+                                consumption.steps,
+                                consumption.tool_calls,
+                            );
+                            let Some(advanced_step) =
+                                next_step.get().checked_add(consumption.steps)
+                            else {
+                                break (
+                                    None,
+                                    Some(RuntimeErrorInfo::new(
+                                        assistant_protocol::RuntimeErrorCode::Internal,
+                                        "run step sequence overflowed",
+                                    )),
+                                );
+                            };
+                            let message_step = match &outcome {
+                                agent_core::ExecutionOutcome::Completed { step, .. } => *step,
+                                _ => advanced_step.saturating_sub(1).max(next_step.get()),
+                            };
+                            let execution_start_step = next_step.get();
+                            final_execution_steps = Some((execution_start_step, message_step));
+                            let controller = controller_tool_coordinator_from(&context);
+                            match crate::run::continue_run_if_required(
+                                &session,
+                                &next.2.run_id,
+                                &outcome,
+                                execution_start_step,
+                                message_step,
+                                crate::run::RunSettlementContext::new(
+                                    context.store.as_ref(),
+                                    controller.as_ref(),
+                                    context.output_dispatcher.as_ref(),
+                                    can_speak,
+                                ),
+                                Some(model_diagnostics.as_ref()),
+                            )
+                            .await
+                            {
+                                Ok(Some(continuation)) => {
+                                    let crate::run::RunContinuationResult { goal, message_step } =
+                                        continuation;
+                                    let Some(continued_input) =
+                                        session.lock_state().ok().and_then(|state| {
+                                            state.journal.as_ref().map(|journal| ExecutionInput {
+                                                conversation: journal.snapshot(),
+                                            })
+                                        })
+                                    else {
+                                        break (
+                                            None,
+                                            Some(RuntimeErrorInfo::new(
+                                                assistant_protocol::RuntimeErrorCode::Internal,
+                                                "continued run conversation is unavailable",
+                                            )),
+                                        );
+                                    };
+                                    input = continued_input;
+                                    next_step = std::num::NonZeroU32::new(advanced_step)
+                                        .expect("a non-zero step plus consumption stays non-zero");
+                                    publish_continuation_events(
+                                        &context,
+                                        &session,
+                                        goal,
+                                        message_step,
+                                    );
+                                    continue;
+                                }
+                                Ok(None) => break (Some(outcome), None),
+                                Err(error) => {
+                                    break (None, Some(error.to_protocol_info()));
+                                }
+                            }
+                        }
                         _ => break (observed.outcome, None),
                     };
                     consume_execution_budget(
@@ -536,8 +646,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         &session,
                         &next.2.run_id,
                         error,
-                        context.store.as_ref(),
-                        controller.as_ref(),
+                        crate::run::RunSettlementContext::new(
+                            context.store.as_ref(),
+                            controller.as_ref(),
+                            context.output_dispatcher.as_ref(),
+                            can_speak,
+                        ),
                         Some(model_diagnostics.as_ref()),
                     )
                     .await
@@ -547,15 +661,32 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         &session,
                         &next.2.run_id,
                         outcome,
-                        context.store.as_ref(),
-                        controller.as_ref(),
+                        final_execution_steps.map_or_else(
+                            || {
+                                crate::run::RunSettlementContext::new(
+                                    context.store.as_ref(),
+                                    controller.as_ref(),
+                                    context.output_dispatcher.as_ref(),
+                                    can_speak,
+                                )
+                            },
+                            |(start, end)| {
+                                crate::run::RunSettlementContext::new(
+                                    context.store.as_ref(),
+                                    controller.as_ref(),
+                                    context.output_dispatcher.as_ref(),
+                                    can_speak,
+                                )
+                                .with_execution_steps(start, end)
+                            },
+                        ),
                         Some(model_diagnostics.as_ref()),
                     )
                     .await
                 };
                 match settled {
                     Ok(settlement) => {
-                        publish_settlement_events(&context.events, &session, settlement);
+                        publish_settlement_events(&context, &session, settlement);
                     }
                     Err(_) => fault_driver(&session),
                 }
@@ -580,22 +711,22 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
 }
 
 fn publish_settlement_events(
-    events: &ObservationCoordinator,
+    context: &QueueDriverContext,
     session: &SessionController,
     settlement: crate::run::RunSettlementResult,
 ) {
-    let committed_step = settlement.committed_step;
+    let final_message_step = settlement.final_message_step;
     if let Ok(state) = session.lock_state() {
         let generation = state.body_generation;
         drop(state);
-        let _ = events.send(RuntimeEvent::ConversationCommitted {
+        let _ = context.events.send(RuntimeEvent::ConversationCommitted {
             owner: ConversationOwner::MainSession {
                 session_id: session.id().clone(),
             },
             generation,
         });
-        if let Some(step) = committed_step {
-            let _ = events.send(RuntimeEvent::StepCommitted {
+        if let Some(step) = final_message_step {
+            let _ = context.events.send(RuntimeEvent::StepCommitted {
                 owner: ConversationOwner::MainSession {
                     session_id: session.id().clone(),
                 },
@@ -604,18 +735,55 @@ fn publish_settlement_events(
             });
         }
     }
-    let _ = events.send(crate::run::finished_event(settlement.run));
+    let _ = context
+        .events
+        .send(crate::run::finished_event(settlement.run));
     if let Some(goal) = settlement.goal {
-        let _ = events.send(RuntimeEvent::GoalChanged {
+        let _ = context.events.send(RuntimeEvent::GoalChanged {
             session_id: session.id().clone(),
             goal_id: goal.goal_id,
             generation: goal.generation,
         });
     }
-    if let Some(continuation) = settlement.continuation {
-        let _ = events.send(RuntimeEvent::RunAccepted {
-            session_id: continuation.session_id,
-            run_id: continuation.run_id,
+    if let Some(output) = settlement.channel_output {
+        let dispatcher = context.output_dispatcher.clone();
+        context.tasks.spawn(
+            async move {
+                let _ = dispatcher.dispatch(output).await;
+            },
+            async {},
+        );
+    }
+}
+
+fn publish_continuation_events(
+    context: &QueueDriverContext,
+    session: &SessionController,
+    goal: Option<assistant_protocol::GoalSnapshot>,
+    message_step: u32,
+) {
+    if let Ok(state) = session.lock_state() {
+        let generation = state.body_generation;
+        drop(state);
+        let _ = context.events.send(RuntimeEvent::ConversationCommitted {
+            owner: ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+            generation,
+        });
+        let _ = context.events.send(RuntimeEvent::StepCommitted {
+            owner: ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+            step: message_step,
+            generation,
+        });
+    }
+    if let Some(goal) = goal {
+        let _ = context.events.send(RuntimeEvent::GoalChanged {
+            session_id: session.id().clone(),
+            goal_id: goal.goal_id,
+            generation: goal.generation,
         });
     }
 }
@@ -668,6 +836,9 @@ async fn fail_before_start(
                             final_text: None,
                             error: Some(error.clone()),
                             accepted_at_ms: finished_at,
+                            reply_route: super::controller::reply_route_for_input(
+                                &source_input.1.stored,
+                            ),
                         })
                 })
                 .flatten()
@@ -708,6 +879,13 @@ async fn fail_before_start(
         }
         if let Some(run) = state.runs.get_mut(run_id) {
             run.fail_before_start(error.clone(), finished_at);
+        }
+        if state
+            .output_cycle
+            .as_ref()
+            .is_some_and(|cycle| failed_input_id.as_ref() == Some(&cycle.source_input_id))
+        {
+            state.output_cycle = None;
         }
         state.updated_at_ms = finished_at;
         state.is_queue_driver_running = false;

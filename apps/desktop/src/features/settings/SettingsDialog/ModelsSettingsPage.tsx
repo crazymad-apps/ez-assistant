@@ -344,7 +344,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
       title="模型"
     >
       <div className={styles.vision_model_setting}>
-        <div className={styles.model_icon}><Icon name="bot" size={17} /></div>
+        <div className={styles.model_icon}><Icon name="model" size={17} /></div>
         <div className={styles.vision_model_summary}>
           <strong>默认识图模型</strong>
           <span>供不支持原生图片输入、但能够调用工具的主模型使用</span>
@@ -366,7 +366,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
       <div className={styles.model_list}>
         {settings.models.map((model) => (
           <article data-valid={model.is_valid} key={model.model_key ?? model.display_name}>
-            <div className={styles.model_icon}><Icon name="bot" size={17} /></div>
+            <div className={styles.model_icon}><Icon name="model" size={17} /></div>
             <div className={styles.model_summary}>
               <div className={styles.model_title}>
                 <strong>{model.display_name}</strong>

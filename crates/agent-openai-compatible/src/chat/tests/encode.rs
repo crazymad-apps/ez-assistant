@@ -50,7 +50,6 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
                     part_id("internal_1"),
                     "boundary_1",
                     "goal_continuation",
-                    Some("goal:1".to_owned()),
                     "<constraint>answer briefly</constraint>",
                 )
                 .expect("internal context"),

@@ -13,6 +13,7 @@ mod attachment_io;
 mod child_task;
 mod context_replacement;
 mod conversation;
+mod device;
 mod engine;
 mod filesystem;
 mod goal;

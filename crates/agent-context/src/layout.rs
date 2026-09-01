@@ -1,10 +1,7 @@
 //! 规范历史块与 protected tail 布局。
 
-use std::collections::HashSet;
-
 use agent_types::{
     AssistantPart, ConversationMessage, ConversationSnapshot, ConversationValidationError,
-    InternalContextPart, UserPart,
 };
 use thiserror::Error;
 
@@ -87,18 +84,6 @@ impl ContextLayout {
 
     /// 按 Rolling Summary 的最少近期轮次要求计算唯一 head/tail 边界。
     pub fn partition(&self, minimum_recent_user_turns: u32) -> ContextPartition<'_> {
-        self.partition_for_continuation(minimum_recent_user_turns, true)
-    }
-
-    /// 为需要在当前活动 Turn 内续跑的宿主计算边界。
-    ///
-    /// 默认调用方应保留 `protect_active_turn=true`。只有 Runtime 已决定用摘要承接整个
-    /// 活动工具链并立即 continuation 时，才允许设为 false。
-    pub fn partition_for_continuation(
-        &self,
-        minimum_recent_user_turns: u32,
-        protect_active_turn: bool,
-    ) -> ContextPartition<'_> {
         let mut split_index = self.blocks.len();
         let mut remaining = usize::try_from(minimum_recent_user_turns).unwrap_or(usize::MAX);
 
@@ -109,19 +94,13 @@ impl ContextLayout {
             }
         }
 
-        if protect_active_turn
-            && let Some((index, _)) =
-                self.blocks.iter().enumerate().rev().find(|(_, block)| {
-                    block.kind == ContextBlockKind::UserTurn && block.is_active()
-                })
+        if let Some((index, _)) = self
+            .blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, block)| block.kind == ContextBlockKind::UserTurn && block.is_active())
         {
-            split_index = split_index.min(index);
-        }
-
-        // 每个 retention key 的最新内部上下文必须原样保留。Context replacement 只能
-        // 表达连续 tail，因此取这些最新版本中最早的块作为边界；同一消息中的用户正文
-        // 与内部 Part 也由此保持原子，不拆写历史消息。
-        if protect_active_turn && let Some(index) = self.latest_retained_block_index() {
             split_index = split_index.min(index);
         }
 
@@ -129,59 +108,6 @@ impl ContextLayout {
             layout: self,
             split_index,
         }
-    }
-
-    fn latest_retained_block_index(&self) -> Option<usize> {
-        let mut seen = HashSet::new();
-        let mut earliest = None;
-        for (index, block) in self.blocks.iter().enumerate().rev() {
-            for message in block.messages().iter().rev() {
-                let ConversationMessage::User(message) = message else {
-                    continue;
-                };
-                for part in message.parts.iter().rev() {
-                    let UserPart::InternalContext(context) = part else {
-                        continue;
-                    };
-                    let Some(key) = &context.retention_key else {
-                        continue;
-                    };
-                    if seen.insert(key.clone()) {
-                        earliest = Some(index);
-                    }
-                }
-            }
-        }
-        earliest
-    }
-
-    /// 返回每个 retention key 的最新冻结正文，并保持这些最新版本在历史中的顺序。
-    ///
-    /// 活动 Turn 整体压缩时，Rolling Summary 会把它们原样重挂到新的隐藏 continuation
-    /// 锚点；普通压缩仍通过 protected tail 保留原消息。
-    pub(crate) fn latest_internal_contexts(&self) -> Vec<InternalContextPart> {
-        let mut seen = HashSet::new();
-        let mut latest = Vec::new();
-        for block in self.blocks.iter().rev() {
-            for message in block.messages().iter().rev() {
-                let ConversationMessage::User(message) = message else {
-                    continue;
-                };
-                for part in message.parts.iter().rev() {
-                    let UserPart::InternalContext(context) = part else {
-                        continue;
-                    };
-                    let Some(key) = &context.retention_key else {
-                        continue;
-                    };
-                    if seen.insert(key.clone()) {
-                        latest.push(context.clone());
-                    }
-                }
-            }
-        }
-        latest.reverse();
-        latest
     }
 }
 
@@ -524,8 +450,8 @@ mod tests {
     }
 
     #[test]
-    fn latest_internal_context_for_each_retention_key_stays_in_the_protected_tail() {
-        let internal_user = |message_id: &str, boundary_id: &str, key: &str| {
+    fn hidden_internal_messages_follow_the_same_latest_turn_rule() {
+        let internal_user = |message_id: &str, boundary_id: &str, kind: &str| {
             ConversationMessage::User(UserMessage {
                 id: id(message_id),
                 origin: UserMessageOrigin::Runtime,
@@ -534,8 +460,7 @@ mod tests {
                     InternalContextPart::new(
                         PartId::new(format!("{message_id}-part")).expect("part id"),
                         boundary_id,
-                        "test_context",
-                        Some(key.to_owned()),
+                        kind,
                         "context",
                     )
                     .expect("internal context"),
@@ -543,23 +468,21 @@ mod tests {
             })
         };
         let layout = ContextLayout::build(&ConversationSnapshot::new(vec![
-            internal_user("user-plan-old", "boundary-plan-old", "work_plan"),
-            assistant("assistant-plan-old"),
+            internal_user("user-proxy", "boundary-proxy", "proxy_report"),
+            assistant("assistant-proxy"),
             user("user-ordinary"),
             assistant("assistant-ordinary"),
-            internal_user("user-plan-new", "boundary-plan-new", "work_plan"),
-            assistant("assistant-plan-new"),
-            internal_user("user-goal", "boundary-goal", "goal:1"),
+            internal_user("user-goal", "boundary-goal", "goal_continuation"),
             assistant("assistant-goal"),
         ]))
         .expect("valid layout");
 
-        let partition = layout.partition(0);
+        let partition = layout.partition(1);
         assert_eq!(partition.compressible_head().len(), 2);
-        assert_eq!(partition.protected_tail().len(), 2);
+        assert_eq!(partition.protected_tail().len(), 1);
         assert_eq!(
             partition.protected_tail()[0].messages()[0],
-            internal_user("user-plan-new", "boundary-plan-new", "work_plan")
+            internal_user("user-goal", "boundary-goal", "goal_continuation")
         );
     }
 

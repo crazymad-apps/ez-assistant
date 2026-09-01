@@ -79,6 +79,21 @@ export class LiveExecutionStore {
     if (this.#pending.length > 0) {
       this.flush();
     }
+    const session_id = view.session.session_id;
+    const authoritative_child_task_ids = new Set(
+      (view.child_tasks ?? []).map((item) => item.task.child_task_id),
+    );
+    for (const [child_task_id, task] of this.child_tasks) {
+      if (task.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
+        this.child_tasks.delete(child_task_id);
+        this.child_runs.delete(child_task_id);
+      }
+    }
+    for (const [child_task_id, run] of this.child_runs) {
+      if (run.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
+        this.child_runs.delete(child_task_id);
+      }
+    }
     const committed_steps = new Map<string, Set<number>>();
     for (const item of view.child_tasks ?? []) {
       this.child_tasks.set(item.task.child_task_id, item.task);

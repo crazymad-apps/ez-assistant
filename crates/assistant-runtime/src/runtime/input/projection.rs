@@ -3,7 +3,7 @@
 use assistant_protocol::{InputId, RunSnapshot};
 
 use crate::{
-    AcceptedInput,
+    AcceptedInput, InputOrigin,
     run::RunRecord,
     session::{InputRecord, SessionState},
 };
@@ -37,6 +37,13 @@ pub(crate) fn project_accepted_input(
 
     let queue_revision = if accepted.input.goal_binding.is_some() {
         state.goal_inputs.push_back(input_id.clone());
+        None
+    } else if accepted.input.origin == InputOrigin::Runtime
+        && accepted.input.goal_binding.is_none()
+        && accepted.input.cross_session.is_none()
+        && accepted.input.channel_source.is_none()
+    {
+        state.session_inputs.push_front(input_id.clone());
         None
     } else {
         state.session_inputs.push_back(input_id.clone());

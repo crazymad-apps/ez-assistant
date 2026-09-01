@@ -855,6 +855,7 @@ mod config;
 mod connection_validation;
 mod controller;
 mod delegation;
+mod device;
 mod failures;
 mod goal_input;
 mod input;

@@ -48,18 +48,18 @@
 - compression request 使用空 tools、`ToolChoice::None` 和显式输出上限。
 - 只有 `FinishReason::Stop`、无 ToolCall 且至少包含一段非空 Text 的完整响应才能形成
   Candidate；Reasoning 不进入摘要正文，取消、Overflow 和普通模型错误原样受控返回。
-- Candidate 固定为 protected System prefix、最新 ContextSummary 和 recent tail；
-  仅清除派生 replacement 中旧 Assistant usage，不得修改原始历史。
+- Candidate 固定为 protected System prefix、最新 ContextSummary 和 recent tail；recent tail
+  必须原样保留。ContextSummary 的 `compacted_usage` 只累计实际被摘要替换的 head，不能提前
+  吸收仍在 recent tail 中的模型调用用量。
 - `ContextLayout::build` 只做共享结构校验和原子分块；Rolling Summary 的
   `minimum_recent_user_turns` 只在 `partition` 时参与 head/tail 边界计算。
 - `ContextLayout` 不按 `TranscriptVisibility` 过滤消息；隐藏 Runtime User Message 与可见 User
   Message 使用同一 user role 和 Turn 结构进入模型上下文，产品转录过滤属于 Runtime/Host 投影职责。
-- Runtime continuation 使用 `partition_for_continuation`：普通阈值压缩保留最近完整 User Turn；
-  Provider overflow 可压缩当前已经形成完整 Tool Exchange 的活动 Turn。若 replacement 会以
-  Assistant 继续执行，必须追加持久化且产品隐藏的 `InternalContext` User continuation 锚点，
-  维持规范 Turn 布局。
-- 普通压缩按 `retention_key` 保护每个 key 的最新 `InternalContext` 所在完整 User Turn；允许摘要
-  活动 Turn 的 overflow continuation 必须把这些最新冻结正文原样重挂到新的隐藏锚点，不能只依赖摘要转述。
+- 每条规范 `UserMessage` 都开始一个 User Turn；可见用户输入、隐藏 Runtime continuation 与内部
+  插入消息遵循同一分块规则，不按来源、可见性或内部类别额外保留。
+- 当前 Runtime 统一要求 replacement 只原样保留最近一个 User Turn，之前的摘要和所有更早
+  Turn 都进入可压缩 head。单一 User Turn 自身撑满上下文时不拆分该 Turn，也不合成 continuation
+  锚点；轮内压缩作为后续版本的独立设计事项处理。
 - Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界；但历史中
   出现 ProviderState 本身不构成永久 protected tail，完整旧 User Turn 可进入压缩 head，摘要替代后
   其 opaque state 自然离开活动上下文。

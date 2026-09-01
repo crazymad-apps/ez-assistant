@@ -176,8 +176,12 @@ impl AssistantRuntime {
                     &session,
                     &run_id,
                     None,
-                    self.store.as_ref(),
-                    controller.as_ref(),
+                    crate::run::RunSettlementContext::new(
+                        self.store.as_ref(),
+                        controller.as_ref(),
+                        self.output_dispatcher.as_ref(),
+                        false,
+                    ),
                     None,
                 )
                 .await?;

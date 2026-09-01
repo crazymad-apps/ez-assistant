@@ -1,4 +1,4 @@
-use agent_types::{ConversationSnapshot, MessageId};
+use agent_types::{ConversationMessage, ConversationSnapshot, MessageId};
 use assistant_protocol::{
     ChildTaskId, ConversationOwner, GoalId, IdempotencyKey, RunId, SessionId, WorkspaceId,
 };
@@ -44,7 +44,7 @@ pub enum ContextReplacementTarget {
     },
 }
 
-/// 使用新 generation 替换当前有效 Conversation，不改写历史 Input/Run/child 关系。
+/// 提交压缩后的 Agent 有效上下文；Store 把它合并进完整产品 Conversation 的新 generation。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextReplacement {
     pub target: ContextReplacementTarget,
@@ -57,6 +57,91 @@ pub struct ContextReplacement {
 pub struct ContextReplacementResult {
     pub source_generation: u64,
     pub result_generation: u64,
+    /// 新 generation 中完整产品 Conversation 的物理消息数。
+    ///
+    /// 它可能大于压缩后的执行上下文消息数；Runtime 不能再用 Journal 长度覆盖该值。
+    pub product_message_count: u64,
+}
+
+/// 从完整产品 Conversation 派生 Agent 当前应读取的有效上下文。
+///
+/// 压缩摘要既是产品历史中的边界标记，也是执行上下文的新起点；开头连续的 System prefix
+/// 始终保留。没有摘要时整份 Conversation 都是有效上下文。该投影不修改持久化正文。
+pub fn execution_context_from_product_history(
+    history: &ConversationSnapshot,
+) -> ConversationSnapshot {
+    let prefix_end = history
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, ConversationMessage::System(_)))
+        .count();
+    let summary_index = history
+        .messages
+        .iter()
+        .rposition(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+        .unwrap_or(prefix_end);
+    let mut messages = history.messages[..prefix_end].to_vec();
+    messages.extend_from_slice(&history.messages[summary_index..]);
+    ConversationSnapshot::new(messages)
+}
+
+/// 把一次压缩后的执行上下文合并回唯一、完整的产品 Conversation。
+///
+/// replacement 必须是 `System prefix → 新 Context Summary → 当前完整历史的原样尾部`。
+/// 合并时复用产品历史开头的 System prefix，只把新摘要插入保留尾部之前，因此保留全部旧
+/// 轮次且不会复制稳定消息 ID。
+pub fn merge_context_replacement_with_product_history(
+    history: &ConversationSnapshot,
+    replacement: &ConversationSnapshot,
+) -> Result<ConversationSnapshot, super::StoreError> {
+    let replacement_prefix_end = replacement
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, ConversationMessage::System(_)))
+        .count();
+    if !matches!(
+        replacement.messages.get(replacement_prefix_end),
+        Some(ConversationMessage::ContextSummary(_))
+    ) {
+        return Err(super::StoreError::new(
+            super::StoreErrorKind::InvalidInput,
+            "context replacement must contain a context summary after its system prefix",
+        ));
+    }
+    let history_prefix_end = history
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, ConversationMessage::System(_)))
+        .count();
+    if replacement.messages[..replacement_prefix_end] != history.messages[..history_prefix_end] {
+        return Err(super::StoreError::new(
+            super::StoreErrorKind::InvalidInput,
+            "context replacement changed the protected system prefix",
+        ));
+    }
+    let retained = &replacement.messages[replacement_prefix_end + 1..];
+    if history.messages.len() < retained.len()
+        || history.messages[history.messages.len() - retained.len()..] != *retained
+    {
+        return Err(super::StoreError::new(
+            super::StoreErrorKind::InvalidInput,
+            "context replacement does not retain an exact conversation suffix",
+        ));
+    }
+    let prefix_len = history.messages.len() - retained.len();
+    let replacement_body = &replacement.messages[replacement_prefix_end..];
+    let mut messages = Vec::with_capacity(prefix_len + replacement_body.len());
+    messages.extend_from_slice(&history.messages[..prefix_len]);
+    messages.extend_from_slice(replacement_body);
+    let merged = ConversationSnapshot::new(messages);
+    merged.validate_tool_exchange_pairs().map_err(|source| {
+        super::StoreError::with_source(
+            super::StoreErrorKind::InvalidInput,
+            "merged product conversation is invalid",
+            source,
+        )
+    })?;
+    Ok(merged)
 }
 
 /// generation 切换成功后创建的新 Input 与首次 Run。
@@ -124,6 +209,90 @@ pub struct StoredConversationMessageLocation {
     pub message_ordinal: u64,
     /// User/Assistant 可展示消息中的零基序号；非展示消息没有该位置。
     pub display_ordinal: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_types::{ContextSummaryMessage, SystemMessage, UserMessage};
+
+    use super::*;
+
+    fn message_id(value: &str) -> MessageId {
+        MessageId::new(value).expect("message id")
+    }
+
+    fn system(value: &str) -> ConversationMessage {
+        ConversationMessage::System(SystemMessage {
+            id: message_id(value),
+            text: value.to_owned(),
+        })
+    }
+
+    fn user(value: &str) -> ConversationMessage {
+        ConversationMessage::User(UserMessage {
+            id: message_id(value),
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
+            parts: Vec::new(),
+        })
+    }
+
+    fn summary(value: &str) -> ConversationMessage {
+        ConversationMessage::ContextSummary(ContextSummaryMessage {
+            id: message_id(value),
+            text: value.to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+        })
+    }
+
+    #[test]
+    fn repeated_compaction_preserves_product_history_and_moves_only_the_execution_boundary() {
+        let prefix = system("system");
+        let first = user("first");
+        let second = user("second");
+        let original =
+            ConversationSnapshot::new(vec![prefix.clone(), first.clone(), second.clone()]);
+        let first_replacement =
+            ConversationSnapshot::new(vec![prefix.clone(), summary("summary-one"), second.clone()]);
+        let first_product =
+            merge_context_replacement_with_product_history(&original, &first_replacement)
+                .expect("first compaction");
+        assert_eq!(
+            first_product.messages,
+            vec![prefix.clone(), first, summary("summary-one"), second,]
+        );
+        assert_eq!(
+            execution_context_from_product_history(&first_product),
+            first_replacement
+        );
+
+        let third = user("third");
+        let mut before_second = first_product.messages.clone();
+        before_second.push(third.clone());
+        let before_second = ConversationSnapshot::new(before_second);
+        let second_replacement =
+            ConversationSnapshot::new(vec![prefix.clone(), summary("summary-two"), third.clone()]);
+        let second_product =
+            merge_context_replacement_with_product_history(&before_second, &second_replacement)
+                .expect("second compaction");
+        assert_eq!(
+            second_product.messages,
+            vec![
+                prefix.clone(),
+                user("first"),
+                summary("summary-one"),
+                user("second"),
+                summary("summary-two"),
+                third,
+            ]
+        );
+        assert_eq!(
+            execution_context_from_product_history(&second_product),
+            second_replacement
+        );
+    }
 }
 
 /// Conversation Recall 的存储级检索范围；调用方权限仍由 Runtime 在进入 Store 前判定。

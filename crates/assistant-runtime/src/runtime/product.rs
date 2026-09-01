@@ -39,8 +39,9 @@ use serde::{Deserialize, Serialize};
 use super::AssistantRuntime;
 use crate::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding, RuntimeError,
-    RuntimeResult, StoreErrorKind, StoredConversationWindow,
+    ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding,
+    InputChannelSource, InputModality, OutputPreference, RuntimeError, RuntimeResult,
+    StoreErrorKind, StoredConversationWindow, StoredInput,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 30;
@@ -91,7 +92,11 @@ impl AssistantRuntime {
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
-        let snapshot = session.conversation_snapshot()?;
+        let snapshot = self
+            .store
+            .load_conversation(session_id)
+            .await
+            .map_err(|source| RuntimeError::from_store("load export conversation", source))?;
         let mut markdown = String::new();
         let title = session.summary()?.title;
         markdown.push_str("# ");
@@ -259,7 +264,7 @@ impl AssistantRuntime {
                 .as_ref()
                 .and_then(|run_id| runs.iter().find(|run| &run.run_id == run_id))
                 .cloned();
-            let queue = queue_snapshot(&session)?;
+            let queue = queue_snapshot(&session, &self.device_names()?)?;
             let mut attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
@@ -286,7 +291,13 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) => continue,
                 Err(error) => return Err(error),
             };
-            let conversation_snapshot = conversation_snapshot_for_usage(&session)?;
+            let conversation_snapshot = self
+                .store
+                .load_conversation(&request.session_id)
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("load session resource conversation", source)
+                })?;
             let conversation = page_from_window(
                 owner,
                 &window,
@@ -525,44 +536,85 @@ impl AssistantRuntime {
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
             let session = self.session(&request.session_id)?;
-            session
-                .ensure_conversation_loaded(self.store.as_ref())
-                .await?;
             session.run_snapshot(&request.run_id)?;
             let attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
                 })?
                 .attachments;
-            let generation = session.lock_state()?.body_generation;
-            let items = project_conversation(
-                &session.conversation_snapshot()?,
-                &self.projection_context(&session, &attachments).await?,
-            )?;
-            let anchor_index = items
-                .iter()
-                .position(|item| {
-                    matches!(item, ConversationItem::Assistant(message) if message.run_id.as_ref() == Some(&request.run_id))
-                })
-                .ok_or_else(|| RuntimeError::RunNotFound {
+            let (generation, message_ids) =
+                {
+                    let state = session.lock_state()?;
+                    let record = state.runs.get(&request.run_id).ok_or_else(|| {
+                        RuntimeError::RunNotFound {
+                            session_id: request.session_id.clone(),
+                            run_id: request.run_id.clone(),
+                        }
+                    })?;
+                    (state.body_generation, record.message_ids().to_vec())
+                };
+            let owner = ConversationOwner::MainSession {
+                session_id: request.session_id.clone(),
+            };
+            let mut anchor = None;
+            for message_id in message_ids.iter().rev() {
+                let location = self
+                    .store
+                    .locate_conversation_message(ConversationMessageLocationRequest {
+                        owner: owner.clone(),
+                        message_id: message_id.clone(),
+                    })
+                    .await
+                    .map_err(|source| {
+                        RuntimeError::from_store("locate run conversation message", source)
+                    })?;
+                if let Some(location) = location
+                    && let Some(display_ordinal) = location.display_ordinal
+                {
+                    if location.generation != generation {
+                        break;
+                    }
+                    anchor = Some((message_id.clone(), display_ordinal));
+                    break;
+                }
+            }
+            let Some((anchor_message_id, display_ordinal)) = anchor else {
+                if session.lock_state()?.body_generation != generation {
+                    continue;
+                }
+                return Err(RuntimeError::RunNotFound {
                     session_id: request.session_id.clone(),
                     run_id: request.run_id.clone(),
-                })?;
-            let anchor_message_id = item_message_id(&items[anchor_index]).clone();
-            let end_index = (anchor_index + 1).min(items.len());
-            let start_index = end_index.saturating_sub(limit);
-            let previous_cursor = (start_index > 0)
-                .then(|| encode_cursor(generation, start_index))
-                .transpose()?;
-            let page = ConversationPage {
-                owner: ConversationOwner::MainSession {
-                    session_id: request.session_id.clone(),
-                },
-                generation,
-                items: items[start_index..end_index].to_vec(),
-                previous_cursor,
-                has_more: start_index > 0,
+                });
             };
+            let anchor_message_id = protocol_message_id(anchor_message_id.as_str())?;
+            let requested_end = usize::try_from(display_ordinal)
+                .ok()
+                .and_then(|ordinal| ordinal.checked_add(1))
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "run conversation location",
+                })?;
+            let window = match self
+                .load_product_conversation_window(
+                    owner.clone(),
+                    generation,
+                    Some(requested_end),
+                    limit,
+                )
+                .await
+            {
+                Ok(window) => window,
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            };
+            let page = page_from_window(
+                owner,
+                &window,
+                project_conversation(
+                    &window.conversation,
+                    &self.projection_context(&session, &attachments).await?,
+                )?,
+            )?;
             let end = self.event_sender.sequence();
             if start == end {
                 return Ok(GetConversationPageAroundRunResult {
@@ -870,7 +922,14 @@ impl AssistantRuntime {
                                 .any(|id| id.as_str() == request.message_id.as_str())
                         })
                         .map(|run| run.snapshot().run_id);
-                    (session.conversation_snapshot()?, run_id)
+                    let snapshot =
+                        self.store
+                            .load_conversation(session_id)
+                            .await
+                            .map_err(|source| {
+                                RuntimeError::from_store("load tool detail conversation", source)
+                            })?;
+                    (snapshot, run_id)
                 }
                 ConversationOwner::ChildTask {
                     session_id,
@@ -985,7 +1044,14 @@ impl AssistantRuntime {
                 session
                     .ensure_conversation_loaded(self.store.as_ref())
                     .await?;
-                (session.conversation_snapshot()?, session.environment())
+                let snapshot =
+                    self.store
+                        .load_conversation(session_id)
+                        .await
+                        .map_err(|source| {
+                            RuntimeError::from_store("load tool resource conversation", source)
+                        })?;
+                (snapshot, session.environment())
             }
             ConversationOwner::ChildTask { child_task_id, .. } => (
                 self.child_task_conversation_snapshot(session_id, child_task_id)
@@ -1092,6 +1158,7 @@ impl AssistantRuntime {
         session: &crate::session::SessionController,
         attachments: &[assistant_protocol::AttachmentSummary],
     ) -> RuntimeResult<ProjectionContext> {
+        let device_names = self.device_names()?;
         let (run_by_message, input_by_message, source_by_message, skill_by_message) = {
             let state = session.lock_state()?;
             let mut run_by_message = HashMap::new();
@@ -1124,7 +1191,7 @@ impl AssistantRuntime {
                 .map(|input| {
                     (
                         input.stored.user_message_id.as_str().to_owned(),
-                        project_input_source(input.stored.cross_session_binding.as_ref()),
+                        project_input_source(&input.stored, &device_names),
                     )
                 })
                 .collect();
@@ -1450,6 +1517,7 @@ pub(super) fn empty_child_projection() -> ProjectionContext {
 
 pub(super) fn queue_snapshot(
     session: &crate::session::SessionController,
+    device_names: &HashMap<assistant_protocol::DeviceId, String>,
 ) -> RuntimeResult<QueueSnapshot> {
     let state = session.lock_state()?;
     let held_by_goal = state.goal.is_some();
@@ -1471,7 +1539,7 @@ pub(super) fn queue_snapshot(
                 submitted_at_ms: input.stored.accepted_at_ms,
                 position: u32::try_from(position).unwrap_or(u32::MAX),
                 is_prioritized: position == 0,
-                source: project_input_source(input.stored.cross_session_binding.as_ref()),
+                source: project_input_source(&input.stored, device_names),
                 held_by_goal,
                 skill: input
                     .stored
@@ -2049,22 +2117,12 @@ fn project_usage(
 fn project_child_usage(snapshot: &ConversationSnapshot) -> ChildTaskUsageSnapshot {
     let usages = snapshot.messages.iter().flat_map(|message| match message {
         ConversationMessage::Assistant(message) => message.usage.iter().collect::<Vec<_>>(),
-        ConversationMessage::ContextSummary(message) => message
-            .compacted_usage
-            .iter()
-            .chain(message.usage.iter())
-            .collect::<Vec<_>>(),
+        ConversationMessage::ContextSummary(message) => message.usage.iter().collect::<Vec<_>>(),
         _ => Vec::new(),
     });
     ChildTaskUsageSnapshot {
         accumulated: sum_usage(usages),
     }
-}
-
-fn conversation_snapshot_for_usage(
-    session: &crate::session::SessionController,
-) -> RuntimeResult<ConversationSnapshot> {
-    session.conversation_snapshot()
 }
 
 fn sum_usage<'a>(usages: impl Iterator<Item = &'a agent_types::TokenUsage>) -> Option<UsageTotals> {
@@ -2201,29 +2259,68 @@ fn decode_cursor(cursor: &str) -> RuntimeResult<ConversationCursor> {
 }
 
 fn project_input_source(
-    binding: Option<&CrossSessionInputBinding>,
+    input: &StoredInput,
+    device_names: &HashMap<assistant_protocol::DeviceId, String>,
 ) -> ConversationInputSourceSnapshot {
-    match binding {
-        None => ConversationInputSourceSnapshot::User,
-        Some(CrossSessionInputBinding::ControllerDelivery {
-            controller_session_id,
-            controller_run_id,
-            ..
-        }) => ConversationInputSourceSnapshot::ControllerDelivery {
-            controller_session_id: controller_session_id.clone(),
-            controller_run_id: controller_run_id.clone(),
+    match input.cross_session.as_ref() {
+        None => match input.channel_source.as_ref() {
+            Some(InputChannelSource::Desktop(source)) => ConversationInputSourceSnapshot::Desktop {
+                modality: project_input_modality(source.modality),
+                requested_output: project_output_preference(source.requested_output),
+            },
+            Some(InputChannelSource::Device(source)) => ConversationInputSourceSnapshot::Device {
+                device_id: source.device_id.clone(),
+                device_name: device_names
+                    .get(&source.device_id)
+                    .cloned()
+                    .unwrap_or_else(|| "已移除设备".to_owned()),
+                modality: project_input_modality(source.modality),
+                requested_output: project_output_preference(source.requested_output),
+            },
+            None => ConversationInputSourceSnapshot::User,
         },
-        Some(CrossSessionInputBinding::ProxyReport {
-            source_session_id,
-            source_run_id,
-            source_goal_id,
-            source_run_status,
-        }) => ConversationInputSourceSnapshot::ProxyReport {
-            source_session_id: source_session_id.clone(),
-            source_run_id: source_run_id.clone(),
-            source_goal_id: source_goal_id.clone(),
-            source_run_status: *source_run_status,
+        Some(envelope) => match &envelope.binding {
+            CrossSessionInputBinding::ControllerDelivery {
+                controller_session_id,
+                controller_run_id,
+                ..
+            } => ConversationInputSourceSnapshot::ControllerDelivery {
+                controller_session_id: controller_session_id.clone(),
+                controller_run_id: controller_run_id.clone(),
+            },
+            CrossSessionInputBinding::ProxyReport {
+                source_session_id,
+                source_run_id,
+                source_goal_id,
+                source_run_status,
+            } => ConversationInputSourceSnapshot::ProxyReport {
+                source_session_id: source_session_id.clone(),
+                source_run_id: source_run_id.clone(),
+                source_goal_id: source_goal_id.clone(),
+                source_run_status: *source_run_status,
+            },
         },
+    }
+}
+
+fn project_input_modality(value: InputModality) -> assistant_protocol::InputModalitySnapshot {
+    match value {
+        InputModality::Text => assistant_protocol::InputModalitySnapshot::Text,
+        InputModality::SpeechTranscript => {
+            assistant_protocol::InputModalitySnapshot::SpeechTranscript
+        }
+    }
+}
+
+fn project_output_preference(
+    value: OutputPreference,
+) -> assistant_protocol::OutputPreferenceSnapshot {
+    match value {
+        OutputPreference::Text => assistant_protocol::OutputPreferenceSnapshot::Text,
+        OutputPreference::Audio => assistant_protocol::OutputPreferenceSnapshot::Audio,
+        OutputPreference::TextAndAudio => {
+            assistant_protocol::OutputPreferenceSnapshot::TextAndAudio
+        }
     }
 }
 
@@ -2343,14 +2440,6 @@ fn protocol_tool_call_id(value: &str) -> RuntimeResult<ToolCallId> {
     ToolCallId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
         component: "conversation tool call id",
     })
-}
-
-fn item_message_id(item: &ConversationItem) -> &MessageId {
-    match item {
-        ConversationItem::User(message) => &message.message_id,
-        ConversationItem::Assistant(message) => &message.message_id,
-        ConversationItem::ContextSummary { message_id, .. } => message_id,
-    }
 }
 
 #[cfg(test)]

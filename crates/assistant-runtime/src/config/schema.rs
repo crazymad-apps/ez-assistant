@@ -29,6 +29,10 @@ pub(super) struct RawConfig {
     /// 按用户 key 保存的模型原始表；每个 value 后续独立编译。
     #[serde(default)]
     pub(super) models: BTreeMap<String, toml::Value>,
+    /// Host 私有语音配置由 Runtime Host 使用同一安全配置源解释；Runtime 只容忍该顶层表，
+    /// 不编译、保存或投影其中的 Provider 与 credential。
+    #[serde(default, rename = "speech")]
+    pub(super) _host_speech: Option<toml::Value>,
 }
 
 /// Runtime 统一拥有的模型传输与建立重试配置。

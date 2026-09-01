@@ -377,7 +377,6 @@ impl StorageEngine {
             },
             &batch.messages,
             staged.created_at_ms,
-            false,
         )?;
         apply_purpose(
             &transaction,
@@ -508,7 +507,6 @@ impl StorageEngine {
             None,
             &replacement.messages,
             plan.changed_at_ms,
-            false,
         )?;
         transaction.commit().map_err(|source| {
             internal_error(
@@ -524,7 +522,7 @@ impl StorageEngine {
             plan.new_generation,
         );
 
-        // 旧 generation 已不再是权威正文；删除失败只留下不可见孤立文件，不回滚已提交切换。
+        // 新 generation 已包含完整权威正文；删除失败只留下不可见孤立文件，不回滚已提交切换。
         let old_path = body_path(&session_directory, plan.previous_generation);
         if fs::remove_file(old_path).is_ok() {
             sync_directory(&session_directory)?;

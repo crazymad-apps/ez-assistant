@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_model::{ModelEvent, ModelEventStream};
+use assistant_protocol::GetConversationPageAroundRunRequest;
 
 struct CallGatedModel {
     capabilities: ModelCapabilities,
@@ -42,7 +43,11 @@ impl ModelService for CallGatedModel {
     }
 }
 
-async fn submit_completed_turn(runtime: &AssistantRuntime, session_id: &SessionId, text: &str) {
+async fn submit_completed_turn(
+    runtime: &AssistantRuntime,
+    session_id: &SessionId,
+    text: &str,
+) -> RunId {
     let accepted = runtime
         .submit_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
@@ -55,12 +60,12 @@ async fn submit_completed_turn(runtime: &AssistantRuntime, session_id: &SessionI
         })
         .await
         .expect("turn accepted");
+    let run_id = accepted.run.run_id.clone();
     assert_eq!(
-        wait_for_terminal(runtime, session_id, &accepted.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(runtime, session_id, &run_id).await.status,
         assistant_protocol::RunStatus::Completed
     );
+    run_id
 }
 
 #[tokio::test]
@@ -75,6 +80,7 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
                 "manual-summary",
                 "first turn summarized",
             ))),
+            ModelScript::Events(message_events(&assistant_text("answer-3", "third answer"))),
         ],
     ));
     let runtime = runtime(model.clone());
@@ -83,7 +89,7 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
         .await
         .expect("session");
     let session_id = session.session.session_id;
-    submit_completed_turn(&runtime, &session_id, "first turn").await;
+    let first_run_id = submit_completed_turn(&runtime, &session_id, "first turn").await;
     submit_completed_turn(&runtime, &session_id, "second turn").await;
     let before = runtime
         .get_session_view(GetSessionViewRequest {
@@ -143,6 +149,36 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
         item,
         assistant_protocol::ConversationItem::ContextSummary { .. }
     )));
+    assert!(view.conversation.items.iter().any(|item| matches!(
+        item,
+        assistant_protocol::ConversationItem::User(user) if user.text == "first turn"
+    )));
+    let first_run_page_result = runtime
+        .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
+            session_id: session_id.clone(),
+            run_id: first_run_id,
+            limit: 10,
+        })
+        .await
+        .expect("page around a run before the compaction boundary");
+    let first_run_page = first_run_page_result.snapshot.value;
+    assert!(first_run_page.items.iter().any(|item| matches!(
+        item,
+        assistant_protocol::ConversationItem::User(user) if user.text == "first turn"
+    )));
+    let exported = runtime
+        .export_session_markdown(&session_id)
+        .await
+        .expect("export complete product history");
+    assert!(exported.contains("first turn"));
+    runtime
+        .set_message_feedback(assistant_protocol::SetMessageFeedbackRequest {
+            session_id: session_id.clone(),
+            message_id: first_run_page_result.anchor_message_id,
+            feedback: Some(assistant_protocol::MessageFeedback::Positive),
+        })
+        .await
+        .expect("feedback on assistant before compaction boundary");
     assert_eq!(
         runtime
             .list_runs(assistant_protocol::ListRunsRequest {
@@ -164,9 +200,29 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
         .await
         .expect("idempotent compact retry");
     assert_eq!(retry.outcome, outcome);
+    submit_completed_turn(&runtime, &session_id, "third turn").await;
     let requests = model.take_requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     assert_eq!(requests[2].generation.max_output_tokens, Some(1_024));
+    let next_conversation = &requests[3].conversation.messages;
+    assert!(matches!(
+        next_conversation.first(),
+        Some(ConversationMessage::ContextSummary(summary))
+            if summary.text == "first turn summarized"
+    ));
+    let user_texts = next_conversation
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User(user) => Some(user.parts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            UserPart::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_texts, vec!["second turn", "third turn"]);
 
     let mut saw_started = false;
     let mut saw_finished = false;

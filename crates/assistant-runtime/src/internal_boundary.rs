@@ -13,11 +13,12 @@ use crate::{
 /// Runtime 已知的内部上下文来源。
 ///
 /// 该 enum 只负责消息构造的共性，不接管 Goal generation、WorkPlan revision 或其他
-/// 领域状态机；新增来源必须显式选择 kind 和 retention key，不能在功能模块内直接
+/// 领域状态机；新增来源必须显式选择 kind，不能在功能模块内直接
 /// 拼装 `InternalContextPart`。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InternalBoundarySource {
     AgentVariant,
+    ChannelInput,
     SkillActivation,
     GoalStart,
     GoalResume,
@@ -29,12 +30,14 @@ pub(crate) enum InternalBoundarySource {
     DelegationDirectories,
     ControllerDelivery,
     ProxyReport,
+    SpeechDeliveryReminder,
 }
 
 impl InternalBoundarySource {
     const fn kind(self) -> &'static str {
         match self {
             Self::AgentVariant => "agent_variant",
+            Self::ChannelInput => "channel_input",
             Self::SkillActivation => "skill_activation",
             Self::GoalStart => "goal_start",
             Self::GoalResume => "goal_resume",
@@ -46,6 +49,7 @@ impl InternalBoundarySource {
             Self::DelegationDirectories => "delegation_directories",
             Self::ControllerDelivery => "controller_delivery",
             Self::ProxyReport => "proxy_report",
+            Self::SpeechDeliveryReminder => "speech_delivery_reminder",
         }
     }
 }
@@ -53,7 +57,6 @@ impl InternalBoundarySource {
 /// 功能模块交给统一边界构造器的冻结输入。
 pub(crate) struct InternalBoundaryRequest {
     pub(crate) source: InternalBoundarySource,
-    pub(crate) retention_key: Option<String>,
     pub(crate) text: String,
 }
 
@@ -84,7 +87,6 @@ impl InternalBoundaryCoordinator {
             allocate_part_id()?,
             boundary_id,
             request.source.kind(),
-            request.retention_key,
             request.text,
         )
         .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -177,7 +179,6 @@ mod tests {
             &mut visible,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::WorkPlan,
-                retention_key: Some("work_plan".to_owned()),
                 text: "frozen plan".to_owned(),
             },
         )
@@ -185,7 +186,6 @@ mod tests {
         let (hidden, hidden_identity) =
             InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
                 source: InternalBoundarySource::GoalContinuation,
-                retention_key: Some("goal:1".to_owned()),
                 text: "continue goal".to_owned(),
             })
             .expect("hidden boundary");
@@ -209,7 +209,6 @@ mod tests {
             &mut message,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::SkillActivation,
-                retention_key: Some("skill:review".to_owned()),
                 text: "skill".to_owned(),
             },
         )
@@ -219,7 +218,6 @@ mod tests {
             InternalBoundarySource::SkillActivation,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::GoalResume,
-                retention_key: Some("goal:1".to_owned()),
                 text: "goal".to_owned(),
             },
         )

@@ -31,7 +31,6 @@ pub(crate) fn inject_claimed_context(
         claimed_message,
         InternalBoundaryRequest {
             source: InternalBoundarySource::WorkPlan,
-            retention_key: Some("work_plan".to_owned()),
             text,
         },
     )?;

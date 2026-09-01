@@ -30,17 +30,11 @@ Return only the concise summary.";
 /// 临时压缩消息只存在于单次请求中，不写入历史或 replacement。
 const COMPRESSION_MESSAGE_ID: &str = "context_compaction_instruction";
 const COMPRESSION_PART_ID: &str = "context_compaction_instruction_text";
-/// 整个活动 Turn 被摘要替换后保留的模型续跑锚点；它属于持久化规范历史，UI 隐藏。
-const CONTINUATION_MESSAGE_ID_SUFFIX: &str = "_continuation";
-const CONTINUATION_PART_ID_SUFFIX: &str = "_continuation_text";
-const CONTINUATION_INSTRUCTION: &str = "Continue the active task from the context summary above.";
-
 /// 同模型滚动摘要策略配置。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RollingSummaryPolicy {
     summary_output_tokens: u32,
     minimum_recent_user_turns: u32,
-    protect_active_turn: bool,
 }
 
 impl RollingSummaryPolicy {
@@ -55,18 +49,7 @@ impl RollingSummaryPolicy {
         Ok(Self {
             summary_output_tokens,
             minimum_recent_user_turns,
-            protect_active_turn: true,
         })
-    }
-
-    /// Runtime continuation 专用策略：摘要可以承接当前仍在工具循环中的完整 User Turn。
-    pub fn for_active_continuation(
-        summary_output_tokens: u32,
-        minimum_recent_user_turns: u32,
-    ) -> Result<Self, RollingSummaryPolicyError> {
-        let mut policy = Self::new(summary_output_tokens, minimum_recent_user_turns)?;
-        policy.protect_active_turn = false;
-        Ok(policy)
     }
 
     /// 压缩请求允许生成的最大输出 token。
@@ -118,15 +101,7 @@ impl CompressionStrategy for RollingSummarySameModel {
                 system_prompt,
                 layout,
             } = input;
-            let retained_internal_contexts = if policy.protect_active_turn {
-                Vec::new()
-            } else {
-                layout.latest_internal_contexts()
-            };
-            let partition = layout.partition_for_continuation(
-                policy.minimum_recent_user_turns(),
-                policy.protect_active_turn,
-            );
+            let partition = layout.partition(policy.minimum_recent_user_turns());
             let compacted_usage = aggregate_replaced_usage(&partition);
             let compressed_blocks = report_count(partition.compressible_head().len())?;
             let retained_blocks = report_count(partition.protected_tail().len())?;
@@ -186,8 +161,6 @@ impl CompressionStrategy for RollingSummarySameModel {
                 &message,
                 summary_text,
                 compacted_usage,
-                !policy.protect_active_turn,
-                &retained_internal_contexts,
             );
             validate_replacement(&replacement)?;
 
@@ -224,7 +197,6 @@ fn compression_instruction_message() -> ConversationMessage {
         PartId::new(COMPRESSION_PART_ID).expect("static compression part id must be valid"),
         "context_compaction_request",
         "context_compaction_instruction",
-        None,
         COMPRESSION_INSTRUCTIONS,
     )
     .expect("static compression context must be valid");
@@ -287,8 +259,6 @@ fn build_replacement(
     message: &AssistantMessage,
     summary_text: String,
     compacted_usage: Option<agent_types::TokenUsage>,
-    ensure_continuation_anchor: bool,
-    retained_internal_contexts: &[InternalContextPart],
 ) -> ConversationSnapshot {
     let mut messages = protected_prefix.to_vec();
     messages.push(ConversationMessage::ContextSummary(ContextSummaryMessage {
@@ -301,70 +271,9 @@ fn build_replacement(
     messages.extend(
         protected_tail
             .iter()
-            .flat_map(|block| block.messages().iter().cloned())
-            .map(clear_assistant_usage),
+            .flat_map(|block| block.messages().iter().cloned()),
     );
-    if ensure_continuation_anchor
-        && !messages
-            .iter()
-            .any(|message| matches!(message, ConversationMessage::User(_)))
-    {
-        messages.push(continuation_anchor(&message.id, retained_internal_contexts));
-    }
     ConversationSnapshot::new(messages)
-}
-
-fn continuation_anchor(
-    summary_id: &MessageId,
-    retained_internal_contexts: &[InternalContextPart],
-) -> ConversationMessage {
-    let message_id = MessageId::new(format!(
-        "{}{CONTINUATION_MESSAGE_ID_SUFFIX}",
-        summary_id.as_str()
-    ))
-    .expect("non-empty summary id forms a valid continuation message id");
-    let mut parts = retained_internal_contexts
-        .iter()
-        .enumerate()
-        .map(|(index, context)| {
-            InternalContextPart::new(
-                PartId::new(format!(
-                    "{}{CONTINUATION_PART_ID_SUFFIX}_{index}",
-                    summary_id.as_str()
-                ))
-                .expect("summary identity forms a valid retained context part id"),
-                context.boundary_id.clone(),
-                context.kind.clone(),
-                context.retention_key.clone(),
-                context.text.clone(),
-            )
-            .expect("previously validated internal context remains valid")
-        })
-        .map(UserPart::InternalContext)
-        .collect::<Vec<_>>();
-    let part = InternalContextPart::new(
-        PartId::new(format!(
-            "{}{CONTINUATION_PART_ID_SUFFIX}",
-            summary_id.as_str()
-        ))
-        .expect("non-empty summary id forms a valid continuation part id"),
-        format!("context_compaction:{}", summary_id.as_str()),
-        "context_continuation",
-        Some("context:continuation".to_owned()),
-        CONTINUATION_INSTRUCTION,
-    )
-    .expect("summary identity forms a valid continuation context");
-    let plan = ContextInsertionPlan::canonical_internal(summary_id.clone(), part);
-    let ContextInsertionPayload::InternalContext(part) = plan.payload else {
-        unreachable!("canonical internal plan carries internal context")
-    };
-    parts.push(UserPart::InternalContext(part));
-    ConversationMessage::User(UserMessage {
-        origin: UserMessageOrigin::Runtime,
-        transcript_visibility: TranscriptVisibility::Hidden,
-        id: message_id,
-        parts,
-    })
 }
 
 fn aggregate_replaced_usage(
@@ -374,7 +283,6 @@ fn aggregate_replaced_usage(
     for message in partition
         .compressible_head()
         .iter()
-        .chain(partition.protected_tail())
         .flat_map(|block| block.messages())
     {
         match message {
@@ -416,13 +324,6 @@ fn add_usage(total: &mut Option<agent_types::TokenUsage>, usage: Option<&agent_t
                 .saturating_add(value),
         );
     }
-}
-
-fn clear_assistant_usage(mut message: ConversationMessage) -> ConversationMessage {
-    if let ConversationMessage::Assistant(assistant) = &mut message {
-        assistant.usage = None;
-    }
-    message
 }
 
 /// Rolling Summary 配置不满足构造约束。
@@ -721,15 +622,15 @@ mod tests {
                     model: Some(summary.model.clone()),
                     usage: summary.usage.clone(),
                     compacted_usage: Some(agent_types::TokenUsage {
-                        input_tokens: 60,
-                        output_tokens: 30,
-                        total_tokens: 90,
-                        cached_input_tokens: Some(12),
-                        reasoning_tokens: Some(6),
+                        input_tokens: 30,
+                        output_tokens: 20,
+                        total_tokens: 50,
+                        cached_input_tokens: Some(8),
+                        reasoning_tokens: Some(4),
                     }),
                 }),
                 snapshot.messages[5].clone(),
-                assistant("assistant_3", None),
+                snapshot.messages[6].clone(),
             ]
         );
         assert_eq!(
@@ -887,11 +788,7 @@ mod tests {
             candidate.replacement.messages[1], tool_turn[0],
             "tail user message stays at the same boundary"
         );
-        for message in &candidate.replacement.messages[1..] {
-            if let ConversationMessage::Assistant(message) = message {
-                assert_eq!(message.usage, None);
-            }
-        }
+        assert_eq!(&candidate.replacement.messages[1..], tool_turn.as_slice());
         candidate
             .replacement
             .validate_tool_exchange_pairs()
@@ -900,94 +797,6 @@ mod tests {
         let mut expected_conversation = snapshot.messages[..3].to_vec();
         expected_conversation.push(compression_instruction_message());
         assert_eq!(requests[0].conversation.messages, expected_conversation);
-    }
-
-    #[tokio::test]
-    async fn active_turn_compaction_persists_a_user_anchor_for_the_continuation_result() {
-        let call_id = ToolCallId::new("call_active").expect("valid call id");
-        let snapshot = ConversationSnapshot::new(vec![
-            ConversationMessage::User(UserMessage {
-                id: id("user_active"),
-                origin: UserMessageOrigin::Runtime,
-                transcript_visibility: TranscriptVisibility::Hidden,
-                parts: vec![UserPart::InternalContext(
-                    InternalContextPart::new(
-                        part_id("active_goal_context"),
-                        "boundary_active_goal",
-                        "goal_continuation",
-                        Some("goal:active".to_owned()),
-                        "frozen active goal",
-                    )
-                    .expect("internal context"),
-                )],
-            }),
-            ConversationMessage::Assistant(AssistantMessage {
-                id: id("assistant_active"),
-                model: model_identity(),
-                parts: vec![AssistantPart::ToolCall(ToolCall {
-                    id: call_id.clone(),
-                    name: ToolName::new("lookup").expect("valid tool name"),
-                    arguments: serde_json::json!({}),
-                })],
-                finish_reason: FinishReason::ToolCalls,
-                usage: Some(usage(20)),
-            }),
-            ConversationMessage::Tool(ToolMessage {
-                id: id("tool_active"),
-                result: ToolResult {
-                    call_id,
-                    status: ToolResultStatus::Success,
-                    content: ToolResultContent::text("result".to_owned()),
-                    metadata: None,
-                },
-            }),
-        ]);
-        let summary = summary_message(
-            "summary_active",
-            vec![AssistantPart::Text(TextPart {
-                id: part_id("summary_active_text"),
-                text: "active task summarized".to_owned(),
-            })],
-            FinishReason::Stop,
-        );
-        let model = Arc::new(ScriptedModel::new([Script::Events(message_events(
-            &summary,
-        ))]));
-        let strategy = RollingSummarySameModel::new(
-            RollingSummaryPolicy::for_active_continuation(64, 0).expect("valid policy"),
-        );
-
-        let StrategyOutcome::Candidate(mut candidate) = strategy
-            .compact(input(model, &snapshot), CancellationToken::new())
-            .await
-            .expect("active turn compaction succeeds")
-        else {
-            panic!("expected candidate");
-        };
-        let [
-            ConversationMessage::ContextSummary(_),
-            ConversationMessage::User(anchor),
-        ] = candidate.replacement.messages.as_slice()
-        else {
-            panic!("replacement must contain a summary and hidden anchor")
-        };
-        assert_eq!(anchor.origin, UserMessageOrigin::Runtime);
-        assert_eq!(anchor.transcript_visibility, TranscriptVisibility::Hidden);
-        assert!(matches!(
-            anchor.parts.as_slice(),
-            [UserPart::InternalContext(retained), UserPart::InternalContext(continuation)]
-                if retained.boundary_id == "boundary_active_goal"
-                    && retained.retention_key.as_deref() == Some("goal:active")
-                    && retained.text == "frozen active goal"
-                    && continuation.text == CONTINUATION_INSTRUCTION
-        ));
-
-        candidate
-            .replacement
-            .messages
-            .push(assistant("assistant_continued", None));
-        crate::ContextLayout::build(&candidate.replacement)
-            .expect("persisted continuation result remains a valid user turn");
     }
 
     #[tokio::test]

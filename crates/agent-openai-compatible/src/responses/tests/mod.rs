@@ -85,7 +85,6 @@ fn runtime_user(id: &str, text: &str) -> ConversationMessage {
                 part_id(&format!("{id}-internal")),
                 format!("boundary-{id}"),
                 "runtime_context",
-                Some("runtime:context".to_owned()),
                 text,
             )
             .expect("internal context"),
@@ -631,6 +630,62 @@ fn deepseek_opaque_reasoning_round_trips_only_on_the_exact_route() {
 }
 
 #[test]
+fn kimi_opaque_reasoning_round_trips_on_the_exact_route() {
+    let exact = bound_adapter(
+        ResponsesProtocolAdapter::kimi(),
+        "https://api.kimi.com/coding/v1",
+        "k3",
+    );
+    let events = feed_sse_with_adapter(
+        concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_k3\",\"model\":\"k3\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_k3\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_k3\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_k3\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Checked\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_k3\",\"output_index\":0,\"summary_index\":0,\"text\":\"Checked\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_k3\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"Checked\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_k3\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Checked\"}],\"encrypted_content\":\"k3-cipher\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_k3\",\"model\":\"k3\"}}\n\n",
+        ),
+        exact.clone(),
+        "k3",
+    )
+    .expect("Kimi encrypted reasoning fixture");
+    let ModelEvent::TurnFinished { message } = events.last().expect("terminal") else {
+        panic!("expected completed turn")
+    };
+    assert!(matches!(
+        message.parts.as_slice(),
+        [AssistantPart::Reasoning(reasoning), AssistantPart::ProviderState(state)]
+            if reasoning.text == "Checked" && state.related_part_id() == Some(&reasoning.id)
+    ));
+
+    let history = request(vec![
+        user("user_k3_1", "continue"),
+        ConversationMessage::Assistant(message.clone()),
+        user("user_k3_2", "continue again"),
+    ]);
+    let value = serde_json::to_value(
+        encode_request_with_images(
+            &history,
+            &agent_model::PreparedModelImages::default(),
+            &exact,
+            "k3",
+        )
+        .expect("exact Kimi replay"),
+    )
+    .expect("request JSON");
+    let reasoning = value["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("reasoning item");
+    assert_eq!(reasoning["encrypted_content"], "k3-cipher");
+    assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[test]
 fn deepseek_canonicalizes_interleaved_chat_parts_before_tool_outputs() {
     let history = request(vec![
         user("user_chat_1", "review"),
@@ -816,6 +871,40 @@ fn compatible_corrupt_state_fails_while_null_encrypted_content_stays_normalized(
     assert!(matches!(
         message.parts.as_slice(),
         [AssistantPart::Reasoning(_)]
+    ));
+}
+
+#[test]
+fn qwen_reasoning_text_stream_and_final_summary_form_one_part() {
+    let events = feed_sse_with_adapter(
+        concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_q_stream\",\"model\":\"qwen3.8-max\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_q_stream\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"output_index\":0,\"item_id\":\"rs_q_stream\",\"content_index\":0,\"delta\":\"Checked\"}\n\n",
+            "data: {\"type\":\"response.reasoning_text.done\",\"output_index\":0,\"item_id\":\"rs_q_stream\",\"content_index\":0,\"text\":\"Checked\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_q_stream\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Checked\"}],\"content\":[],\"encrypted_content\":null}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_q_stream\",\"model\":\"qwen3.8-max\"}}\n\n",
+        ),
+        ResponsesProtocolAdapter::qwen(),
+        "qwen3.8-max",
+    )
+    .expect("Qwen reasoning stream fixture");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ModelEvent::ReasoningStarted { .. }))
+            .count(),
+        1
+    );
+    let ModelEvent::TurnFinished { message } = events.last().expect("terminal") else {
+        panic!("expected completed turn")
+    };
+    assert!(matches!(
+        message.parts.as_slice(),
+        [AssistantPart::Reasoning(reasoning)]
+            if reasoning.id.as_str() == "rs_q_stream:summary:0"
+                && reasoning.text == "Checked"
     ));
 }
 

@@ -2,10 +2,12 @@
 
 mod approval;
 mod attachment;
+mod channel;
 mod compaction;
 mod connection_validation;
 pub(crate) mod controller;
 mod delegation;
+mod device;
 pub(crate) mod goal;
 mod input;
 mod memory;
@@ -22,7 +24,10 @@ mod work_plan;
 mod workspace;
 
 pub use attachment::StagedAttachmentUpload;
-pub(crate) use input::projection::project_accepted_input;
+pub(crate) use channel::{
+    MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE, MAX_SPEAK_TEXT_CHARS, SpeakAuthorizationFacts,
+    resolve_output_cycle_deliveries,
+};
 pub use product::ResolvedToolFileResource;
 
 use std::{
@@ -37,12 +42,12 @@ use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CancelRunRequest, CancelRunResult,
     ConfigurationMutationResult, ConfigurationStatus, CreateModelRequest, CreateSessionRequest,
     CreateSessionResult, DeleteConfirmationToken, DeleteModelRequest, DeleteSessionImpact,
-    GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult, GetRunRequest,
-    GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest, ListModelsResult,
-    ListSessionsRequest, ListSessionsResult, ModelCatalogEntrySnapshot, ModelCatalogSnapshot,
-    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
-    SessionId, SessionSummary, SetAuxiliaryVisionModelRequest, SetDefaultModelRequest,
-    UpdateModelRequest, WorkspaceId,
+    DeviceId, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult,
+    GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest,
+    ListModelsResult, ListSessionsRequest, ListSessionsResult, ModelCatalogEntrySnapshot,
+    ModelCatalogSnapshot, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent,
+    RuntimeEventEnvelope, RuntimeLifecycle, SessionId, SessionSummary,
+    SetAuxiliaryVisionModelRequest, SetDefaultModelRequest, UpdateModelRequest, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -86,11 +91,13 @@ pub struct AssistantRuntime {
     sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
     workspaces: RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>,
     attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
+    devices: RwLock<BTreeMap<DeviceId, crate::PairedDevice>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: AsyncRwLock<()>,
     model_binding_gate: AsyncRwLock<()>,
     workspace_mutation_gate: AsyncMutex<()>,
+    device_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<PermissionCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
@@ -100,6 +107,7 @@ pub struct AssistantRuntime {
     run_tool_factory: Arc<dyn RunToolFactory>,
     child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     child_tasks: Arc<ChildTaskRegistry>,
+    output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     context_window: Arc<ContextWindowEvaluator>,
     event_sender: ObservationCoordinator,
@@ -250,11 +258,13 @@ impl AssistantRuntime {
             sessions: Arc::new(RwLock::new(recovered.sessions)),
             workspaces: RwLock::new(recovered.workspaces),
             attachments: RwLock::new(recovered.attachments),
+            devices: RwLock::new(recovered.devices),
             delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
             operation_gate: AsyncRwLock::new(()),
             model_binding_gate: AsyncRwLock::new(()),
             workspace_mutation_gate: AsyncMutex::new(()),
+            device_mutation_gate: AsyncMutex::new(()),
             config_registry: Arc::new(ConfigRegistry::new(config_source, model_catalog)),
             permission_coordinator,
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
@@ -264,6 +274,7 @@ impl AssistantRuntime {
             run_tool_factory,
             child_task_workspace_factory,
             child_tasks: Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks)),
+            output_dispatcher: Arc::new(crate::channel::NoopChannelOutputDispatcher),
             recall_reference_codec,
             context_window: Arc::new(
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
@@ -278,6 +289,15 @@ impl AssistantRuntime {
     /// 返回构造时已经校验的 Runtime 配置。
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    /// 在 Host 开放入口前替换附加 Channel 输出端口。
+    pub fn with_channel_output_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
+    ) -> Self {
+        self.output_dispatcher = dispatcher;
+        self
     }
 
     /// 查询当前 Runtime 生命周期。
@@ -725,7 +745,7 @@ impl AssistantRuntime {
         })
     }
 
-    /// 按 SessionId 的确定性顺序列出当前进程内 Session。
+    /// 按置顶、最近活动时间和 SessionId 的确定性顺序列出当前进程内 Session。
     pub fn list_sessions(&self, request: ListSessionsRequest) -> RuntimeResult<ListSessionsResult> {
         let sessions: Vec<_> = self
             .sessions
@@ -770,10 +790,10 @@ impl AssistantRuntime {
         })
     }
 
-    /// 查询一个 Session 当前已经完整提交的规范 Conversation。
+    /// 查询一个 Session 当前已经完整提交的 Agent 有效 Conversation。
     ///
     /// 该返回值属于 Runtime library 内部装配与单元测试能力，不进入 `assistant-protocol`
-    /// 公共 DTO，也不再通过正式 Host 暴露主会话整量查询。
+    /// 公共 DTO，也不再通过正式 Host 暴露主会话整量查询。产品完整历史必须通过 Store 分页读取。
     pub async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
@@ -911,7 +931,7 @@ impl AssistantRuntime {
         });
         Ok(assistant_protocol::InterruptRunResult {
             run: result.run,
-            queue: self::product::queue_snapshot(&session)?,
+            queue: self::product::queue_snapshot(&session, &self.device_names()?)?,
         })
     }
 

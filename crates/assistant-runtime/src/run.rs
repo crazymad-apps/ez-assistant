@@ -11,7 +11,10 @@ pub(crate) use model_diagnostics::{
     ModelFailureDiagnostics, RunModelDiagnostics, model_failure_kind, model_failure_kind_value,
 };
 pub(crate) use recorder::RuntimeRecorder;
-pub(crate) use settlement::{RunSettlementResult, settle_run, settle_run_with_error};
+pub(crate) use settlement::{
+    RunContinuationResult, RunSettlementContext, RunSettlementResult, continue_run_if_required,
+    settle_run, settle_run_with_error,
+};
 pub(crate) use supervisor::observe_run_execution;
 
 use agent_types::{
@@ -221,12 +224,6 @@ impl RunRecord {
     pub(crate) fn attempt(&self) -> u32 {
         self.attempt
     }
-    pub(crate) fn variant(&self) -> AgentVariant {
-        self.variant
-    }
-    pub(crate) fn approval_mode(&self) -> ApprovalMode {
-        self.approval_mode
-    }
     pub(crate) fn status(&self) -> RunStatus {
         self.status
     }
@@ -315,7 +312,6 @@ pub(crate) fn create_user_message(
         &mut message,
         InternalBoundaryRequest {
             source: InternalBoundarySource::AgentVariant,
-            retention_key: Some("agent_variant".to_owned()),
             text: crate::agent_variant::injection_text(variant).to_owned(),
         },
     )?;

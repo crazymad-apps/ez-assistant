@@ -9,7 +9,8 @@ use assistant_protocol::{
 use super::super::AssistantRuntime;
 use crate::{
     GoalClear, GoalHeldInputResume, GoalInputBinding, GoalStop, InputOrigin, NewStoredInput,
-    RuntimeError, RuntimeResult, StoreErrorKind,
+    ReplyRoute, RuntimeError, RuntimeResult, StoreErrorKind,
+    config::ConfigRegistry,
     goal::{
         GoalControl, GoalState, allocate_goal_id, create_continuation_message,
         inject_resume_context, inject_start_context,
@@ -62,7 +63,7 @@ impl AssistantRuntime {
                     }
                     (state.model_key.clone(), goal.clone())
                 };
-                self.ensure_goal_model_supported(session, &model_key)?;
+                ensure_goal_model_supported(&self.config_registry, session, &model_key)?;
                 Ok(GoalSubmission::Resume(goal))
             }
             SubmitInputMode::StartGoal => {
@@ -75,29 +76,10 @@ impl AssistantRuntime {
                     }
                     state.model_key.clone()
                 };
-                self.ensure_goal_model_supported(session, &model_key)?;
+                ensure_goal_model_supported(&self.config_registry, session, &model_key)?;
                 Ok(GoalSubmission::Start)
             }
         }
-    }
-
-    fn ensure_goal_model_supported(
-        &self,
-        session: &SessionController,
-        model_key: &assistant_protocol::ModelKey,
-    ) -> RuntimeResult<()> {
-        let snapshot = self.config_registry.snapshot()?;
-        let model = snapshot
-            .model(model_key)
-            .ok_or_else(|| RuntimeError::ModelUnavailable {
-                model_key: model_key.clone(),
-            })?;
-        if !model.capabilities().tool_calls {
-            return Err(RuntimeError::GoalUnsupportedByModel {
-                session_id: session.id().clone(),
-            });
-        }
-        Ok(())
     }
 
     /// 原子暂停整个 Goal；Store 成功记录世代与取消意图后才触发活动 Run 取消令牌。
@@ -314,7 +296,7 @@ impl AssistantRuntime {
                 state.approval_mode,
             )
         };
-        self.ensure_goal_model_supported(session.as_ref(), &model_key)?;
+        ensure_goal_model_supported(&self.config_registry, session.as_ref(), &model_key)?;
 
         // 先构造下一世代及其隐藏 continuation，但此时不能提前修改内存中的权威 Goal 投影。
         let accepted_at_ms = super::super::now_ms()?;
@@ -339,8 +321,10 @@ impl AssistantRuntime {
                     goal_id: resumed.id.clone(),
                     generation: resumed.generation,
                     turn: resumed.turn,
+                    reply_route: None,
                 }),
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: None,
                 skill_activation: None,
                 approval_mode,
                 message,
@@ -432,7 +416,7 @@ impl AssistantRuntime {
             )?;
             (goal.clone(), state.model_key.clone(), message)
         };
-        self.ensure_goal_model_supported(session.as_ref(), &model_key)?;
+        ensure_goal_model_supported(&self.config_registry, session.as_ref(), &model_key)?;
         let accepted_at_ms = super::super::now_ms()?;
         let resumed =
             goal.resume(accepted_at_ms)
@@ -582,26 +566,7 @@ impl GoalSubmission {
     ) -> RuntimeResult<Option<PreparedGoalSubmission>> {
         match self {
             Self::None => Ok(None),
-            Self::Start => {
-                let goal_id = allocate_goal_id()?;
-                inject_start_context(message, &goal_id)?;
-                let control =
-                    GoalControl::start(goal_id, message, accepted_at_ms).map_err(|_| {
-                        RuntimeError::InternalStateUnavailable {
-                            component: "Goal objective snapshot",
-                        }
-                    })?;
-                let binding = GoalInputBinding {
-                    goal_id: control.id.clone(),
-                    generation: control.generation,
-                    turn: control.turn,
-                };
-                Ok(Some(PreparedGoalSubmission {
-                    control,
-                    binding,
-                    persistence: GoalSubmissionPersistence::Start,
-                }))
-            }
+            Self::Start => prepare_goal_start(message, accepted_at_ms, None).map(Some),
             Self::Resume(goal) => {
                 let control = goal.resume(accepted_at_ms).map_err(|_| {
                     RuntimeError::InternalStateUnavailable {
@@ -613,6 +578,7 @@ impl GoalSubmission {
                     goal_id: control.id.clone(),
                     generation: control.generation,
                     turn: control.turn,
+                    reply_route: None,
                 };
                 Ok(Some(PreparedGoalSubmission {
                     control,
@@ -622,4 +588,50 @@ impl GoalSubmission {
             }
         }
     }
+}
+
+/// 校验目标 Session 当前模型能够执行 Goal 所需的工具调用。
+pub(in crate::runtime) fn ensure_goal_model_supported(
+    config_registry: &ConfigRegistry,
+    session: &SessionController,
+    model_key: &assistant_protocol::ModelKey,
+) -> RuntimeResult<()> {
+    let snapshot = config_registry.snapshot()?;
+    let model = snapshot
+        .model(model_key)
+        .ok_or_else(|| RuntimeError::ModelUnavailable {
+            model_key: model_key.clone(),
+        })?;
+    if !model.capabilities().tool_calls {
+        return Err(RuntimeError::GoalUnsupportedByModel {
+            session_id: session.id().clone(),
+        });
+    }
+    Ok(())
+}
+
+/// 构造首次 Goal Input 及控制器事实；调用方负责将其与 Input/Run 原子提交。
+pub(in crate::runtime) fn prepare_goal_start(
+    message: &mut UserMessage,
+    accepted_at_ms: i64,
+    reply_route: Option<ReplyRoute>,
+) -> RuntimeResult<PreparedGoalSubmission> {
+    let goal_id = allocate_goal_id()?;
+    inject_start_context(message, &goal_id)?;
+    let control = GoalControl::start(goal_id, message, accepted_at_ms).map_err(|_| {
+        RuntimeError::InternalStateUnavailable {
+            component: "Goal objective snapshot",
+        }
+    })?;
+    let binding = GoalInputBinding {
+        goal_id: control.id.clone(),
+        generation: control.generation,
+        turn: control.turn,
+        reply_route,
+    };
+    Ok(PreparedGoalSubmission {
+        control,
+        binding,
+        persistence: GoalSubmissionPersistence::Start,
+    })
 }

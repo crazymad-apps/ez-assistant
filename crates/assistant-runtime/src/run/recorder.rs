@@ -246,7 +246,6 @@ fn prepare_skill_activations(
     let first = &staged[0].1;
     let (mut message, _) = InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
         source: InternalBoundarySource::SkillActivation,
-        retention_key: Some(format!("skill:{}", first.name.as_str())),
         text: render_model_activation(&catalog_revision, first),
     })
     .map_err(|_| record_error("skill activation boundary could not be constructed"))?;
@@ -255,7 +254,6 @@ fn prepare_skill_activations(
             &mut message,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::SkillActivation,
-                retention_key: Some(format!("skill:{}", definition.name.as_str())),
                 text: render_model_activation(&catalog_revision, definition),
             },
         )
@@ -350,7 +348,8 @@ mod tests {
                 agent_variant: AgentVariant::Build,
                 origin: crate::InputOrigin::User,
                 goal_binding: None,
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: Some(crate::InputChannelSource::desktop_text()),
                 skill_activation: None,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),

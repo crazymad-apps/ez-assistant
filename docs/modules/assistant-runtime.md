@@ -266,8 +266,8 @@ Runtime Host 进程
 - 每个父 Run 冻结子任务总数、并发数以及子 Agent 的 step、tool、output 和执行超时上限。子 Agent
   的 step/tool/output 同时受全局 Agent 配置约束，实际取二者较小值；超时从取得执行 permit 后开始。
 - 父子执行发生自动压缩时，continuation 从 Core 的可靠 CompactionRequired 终态扣减已消费 Step 与
-  实际 dispatch 工具数，不得用可丢弃的事件流计算剩余预算。整体摘要活动 Turn 后，replacement
-  必须保留一条持久化的 Injected User continuation 锚点，保证后续 Assistant 仍属于合法 User Turn。
+  实际 dispatch 工具数，不得用可丢弃的事件流计算剩余预算。当前父子压缩均只原样保留最近一个
+  User Turn；该 Turn 自身溢出时不拆分或生成隐藏锚点，轮内压缩留待后续版本完善。
 - 每个活动 child 拥有派生自父 Run 的取消令牌。父 Run 取消和 Runtime shutdown 级联到全部 child；
   单独取消只影响目标 child。可靠完成与取消竞争时允许已经形成的完整终态获胜，timeout 则稳定结算为
   `failed/timeout`，不能伪装成成功。
@@ -414,22 +414,22 @@ Runtime Host 进程
 
 ## v0.18.0 M4 Goal 续跑与生命周期边界
 
-- Run settlement 是 Run、Goal、预算和后继 Input/Run 的单一高层 Store 操作。Runtime 先根据本 Run
-  signal、规范 usage 和执行结果构造 effect，Store 原子提交后再用返回的权威 Goal/continuation
-  更新 Session 投影；不能先在内存切换 Goal 或另行入队后继。
-- 没有 complete/blocked signal 且预算未触发时，结算创建只含版本化 Injected Part 的隐藏 Runtime
-  continuation；complete 在结算事务中形成 Completed 回执并立即删除 Goal，blocked 转
+- M9 后 Goal 自动推进不再属于 Run settlement 的后继 Input/Run。Goal 门禁先根据当前
+  AgentExecution 的 signal、规范 usage 和执行结果构造 effect；需要继续时，通过活动 Run 内的单一
+  Store 操作原子提交候选消息、隐藏推进消息和 Goal 进度，保持原 Input/Run 为 running。
+- 没有 complete/blocked signal 且预算未触发时，Goal 门禁在同一 Run 内追加只含版本化内部 Part 的
+  隐藏推进消息；complete 在最终结算事务中形成 Completed 回执并立即删除 Goal，blocked 转
   Paused(Blocked)，Run/token/连续失败预算统一转为 Paused(BudgetExceeded)。usage 不完整时
   不猜测 token，但仍记录该 Run 并保持 usage incomplete 事实。
-- Stop 是 Goal 级操作：先持久暂停为 UserStopped、递增 generation、删除未领取 Runtime continuation，
-  并为活动 Run 记录取消意图；成功后才发布取消 token。当前 Goal Run 不允许走普通单 Run cancel。
+- Stop 是 Goal 级操作：先持久暂停为 UserStopped、递增 generation，并为活动 Run 记录取消意图；
+  成功后才发布取消 token。当前 Goal Run 不允许走普通单 Run cancel。
   Clear 主要删除已暂停且无活动 Run 的控制器；完成 Goal 已在结算事务中自动删除。两者都不删除
   Conversation、WorkPlan 或 held 用户队列。
 - Resume 是显式的新 generation。它可创建无正文隐藏 continuation、原子接受新的可见用户消息，或把
   已有 held User Input/Run 绑定到新 generation；第三种方式复用原 ID，不复制队列项。所有方式均由
   Store 返回权威结果后更新 Session，迟到 signal、取消回调和旧 continuation 不能越过 generation。
-- 启动恢复把 Running Goal 原子转为 Paused(RecoveryRequired)、递增 generation 并删除旧 queued
-  continuation。Fork 仅在 objective source message 位于复制前缀内时复制 Goal，分配新 GoalId 并以
+- 启动恢复把 Running Goal 原子转为 Paused(RecoveryRequired) 并递增 generation；自动推进不再存在
+  queued continuation。Fork 仅在 objective source message 位于复制前缀内时复制 Goal，分配新 GoalId 并以
   Paused(Forked)、generation 1 建立独立控制器。历史重入到 objective 或之前拒绝；重入其后时随
   Conversation generation 切换原子暂停 Goal。Session 删除仍按 Session 所有权清理 Goal 和历史绑定。
 - 恢复时只有仍为 Queued 的 Goal-bound Input 必须匹配当前 GoalId/generation；Committed Input 的
@@ -463,13 +463,13 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 ## v0.19.0 统一内部上下文边界
 
 - `InternalBoundaryCoordinator` 是 Runtime 新建内部上下文 Part 和隐藏 UserMessage 的唯一构造入口；
-  Goal、WorkPlan、Plan/Build 变体和委派只提供冻结正文、来源与 retention key，不自行分配 boundary。
+  Goal、WorkPlan、Plan/Build 变体和委派只提供冻结正文与来源，不自行分配 boundary。
 - 新写入统一使用 `UserPart::InternalContext`；旧 `Injected` 继续安全读取、进入模型上下文并在产品
   转录、搜索、导出和 Goal objective 中排除，不批量重写历史。
 - 规范内部消息继续由既有 Input、Goal settlement、Context replacement 和 child 事务可靠提交；
   request-only Provider 信封不进入 Store、Conversation、RuntimeEvent、Run step 或产品消息。
-- 压缩时每个 retention key 的最新冻结正文必须可恢复；活动 Turn 整体摘要时由共享 Context 能力
-  原样重挂到新的隐藏 continuation 锚点，Runtime 不从摘要文本猜测恢复。
+- 内部上下文与普通用户正文共同归属于所在 User Turn；压缩不再根据内部类别建立额外保留集合，
+  Runtime 统一只原样保留最近一个 Turn。
 
 ## v0.19.0 Skill 发现与 Session Catalog 边界
 
@@ -497,6 +497,88 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
   Catalog revision、definition digest 和触发来源保持不变，Input/Run 归属置空表示继承历史。
 - `ListSkills` 每次显式调用都重新扫描当前管理范围；`SetSkillEnabled` 只按名称保存全局开关并发布失效
   事件，不刷新既有 Session Catalog 或 Activation。
+
+## v0.21.0 M1 设备与 Channel 领域边界
+
+- Runtime 只持有已配对设备的稳定身份、展示名、公钥和生命周期；在线连接、心跳、当前能力、输出偏好、
+  配对窗口和媒体状态属于 Host 易失资源。设备注册、重命名、撤销和 Controller PC 输出托管通过
+  `RuntimeStore` 的业务原子操作落账，不向 Runtime 注入具体 Gateway 生命周期。
+- `InputChannelSource` 正交于既有 `InputOrigin` 和跨会话输入信封。Desktop 输入冻结为
+  `Text + Text`；Host 的 Desktop/Device Adapter 都调用统一 `submit_session_input`，Device 产品策略仍
+  由 Host Router 选择当前 Controller。Device ID、`client_input_id`、模态和本轮输出偏好进入既有 Input，不复制 UserMessage
+  正文、Run、Queue 或 Conversation。
+- Device 输入幂等键由 Runtime 基于稳定 Channel kind、Device ID 和 client input identity 派生；
+  Runtime 与 Store 都复核设备仍为 paired 且目标 Session active，但不把 Controller 产品路由写入
+  通用准入。设备重命名只改变 Registry
+  展示投影，历史 Input 始终按稳定 Device ID 解释；撤销设备不删除历史来源。
+- PC 输出托管是 Controller Session 的可选稳定关系，与普通 Session proxy 完全独立。设置、切换、
+  解除和设备撤销由独立 mutation gate 与 Store 原子操作串行化；撤销设备必须同步清除引用它的托管，
+  不保存托管 revision、变更时间或审计历史。
+- 输出周期是 Session 内易失状态，只关联来源 Input、是否已交付过播报以及一次性
+  补播提醒状态。普通 Desktop/Device 输入及 ProxyReport 开始周期，同 Run 的 Goal continuation 继承；
+  每次合法 `speak` 立即通过 Host 输出端口按调用顺序交付，不保存候选历史或 revision。
+  重启不恢复输出周期、播放队列或尚未执行的内部补播提醒。
+- Run settlement 在规范 Conversation 已可靠提交后解析零到多个 `ResolvedChannelDelivery`，异步交给 Host
+  注入的 dispatcher。Device 来源使用冻结偏好，Desktop 来源在结算时读取当前 PC 托管；
+  `CrossSessionInputEnvelope` 统一包装 `ControllerDelivery`/`ProxyReport` 业务来源与公共
+  `ReplyRoute`。主控投递以必填 `start_goal` 区分单轮任务和长任务；长任务的首次 Input、Run、Goal
+  与含回复路径的 `GoalInputBinding` 必须原子接受；同 Run 自动推进直接读取该 binding，`ProxyReport` 原样传递路径，
+  直到主控实际输出时才解析。ControllerDelivery 本身不形成外部回复。dispatcher 失败不得改写
+  Run、Conversation 或 Desktop 的完整规范正文，Runtime 不建立 Delivery Store。
+
+## v0.21.0 M3 Channel 文字链路边界
+
+- 顶层输入实体始终为 Session。Host Device Channel Router 从 Runtime 权威活动 Session 投影选择当前
+  Controller，再与 Desktop Adapter 一样调用 `submit_session_input`；Runtime/Store 可靠接受时复核目标
+  Session active 与 Device paired，不保存 Host 路由状态。
+- Device `client_input_id` 只参与派生既有 `IdempotencyKey`；重试继续命中同一 Input/Run。Runtime 不
+  保存 WSS message ID、connection ID、在线状态或终端轮次副本。
+- Channel dispatcher 只在规范结算、内存投影和事实事件完成后异步调用；调用不持有 Session mutation
+  gate，失败结果不回滚 Conversation。重启不恢复或补发旧 Channel output。
+
+## v0.21.0 M5 语音转写输入边界
+
+- Runtime 配置加载允许顶层 Host 私有 `[speech]` 表存在，但不编译、保存或投影 Provider、credential、
+  endpoint 和媒体状态；这些事实只属于 Runtime Host 的 SpeechService。
+- ASR 成功后仍通过同一个 Session Channel Input 用例进入 Runtime，正文直接成为既有 Conversation
+  UserMessage，来源模态冻结为 `SpeechTranscript`。Runtime 不保存 PCM、WAV、transcript 副本或第二套
+  Device Conversation。
+- 同一 Device/client identity 的语音重试复用既有输入幂等键；Runtime 只看到通过 Host 校验的可信
+  transcript，ASR 失败、取消和空结果不会调用 Runtime，也不会占用输入身份。
+
+## v0.21.0 M6 speak 与输出结算边界
+
+- `speak` 是只向 Controller 父 Agent 装配的 Runtime 私有工具。它只接受面向朗读的纯文本，并直接
+  限制每次最多 120 个 Unicode 字符；长内容由模型按自然句子或语义边界串行调用多次。单个输出
+  周期最多成功接受 20 个片段，第 21 次在调用 Host TTS 前返回 Tool Error；Tool Description 与
+  隐藏补齐提醒都显式告知模型这一上限。
+  每次通过校验的调用在工具 started 事实落账后立即交给 Host TTS/FIFO；Tool Call/Result
+  仍进入既有 Conversation，不增加播报副本、revision 或独立持久表。
+- Tool、Context 与 Goal continuation 共用同一 Run/输出周期。当前 AgentExecution 候选结束时若有效目标需要语音但
+  整个周期从未成功调用 `speak`，Runtime 只插入一次隐藏的 `speech_delivery_reminder`
+  Runtime UserMessage，并使用相同 RunId 启动下一次 AgentExecution。该消息明示不是用户新交互，模型不得道歉、回应提醒或重新
+  生成普通正文；二次仍未播报时明确降级，不循环续跑。
+- 完整 Assistant 正文始终作为 Desktop 规范 Conversation 的正文。已排队播报是 Host
+  易失交付；同一 Run 后续失败不回收已交付片段，新用户输入、设备撤销/断线或 Host 关闭会清空对应队列。
+
+## v0.21.0 M9 统一输入与 Run 门禁边界
+
+- Runtime 对 Host 只暴露 `SubmitSessionInputRequest -> submit_session_input` 这一规范 Session 输入用例；
+  Desktop wire DTO 与 Device WSS payload 均先由 Host Adapter 注入可信 `InputChannelSource`。
+- 一个可靠接受的 Input 只创建一个首次 Run。Queue Driver 在相同 RunId、取消令牌、Recorder、工具集、
+  step/tool 预算和 output cycle 下串联多个 `AgentExecution`。
+- 门禁顺序固定为 ContextChanged、Context Compaction、Goal、Speech Reminder。Goal 只在门禁处与
+  通用续跑相交，不把预算、generation、reply route 或状态机字段装进 continuation。
+- Goal/Speech 需要下一次 AgentExecution 时，Store 只在活动 Run 内可靠追加消息和可选 Goal effect；
+  不创建 Input、Run、Queue、continuation 表或协议事件。只有最终结算发布一次 `RunFinished`。
+- 重启不重放未完成 AgentExecution；活动 Run 按现有中断恢复收敛，Running Goal 进入
+  `RecoveryRequired`，之后显式恢复才可建立新的 Input/Run。
+- 压缩不能改变产品 Conversation 的历史含义。Store 的当前 generation 始终保存完整产品历史，
+  新 ContextSummary 只插入为压缩边界；Runtime Journal 在启动和首次读取时使用开头 System prefix
+  与最后一个 ContextSummary 之后的消息派生 Agent 有效上下文。`message_count` 表示完整产品正文，
+  `persisted_message_count` 只表示当前 Journal 边界，两者不能互相覆盖。
+- Conversation 分页、Around Run、Fork、历史重新输入和 Run 归属恢复读取完整产品历史；模型请求与
+  后续压缩只读取派生的有效上下文。Desktop 不跨 generation 拼接内存旧页。
 
 ## v0.19.0 模型 Skill 激活与同 Run continuation
 

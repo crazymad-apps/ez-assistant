@@ -42,7 +42,7 @@ fn formal_host_projects_and_controls_goal_and_work_plan_across_restart() {
             .is_empty()
     );
     let runs = client.runtime("list_runs", json!({"session_id":long_session}));
-    assert_eq!(runs["runs"].as_array().expect("Goal runs").len(), 4);
+    assert_eq!(runs["runs"].as_array().expect("Goal runs").len(), 1);
     assert_eq!(
         client.wait_for_status(
             "first Goal run",
@@ -242,7 +242,7 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("Goal Input counts");
-    assert_eq!(input_counts, (4, 1, 3));
+    assert_eq!(input_counts, (1, 1, 0));
     let completed_runs: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM runs WHERE session_id = ?1 AND status = 'completed'",
@@ -250,7 +250,7 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
             |row| row.get(0),
         )
         .expect("completed Goal Run count");
-    assert_eq!(completed_runs, 4);
+    assert_eq!(completed_runs, 1);
     drop(connection);
 
     let body = runtime_home.join(format!(

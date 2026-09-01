@@ -858,7 +858,6 @@ mod tests {
                     id("part_internal"),
                     "boundary_1",
                     "goal_continuation",
-                    Some("goal:1".to_owned()),
                     "continue",
                 )
                 .expect("internal context"),
@@ -885,6 +884,26 @@ mod tests {
                 .as_slice(),
             [UserPart::Injected(_)]
         ));
+
+        let legacy_internal = serde_json::json!({
+            "id": "message_legacy_internal",
+            "origin": "runtime",
+            "transcript_visibility": "hidden",
+            "parts": [{
+                "type": "internal_context",
+                "data": {
+                    "id": "part_legacy_internal",
+                    "boundary_id": "boundary_legacy",
+                    "kind": "goal_continuation",
+                    "retention_key": "goal:legacy",
+                    "text": "continue"
+                }
+            }]
+        });
+        let decoded = serde_json::from_value::<UserMessage>(legacy_internal)
+            .expect("legacy retention key is ignored");
+        let reencoded = serde_json::to_value(decoded).expect("serialize current internal context");
+        assert!(reencoded["parts"][0]["data"].get("retention_key").is_none());
 
         let invalid = serde_json::json!({
             "id": "message_invalid_internal",

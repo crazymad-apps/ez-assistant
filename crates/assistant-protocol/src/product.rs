@@ -213,8 +213,21 @@ pub enum ConversationItem {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationInputSourceSnapshot {
+    /// 兼容未记录渠道信息的既有用户消息。
     #[default]
     User,
+    /// Desktop 客户端直接提交的输入。
+    Desktop {
+        modality: InputModalitySnapshot,
+        requested_output: OutputPreferenceSnapshot,
+    },
+    /// 已认证智能终端提交的输入；名称是消息接受时冻结的展示快照。
+    Device {
+        device_id: crate::DeviceId,
+        device_name: String,
+        modality: InputModalitySnapshot,
+        requested_output: OutputPreferenceSnapshot,
+    },
     ControllerDelivery {
         controller_session_id: SessionId,
         controller_run_id: RunId,
@@ -227,6 +240,25 @@ pub enum ConversationInputSourceSnapshot {
         source_goal_id: Option<GoalId>,
         source_run_status: RunStatus,
     },
+}
+
+/// Channel 输入已经由 Host 转换为正文后的业务模态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum InputModalitySnapshot {
+    Text,
+    SpeechTranscript,
+}
+
+/// 一轮 Channel 输入冻结的期望输出形态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum OutputPreferenceSnapshot {
+    Text,
+    Audio,
+    TextAndAudio,
 }
 
 /// 可靠提交的用户消息。

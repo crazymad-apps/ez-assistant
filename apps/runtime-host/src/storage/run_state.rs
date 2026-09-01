@@ -4,12 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_types::ConversationMessage;
 use assistant_protocol::{InputId, RunStatus};
-use assistant_runtime::{NewStoredRunAttempt, StoredRun, StoredRunSettlement, UserMessageCommit};
+use assistant_runtime::{
+    NewStoredRunAttempt, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, UserMessageCommit,
+};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
     StorageEngine, StorageResult,
-    append_effect::{AppendPurpose, apply_run_settlement},
+    append_effect::{AppendPurpose, apply_run_continuation, apply_run_settlement},
     conflict, database_write_error, internal_error, invalid_data_with_source,
     mode::{approval_mode_value, parse_agent_variant},
     recovery::AppendRequest,
@@ -189,6 +192,79 @@ impl StorageEngine {
         self.run_settlement_result(goal_effect.as_ref(), proxy_report.as_deref())
     }
 
+    /// 可靠追加活动 Run 的下一 Loop 上下文，并保持 Run 为 running。
+    pub(super) fn commit_run_continuation(
+        &mut self,
+        continuation: StoredRunContinuation,
+    ) -> StorageResult<StoredRunContinuationResult> {
+        if continuation.messages.is_empty() {
+            return Err(assistant_runtime::StoreError::new(
+                assistant_runtime::StoreErrorKind::InvalidInput,
+                "run continuation has no messages",
+            ));
+        }
+        let pending_count: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pending_tool_exchanges WHERE run_id = ?1",
+                [continuation.run_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|source| {
+                internal_error("run pending tool exchange could not be queried", source)
+            })?;
+        if pending_count != 0 {
+            return Err(conflict("run has a pending tool exchange"));
+        }
+        let effect = continuation.goal_effect.clone();
+        let purpose = AppendPurpose::RunContinuation {
+            goal_effect: continuation.goal_effect.map(Box::new),
+        };
+        let preflight = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                internal_error("run continuation preflight could not begin", source)
+            })?;
+        apply_run_continuation(
+            &preflight,
+            &continuation.run_id,
+            &continuation.session_id,
+            &purpose,
+            continuation.committed_at_ms,
+        )?;
+        preflight.rollback().map_err(|source| {
+            internal_error("run continuation preflight could not roll back", source)
+        })?;
+        self.stage_append_for(
+            AppendRequest {
+                operation_id: continuation.operation_id.clone(),
+                session_id: continuation.session_id,
+                run_id: continuation.run_id,
+                messages: continuation.messages,
+                message_step: Some(continuation.message_step),
+                created_at_ms: continuation.committed_at_ms,
+            },
+            purpose,
+        )?;
+        self.complete_staged_append(&continuation.operation_id)?;
+        let (goal, resume_required) = match effect {
+            None => (None, false),
+            Some(assistant_runtime::StoredGoalSettlementEffect::Progress { goal, .. }) => {
+                (Some(goal), false)
+            }
+            Some(assistant_runtime::StoredGoalSettlementEffect::Transition {
+                goal,
+                resume_required,
+                ..
+            }) => (Some(goal), resume_required),
+        };
+        Ok(StoredRunContinuationResult {
+            goal,
+            resume_required,
+        })
+    }
+
     fn run_settlement_result(
         &self,
         effect: Option<&assistant_runtime::StoredGoalSettlementEffect>,
@@ -196,28 +272,9 @@ impl StorageEngine {
     ) -> StorageResult<assistant_runtime::StoredRunSettlementResult> {
         let mut result = match effect {
             None => assistant_runtime::StoredRunSettlementResult::default(),
-            Some(assistant_runtime::StoredGoalSettlementEffect::Continue {
-                goal,
-                next_input,
-                ..
-            }) => {
-                let input = self
-                    .load_inputs()?
-                    .into_iter()
-                    .find(|input| input.input_id == next_input.input_id)
-                    .ok_or_else(|| super::invalid_data("Goal continuation input is missing"))?;
-                let run = self
-                    .load_runs()?
-                    .into_iter()
-                    .find(|run| run.run_id == next_input.run_id)
-                    .ok_or_else(|| super::invalid_data("Goal continuation Run is missing"))?;
+            Some(assistant_runtime::StoredGoalSettlementEffect::Progress { goal, .. }) => {
                 assistant_runtime::StoredRunSettlementResult {
                     goal: Some(goal.clone()),
-                    continuation: Some(assistant_runtime::AcceptedInput {
-                        input,
-                        run,
-                        is_duplicate: false,
-                    }),
                     accepted_proxy_report: None,
                     resume_required: false,
                 }
@@ -228,7 +285,6 @@ impl StorageEngine {
                 ..
             }) => assistant_runtime::StoredRunSettlementResult {
                 goal: Some(goal.clone()),
-                continuation: None,
                 accepted_proxy_report: None,
                 resume_required: *resume_required,
             },

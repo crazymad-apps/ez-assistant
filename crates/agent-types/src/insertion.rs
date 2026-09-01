@@ -14,9 +14,6 @@ pub struct InternalContextPart {
     pub boundary_id: String,
     /// 不解释正文的稳定来源类别。
     pub kind: String,
-    /// 压缩时需要保留最新版本的逻辑上下文键。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention_key: Option<String>,
     /// 已冻结、可直接投影给模型的正文。
     pub text: String,
 }
@@ -31,20 +28,11 @@ impl<'de> Deserialize<'de> for InternalContextPart {
             id: PartId,
             boundary_id: String,
             kind: String,
-            #[serde(default)]
-            retention_key: Option<String>,
             text: String,
         }
 
         let raw = RawInternalContextPart::deserialize(deserializer)?;
-        Self::new(
-            raw.id,
-            raw.boundary_id,
-            raw.kind,
-            raw.retention_key,
-            raw.text,
-        )
-        .map_err(serde::de::Error::custom)
+        Self::new(raw.id, raw.boundary_id, raw.kind, raw.text).map_err(serde::de::Error::custom)
     }
 }
 
@@ -54,7 +42,6 @@ impl InternalContextPart {
         id: PartId,
         boundary_id: impl Into<String>,
         kind: impl Into<String>,
-        retention_key: Option<String>,
         text: impl Into<String>,
     ) -> Result<Self, InternalContextError> {
         let boundary_id = boundary_id.into();
@@ -65,12 +52,6 @@ impl InternalContextPart {
         if kind.trim().is_empty() {
             return Err(InternalContextError::EmptyKind);
         }
-        if retention_key
-            .as_ref()
-            .is_some_and(|key| key.trim().is_empty())
-        {
-            return Err(InternalContextError::EmptyRetentionKey);
-        }
         let text = text.into();
         if text.is_empty() {
             return Err(InternalContextError::EmptyText);
@@ -79,7 +60,6 @@ impl InternalContextPart {
             id,
             boundary_id,
             kind,
-            retention_key,
             text,
         })
     }
@@ -92,8 +72,6 @@ pub enum InternalContextError {
     EmptyBoundaryId,
     #[error("internal context kind must not be empty")]
     EmptyKind,
-    #[error("internal context retention key must not be empty")]
-    EmptyRetentionKey,
     #[error("internal context text must not be empty")]
     EmptyText,
 }

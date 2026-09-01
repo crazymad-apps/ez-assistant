@@ -68,6 +68,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
         .await
         .expect("upload Goal attachment")
         .attachment;
+    let mut events = runtime.subscribe_events();
     let key = IdempotencyKey::new("start-goal-1").expect("key");
     let first = runtime
         .submit_input(SubmitInputRequest {
@@ -101,6 +102,36 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             .status,
         assistant_protocol::RunStatus::Completed
     );
+    let lifecycle = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events.recv().await.expect("Goal lifecycle event");
+            let finished = matches!(
+                &event,
+                RuntimeEvent::RunFinished { run_id, .. } if run_id == &first.run.run_id
+            );
+            observed.push(event);
+            if finished {
+                return observed;
+            }
+        }
+    })
+    .await
+    .expect("Goal Run terminal event");
+    for expected in ["accepted", "started", "finished"] {
+        let count = lifecycle
+            .iter()
+            .filter(|event| match (expected, event) {
+                ("accepted", RuntimeEvent::RunAccepted { run_id, .. })
+                | ("started", RuntimeEvent::RunStarted { run_id, .. })
+                | ("finished", RuntimeEvent::RunFinished { run_id, .. }) => {
+                    run_id == &first.run.run_id
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(count, 1, "Goal Run must emit one {expected} event");
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let cleared = runtime
@@ -646,7 +677,16 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
     assert_eq!(goal.budget.used_runs, 3);
     assert_eq!(goal.consecutive_failures, 3);
     assert_eq!(goal.generation, 2);
-    assert_eq!(state.inputs.len(), 3, "each failure is a distinct Goal Run");
+    assert_eq!(
+        state.inputs.len(),
+        1,
+        "automatic Goal progress keeps the original Input"
+    );
+    assert_eq!(
+        state.runs.len(),
+        1,
+        "automatic Goal progress keeps the original Run"
+    );
     assert!(state.runs.values().all(|run| run.attempt() == 1));
 }
 
@@ -836,29 +876,32 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
 
 #[tokio::test]
 async fn reported_usage_pauses_goal_at_the_total_token_limit() {
-    let costly = AssistantMessage {
-        id: MessageId::new("goal-token-limit-answer").expect("message id"),
+    let costly = |suffix: &str| AssistantMessage {
+        id: MessageId::new(format!("goal-token-limit-answer-{suffix}")).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
             "fixture-model",
         ),
         parts: vec![AssistantPart::Text(TextPart {
-            id: PartId::new("goal-token-limit-text").expect("part id"),
+            id: PartId::new(format!("goal-token-limit-text-{suffix}")).expect("part id"),
             text: "large result".to_owned(),
         })],
         finish_reason: FinishReason::Stop,
         usage: Some(TokenUsage {
-            input_tokens: 250_000,
-            output_tokens: 250_000,
-            total_tokens: 500_000,
+            input_tokens: 125_000,
+            output_tokens: 125_000,
+            total_tokens: 250_000,
             cached_input_tokens: None,
             reasoning_tokens: None,
         }),
     };
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
-        8_192,
-        [ModelScript::Events(message_events(&costly))],
+        1_000_000,
+        [
+            ModelScript::Events(message_events(&costly("first"))),
+            ModelScript::Events(message_events(&costly("second"))),
+        ],
     ));
     let runtime = runtime_with_tools(model, ToolSetSnapshot::default());
     let session_id = runtime
@@ -883,11 +926,17 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
     let controller = runtime.session(&session_id).expect("session");
     let state = controller.lock_state().expect("state");
     let goal = state.goal.as_ref().expect("Goal");
-    assert!(matches!(
-        goal.state,
-        GoalState::Paused(crate::goal::GoalPauseReason::TokenLimitReached)
-    ));
+    assert!(
+        matches!(
+            goal.state,
+            GoalState::Paused(crate::goal::GoalPauseReason::TokenLimitReached)
+        ),
+        "unexpected Goal state: {goal:?}"
+    );
     assert_eq!(goal.budget.used_total_tokens, 500_000);
+    assert_eq!(goal.budget.used_runs, 2);
     assert!(goal.budget.usage_complete);
     assert_eq!(goal.generation, 2);
+    assert_eq!(state.inputs.len(), 1);
+    assert_eq!(state.runs.len(), 1);
 }

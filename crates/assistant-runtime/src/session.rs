@@ -16,9 +16,9 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment, SessionProxyState,
-    SessionRole, SessionSkillCatalog, StoredConversationState, StoredInput, StoredInputState,
-    StoredRun, StoredSession,
+    PcOutputHosting, RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
+    SessionProxyState, SessionRole, SessionSkillCatalog, StoredConversationState, StoredInput,
+    StoredInputState, StoredRun, StoredSession,
     goal::{GoalControl, GoalState},
     id,
     journal::InMemoryJournal,
@@ -26,6 +26,10 @@ use crate::{
     work_plan::WorkPlan,
 };
 
+/// 单个 Session 的并发协调器和状态所有者。
+///
+/// `mutation_gate` 串行化跨 await 的业务变更，`state` 只保护短临界区内存投影；
+/// 可靠事实必须先由 Store 提交，不能仅修改这里的状态。
 pub(crate) struct SessionController {
     id: SessionId,
     created_at_ms: i64,
@@ -36,6 +40,9 @@ pub(crate) struct SessionController {
     state: Mutex<SessionState>,
 }
 
+/// Session 在当前 Runtime 进程中的完整可变投影。
+///
+/// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
     pub(crate) title: String,
     pub(crate) is_pinned: bool,
@@ -47,6 +54,7 @@ pub(crate) struct SessionState {
     pub(crate) lifecycle: SessionLifecycle,
     pub(crate) role: SessionRole,
     pub(crate) proxy: Option<SessionProxyState>,
+    pub(crate) pc_output_hosting: Option<PcOutputHosting>,
     pub(crate) journal: Option<InMemoryJournal>,
     pub(crate) persisted_message_count: usize,
     pub(crate) message_count: u64,
@@ -63,6 +71,8 @@ pub(crate) struct SessionState {
     pub(crate) resume_required: bool,
     pub(crate) is_queue_driver_running: bool,
     pub(crate) active_run: Option<ActiveRun>,
+    /// 当前进程内的逻辑输出周期；重启后不恢复也不补播。
+    pub(crate) output_cycle: Option<crate::OutputCycleState>,
     /// 仅属于当前 Runtime 进程；不得进入 Store 或恢复投影。
     pub(crate) active_compaction: Option<ActiveSessionCompaction>,
     pub(crate) is_faulted: bool,
@@ -74,12 +84,18 @@ pub(crate) struct SessionState {
     pub(crate) skill_activations: Vec<crate::StoredSkillActivation>,
 }
 
+/// 当前正在执行的手动或自动压缩及其可选取消句柄。
+///
+/// 它仅用于进程内互斥与 UI 投影，压缩可靠结果仍通过 Conversation/Store 表达。
 #[derive(Clone)]
 pub(crate) struct ActiveSessionCompaction {
     pub(crate) snapshot: SessionCompactionSnapshot,
     pub(crate) cancellation: Option<CancellationToken>,
 }
 
+/// 一条已接受 Input 的持久事实及其首次、最近 Run 关联。
+///
+/// 重试会更新 `latest_run_id`，但不会创建第二条用户输入或改变 `first_run_id`。
 #[derive(Clone)]
 pub(crate) struct InputRecord {
     pub(crate) stored: StoredInput,
@@ -168,6 +184,7 @@ impl SessionController {
                 lifecycle: map_lifecycle(stored.lifecycle),
                 role: stored.role,
                 proxy: stored.proxy,
+                pc_output_hosting: stored.pc_output_hosting,
                 journal: Some(InMemoryJournal::new()),
                 persisted_message_count: 0,
                 message_count: stored.message_count,
@@ -182,6 +199,7 @@ impl SessionController {
                 resume_required: false,
                 is_queue_driver_running: false,
                 active_run: None,
+                output_cycle: None,
                 active_compaction: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
@@ -257,6 +275,7 @@ impl SessionController {
                 lifecycle: map_lifecycle(stored.lifecycle),
                 role: stored.role,
                 proxy: stored.proxy,
+                pc_output_hosting: stored.pc_output_hosting,
                 journal: None,
                 persisted_message_count: 0,
                 message_count: stored.message_count,
@@ -271,6 +290,7 @@ impl SessionController {
                 resume_required,
                 is_queue_driver_running: false,
                 active_run: None,
+                output_cycle: None,
                 active_compaction: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
@@ -301,6 +321,12 @@ impl SessionController {
                     controller_session_id: proxy.controller_session_id.clone(),
                     changed_at_ms: proxy.changed_at_ms,
                 }),
+            pc_output_hosting: state.pc_output_hosting.as_ref().map(|hosting| {
+                assistant_protocol::PcOutputHostingSnapshot {
+                    device_id: hosting.device_id.clone(),
+                    device_name: hosting.device_name.clone(),
+                }
+            }),
             active_compaction: state
                 .active_compaction
                 .as_ref()
@@ -542,7 +568,7 @@ impl SessionController {
             }
         }
 
-        let snapshot = match store.load_conversation(&self.id).await {
+        let product_history = match store.load_conversation(&self.id).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 if error.kind() == crate::StoreErrorKind::InvalidData {
@@ -551,8 +577,9 @@ impl SessionController {
                 return Err(RuntimeError::from_store("load session conversation", error));
             }
         };
+        let snapshot = crate::execution_context_from_product_history(&product_history);
         let persisted_message_count = snapshot.messages.len();
-        let journal = InMemoryJournal::from_snapshot(snapshot.clone()).map_err(|_| {
+        let journal = InMemoryJournal::from_snapshot(snapshot).map_err(|_| {
             RuntimeError::StorageUnavailable {
                 operation: "load session conversation",
                 source: None,
@@ -560,7 +587,7 @@ impl SessionController {
         })?;
         let mut state = self.lock_state()?;
         for run in state.runs.values_mut() {
-            run.hydrate(&snapshot);
+            run.hydrate(&product_history);
         }
         state.persisted_message_count = persisted_message_count;
         state.journal = Some(journal);

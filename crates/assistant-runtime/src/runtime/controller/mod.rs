@@ -18,8 +18,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CrossSessionInputBinding, InputOrigin, NewStoredInput, RuntimeError, RuntimeResult,
-    RuntimeStore, SessionProxyChange, SessionProxyState, SessionRole, StoredInputState,
+    CrossSessionInputBinding, CrossSessionInputEnvelope, InputChannelSource, InputOrigin,
+    NewStoredInput, ReplyRoute, RuntimeError, RuntimeResult, RuntimeStore, SessionProxyChange,
+    SessionProxyState, SessionRole, StoredInputState,
+    config::ConfigRegistry,
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
@@ -28,7 +30,10 @@ use crate::{
     session::SessionController,
 };
 
-use super::input::projection::{AcceptedInputProjection, project_accepted_input};
+use super::{
+    goal::{ensure_goal_model_supported, prepare_goal_start},
+    input::projection::{AcceptedInputProjection, project_accepted_input},
+};
 
 mod tool;
 
@@ -69,11 +74,29 @@ pub(crate) struct ProxyReportDraft {
     pub(crate) final_text: Option<String>,
     pub(crate) error: Option<RuntimeErrorInfo>,
     pub(crate) accepted_at_ms: i64,
+    pub(crate) reply_route: ReplyRoute,
+}
+
+pub(crate) fn reply_route_for_input(input: &crate::StoredInput) -> ReplyRoute {
+    if let Some(envelope) = input.cross_session.as_ref()
+        && matches!(
+            envelope.binding,
+            CrossSessionInputBinding::ControllerDelivery { .. }
+        )
+    {
+        return envelope.reply_route.clone();
+    }
+    input
+        .goal_binding
+        .as_ref()
+        .and_then(|binding| binding.reply_route.clone())
+        .unwrap_or_default()
 }
 
 /// 工具实例共享的 Runtime 私有协调器；不持有 Controller Session mutation gate。
 pub(crate) struct ControllerToolCoordinator {
     sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+    config_registry: Arc<ConfigRegistry>,
     store: Arc<dyn RuntimeStore>,
     events: ObservationCoordinator,
     wake_queue: Arc<WakeQueue>,
@@ -82,12 +105,14 @@ pub(crate) struct ControllerToolCoordinator {
 impl ControllerToolCoordinator {
     pub(super) fn new(
         sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+        config_registry: Arc<ConfigRegistry>,
         store: Arc<dyn RuntimeStore>,
         events: ObservationCoordinator,
         wake_queue: Arc<WakeQueue>,
     ) -> Self {
         Self {
             sessions,
+            config_registry,
             store,
             events,
             wake_queue,
@@ -179,8 +204,9 @@ impl ControllerToolCoordinator {
     /// 执行主控 `send_session_message` 工具的权威投递用例。
     ///
     /// 本函数只获取目标 Session mutation gate：先校验当前主控、代理关系和空 Queue，再由 Store
-    /// 原子接受 `ControllerDelivery` Input 与首次 Run。Store 成功后复用统一 Input 投影并唤醒目标；
-    /// 同一主控 ToolCall 的重放返回首次 receipt，不重新入队。
+    /// 原子接受 `ControllerDelivery` Input 与首次 Run；`start_goal` 为真时，同一事务还创建 Goal
+    /// 并冻结其回复路径。Store 成功后复用统一 Input/Goal 投影并唤醒目标；同一主控 ToolCall 的
+    /// 重放返回首次 receipt，不重新入队或重复创建 Goal。
     pub(super) async fn deliver(
         &self,
         controller_session_id: &SessionId,
@@ -188,6 +214,7 @@ impl ControllerToolCoordinator {
         controller_tool_call_id: &ToolCallId,
         target_session_id: &SessionId,
         message_text: String,
+        start_goal: bool,
     ) -> RuntimeResult<DeliveryReceipt> {
         self.ensure_current_controller(controller_session_id)?;
         let message_text = message_text.trim().to_owned();
@@ -206,7 +233,7 @@ impl ControllerToolCoordinator {
             controller_run_id,
             controller_tool_call_id,
         )?;
-        let (variant, approval_mode, input_id, run_id) = {
+        let (variant, approval_mode, input_id, run_id, model_key) = {
             let state = target.lock_state()?;
             if let Some(existing) = state
                 .inputs
@@ -234,24 +261,29 @@ impl ControllerToolCoordinator {
                     session_id: target_session_id.clone(),
                 });
             }
+            if start_goal && state.goal.is_some() {
+                return Err(RuntimeError::GoalAlreadyExists {
+                    session_id: target_session_id.clone(),
+                });
+            }
             (
                 state.current_variant,
                 state.approval_mode,
                 allocate_input_id(&state)?,
                 allocate_run_id(&state)?,
+                state.model_key.clone(),
             )
         };
+        if start_goal {
+            ensure_goal_model_supported(&self.config_registry, target.as_ref(), &model_key)?;
+        }
+        let reply_route = self.reply_route(controller_session_id, controller_run_id)?;
         let mut message = create_user_message(message_text, Vec::new(), variant)?;
         message.origin = UserMessageOrigin::Runtime;
         InternalBoundaryCoordinator::append(
             &mut message,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::ControllerDelivery,
-                retention_key: Some(format!(
-                    "controller-delivery:{}:{}",
-                    controller_session_id.as_str(),
-                    controller_run_id.as_str()
-                )),
                 text: format!(
                     "This visible task was delivered by controller session {} from run {}.",
                     controller_session_id.as_str(),
@@ -259,12 +291,26 @@ impl ControllerToolCoordinator {
                 ),
             },
         )?;
-        let binding = CrossSessionInputBinding::ControllerDelivery {
-            controller_session_id: controller_session_id.clone(),
-            controller_run_id: controller_run_id.clone(),
-            controller_tool_call_id: controller_tool_call_id.clone(),
+        let envelope = CrossSessionInputEnvelope {
+            binding: CrossSessionInputBinding::ControllerDelivery {
+                controller_session_id: controller_session_id.clone(),
+                controller_run_id: controller_run_id.clone(),
+                controller_tool_call_id: controller_tool_call_id.clone(),
+            },
+            reply_route: reply_route.clone(),
         };
         let accepted_at_ms = super::now_ms()?;
+        let prepared_goal = start_goal
+            .then(|| prepare_goal_start(&mut message, accepted_at_ms, Some(reply_route)))
+            .transpose()?;
+        let goal_binding = prepared_goal.as_ref().map(|goal| goal.binding.clone());
+        let new_goal = prepared_goal
+            .as_ref()
+            .map(|goal| goal.control.to_stored(target_session_id.clone()));
+        let goal_snapshot = prepared_goal
+            .as_ref()
+            .map(|goal| super::product::project_goal(&goal.control))
+            .transpose()?;
         let accepted = self
             .store
             .accept_input(NewStoredInput {
@@ -274,12 +320,13 @@ impl ControllerToolCoordinator {
                 idempotency_key: Some(idempotency_key),
                 agent_variant: variant,
                 origin: InputOrigin::Runtime,
-                goal_binding: None,
-                cross_session_binding: Some(binding),
+                goal_binding,
+                cross_session: Some(envelope),
+                channel_source: None,
                 skill_activation: None,
                 approval_mode,
                 message,
-                new_goal: None,
+                new_goal,
                 resumed_goal: None,
                 generated_title: None,
                 accepted_at_ms,
@@ -299,9 +346,12 @@ impl ControllerToolCoordinator {
         if !accepted.is_duplicate {
             let projection = {
                 let mut state = target.lock_state()?;
+                if let Some(goal) = prepared_goal {
+                    state.goal = Some(goal.control);
+                }
                 project_accepted_input(&mut state, accepted)
             };
-            self.publish_and_wake_projected_input(&target, projection)?;
+            self.publish_and_wake_projected_input(&target, projection, goal_snapshot)?;
         }
         Ok(receipt)
     }
@@ -353,7 +403,7 @@ impl ControllerToolCoordinator {
         };
         // 观察事件和 Queue 唤醒不属于内存投影临界区；先释放主控 gate，也让后续 driver 能取得它。
         drop(_mutation);
-        self.publish_and_wake_projected_input(&target, projection)
+        self.publish_and_wake_projected_input(&target, projection, None)
     }
 
     /// 发布 Store 成功后的观察事件并唤醒目标 Queue；事件丢失可由 Session 快照恢复。
@@ -361,11 +411,19 @@ impl ControllerToolCoordinator {
         &self,
         target: &Arc<SessionController>,
         projection: AcceptedInputProjection,
+        goal: Option<assistant_protocol::GoalSnapshot>,
     ) -> RuntimeResult<()> {
         let _ = self.events.send(RuntimeEvent::RunAccepted {
             session_id: target.id().clone(),
             run_id: projection.run.run_id,
         });
+        if let Some(goal) = goal {
+            let _ = self.events.send(RuntimeEvent::GoalChanged {
+                session_id: target.id().clone(),
+                goal_id: goal.goal_id,
+                generation: goal.generation,
+            });
+        }
         if let Some(revision) = projection.queue_revision {
             let _ = self.events.send(RuntimeEvent::QueueChanged {
                 session_id: target.id().clone(),
@@ -429,11 +487,6 @@ pub(crate) fn build_proxy_report_input(
         &mut message,
         InternalBoundaryRequest {
             source: InternalBoundarySource::ProxyReport,
-            retention_key: Some(format!(
-                "proxy-report:{}:{}",
-                draft.source_session_id.as_str(),
-                draft.source_run_id.as_str()
-            )),
             text: format!(
                 "This visible report was emitted by managed session {} from run {} with terminal status {}.",
                 draft.source_session_id.as_str(),
@@ -452,12 +505,16 @@ pub(crate) fn build_proxy_report_input(
         agent_variant: variant,
         origin: InputOrigin::Runtime,
         goal_binding: None,
-        cross_session_binding: Some(CrossSessionInputBinding::ProxyReport {
-            source_session_id: draft.source_session_id,
-            source_run_id: draft.source_run_id,
-            source_goal_id: draft.source_goal_id,
-            source_run_status: draft.source_run_status,
+        cross_session: Some(CrossSessionInputEnvelope {
+            binding: CrossSessionInputBinding::ProxyReport {
+                source_session_id: draft.source_session_id,
+                source_run_id: draft.source_run_id,
+                source_goal_id: draft.source_goal_id,
+                source_run_status: draft.source_run_status,
+            },
+            reply_route: draft.reply_route,
         }),
+        channel_source: None,
         skill_activation: None,
         approval_mode,
         message,
@@ -466,6 +523,38 @@ pub(crate) fn build_proxy_report_input(
         generated_title: None,
         accepted_at_ms: draft.accepted_at_ms,
     })
+}
+
+impl ControllerToolCoordinator {
+    fn reply_route(
+        &self,
+        controller_session_id: &SessionId,
+        controller_run_id: &RunId,
+    ) -> RuntimeResult<ReplyRoute> {
+        let controller = self.session(controller_session_id)?;
+        let state = controller.lock_state()?;
+        let run =
+            state
+                .runs
+                .get(controller_run_id)
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "controller delivery source run",
+                })?;
+        let input =
+            state
+                .inputs
+                .get(run.input_id())
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "controller delivery source input",
+                })?;
+        Ok(match input.stored.channel_source.as_ref() {
+            Some(InputChannelSource::Device(source)) => ReplyRoute::Device {
+                device_id: source.device_id.clone(),
+                requested_output: source.requested_output,
+            },
+            _ => ReplyRoute::SessionDefault,
+        })
+    }
 }
 
 fn allocate_input_id(state: &crate::session::SessionState) -> RuntimeResult<InputId> {

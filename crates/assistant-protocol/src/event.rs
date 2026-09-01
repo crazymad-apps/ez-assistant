@@ -410,6 +410,7 @@ mod tests {
             lifecycle: crate::SessionLifecycle::Active,
             role: crate::SessionRoleSnapshot::Standard,
             proxy: None,
+            pc_output_hosting: None,
             active_compaction: None,
             current_variant: crate::AgentVariant::Build,
             approval_mode: crate::ApprovalMode::Ask,

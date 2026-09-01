@@ -1,0 +1,35 @@
+{
+  "valid_envelope": {
+    "protocol_major": 1,
+    "protocol_minor": 0,
+    "message_id": "message-error-fixture",
+    "type": "error",
+    "payload": {
+      "code": "authentication_failed",
+      "correlation_message_id": "message-hello-fixture",
+      "recoverable": false
+    }
+  },
+  "error_codes": [
+    { "code": "pairing_not_open", "recoverable": true },
+    { "code": "pairing_failed", "recoverable": true },
+    { "code": "authentication_required", "recoverable": false },
+    { "code": "authentication_failed", "recoverable": false },
+    { "code": "unsupported_output_preference", "recoverable": true },
+    { "code": "unsupported_message", "recoverable": true },
+    { "code": "binary_not_available", "recoverable": true },
+    { "code": "asr_unavailable", "recoverable": true },
+    { "code": "asr_auth_failed", "recoverable": true },
+    { "code": "asr_timeout", "recoverable": true },
+    { "code": "asr_provider_failed", "recoverable": true },
+    { "code": "asr_empty_transcript", "recoverable": true },
+    { "code": "audio_input_busy", "recoverable": true },
+    { "code": "audio_input_too_large", "recoverable": false },
+    { "code": "invalid_pcm_frame", "recoverable": false },
+    { "code": "invalid_pcm_sequence", "recoverable": false },
+    { "code": "client_input_reused", "recoverable": false },
+    { "code": "connection_replaced", "recoverable": false },
+    { "code": "device_revoked", "recoverable": false },
+    { "code": "gateway_disabled", "recoverable": false }
+  ]
+}

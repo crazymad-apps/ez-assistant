@@ -6,7 +6,9 @@ use assistant_protocol::{
     SessionTitleOrigin,
 };
 
-use crate::{SessionExecutionEnvironment, SessionSkillCatalog, StoredSkillActivation};
+use crate::{
+    PcOutputHosting, SessionExecutionEnvironment, SessionSkillCatalog, StoredSkillActivation,
+};
 
 use super::{StoredAttachment, StoredGoal, StoredWorkPlan};
 
@@ -177,6 +179,7 @@ pub struct StoredSession {
     pub approval_mode: ApprovalMode,
     pub role: SessionRole,
     pub proxy: Option<SessionProxyState>,
+    pub pc_output_hosting: Option<PcOutputHosting>,
     pub body_generation: u64,
     pub message_count: u64,
     pub created_at_ms: i64,

@@ -107,6 +107,11 @@ define_identifier!(
     "workspace_id"
 );
 define_identifier!(
+    /// Runtime 已登记设备的不透明稳定标识。
+    DeviceId,
+    "device_id"
+);
+define_identifier!(
     /// Runtime 中一个 Session Attachment 的不透明标识。
     AttachmentId,
     "attachment_id"
@@ -347,6 +352,7 @@ mod tests {
         assert!(ApprovalId::new(" ").is_err());
         assert!(TodoItemId::new(" ").is_err());
         assert!(WorkspaceId::new(" ").is_err());
+        assert!(DeviceId::new(" ").is_err());
         assert!(InputId::new(" ").is_err());
         assert!(MessageId::new("\n").is_err());
         assert!(PartId::new("\t").is_err());
@@ -385,6 +391,11 @@ mod tests {
             serde_json::to_value(WorkspaceId::new("workspace-1").expect("workspace id"))
                 .expect("serialize workspace id"),
             "workspace-1"
+        );
+        assert_eq!(
+            serde_json::to_value(DeviceId::new("device-1").expect("device id"))
+                .expect("serialize device id"),
+            "device-1"
         );
         assert_eq!(
             serde_json::to_value(InputId::new("input-1").expect("input id"))

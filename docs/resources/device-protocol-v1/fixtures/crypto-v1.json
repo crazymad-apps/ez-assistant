@@ -1,0 +1,38 @@
+{
+  "pairing": {
+    "pairing_code": "123456",
+    "pairing_request_id": "fixture-request",
+    "installation_id": "0123456789abcdef0123456789abcdef",
+    "certificate_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "device_nonce": "device-nonce-fixture",
+    "host_nonce": "host-nonce-fixture",
+    "capabilities": {
+      "input_text": true,
+      "input_pcm16_16k_mono": false,
+      "output_text": true,
+      "output_pcm16_16k_mono": false,
+      "playback_cancel": false,
+      "display_status": true,
+      "display_transcript": true
+    },
+    "device_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000005",
+    "host_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000007",
+    "associated_data": "AAAAAAAAABdlei1hc3Npc3RhbnQtcGFpcmluZy12MQAAAAAAAAAPZml4dHVyZS1yZXF1ZXN0AAAAAAAAACAwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZgAAAAAAAABAYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQAAAAAAAAAUZGV2aWNlLW5vbmNlLWZpeHR1cmUAAAAAAAAAEmhvc3Qtbm9uY2UtZml4dHVyZQAAAAAAAAAHAQABAAABAQ",
+    "device_share": "BGskAGlnvzUJBxcVmuSzarCd1BAgqe7rMZATrcEgL4soKJC4kBfoQzY7YkROnOZ2v40xIQkkWqs09tEJolZ3xFg",
+    "host_share": "BJOVw9GEr8DMp481poxTdlcGp34O0wULhrujTilqHd1kuS2zRLKHpybBW3JytcWHGDfIVjI8fT1iHXEBga5NQOY",
+    "device_confirmation": "bafuqgquWlAGDOBpP9Yb0Z_lkabRwcuYuHZt0-SBaS8",
+    "host_confirmation": "4lS4w6y0TnLOX0jJZqGZZ4ZJj06bRcI6eNMcO4p2grU",
+    "session_key": "dB77FpNwOr2EXcc6xpTh3A"
+  },
+  "authentication": {
+    "connection_id": "connection-fixture",
+    "host_nonce": "host-auth-nonce",
+    "device_id": "device-fixture",
+    "device_nonce": "device-auth-nonce",
+    "output_preference": "text",
+    "transcript": "AAAAAAAAABRlei1hc3Npc3RhbnQtYXV0aC12MQAAAAAAAAACAAEAAAAAAAAAAgAAAAAAAAAAABJjb25uZWN0aW9uLWZpeHR1cmUAAAAAAAAAD2hvc3QtYXV0aC1ub25jZQAAAAAAAAAOZGV2aWNlLWZpeHR1cmUAAAAAAAAAEWRldmljZS1hdXRoLW5vbmNlAAAAAAAAAAcBAAEAAAEBAAAAAAAAAAR0ZXh0",
+    "private_seed": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+    "signature": "0Yn3d21SvbS0GEj9BLydIypy4JUotUiburl5jojJTUo9JCXCJ7S9k7VKWM-ZnRTnDBxf7whvbntuUyDraAFsDg"
+  }
+}

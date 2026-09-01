@@ -437,10 +437,9 @@ impl ParentDelegationController {
             )
             .await
             {
-                Ok(replacement) => {
+                Ok((replacement, product_message_count)) => {
                     stored.body_generation = stored.body_generation.saturating_add(1);
-                    stored.message_count =
-                        u64::try_from(replacement.messages.len()).unwrap_or(u64::MAX);
+                    stored.message_count = product_message_count;
                     self.registry
                         .upsert(stored.clone())
                         .map_err(internal_tool_error)?;

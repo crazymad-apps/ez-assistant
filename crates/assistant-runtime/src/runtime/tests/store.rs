@@ -20,9 +20,10 @@ use crate::{
     SessionPinnedChange, SessionTitleChange, SkillNameState, SkillNameStateChange, StoreError,
     StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunSettlement, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit,
-    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredSession, StoredSessionFork,
+    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -71,6 +72,31 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn register_paired_device(
+        &self,
+        device: crate::NewPairedDevice,
+    ) -> StoreFuture<'_, crate::PairedDevice> {
+        self.inner.register_paired_device(device)
+    }
+
+    fn rename_device(
+        &self,
+        change: crate::DeviceNameChange,
+    ) -> StoreFuture<'_, crate::PairedDevice> {
+        self.inner.rename_device(change)
+    }
+
+    fn revoke_device(
+        &self,
+        change: crate::DeviceRevocation,
+    ) -> StoreFuture<'_, crate::DeviceRevocationResult> {
+        self.inner.revoke_device(change)
+    }
+
+    fn set_pc_output_hosting(&self, change: crate::PcOutputHostingChange) -> StoreFuture<'_, bool> {
+        self.inner.set_pc_output_hosting(change)
+    }
+
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         self.inner.load_runtime()
     }
@@ -285,6 +311,13 @@ impl RuntimeStore for FaultInjectingStore {
             ))));
         }
         self.inner.settle_run(settlement)
+    }
+
+    fn commit_run_continuation(
+        &self,
+        continuation: StoredRunContinuation,
+    ) -> StoreFuture<'_, StoredRunContinuationResult> {
+        self.inner.commit_run_continuation(continuation)
     }
 
     fn stop_goal(&self, stop: crate::GoalStop) -> StoreFuture<'_, crate::GoalStopResult> {

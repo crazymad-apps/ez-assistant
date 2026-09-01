@@ -90,7 +90,6 @@ impl StorageEngine {
                 None,
                 &snapshot.messages,
                 completed_at_ms,
-                true,
             )?;
             transaction
                 .execute(
@@ -114,7 +113,6 @@ pub(super) fn record_usage_messages(
     run_id: Option<&str>,
     messages: &[ConversationMessage],
     completed_at_ms: i64,
-    include_legacy_compacted: bool,
 ) -> StorageResult<()> {
     for message in messages {
         match message {
@@ -135,20 +133,6 @@ pub(super) fn record_usage_messages(
                 }
             }
             ConversationMessage::ContextSummary(message) => {
-                if include_legacy_compacted && let Some(usage) = message.compacted_usage.as_ref() {
-                    record_usage(
-                        transaction,
-                        owner,
-                        run_id,
-                        UsageRecord {
-                            request_id: format!("{}:legacy-compacted", message.id.as_str()),
-                            request_kind: "legacy_compacted",
-                            model: message.model.as_ref(),
-                            usage,
-                        },
-                        completed_at_ms,
-                    )?;
-                }
                 if let Some(usage) = message.usage.as_ref() {
                     record_usage(
                         transaction,

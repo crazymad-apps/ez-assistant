@@ -30,6 +30,7 @@ import { RuntimeClientError } from "../runtime-client/RuntimeClient";
 import { ConnectionStore } from "./ConnectionStore";
 import { ConversationSearchStore } from "./ConversationSearchStore";
 import { DesktopLifecycleStore } from "./DesktopLifecycleStore";
+import { DeviceGatewayStore } from "./DeviceGatewayStore";
 import { LiveExecutionStore } from "./LiveExecutionStore";
 import { MemorySettingsStore } from "./MemorySettingsStore";
 import { NavigationStore, type ConversationLocation } from "./NavigationStore";
@@ -47,6 +48,7 @@ export class RootStore {
   readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
   readonly memory_settings: MemorySettingsStore;
+  readonly device_gateway: DeviceGatewayStore;
   readonly desktop_lifecycle: DesktopLifecycleStore;
   pending_session_action = false;
   pending_workspace_action = false;
@@ -80,6 +82,12 @@ export class RootStore {
       report_interaction_error: (message) => {
         this.interaction_error = message;
       },
+      refresh_device_gateway: () => this.device_gateway.scheduleRefresh(),
+      mark_device_gateway_stale: () => this.device_gateway.markStale(),
+    });
+    this.device_gateway = new DeviceGatewayStore({
+      get_client: () => this.#runtime.client,
+      refresh_application: () => this.#runtime.loadApplication(),
     });
     this.desktop_lifecycle = new DesktopLifecycleStore({
       get_application: () => this.projection.application,
@@ -702,6 +710,7 @@ export class RootStore {
   dispose(): void {
     this.#disposed = true;
     this.#runtime.dispose();
+    this.device_gateway.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
     if (this.#preferences_save_timer !== null) {

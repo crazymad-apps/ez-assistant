@@ -13,25 +13,29 @@ use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry,
 use agent_model::SystemPromptSnapshot;
 use agent_types::InternalContextPart;
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
-    FileReferencesPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ProtocolId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId,
-    ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
-    ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
+    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, MessageId,
+    ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart, TextPart,
+    TokenUsage, ToolCall, ToolCallId, ToolImageReference, ToolMessage, ToolName, ToolResult,
+    ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, GoalId,
-    IdempotencyKey, InputId, MessageFeedback, ModelKey, PermissionDiagnosticCode, RunId, RunStatus,
-    SessionHistoryCleanupStatus, SessionId, SessionTitleOrigin, TodoItemId, WorkspaceId,
+    AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, DeviceId,
+    GoalId, IdempotencyKey, InputId, MessageFeedback, ModelKey, PermissionDiagnosticCode, RunId,
+    RunStatus, SessionHistoryCleanupStatus, SessionId, SessionTitleOrigin, TodoItemId, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementTarget, ConversationMessageLocationRequest, ConversationRewrite,
     ConversationSearchRequest, ConversationSearchScope, ConversationWindowRequest,
-    CrossSessionInputBinding, ForkedAttachmentReference, GoalInputBinding, GoalStop, InputOrigin,
-    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
-    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
+    CrossSessionInputBinding, CrossSessionInputEnvelope, DesktopInputSource, DeviceInputSource,
+    DeviceLifecycle, DeviceNameChange, DevicePublicKey, DeviceRevocation,
+    ForkedAttachmentReference, GoalInputBinding, GoalStop, InputChannelSource, InputModality,
+    InputOrigin, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewPairedDevice,
+    NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
+    OutputPreference, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
     PermissionDocument, PermissionEffect, PermissionFileOperation, PermissionFileRevision,
     PermissionFileScope, PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy,
     PinnedMemoryMutation, QueuePriorityChange, RuntimeStore, SessionDeletion,
@@ -51,6 +55,13 @@ use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkil
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+fn desktop_channel_source() -> assistant_runtime::InputChannelSource {
+    assistant_runtime::InputChannelSource::Desktop(DesktopInputSource {
+        modality: assistant_runtime::InputModality::Text,
+        requested_output: assistant_runtime::OutputPreference::Text,
+    })
+}
 
 use super::{
     DATA_DIRECTORY, DATABASE_FILE, LocalRuntimeStore, SESSIONS_DIRECTORY, StorageEngine,
@@ -297,7 +308,8 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: controller_message.clone(),
@@ -334,16 +346,18 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             PartId::new("p-delivery-source").expect("part id"),
             "b-delivery-source",
             "controller_delivery",
-            Some("controller-delivery:test".to_owned()),
             "delivered by the controller",
         )
         .expect("internal source"),
     ));
-    let binding = CrossSessionInputBinding::ControllerDelivery {
-        controller_session_id: controller_session_id.clone(),
-        controller_run_id: controller_run_id.clone(),
-        controller_tool_call_id: assistant_protocol::ToolCallId::new("tc-delivery")
-            .expect("tool call id"),
+    let binding = CrossSessionInputEnvelope {
+        binding: CrossSessionInputBinding::ControllerDelivery {
+            controller_session_id: controller_session_id.clone(),
+            controller_run_id: controller_run_id.clone(),
+            controller_tool_call_id: assistant_protocol::ToolCallId::new("tc-delivery")
+                .expect("tool call id"),
+        },
+        reply_route: assistant_runtime::ReplyRoute::SessionDefault,
     };
     let accepted = engine
         .accept_input(NewStoredInput {
@@ -354,7 +368,8 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::Runtime,
             goal_binding: None,
-            cross_session_binding: Some(binding.clone()),
+            cross_session: Some(binding.clone()),
+            channel_source: None,
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: delivery_message,
@@ -364,14 +379,14 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             accepted_at_ms: 13,
         })
         .expect("accept delivery");
-    assert_eq!(accepted.input.cross_session_binding, Some(binding));
+    assert_eq!(accepted.input.cross_session, Some(binding));
     assert!(
         engine
             .load_inputs()
             .expect("load delivery")
             .iter()
             .any(|input| input.input_id == accepted.input.input_id
-                && input.cross_session_binding == accepted.input.cross_session_binding)
+                && input.cross_session == accepted.input.cross_session)
     );
 
     engine
@@ -383,7 +398,8 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: raw_user_message("m-user-takeover", "user request"),
@@ -404,10 +420,12 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             .is_none()
     );
     assert!(!recovered.inputs.iter().any(|input| {
-        matches!(
-            input.cross_session_binding,
-            Some(CrossSessionInputBinding::ControllerDelivery { .. })
-        )
+        input.cross_session.as_ref().is_some_and(|envelope| {
+            matches!(
+                envelope.binding,
+                CrossSessionInputBinding::ControllerDelivery { .. }
+            )
+        })
     }));
     assert!(
         !recovered
@@ -415,6 +433,182 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             .iter()
             .any(|run| run.run_id.as_str() == "r-delivery-target")
     );
+}
+
+#[test]
+fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
+    let temporary = TempDir::new().expect("tempdir");
+    let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
+    let mut controller = new_session("s-goal-delivery-controller", &engine.sessions_directory);
+    controller.role = SessionRole::Controller;
+    engine
+        .create_session(controller)
+        .expect("create controller");
+    engine
+        .create_session(new_session(
+            "s-goal-delivery-target",
+            &engine.sessions_directory,
+        ))
+        .expect("create target");
+    let controller_session_id = session_id("s-goal-delivery-controller");
+    let target_session_id = session_id("s-goal-delivery-target");
+    let controller_input_id = InputId::new("i-goal-delivery-controller").expect("input id");
+    let controller_run_id = run_id("r-goal-delivery-controller");
+    let controller_message = raw_user_message("m-goal-delivery-controller", "delegate task");
+    engine
+        .accept_input(NewStoredInput {
+            input_id: controller_input_id.clone(),
+            run_id: controller_run_id.clone(),
+            session_id: controller_session_id.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
+            skill_activation: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: controller_message.clone(),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 10,
+        })
+        .expect("accept controller input");
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "commit-goal-delivery-controller".to_owned(),
+            input_id: controller_input_id,
+            run_id: controller_run_id.clone(),
+            session_id: controller_session_id.clone(),
+            message: Some(controller_message),
+            reasoning_effort: None,
+            created_at_ms: 11,
+        })
+        .expect("start controller run");
+    engine
+        .set_session_proxy(SessionProxyChange {
+            target_session_id: target_session_id.clone(),
+            controller_session_id: controller_session_id.clone(),
+            enabled: true,
+            changed_at_ms: 12,
+        })
+        .expect("enable proxy");
+
+    let objective_text = TextPart {
+        id: PartId::new("p-goal-delivery-text").expect("part id"),
+        text: "complete delegated long task".to_owned(),
+    };
+    let objective_part = StoredGoalObjectivePart::Text(objective_text.clone());
+    let objective_hash = format!(
+        "sha256-v1:{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&vec![objective_part.clone()]).expect("encode objective")
+        )
+    );
+    let message = UserMessage {
+        id: MessageId::new("m-goal-delivery-target").expect("message id"),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Visible,
+        parts: vec![
+            UserPart::Text(objective_text),
+            UserPart::InternalContext(
+                InternalContextPart::new(
+                    PartId::new("p-goal-delivery-source").expect("part id"),
+                    "b-goal-delivery-source",
+                    "controller_delivery",
+                    "delivered by the controller",
+                )
+                .expect("delivery source"),
+            ),
+            UserPart::Injected(TextPart {
+                id: PartId::new("p-goal-delivery-context").expect("part id"),
+                text: "GOAL_START_INJECTION_V1".to_owned(),
+            }),
+        ],
+    };
+    let goal_id = GoalId::new("goal-controller-delivery").expect("goal id");
+    let reply_route = assistant_runtime::ReplyRoute::SessionDefault;
+    let goal = StoredGoal {
+        goal_id: goal_id.clone(),
+        session_id: target_session_id.clone(),
+        objective: StoredGoalObjective {
+            source_message_id: message.id.clone(),
+            payload: vec![objective_part],
+            payload_hash: objective_hash,
+        },
+        state: StoredGoalState::Running,
+        pause_reason: None,
+        generation: 1,
+        turn: 1,
+        budget: StoredGoalBudget {
+            max_runs: 20,
+            max_total_tokens: 500_000,
+            max_consecutive_failures: 3,
+            used_runs: 0,
+            used_total_tokens: 0,
+            usage_complete: true,
+        },
+        consecutive_failures: 0,
+        created_at_ms: 13,
+        updated_at_ms: 13,
+        completed_at_ms: None,
+    };
+    let envelope = CrossSessionInputEnvelope {
+        binding: CrossSessionInputBinding::ControllerDelivery {
+            controller_session_id,
+            controller_run_id,
+            controller_tool_call_id: assistant_protocol::ToolCallId::new("tc-goal-delivery")
+                .expect("tool call id"),
+        },
+        reply_route: reply_route.clone(),
+    };
+    let accepted = engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("i-goal-delivery-target").expect("input id"),
+            run_id: run_id("r-goal-delivery-target"),
+            session_id: target_session_id.clone(),
+            idempotency_key: Some(
+                IdempotencyKey::new("goal-delivery-key").expect("idempotency key"),
+            ),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::Runtime,
+            goal_binding: Some(GoalInputBinding {
+                goal_id: goal_id.clone(),
+                generation: 1,
+                turn: 1,
+                reply_route: Some(reply_route.clone()),
+            }),
+            cross_session: Some(envelope.clone()),
+            channel_source: None,
+            skill_activation: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message,
+            new_goal: Some(goal),
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 13,
+        })
+        .expect("accept delegated Goal");
+    assert_eq!(accepted.input.cross_session, Some(envelope));
+    assert_eq!(
+        accepted
+            .input
+            .goal_binding
+            .as_ref()
+            .expect("Goal binding")
+            .reply_route,
+        Some(reply_route)
+    );
+    let stored_inputs = engine.load_inputs().expect("load delegated Goal input");
+    let recovered_input = stored_inputs
+        .iter()
+        .find(|input| input.input_id == accepted.input.input_id)
+        .expect("recovered delegated Goal input");
+    assert_eq!(recovered_input.goal_binding, accepted.input.goal_binding);
+    assert_eq!(recovered_input.cross_session, accepted.input.cross_session);
+    let recovered = engine.load_runtime().expect("recover delegated Goal");
+    assert!(recovered.goals.iter().any(|goal| goal.goal_id == goal_id));
 }
 
 #[test]
@@ -446,7 +640,8 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: source_message.clone(),
@@ -483,7 +678,6 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
             PartId::new("p-proxy-report").expect("part id"),
             "b-proxy-report",
             "proxy_report",
-            Some("proxy-report:test".to_owned()),
             "stable source report",
         )
         .expect("report source"),
@@ -496,12 +690,16 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         agent_variant: assistant_protocol::AgentVariant::Build,
         origin: InputOrigin::Runtime,
         goal_binding: None,
-        cross_session_binding: Some(CrossSessionInputBinding::ProxyReport {
-            source_session_id: source_session_id.clone(),
-            source_run_id: source_run_id.clone(),
-            source_goal_id: None,
-            source_run_status: RunStatus::Completed,
+        cross_session: Some(CrossSessionInputEnvelope {
+            binding: CrossSessionInputBinding::ProxyReport {
+                source_session_id: source_session_id.clone(),
+                source_run_id: source_run_id.clone(),
+                source_goal_id: None,
+                source_run_status: RunStatus::Completed,
+            },
+            reply_route: assistant_runtime::ReplyRoute::SessionDefault,
         }),
+        channel_source: None,
         skill_activation: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: report_message,
@@ -550,10 +748,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         recovered_report.state,
         assistant_runtime::StoredInputState::Queued
     );
-    assert_eq!(
-        recovered_report.cross_session_binding,
-        report_input.cross_session_binding
-    );
+    assert_eq!(recovered_report.cross_session, report_input.cross_session);
 }
 
 #[tokio::test]
@@ -727,7 +922,6 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             PartId::new("part-skill-activation").expect("part id"),
             "boundary-skill-activation".to_owned(),
             "skill_activation".to_owned(),
-            Some("skill:review".to_owned()),
             "SKILL_ACTIVATION_V1\nReview carefully.".to_owned(),
         )
         .expect("internal context"),
@@ -754,7 +948,8 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: Some(activation.clone()),
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: message.clone(),
@@ -900,6 +1095,16 @@ fn assistant_message(value: &str, text: &str) -> ConversationMessage {
         ],
         finish_reason: FinishReason::Stop,
         usage: None,
+    })
+}
+
+fn context_summary(value: &str, text: &str) -> ConversationMessage {
+    ConversationMessage::ContextSummary(ContextSummaryMessage {
+        id: MessageId::new(value).expect("message id"),
+        text: text.to_owned(),
+        model: None,
+        usage: None,
+        compacted_usage: None,
     })
 }
 
@@ -1528,7 +1733,8 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             new_goal: None,
             resumed_goal: None,
@@ -1862,7 +2068,8 @@ fn commit_completed_turn(
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             new_goal: None,
             resumed_goal: None,
@@ -2270,7 +2477,7 @@ fn initializes_private_database_and_current_schema() {
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type = 'table' AND name IN (
-                'sessions', 'inputs', 'runs', 'run_message_refs',
+                'devices', 'sessions', 'inputs', 'runs', 'run_message_refs',
                 'pending_tool_exchanges', 'pending_tool_starts', 'body_appends',
                 'workspaces', 'session_resources', 'session_work_plans', 'session_goals'
              )",
@@ -2278,7 +2485,7 @@ fn initializes_private_database_and_current_schema() {
             |row| row.get(0),
         )
         .expect("table count");
-    assert_eq!(table_count, 11);
+    assert_eq!(table_count, 12);
 
     let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
     assert_eq!(
@@ -2297,6 +2504,185 @@ fn initializes_private_database_and_current_schema() {
             & 0o777,
         0o700
     );
+}
+
+#[test]
+fn paired_device_and_controller_hosting_survive_restart_and_revoke_atomically() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let controller_id = session_id("s-device-controller");
+    let device_id = DeviceId::new("device-durable").expect("device id");
+    let mut engine = open_engine(&root);
+    let sessions_directory = engine.sessions_directory.clone();
+    let mut controller = new_session(controller_id.as_str(), &sessions_directory);
+    controller.role = SessionRole::Controller;
+    engine
+        .create_session(controller)
+        .expect("create controller");
+    engine
+        .register_paired_device(NewPairedDevice {
+            device_id: device_id.clone(),
+            display_name: "客厅终端".to_owned(),
+            public_key: DevicePublicKey::new([3; 32]),
+            paired_at_ms: 2_000,
+        })
+        .expect("register device");
+    assert_eq!(
+        engine
+            .register_paired_device(NewPairedDevice {
+                device_id: DeviceId::new("device-duplicate-key").expect("device id"),
+                display_name: "重复终端".to_owned(),
+                public_key: DevicePublicKey::new([3; 32]),
+                paired_at_ms: 2_050,
+            })
+            .expect_err("public key identity must be unique")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+    engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-device-durable").expect("input id"),
+            run_id: run_id("run-device-durable"),
+            session_id: controller_id.clone(),
+            idempotency_key: Some(
+                IdempotencyKey::new("device-durable-input").expect("idempotency key"),
+            ),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(InputChannelSource::Device(DeviceInputSource {
+                device_id: device_id.clone(),
+                client_input_id: "client-device-durable".to_owned(),
+                modality: InputModality::SpeechTranscript,
+                requested_output: OutputPreference::Audio,
+            })),
+            skill_activation: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: raw_user_message("message-device-durable", "设备输入"),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 2_100,
+        })
+        .expect("accept device input");
+    assert!(
+        engine
+            .set_pc_output_hosting(PcOutputHostingChange {
+                controller_session_id: controller_id.clone(),
+                device_id: Some(device_id.clone()),
+            })
+            .expect("set hosting")
+    );
+    assert!(
+        !engine
+            .set_pc_output_hosting(PcOutputHostingChange {
+                controller_session_id: controller_id.clone(),
+                device_id: Some(device_id.clone()),
+            })
+            .expect("idempotent hosting")
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover runtime");
+    assert_eq!(recovered.devices.len(), 1);
+    assert!(matches!(
+        recovered.inputs[0].channel_source,
+        Some(InputChannelSource::Device(_))
+    ));
+    assert_eq!(
+        recovered.sessions[0]
+            .pc_output_hosting
+            .as_ref()
+            .map(|hosting| hosting.device_name.as_str()),
+        Some("客厅终端")
+    );
+    reopened
+        .rename_device(DeviceNameChange {
+            device_id: device_id.clone(),
+            display_name: "书房终端".to_owned(),
+            changed_at_ms: 3_000,
+        })
+        .expect("rename device");
+    assert_eq!(
+        reopened.load_sessions().expect("load renamed hosting")[0]
+            .pc_output_hosting
+            .as_ref()
+            .map(|hosting| hosting.device_name.as_str()),
+        Some("书房终端")
+    );
+
+    let revoked = reopened
+        .revoke_device(DeviceRevocation {
+            device_id: device_id.clone(),
+            revoked_at_ms: 4_000,
+        })
+        .expect("revoke device");
+    assert!(revoked.changed);
+    assert_eq!(revoked.device.lifecycle, DeviceLifecycle::Revoked);
+    assert_eq!(revoked.cleared_session_ids, vec![controller_id]);
+    assert!(
+        reopened.load_sessions().expect("load cleared hosting")[0]
+            .pc_output_hosting
+            .is_none()
+    );
+    assert!(matches!(
+        reopened.load_inputs().expect("load historical source")[0].channel_source,
+        Some(InputChannelSource::Device(_))
+    ));
+}
+
+#[test]
+fn paired_device_input_can_target_an_active_standard_session() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    let target_id = session_id("s-device-standard");
+    let device_id = DeviceId::new("device-standard-target").expect("device id");
+    engine
+        .create_session(new_session(
+            target_id.as_str(),
+            &engine.sessions_directory.clone(),
+        ))
+        .expect("create standard session");
+    engine
+        .register_paired_device(NewPairedDevice {
+            device_id: device_id.clone(),
+            display_name: "普通会话终端".to_owned(),
+            public_key: DevicePublicKey::new([9; 32]),
+            paired_at_ms: 2_000,
+        })
+        .expect("register device");
+
+    let accepted = engine
+        .accept_input(NewStoredInput {
+            input_id: InputId::new("input-device-standard").expect("input id"),
+            run_id: run_id("run-device-standard"),
+            session_id: target_id,
+            idempotency_key: Some(
+                IdempotencyKey::new("device-standard-input").expect("idempotency key"),
+            ),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(InputChannelSource::Device(DeviceInputSource {
+                device_id,
+                client_input_id: "client-device-standard".to_owned(),
+                modality: InputModality::Text,
+                requested_output: OutputPreference::Text,
+            })),
+            skill_activation: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: raw_user_message("message-device-standard", "设备输入普通会话"),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 2_100,
+        })
+        .expect("accept device input for standard session");
+
+    assert!(accepted.input.channel_source.is_some());
+    assert_eq!(accepted.run.status, RunStatus::Accepted);
 }
 
 #[test]
@@ -2629,8 +3015,10 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
             goal_id: goal_id.clone(),
             generation: 1,
             turn: 1,
+            reply_route: None,
         }),
-        cross_session_binding: None,
+        cross_session: None,
+        channel_source: Some(desktop_channel_source()),
         skill_activation: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: message.clone(),
@@ -2678,7 +3066,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
 }
 
 #[test]
-fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
+fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
     let sessions_directory = engine.sessions_directory.clone();
@@ -2743,8 +3131,10 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
                 goal_id: goal_id.clone(),
                 generation: 1,
                 turn: 1,
+                reply_route: None,
             }),
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: first_message,
@@ -2779,52 +3169,23 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
             text: "GOAL_CONTINUATION_V1".to_owned(),
         })],
     };
-    let next_input = NewStoredInput {
-        input_id: InputId::new("input-goal-continuation").expect("input id"),
-        run_id: RunId::new("run-goal-continuation").expect("run id"),
-        session_id: session.clone(),
-        idempotency_key: None,
-        agent_variant: assistant_protocol::AgentVariant::Build,
-        origin: InputOrigin::Runtime,
-        goal_binding: Some(GoalInputBinding {
-            goal_id: goal_id.clone(),
-            generation: 1,
-            turn: 2,
-        }),
-        cross_session_binding: None,
-        skill_activation: None,
-        approval_mode: assistant_protocol::ApprovalMode::Ask,
-        message: continuation_message,
-        new_goal: None,
-        resumed_goal: None,
-        generated_title: None,
-        accepted_at_ms: 3_000,
-    };
-    let mut invalid_next_input = next_input.clone();
-    invalid_next_input
-        .goal_binding
-        .as_mut()
-        .expect("Goal binding")
-        .generation = 2;
     assert!(
         engine
-            .settle_run(StoredRunSettlement {
-                message_step: None,
+            .commit_run_continuation(assistant_runtime::StoredRunContinuation {
                 operation_id: "reject-invalid-goal-continuation".to_owned(),
                 run_id: first.run.run_id.clone(),
                 session_id: session.clone(),
-                status: RunStatus::Completed,
-                cancel_requested: false,
-                error: None,
-                messages: vec![assistant_message("invalid-goal-answer", "must roll back")],
-                goal_effect: Some(StoredGoalSettlementEffect::Continue {
+                messages: vec![
+                    assistant_message("invalid-goal-answer", "must roll back"),
+                    ConversationMessage::User(continuation_message.clone()),
+                ],
+                message_step: 1,
+                goal_effect: Some(StoredGoalSettlementEffect::Progress {
                     expected_goal_id: goal_id.clone(),
-                    expected_generation: 1,
+                    expected_generation: 2,
                     goal: updated_goal.clone(),
-                    next_input: Box::new(invalid_next_input),
                 }),
-                proxy_report: None,
-                finished_at_ms: 3_000,
+                committed_at_ms: 3_000,
             })
             .is_err()
     );
@@ -2849,36 +3210,33 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
         1
     );
     let result = engine
-        .settle_run(StoredRunSettlement {
-            message_step: None,
+        .commit_run_continuation(assistant_runtime::StoredRunContinuation {
             operation_id: "settle-goal-and-continue".to_owned(),
-            run_id: first.run.run_id,
+            run_id: first.run.run_id.clone(),
             session_id: session.clone(),
-            status: RunStatus::Completed,
-            cancel_requested: false,
-            error: None,
-            messages: vec![assistant_message("goal-settlement-answer", "progress")],
-            goal_effect: Some(StoredGoalSettlementEffect::Continue {
+            messages: vec![
+                assistant_message("goal-settlement-answer", "progress"),
+                ConversationMessage::User(continuation_message),
+            ],
+            message_step: 1,
+            goal_effect: Some(StoredGoalSettlementEffect::Progress {
                 expected_goal_id: goal_id,
                 expected_generation: 1,
                 goal: updated_goal.clone(),
-                next_input: Box::new(next_input.clone()),
             }),
-            proxy_report: None,
-            finished_at_ms: 3_000,
+            committed_at_ms: 3_000,
         })
-        .expect("settle Goal and create continuation");
+        .expect("commit Goal progress inside the active Run");
     assert_eq!(result.goal, Some(updated_goal.clone()));
-    let continuation = result.continuation.expect("continuation result");
-    assert_eq!(continuation.input.input_id, next_input.input_id);
-    assert_eq!(continuation.run.run_id, next_input.run_id);
-    assert_eq!(continuation.input.origin, InputOrigin::Runtime);
     assert_eq!(
         engine.load_all_goals().expect("load Goal"),
         vec![updated_goal.clone()]
     );
-    assert_eq!(engine.load_inputs().expect("load inputs").len(), 2);
-    assert_eq!(engine.load_runs().expect("load runs").len(), 2);
+    assert_eq!(engine.load_inputs().expect("load inputs").len(), 1);
+    let runs = engine.load_runs().expect("load runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, first.run.run_id);
+    assert_eq!(runs[0].status, RunStatus::Running);
     let held_message = raw_user_message("goal-resume-user", "use stable channel");
     let held = engine
         .accept_input(NewStoredInput {
@@ -2889,7 +3247,8 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: held_message.clone(),
@@ -2913,9 +3272,24 @@ fn goal_run_settlement_updates_budget_and_creates_continuation_atomically() {
             stopped_goal: stopped_goal.clone(),
         })
         .expect("stop Goal");
-    assert_eq!(stopped.removed_input_ids, vec![next_input.input_id]);
-    assert!(stopped.cancelling_run_id.is_none());
+    assert!(stopped.removed_input_ids.is_empty());
+    assert_eq!(stopped.cancelling_run_id, Some(first.run.run_id.clone()));
     assert_eq!(engine.load_inputs().expect("inputs after stop").len(), 2);
+    engine
+        .settle_run(StoredRunSettlement {
+            message_step: None,
+            operation_id: "cancel-stopped-goal-run".to_owned(),
+            run_id: first.run.run_id,
+            session_id: session.clone(),
+            status: RunStatus::Cancelled,
+            cancel_requested: true,
+            error: None,
+            messages: Vec::new(),
+            goal_effect: None,
+            proxy_report: None,
+            finished_at_ms: 4_100,
+        })
+        .expect("settle stopped Goal Run");
 
     let mut resumed_goal = stopped_goal;
     resumed_goal.state = StoredGoalState::Running;
@@ -3035,8 +3409,10 @@ fn running_goal_is_durably_paused_once_during_recovery() {
                 goal_id: GoalId::new("goal-recovery").expect("goal id"),
                 generation: 1,
                 turn: 2,
+                reply_route: None,
             }),
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: None,
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: UserMessage {
@@ -4033,7 +4409,8 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
@@ -4343,7 +4720,8 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             new_goal: None,
             resumed_goal: None,
@@ -4617,7 +4995,6 @@ fn model_skill_activation_commits_with_tool_results_and_recovers_as_one_fact() {
                 PartId::new("part-model-skill").expect("part id"),
                 "boundary-model-skill".to_owned(),
                 "skill_activation".to_owned(),
-                Some("skill:review".to_owned()),
                 "SKILL_ACTIVATION_V1\ntrigger: model".to_owned(),
             )
             .expect("internal context"),
@@ -5316,22 +5693,27 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
         .expect("activate run");
     engine
         .append_messages(append_request(
-            "operation-compact-run",
+            "operation-compact-run-old",
             "s-compact-run",
             "r-compact-run",
         ))
         .expect("append original");
-    let replacement = ConversationSnapshot::new(vec![ConversationMessage::User(UserMessage {
-        id: MessageId::new("message-compact-run").expect("message id"),
-        origin: UserMessageOrigin::Runtime,
-        transcript_visibility: TranscriptVisibility::Hidden,
-        parts: vec![UserPart::Injected(TextPart {
-            id: PartId::new("message-compact-run-injected").expect("part id"),
-            text: "continue after summary replacement".to_owned(),
-        })],
-    })]);
-
     engine
+        .append_messages(append_request(
+            "operation-compact-run-retained",
+            "s-compact-run",
+            "r-compact-run",
+        ))
+        .expect("append retained turn");
+    let original = engine
+        .load_conversation(&session_id("s-compact-run"))
+        .expect("original conversation");
+    let mut replacement_messages =
+        vec![context_summary("summary-compact-run", "older run context")];
+    replacement_messages.extend_from_slice(&original.messages[2..]);
+    let replacement = ConversationSnapshot::new(replacement_messages);
+
+    let committed = engine
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::Run {
                 session_id: session_id("s-compact-run"),
@@ -5341,6 +5723,7 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
             changed_at_ms: 3_000,
         })
         .expect("replace active run context");
+    assert_eq!(committed.product_message_count, 5);
 
     let generation: i64 = engine
         .connection
@@ -5360,10 +5743,17 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
         .expect("run status");
     assert_eq!(generation, 2);
     assert_eq!(status, "running");
+    let mut expected_messages = original.messages[..2].to_vec();
+    expected_messages.extend_from_slice(&replacement.messages);
+    let expected = ConversationSnapshot::new(expected_messages);
     assert_eq!(
         engine
             .load_conversation(&session_id("s-compact-run"))
             .expect("replacement conversation"),
+        expected
+    );
+    assert_eq!(
+        assistant_runtime::execution_context_from_product_history(&expected),
         replacement
     );
     let product_window = engine
@@ -5376,17 +5766,117 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
             limit: 20,
         })
         .expect("product window after replacement");
-    assert_eq!(product_window.total, 0);
-    assert!(product_window.conversation.messages.is_empty());
+    assert_eq!(product_window.total, 5);
+    assert_eq!(product_window.conversation, expected);
+
+    engine
+        .append_messages(append_request(
+            "operation-compact-run-third",
+            "s-compact-run",
+            "r-compact-run",
+        ))
+        .expect("append after first compaction");
+    let before_second = engine
+        .load_conversation(&session_id("s-compact-run"))
+        .expect("history before second compaction");
+    let mut second_replacement_messages = vec![context_summary(
+        "summary-compact-run-second",
+        "context through the second turn",
+    )];
+    second_replacement_messages.extend_from_slice(&before_second.messages[5..]);
+    let second_replacement = ConversationSnapshot::new(second_replacement_messages);
+    let second_committed = engine
+        .replace_context(ContextReplacement {
+            target: ContextReplacementTarget::Run {
+                session_id: session_id("s-compact-run"),
+                run_id: run_id("r-compact-run"),
+            },
+            conversation: second_replacement.clone(),
+            changed_at_ms: 4_000,
+        })
+        .expect("replace active run context a second time");
+    assert_eq!(second_committed.result_generation, 3);
+    assert_eq!(second_committed.product_message_count, 8);
+    let mut final_messages = before_second.messages[..5].to_vec();
+    final_messages.extend_from_slice(&second_replacement.messages);
+    let final_history = ConversationSnapshot::new(final_messages);
+    assert_eq!(
+        engine
+            .load_conversation(&session_id("s-compact-run"))
+            .expect("history after second compaction"),
+        final_history
+    );
+    assert_eq!(
+        assistant_runtime::execution_context_from_product_history(&final_history),
+        second_replacement
+    );
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover compacted runtime");
+    assert_eq!(recovered.sessions[0].message_count, 8);
+    assert_eq!(
+        reopened
+            .load_conversation(&session_id("s-compact-run"))
+            .expect("conversation after restart"),
+        final_history
+    );
+    let latest_page = reopened
+        .load_conversation_window(ConversationWindowRequest {
+            owner: ConversationOwner::MainSession {
+                session_id: session_id("s-compact-run"),
+            },
+            generation: 3,
+            end: None,
+            limit: 3,
+        })
+        .expect("latest product page after restart");
+    assert_eq!(latest_page.total, 8);
+    assert_eq!(latest_page.start, 5);
+    let previous_page = reopened
+        .load_conversation_window(ConversationWindowRequest {
+            owner: ConversationOwner::MainSession {
+                session_id: session_id("s-compact-run"),
+            },
+            generation: 3,
+            end: Some(latest_page.start),
+            limit: 5,
+        })
+        .expect("previous product page after restart");
+    assert_eq!(previous_page.start, 0);
+    assert_eq!(previous_page.end, 5);
 }
 
 #[test]
 fn idle_session_compaction_commits_generation_and_receipt_atomically() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-idle-compact", "r-idle-compact");
     engine
-        .create_session(new_session("s-idle-compact", &engine.sessions_directory))
-        .expect("create session");
+        .append_messages(append_request(
+            "idle-compact-old",
+            "s-idle-compact",
+            "r-idle-compact",
+        ))
+        .expect("append old turn");
+    engine
+        .append_messages(append_request(
+            "idle-compact-retained",
+            "s-idle-compact",
+            "r-idle-compact",
+        ))
+        .expect("append retained turn");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'completed', finished_at_ms = 1_500
+             WHERE run_id = 'r-idle-compact'",
+            [],
+        )
+        .expect("settle fixture run");
+    let original = engine
+        .load_conversation(&session_id("s-idle-compact"))
+        .expect("original conversation");
     let operation_id = IdempotencyKey::new("idle-compact-operation").expect("operation id");
     let preparation = SessionHistoryCompactionPreparation {
         operation_id: operation_id.clone(),
@@ -5400,10 +5890,12 @@ fn idle_session_compaction_commits_generation_and_receipt_atomically() {
             .expect("prepare compact"),
         SessionHistoryCompactionPreparationResult::Prepared
     );
-    let replacement = ConversationSnapshot::new(vec![user_message(
-        "idle-compact-message",
-        "retained context",
-    )]);
+    let mut replacement_messages = vec![context_summary(
+        "idle-compact-summary",
+        "older session context",
+    )];
+    replacement_messages.extend_from_slice(&original.messages[2..]);
+    let replacement = ConversationSnapshot::new(replacement_messages);
     let committed = engine
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::IdleSession {
@@ -5419,11 +5911,15 @@ fn idle_session_compaction_commits_generation_and_receipt_atomically() {
         .expect("commit idle compact");
     assert_eq!(committed.source_generation, 1);
     assert_eq!(committed.result_generation, 2);
+    assert_eq!(committed.product_message_count, 5);
+    let mut expected_messages = original.messages[..2].to_vec();
+    expected_messages.extend_from_slice(&replacement.messages);
+    let expected = ConversationSnapshot::new(expected_messages);
     assert_eq!(
         engine
             .load_conversation(&session_id("s-idle-compact"))
             .expect("load compacted conversation"),
-        replacement
+        expected
     );
     assert_eq!(
         engine
@@ -5446,6 +5942,17 @@ fn idle_session_compaction_commits_generation_and_receipt_atomically() {
         )
         .expect("compact receipt");
     assert_eq!(receipt, ("completed".to_owned(), 2, 4, 1));
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let recovered = reopened.load_runtime().expect("recover compacted session");
+    assert_eq!(recovered.sessions[0].message_count, 5);
+    assert_eq!(
+        reopened
+            .load_conversation(&session_id("s-idle-compact"))
+            .expect("load compacted conversation after restart"),
+        expected
+    );
 }
 
 #[test]
@@ -5511,12 +6018,15 @@ fn running_child_context_replacement_switches_only_child_generation() {
             started_at_ms: 2_100,
         })
         .expect("start child");
-    let replacement = ConversationSnapshot::new(vec![user_message(
-        "child-replacement",
-        "summary replacement",
-    )]);
+    let original = engine
+        .load_child_conversation(&session_id("s-compact-child"), &child_id)
+        .expect("original child conversation");
+    let replacement = ConversationSnapshot::new(vec![
+        context_summary("child-summary", "earlier child context"),
+        original.messages[0].clone(),
+    ]);
 
-    engine
+    let committed = engine
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::ChildTask {
                 session_id: session_id("s-compact-child"),
@@ -5526,6 +6036,7 @@ fn running_child_context_replacement_switches_only_child_generation() {
             changed_at_ms: 3_000,
         })
         .expect("replace child context");
+    assert_eq!(committed.product_message_count, 2);
 
     let tasks = engine.load_child_tasks().expect("load child tasks");
     assert_eq!(tasks[0].body_generation, 2);
@@ -5534,6 +6045,16 @@ fn running_child_context_replacement_switches_only_child_generation() {
         engine
             .load_child_conversation(&session_id("s-compact-child"), &child_id)
             .expect("child replacement"),
+        replacement
+    );
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().expect("recover child context");
+    assert_eq!(
+        reopened
+            .load_child_conversation(&session_id("s-compact-child"), &child_id)
+            .expect("child replacement after restart"),
         replacement
     );
 }
@@ -5574,7 +6095,8 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
@@ -5650,7 +6172,8 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
                 new_goal: None,
                 resumed_goal: None,
@@ -5741,7 +6264,8 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             new_goal: None,
             resumed_goal: None,
@@ -6955,7 +7479,8 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: source_message.clone(),
@@ -6992,16 +7517,18 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             PartId::new("p-clear-cross-session-report").expect("part id"),
             "b-clear-cross-session-report",
             "proxy_report",
-            Some("proxy-report:clear-test".to_owned()),
             "stable source report",
         )
         .expect("report source"),
     ));
-    let report_binding = CrossSessionInputBinding::ProxyReport {
-        source_session_id: target_session_id.clone(),
-        source_run_id: source_run_id.clone(),
-        source_goal_id: None,
-        source_run_status: RunStatus::Completed,
+    let report_binding = CrossSessionInputEnvelope {
+        binding: CrossSessionInputBinding::ProxyReport {
+            source_session_id: target_session_id.clone(),
+            source_run_id: source_run_id.clone(),
+            source_goal_id: None,
+            source_run_status: RunStatus::Completed,
+        },
+        reply_route: assistant_runtime::ReplyRoute::SessionDefault,
     };
     let report_input = NewStoredInput {
         input_id: report_input_id.clone(),
@@ -7011,7 +7538,8 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         agent_variant: assistant_protocol::AgentVariant::Build,
         origin: InputOrigin::Runtime,
         goal_binding: None,
-        cross_session_binding: Some(report_binding.clone()),
+        cross_session: Some(report_binding.clone()),
+        channel_source: None,
         skill_activation: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: report_message,
@@ -7107,7 +7635,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             .expect("load cross-session report")
             .iter()
             .any(|input| input.input_id == report_input_id
-                && input.cross_session_binding == Some(report_binding.clone()))
+                && input.cross_session == Some(report_binding.clone()))
     );
 
     let replay = engine
@@ -7151,7 +7679,8 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: InputOrigin::User,
             goal_binding: None,
-            cross_session_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
             skill_activation: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: queued,

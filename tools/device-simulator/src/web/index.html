@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="simulator-token" content="__SIMULATOR_TOKEN__" />
+    <title>EZ Assistant 智能终端模拟器</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">DEVICE SIMULATOR</p>
+          <h1>智能终端</h1>
+        </div>
+        <span id="phase" class="phase">连接中</span>
+      </header>
+
+      <section class="card">
+        <h2>设备与 Host</h2>
+        <label>
+          可发现 Host
+          <select id="hosts"></select>
+        </label>
+        <div class="actions">
+          <button id="connect">连接 / 配对</button>
+          <button id="disconnect" class="secondary">断开</button>
+        </div>
+        <dl>
+          <div><dt>Device ID</dt><dd id="device-id">未配对</dd></div>
+          <div><dt>配对码</dt><dd id="pairing-code" class="code">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="card">
+        <h2>交互形态</h2>
+        <label>
+          终端形态
+          <select id="terminal-profile">
+            <option value="voice_only">纯语音</option>
+            <option value="screen_voice">带屏语音</option>
+            <option value="keyboard_screen">键盘屏幕</option>
+            <option value="mixed">混合终端</option>
+          </select>
+        </label>
+        <label>
+          输出偏好
+          <select id="preference">
+            <option value="text">文字</option>
+            <option value="audio">语音</option>
+            <option value="text_and_audio">文字 + 语音</option>
+          </select>
+        </label>
+        <div class="playback-row">
+          <div class="actions">
+            <button id="enable-playback" class="secondary">启用播报</button>
+            <button id="cancel-playback" class="secondary" disabled>停止播报</button>
+          </div>
+          <span id="playback-state" class="playback-state">播报未启用</span>
+        </div>
+        <label class="text-input">
+          文字输入
+          <textarea id="text-input" rows="3" placeholder="输入要发送给当前主控会话的消息"></textarea>
+        </label>
+        <div class="actions">
+          <button id="submit-text">发送</button>
+          <button id="retry-text" class="secondary">重试上一条</button>
+        </div>
+        <div class="recording-row">
+          <div class="actions">
+            <button id="start-recording">开始录音</button>
+            <button id="stop-recording" class="secondary" disabled>停止并发送</button>
+          </div>
+          <span id="recording-state" class="recording-state">未录音</span>
+        </div>
+        <div class="actions compact-actions">
+          <button id="submit-test-pcm" class="secondary">发送测试语音</button>
+          <button id="retry-pcm" class="secondary">重试测试语音</button>
+        </div>
+        <button id="reset" class="danger">重置模拟设备</button>
+        <p class="hint">切换终端形态需要先断开设备，新的能力会在下一次 WSS hello 中声明。真人录音会由
+          AudioWorklet 采集并转换为 PCM16/16 kHz/mono，再经 Node 的正式 Device WSS
+          进入 Host ASR；下行 PCM 经 Node 校验后由浏览器播放。浏览器不执行 ASR/TTS，重试复用同一
+          client input ID。启用播报时，若当前仅输出文字，会自动切换为“文字 + 语音”。</p>
+      </section>
+
+      <section class="card">
+        <h2>当前轮次</h2>
+        <dl>
+          <div><dt>Client Input</dt><dd id="client-input-id">—</dd></div>
+          <div><dt>Runtime Input</dt><dd id="runtime-input-id">—</dd></div>
+          <div><dt>Run</dt><dd id="run-id">—</dd></div>
+          <div><dt>队列状态</dt><dd id="queue-state">—</dd></div>
+        </dl>
+        <p id="text-output" class="text-output">尚无终端回复</p>
+      </section>
+
+      <details class="card fault-panel">
+        <summary>协议故障注入</summary>
+        <label>
+          故障类型
+          <select id="fault">
+            <option value="corrupt_next_auth_signature">下一次认证签名损坏</option>
+            <option value="next_protocol_major_mismatch">下一次认证协议主版本错误</option>
+            <option value="duplicate_next_text_envelope">下一条文字控制帧重复</option>
+            <option value="invalid_next_pcm_sequence">下一次 PCM 首帧序号错位</option>
+            <option value="disconnect_after_next_input">下一次输入发送后断线</option>
+            <option value="ignore_next_ping">忽略下一次应用层 ping</option>
+            <option value="pause_read_5s">暂停读取下行 5 秒</option>
+            <option value="unsupported_output_preference">发送能力外输出偏好</option>
+            <option value="duplicate_playback_cancel">重复发送停止播报</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button id="inject-fault" class="secondary">注入</button>
+        </div>
+        <p class="hint">一次性故障只影响 Node 发往正式 Device WSS 的下一次对应行为；即时故障会立刻执行。</p>
+      </details>
+
+      <details class="card diagnostics">
+        <summary>会话监控</summary>
+        <p id="error" class="error"></p>
+        <p id="armed-fault" class="hint"></p>
+        <ol id="events"></ol>
+      </details>
+    </main>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

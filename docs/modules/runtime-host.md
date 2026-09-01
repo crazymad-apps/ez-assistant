@@ -117,6 +117,9 @@ Worker 池。
   均只使用产品可见消息。SQLite `sessions.message_count` 继续表示物理 JSONL 消息数。
 - 单一命名阻塞线程从打开到关闭独占 `rusqlite::Connection` 和文件 I/O；Tokio 侧通过有界命令
   队列等待结果，不能直接执行阻塞数据库操作。
+- `storage/worker` 按适配职责拆分：`command` 定义类型化队列消息，`client` 实现异步
+  `RuntimeStore` 代理与 worker 生命周期，`thread` 只负责在阻塞线程上把命令分发给
+  `StorageEngine`。拆分不能改变命令顺序、背压、连接所有权或关闭语义。
 - `rusqlite` 只属于 Host，并使用关闭默认 feature 的 `bundled` SQLite；`assistant-runtime` 只依赖
   RuntimeStore 端口。
 - Serve 启动先取得 endpoint 单实例所有权，再打开 Store 并等待 Runtime 完成结构化恢复；只有
@@ -364,20 +367,18 @@ Worker 池。
 
 ## v0.18.0 M4 Goal 事务与恢复存储边界
 
-- `settle_run` 的 staged append 同时携带可选 Goal effect。Host 在写 Conversation JSONL 前，先以
-  同一 `apply_run_settlement` 逻辑执行 Immediate transaction 预检并显式回滚；只有跨表身份、CAS、
-  generation、预算和 continuation 全部合法才允许落盘。正式 finalize 再在单一 transaction 内提交
-  Run、Goal 和可选后继 Input/Run，避免非法 effect 留下 JSONL 半提交。
-- continuation 必须是 Runtime origin、transcript hidden、只含 Injected Part，并精确匹配当前
-  GoalId/new generation/new turn；它不能夹带 new/resumed Goal。Volatile Store 与 SQLite Store 使用
-  相同形状和世代门禁，Store 结果是 Runtime 内存投影的权威输入。
+- `settle_run` 的 staged append 同时携带可选 Goal 终态 effect；M9 新增的活动 Run 内提交复用同一
+  staged append/Immediate transaction 预检，在 Run 保持 running 时原子追加候选消息、隐藏推进消息和
+  可选 Goal progress。两条操作都必须先验证跨表身份、CAS 与 generation，再发布 JSONL。
+- 自动 Goal progress 不再插入后继 Input/Run。Volatile Store 与 SQLite Store 使用相同活动 Run、消息
+  顺序和世代门禁，Store 结果是 Runtime 内存投影的权威输入。
 - Stop 在单一 transaction 中暂停 Goal、递增 generation、删除该 Goal 旧 queued Runtime Input/Run，
   并记录活动 Run cancel intent；Clear 只删除控制器行。`inputs.goal_id` 是历史绑定而非控制器所有权
   外键，因此 Clear 后历史 Input 继续可读；Session 外键仍负责永久删除时的整体级联。
 - Resume 新消息、无消息 continuation 和 held Input 复用分别有显式 Store 操作；held 路径只更新已有
   Input binding/queued message injection 和 Run，不产生重复队列项。历史重入的 Conversation rewrite
   与 Goal RecoveryRequired/generation 转换同事务提交。
-- 启动恢复除暂停 Running Goal 外还删除旧 generation 的 queued Runtime continuation。Fork 在目标
+- 启动恢复暂停 Running Goal；自动推进不再产生 queued Runtime continuation。Fork 在目标
   Session/WorkPlan 创建事务中按 Runtime 已验证的前缀条件插入新 GoalId 的 Forked 快照，Host 不自行
   推断 objective 是否属于前缀。
 - 所有恢复、回滚、Fork、Stop/Resume/Clear 与 schema 用例只使用隔离 `TempDir`/内存 Store，不打开或
@@ -401,6 +402,137 @@ cargo check -p assistant-runtime-host -p assistant-runtime -p assistant-protocol
 cargo run -p assistant-runtime-host -- --help
 cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnings
 ```
+
+## v0.21.0 M0 Host 运行框架
+
+- `HostSupervisor` 是 `runtime-host` 内唯一的进程级长期子系统 owner，持有根关闭令牌、每个子系统的
+  child token、受跟踪 task group 和 Host 子系统关闭 deadline；它不保存 Session、Run、Device、
+  托管或 Store 的第二份业务状态。
+- Desktop HTTP 是关键子系统：未进入关闭流程却返回、报错或 panic 时触发整体 Host 受控关闭。
+  Device Gateway 与 Speech 等后续可选子系统使用降级策略，其失败不得停止 Desktop/Runtime 主链；
+  M0 不实现自动重启，后续如需要必须基于真实故障和明确退避策略另行设计。
+- connection reader/writer 等短任务不直接登记到进程 Supervisor，必须由所属 transport/Gateway 的
+  有界 task group 拥有、取消和等待，避免单连接故障被误判为进程级故障。
+- 关闭顺序为：根令牌停止 Host 新入口并限时回收 Host 子系统，再显式调用 Runtime shutdown 结算
+  Run、flush/join Store；即使 Host 子系统异常或超时也不得跳过 Runtime shutdown。超时后的 task abort
+  是 Host 资源回收兜底，不替代 Runtime 自己的可靠恢复语义。
+- Ctrl-C 不再由临时 detach/abort 的信号任务管理；HostSupervisor 直接观察信号。HTTP ShutdownRuntime
+  Command 继续通过根令牌结束 Host，并复用 Runtime shutdown 的幂等语义。
+
+## v0.21.0 M2 Device Gateway 运行边界
+
+- `DeviceGatewayService` 是 HostSupervisor 管理的可降级长期子系统；它持有安装 TLS 身份、
+  mDNS、WSS listener、配对窗口、pending 候选、在线连接、心跳和当前输出偏好，但不保存第二份
+  Device/Session/Conversation 权威状态。
+- 安装身份只在首次启用设备接入时写入 Runtime Home `device/`；私钥和元数据使用私有权限与
+  同目录发布，损坏、类型异常或权限过宽时 listener fail-closed，Desktop HTTP/Runtime 仍可用。
+- WSS 仅提供 `/device`；未配对连接只能走 5 分钟窗口内的 SPAKE2 流程。设备在双向 PAKE
+  确认后才生成 Ed25519 长期密钥，Host 只在 bind commit 通过后调用 Runtime 登记公钥。
+- mDNS 只发布定位、版本、证书指纹和配对可用性线索，不构成认证。配对窗口开关或自然过期
+  都要刷新发现投影。同一 Device ID 新连接替换旧连接；撤销后立即通知在线连接，后续挑战认证
+  统一 fail-closed。
+- Device Gateway Command 是 Desktop 到 Host 的交互意图，不是 Runtime Agent 指令。Host 组合 Runtime
+  的稳定设备记录和 Gateway 在线/pending 状态返回单一快照；关闭 Gateway 不改写已配对设备或
+  PC 输出托管事实。
+- M2 只协商当前真实可用的文字/显示能力，屏蔽语音输入、PCM 输出和播放取消；设备业务
+  文字输入与回复派发属于 M3，不得在 M2 未认证连接上提前开放。
+
+## v0.21.0 M3 Device 文字交互边界
+
+- 已认证 WSS 的 `text_input` 只携带稳定 `client_input_id`、正文和本轮输出偏好；Device ID 来自
+  当前认证连接，目标 Session 由 Host Device Channel Router 从 Runtime 权威 Session 投影选择，设备不能提交任意
+  Session、reply target、附件、Goal 或 Skill 意图。
+- Host 把设备输入转换为 `SubmitSessionInputRequest`，并与 Desktop Command 一样调用统一
+  `submit_session_input`；可靠接受后才返回 `input_accepted`；
+  相同 Device/client identity 重试由 Runtime 返回首次 Input/Run，不在 Gateway 建幂等缓存。
+- `DeviceChannelOutputDispatcher` 是 Runtime 传输中立输出端口的 Host Adapter。它只弱绑定 Gateway
+  在线资源，避免形成 Runtime/Gateway 所有权环，也不保存正文、delivery、connection ID 或离线队列。
+- 每个 Device delivery 在发送时独立核对当前认证连接、协商能力和偏好来源；来源轮次使用冻结偏好，
+  PC 托管使用目标连接当前偏好。离线、能力不足或有界连接队列满只产生脱敏诊断，不修改已结算 Run、
+  规范 Conversation 或其他 delivery。
+- Device 只接收 `input_accepted`、有限状态和允许的 `text_output`；完整规范输入/输出继续由 Desktop
+  HTTP/SSE 与 Conversation 投影保证。M3 不开放 PCM、ASR、TTS、播放或 Desktop 设备管理 UI。
+
+## v0.21.0 M4 Desktop Gateway 观察边界
+
+- Host 的 Gateway Command 继续组合 Runtime 稳定设备/托管事实与 Gateway 易失状态，并将结果作为
+  Desktop 唯一设备快照；重命名、撤销和托管先由 Runtime 完成权威变更，再刷新组合投影。
+- Gateway 内部 broadcast 只发布 `Changed` 失效信号；HTTP SSE 将它与 Runtime 事件并行投影为
+  `device_gateway_event`。任一广播 lag 都沿用 `stream_gap` 后断开，要求 Desktop 重连并读取快照。
+- 接入启停、配对窗口、候选变化、认证连接、在线偏好和稳定设备变更都会触发失效通知。Host 不将
+  这些易失事实写入 Runtime Store，也不要求 Desktop 按心跳或本地时钟猜测状态。
+- M4 的 ASR/TTS 投影固定为 unavailable；实际 SpeechService 生命周期、配置解析、降级原因和 PCM
+  处理仍属于 M5/M6，不能因 UI 已能展示状态而提前声称语音能力可用。
+
+## v0.21.0 M5 PCM 与 Host ASR 边界
+
+- `SpeechService` 是 HostSupervisor 管理的可降级平行子系统，与 DeviceGateway 共享同一个安全
+  `RuntimeConfigSource`，但独立持有 Provider、请求任务、取消和 readiness；它不进入 Runtime Core，
+  也不从 Gateway 连接生命周期派生服务生命周期。
+- Host 私有 `[speech.asr]` 配置编译 DashScope Adapter；缺失、非法或不可构造时只把 ASR 投影为
+  unavailable，Desktop、Runtime 和设备文字能力继续可用。M5 只校验 TTS 配置形状并保留平行 SPI，
+  在 M6 Adapter 落地前不得投影为 ready。
+- 已认证连接每次只允许一个 `ReceivingPcm/Recognizing` 上行周期。16-byte 网络序 header 与固定
+  PCM16 LE、16 kHz、mono、20 ms payload 必须逐帧校验；stream、sequence、格式、尾序号或 60 秒
+  字节上限不一致时 fail-closed，不把媒体帧包装成 Runtime Event。
+- `listen_stop` 封口后才调用整句 ASR；成功 transcript 经非空与长度校验后，以原
+  `client_input_id` 调用统一 `submit_session_input`。取消、空结果和识别失败不创建 Input；
+  同连接及重连重试最终都由 Runtime 的既有幂等事实返回首次 Input/Run。
+- 开发构建只有在配置显式绝对 `speech.debug_audio_directory` 时才尽力写入上行 PCM；Release 强制
+  不保存。写入失败不影响 ASR 或 Runtime 结果，不增加数据库、TTL、容量管理或 UI。
+
+## v0.21.0 M6 TTS 与设备播放边界
+
+- `[speech.tts]` 与 ASR 通过平行 SPI 编译 DashScope Adapter；配置缺失或非法只投影 TTS unavailable，
+  不影响 Runtime、Desktop 或设备文字能力。Provider 返回的音频 URL 必须是受信 DashScope OSS HTTPS
+  地址（测试只额外允许 loopback），PCM 下载受超时、取消和 60 秒字节上限约束。
+- Gateway 为每次 `speak` 先向目标认证连接预留队列位，再合成该片段；同一连接使用最多 20 个
+  位置的有界 FIFO
+  严格保持 Tool Call 顺序，前一段播放结束后才开始下一段。队列满、目标离线或能力不足时该次
+  Tool 明确失败，不建立无界缓冲或离线补播。
+- 下行使用与上行共享的 16-byte 网络序 header，direction kind 为 `2`，PCM16 LE/16 kHz/mono 按
+  20 ms、640-byte 固定帧发送；尾帧补零，`playback_start.sample_count` 给出真实样本数。慢连接通过
+  有界命令队列和单帧发送超时终止本地播放，不建立无界媒体队列。
+- `playback_cancel`、新设备输入、连接替换/断开和 Host 关闭只撤销该连接当前及待播队列，
+  不调用 Runtime Run cancel。`playback_start/frame/end`、PCM 与当前播放状态都是 Host 易失传输状态，
+  不写入 Runtime Store 或公共 SSE。
+- H5 播放端把 PCM 连续重采样后送入单一长期 AudioWorklet 流，由渲染线程执行 120 ms 首缓冲和
+  80 ms 下溢恢复，并在相邻 `speak` 片段之间保留 160 ms 气口；本地 marker 排空后才显示完成。
+  浏览器本地容量或处理器故障不得冒充用户取消并清空 Host 后续播放队列。
+- 输出周期结束仍无成功 `speak` 时明确返回 `no_speak_text`，不得退回朗读完整 Assistant 正文。开发构建只在
+  显式绝对 debug 目录下尽力保存 `*-tts.pcm`，Release 默认不保存。
+
+## v0.21.0 M1 设备与 Channel 存储边界
+
+- SQLite `devices` 只保存 Device ID、当前展示名、Ed25519 原始公钥、paired/revoked 生命周期及配对、
+  更新、撤销时间；不保存配对码、连接 Token、设备私钥、在线状态、能力、当前偏好或媒体数据。
+- `sessions.pc_output_device_id` 只保存 Controller 到设备的可选稳定关系；恢复时通过 Device Registry
+  解析当前名称。设置托管在单一 Immediate transaction 内重新核对 Controller 与 paired 设备；撤销
+  设备在同一事务清除全部托管引用，历史 Input 不随撤销删除或改写。
+- `inputs.channel_source_json` 随既有 Input/首次 Run 接受事务保存通用来源；旧 User 行缺失时按 Desktop
+  Text/Text 读取，旧 Runtime 行保持无外部来源。Device User Input 在同一接受事务内再次核对目标
+  Session active 且设备仍 paired，避免认证后到落账前的撤销竞态；Controller 选择只属于 Host Router。
+- Goal continuation 所需的报告返回依据只随既有 Goal/Input binding 保存；旧行缺失按
+  `SessionDefault` 解释。Host Store 不建立 Channel、Reply 或 Delivery 表，也不保存 OutputCycle；
+  投递失败不会触发 SQLite Conversation 或 Run 回滚。
+- M1 当时尚未接入的正式设备连接、能力协商和在线投影已由 M2 Device Gateway 接入
+  HostSupervisor；业务文字输入和回复 dispatcher 仍属于 M3。M1/M2 的 schema、重启、撤销和历史
+  来源测试只使用隔离 `TempDir`。
+
+## v0.21.0 M9 活动 Run 续跑存储边界
+
+- Host Store 通过单个 `commit_run_continuation` 业务操作，在既有 JSONL staged append 与 SQLite
+  transaction 中提交活动 Run 的消息增量及可选 Goal effect；Run、Input 和 Queue 生命周期保持不变。
+- 该操作要求 Run 仍为 running、Session/Run 所有权一致且无 pending Tool Exchange；消息进入
+  `run_message_refs` 并绑定当前 AgentExecution 的最终 step，不增加 Loop ID、revision 或新表。
+- 进程在 Loop 间中断时只从已提交 Conversation/Goal 事实恢复，并按既有规则终结非终态 Run；Host
+  不持久 continuation 决定，也不为 Goal 或 Speech 建立恢复队列。
+- Context replacement 写入的新 JSONL generation 必须包含完整产品 Conversation：保留全部旧轮次，
+  在原样 recent tail 之前插入新的 ContextSummary。SQLite `message_count`、产品 offset/Recall 索引和
+  分页均基于这份完整正文；旧 generation 只能在新正文与 SQLite 切换成功后 best-effort 清理。
+- replacement 的 System prefix 与 recent tail 必须和当前权威正文严格一致，Store 不接受模糊匹配或
+  客户端补偿拼接。Runtime 重启后从最后一个 ContextSummary 派生 Agent 上下文，因此不增加第二份
+  Conversation、边界表、revision 或同版本兼容字段。
 
 ## v0.19.0 内部上下文兼容存储
 

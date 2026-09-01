@@ -506,7 +506,7 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
 }
 
 #[tokio::test]
-async fn child_provider_overflow_compacts_its_single_turn_and_continues() {
+async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
     let delegate_call = AssistantMessage {
         id: MessageId::new("parent-delegate-compact").expect("message id"),
         model: ModelIdentity::new(
@@ -538,8 +538,6 @@ async fn child_provider_overflow_compacts_its_single_turn_and_continues() {
         finish_reason: FinishReason::ToolCalls,
         usage: None,
     };
-    let summary = assistant_text("child-summary", "child work before overflow summarized");
-    let child_final = assistant_text("child-after-compact", "child continued");
     let parent_final = assistant_text("parent-after-child-compact", "parent completed");
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
@@ -550,8 +548,6 @@ async fn child_provider_overflow_compacts_its_single_turn_and_continues() {
             ModelScript::FailEstablishment(ModelError::ContextOverflow {
                 message: "fixture overflow".to_owned(),
             }),
-            ModelScript::Events(message_events(&summary)),
-            ModelScript::Events(message_events(&child_final)),
             ModelScript::Events(message_events(&parent_final)),
         ],
     ));
@@ -604,29 +600,27 @@ async fn child_provider_overflow_compacts_its_single_turn_and_continues() {
     let child = recovered.child_tasks.first().expect("one child task");
     assert_eq!(
         child.status,
-        assistant_protocol::ChildTaskStatus::Completed,
+        assistant_protocol::ChildTaskStatus::Failed,
         "child error: {:?}",
         child.error
     );
-    assert_eq!(child.body_generation, 2);
+    assert!(matches!(
+        child.error.as_ref(),
+        Some(error) if error.code == assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
+    ));
+    assert_eq!(child.body_generation, 1);
     let child_conversation = store
         .load_child_conversation(&session.session.session_id, &child.child_task_id)
         .await
         .expect("child conversation");
-    assert!(matches!(
-        child_conversation.messages.first(),
-        Some(ConversationMessage::ContextSummary(summary))
-            if summary.text == "child work before overflow summarized"
-    ));
-    assert!(matches!(
-        child_conversation.messages.last(),
-        Some(ConversationMessage::Assistant(message))
-            if message.id.as_str() == "child-after-compact"
-    ));
+    assert!(
+        !child_conversation
+            .messages
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+    );
     let requests = model.take_requests();
-    assert_eq!(requests.len(), 6);
-    assert!(requests[3].tools.is_empty());
-    assert_eq!(requests[3].tool_choice, ToolChoice::None);
+    assert_eq!(requests.len(), 4);
 }
 
 #[tokio::test]

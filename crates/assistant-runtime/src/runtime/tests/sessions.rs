@@ -501,7 +501,8 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         })
         .await
         .expect("submit skill input");
-    let queue = crate::runtime::product::queue_snapshot(&controller).expect("queue");
+    let queue =
+        crate::runtime::product::queue_snapshot(&controller, &Default::default()).expect("queue");
     assert_eq!(
         queue.items[0].skill.as_ref().map(|tag| tag.name.as_str()),
         Some("review")
@@ -535,7 +536,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         assistant_protocol::SkillHealthSnapshot::Disabled
     );
     assert_eq!(
-        crate::runtime::product::queue_snapshot(&controller)
+        crate::runtime::product::queue_snapshot(&controller, &Default::default())
             .expect("queue")
             .items[0]
             .skill
@@ -677,7 +678,6 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
             part,
             UserPart::InternalContext(part)
                 if part.kind == "skill_activation"
-                    && part.retention_key.as_deref() == Some("skill:review")
                     && part.text.contains("trigger: model")
                     && part.text.contains("Review carefully.")
         )
@@ -775,11 +775,18 @@ async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
         .iter()
         .map(|session| session.session_id.clone())
         .collect::<Vec<_>>();
-    let mut expected_ids = vec![
-        first.session.session_id.clone(),
-        second.session.session_id.clone(),
-    ];
-    expected_ids.sort();
+    let mut expected = vec![first.session.clone(), second.session.clone()];
+    expected.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let expected_ids = expected
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect::<Vec<_>>();
     assert_eq!(listed_ids, expected_ids);
     assert_eq!(
         runtime

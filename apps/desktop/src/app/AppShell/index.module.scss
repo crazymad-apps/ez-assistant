@@ -293,49 +293,6 @@
   flex: 1 1 180px;
 }
 
-.session_status {
-  display: inline-flex;
-  min-height: 24px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: var(--ez-text-secondary);
-  background: var(--ez-surface-subtle);
-  font-size: var(--ez-font-small);
-  font-weight: 600;
-  white-space: nowrap;
-
-  i {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--ez-text-muted);
-  }
-
-  &[data-tone="success"] {
-    color: var(--ez-success-text);
-    background: var(--ez-success-soft);
-
-    i { background: var(--ez-success); }
-  }
-
-  &[data-tone="warning"] {
-    color: var(--ez-warning-text);
-    background: var(--ez-warning-soft);
-
-    i { background: var(--ez-warning); }
-  }
-
-  &[data-tone="active"] {
-    color: var(--ez-primary-text);
-    background: var(--ez-primary-soft);
-
-    i { background: var(--ez-primary); }
-  }
-}
-
 .session_role_badge {
   flex: 0 0 auto;
   padding: 3px 7px;

@@ -597,8 +597,8 @@ Store Snapshot 与独立 child Conversation 重建。Session 归档/恢复保留
 父 Run 与 child 都由 Runtime 处理 Core 的 `CompactionRequired` 可靠终态。Runtime 使用终态携带的
 已消费 Step/实际 dispatch 工具数计算剩余预算，调用 `agent-context` 形成 Rolling Summary，完成
 generation 原子切换后继续同一逻辑执行；不得从可能丢失的实时事件反推预算。Provider overflow
-允许摘要已经形成完整 Tool Exchange 的活动 Turn，并用持久化 Injected User continuation 锚点维持
-后续 Assistant 的规范 User Turn 归属。
+与手动压缩当前统一只原样保留最近一个 User Turn；可见输入、隐藏 continuation 和内部插入使用同一
+Turn 语义。单一 Turn 自身溢出的轮内压缩留待后续版本完善。
 
 M5 的客户端验证层不新增 usage 权威：父和各 child 的实际 usage 仍随各自规范 Conversation
 保存，合计只在页面根据父子关系动态计算。长任务的实时事件按帧合并；折叠 child 不缓存无限
@@ -633,8 +633,8 @@ fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。
   Provider Adapter 不得创建 Runtime boundary、产品消息、Run 或 step。
 - Tool Result 图片的聚合 user-role 信封是由已落账 ToolMessage/Part 确定性派生的 request-only
   计划，只进入当次 Provider wire。Chat/Responses 必须共用批次顺序规划，不写回 Conversation。
-- 普通压缩原样保护每个 retention key 的最新内部上下文；活动 Turn continuation 允许摘要时，
-  最新冻结正文必须原样重挂到隐藏锚点，确保后续执行不依赖摘要猜测控制事实。
+- 压缩不按内部上下文类别建立独立保留集合；`InternalContext` 与正文共同服从所在 User Turn 的
+  原子边界，当前 Runtime 统一只原样保留最近一个 Turn。
 
 ## 十六、v0.19.0 Skill 发现与启停
 

@@ -26,11 +26,12 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.20.0"
+version = "0.21.0"
 
 [workspace.dependencies]
 async-stream = "0.3.6"
 axum = "0.8.4"
+axum-server = "0.8.0"
 base64 = "0.22.1"
 clap = { version = "4.6.5", features = ["derive"] }
 dotenvy = "0.15.7"
@@ -50,6 +51,8 @@ process-wrap = { version = "9.1.0", default-features = false, features = [
     "creation-flags",
     "kill-on-drop",
 ] }
+rand_core = { version = "0.9.5", features = ["os_rng"] }
+rcgen = "0.14.9"
 quick-xml = "0.41.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 schemars = "1.2.1"
@@ -67,3 +70,11 @@ url = "2.5.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# 该 workspace 包含多个应用和验证宿主；Cargo 默认的完整调试信息、macOS unpacked
+# 调试产物与增量缓存叠加后会使 target 长期快速膨胀。开发构建保留文件/行号回溯，
+# 但不保存变量级调试信息和增量编译状态。test profile 会继承这些设置。
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+incremental = false

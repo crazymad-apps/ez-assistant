@@ -140,6 +140,7 @@ impl StorageEngine {
         self.pause_running_goals_for_recovery()?;
         self.backfill_session_usage()?;
         Ok(RecoveredRuntime {
+            devices: self.load_devices()?,
             workspaces: self.load_all_workspaces()?,
             attachments: self.load_attachments()?,
             sessions: self.load_sessions()?,
@@ -245,6 +246,7 @@ impl StorageEngine {
             approval_mode: session.approval_mode,
             role: session.role,
             proxy: None,
+            pc_output_hosting: None,
             body_generation: 1,
             message_count: 0,
             created_at_ms: session.created_at_ms,
@@ -413,11 +415,13 @@ impl StorageEngine {
             .prepare(
                 "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, proxy_controller_session_id, proxy_changed_at_ms,
-                        lifecycle, body_generation, message_count, created_at_ms,
+                        sessions.lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
-                        archived_at_ms, is_pinned, title_origin
+                        archived_at_ms, is_pinned, title_origin,
+                        sessions.pc_output_device_id, devices.display_name
                  FROM sessions
+                 LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
                  ORDER BY created_at_ms, session_id",
             )
             .map_err(|source| internal_error("runtime sessions could not be queried", source))?;
@@ -443,6 +447,8 @@ impl StorageEngine {
                     row.get::<_, Option<i64>>(16)?,
                     row.get::<_, i64>(17)?,
                     row.get::<_, String>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -469,6 +475,8 @@ impl StorageEngine {
                 archived_at_ms,
                 is_pinned,
                 title_origin,
+                pc_output_device_id,
+                pc_output_device_name,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -530,6 +538,23 @@ impl StorageEngine {
                     }
                     (None, None) => None,
                     _ => return Err(invalid_data("stored session proxy is incomplete")),
+                },
+                pc_output_hosting: match (pc_output_device_id, pc_output_device_name) {
+                    (Some(device_id), Some(device_name)) => {
+                        Some(assistant_runtime::PcOutputHosting {
+                            device_id: assistant_protocol::DeviceId::new(device_id).map_err(
+                                |source| {
+                                    invalid_data_with_source(
+                                        "stored hosting device id is invalid",
+                                        source,
+                                    )
+                                },
+                            )?,
+                            device_name,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => return Err(invalid_data("stored session hosting is incomplete")),
                 },
                 body_generation: positive_u64(
                     body_generation,

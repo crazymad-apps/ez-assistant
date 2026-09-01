@@ -35,7 +35,6 @@ pub(super) fn child_user_message(
         append_context(
             &mut message,
             InternalBoundarySource::DelegationContext,
-            "delegation:context",
             format!("<delegated_context>\n{context}\n</delegated_context>"),
         )?;
     }
@@ -43,20 +42,17 @@ pub(super) fn child_user_message(
         append_context(
             &mut message,
             InternalBoundarySource::DelegationExpectedOutput,
-            "delegation:expected_output",
             format!("<expected_output>\n{expected_output}\n</expected_output>"),
         )?;
     }
     append_context(
         &mut message,
         InternalBoundarySource::DelegationVariant,
-        "delegation:variant",
         crate::agent_variant::injection_text(variant).to_owned(),
     )?;
     append_context(
         &mut message,
         InternalBoundarySource::DelegationDirectories,
-        "delegation:directories",
         format!(
             "<runtime_directories>\nworking_directory: {}\nsession_attachment_directory: {}\nsession_private_directory: {}\nworkspace_private_directory: {}\nchild_task_private_directory: {}\n</runtime_directories>",
             environment.working_directory,
@@ -75,16 +71,8 @@ pub(super) fn child_user_message(
 fn append_context(
     message: &mut UserMessage,
     source: InternalBoundarySource,
-    retention_key: &str,
     text: String,
 ) -> Result<(), crate::RuntimeError> {
-    InternalBoundaryCoordinator::append(
-        message,
-        InternalBoundaryRequest {
-            source,
-            retention_key: Some(retention_key.to_owned()),
-            text,
-        },
-    )?;
+    InternalBoundaryCoordinator::append(message, InternalBoundaryRequest { source, text })?;
     Ok(())
 }

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use super::StoredGoal;
 use crate::StoredSkillActivation;
+use crate::{InputChannelSource, ReplyRoute};
 
 /// 队列执行器领取一次 Run 时提交的 User Message 与结构化关联。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,23 +87,46 @@ pub struct GoalInputBinding {
     pub goal_id: GoalId,
     pub generation: u64,
     pub turn: u32,
+    /// 由跨 Session 投递启动的 Goal 冻结其最终回复路径；普通 Goal 为 `None`。
+    pub reply_route: Option<ReplyRoute>,
 }
 
-/// 可见 Runtime Input 的冻结跨会话来源；不是回复链或通用消息信封。
+/// 可见 Runtime Input 的冻结跨会话关联事实。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CrossSessionInputBinding {
+    /// 主控某次 Tool Call 向普通 Session 发起的任务输入。
     ControllerDelivery {
+        /// 发起投递的主控 Session。
         controller_session_id: SessionId,
+        /// 当前投递所属的主控 Run；必须仍处于执行期。
         controller_run_id: RunId,
+        /// 用于整个投递操作幂等的主控 Tool Call。
         controller_tool_call_id: ToolCallId,
     },
+    /// 普通 Session 在代理任务链结束后返回主控的结构化报告来源。
     ProxyReport {
+        /// 实际执行任务的普通 Session。
         source_session_id: SessionId,
+        /// 触发本次报告的终态 Run。
         source_run_id: RunId,
+        /// 该 Run 所属的 Goal；单轮任务为 `None`。
         source_goal_id: Option<GoalId>,
+        /// 来源 Run 已可靠提交的终态。
         source_run_status: RunStatus,
     },
+}
+
+/// 跨 Session Input 的持久消息信封。
+///
+/// `binding` 只描述当前消息的来源与关联身份；`reply_route` 是整条代理请求链共同携带的
+/// `reply-to`，由 `ControllerDelivery` 冻结并在 `ProxyReport` 实际输出前解析。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CrossSessionInputEnvelope {
+    /// 当前跨会话消息的来源类型和关联身份。
+    pub binding: CrossSessionInputBinding,
+    /// 从原始主控输入冻结并沿代理链传递的最终回复路径。
+    pub reply_route: ReplyRoute,
 }
 
 /// Runtime 从 Store 恢复的 Input 投影。
@@ -115,7 +139,8 @@ pub struct StoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
-    pub cross_session_binding: Option<CrossSessionInputBinding>,
+    pub cross_session: Option<CrossSessionInputEnvelope>,
+    pub channel_source: Option<InputChannelSource>,
     /// 用户接受输入时冻结的单个 Skill；Runtime continuation 恒为空。
     pub skill_activation: Option<StoredSkillActivation>,
     pub user_message_id: MessageId,
@@ -134,7 +159,9 @@ pub struct NewStoredInput {
     pub agent_variant: AgentVariant,
     pub origin: InputOrigin,
     pub goal_binding: Option<GoalInputBinding>,
-    pub cross_session_binding: Option<CrossSessionInputBinding>,
+    pub cross_session: Option<CrossSessionInputEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_source: Option<InputChannelSource>,
     /// 与 Input、首次 Run 和 queued message 同事务写入的用户 Skill Activation。
     pub skill_activation: Option<StoredSkillActivation>,
     pub approval_mode: ApprovalMode,
@@ -156,14 +183,38 @@ pub struct InputMessageValidationError;
 pub fn validate_input_message(
     origin: InputOrigin,
     goal_binding: Option<&GoalInputBinding>,
-    cross_session_binding: Option<&CrossSessionInputBinding>,
+    cross_session: Option<&CrossSessionInputEnvelope>,
+    message: &UserMessage,
+) -> Result<(), InputMessageValidationError> {
+    let channel_source = match origin {
+        InputOrigin::User => Some(InputChannelSource::desktop_text()),
+        InputOrigin::Runtime => None,
+    };
+    validate_input_message_with_channel_source(
+        origin,
+        goal_binding,
+        cross_session,
+        channel_source.as_ref(),
+        message,
+    )
+}
+
+pub fn validate_input_message_with_channel_source(
+    origin: InputOrigin,
+    goal_binding: Option<&GoalInputBinding>,
+    cross_session: Option<&CrossSessionInputEnvelope>,
+    channel_source: Option<&InputChannelSource>,
     message: &UserMessage,
 ) -> Result<(), InputMessageValidationError> {
     if goal_binding.is_some_and(|binding| binding.generation == 0 || binding.turn == 0) {
         return Err(InputMessageValidationError);
     }
-    match (origin, cross_session_binding) {
-        (InputOrigin::User, None) => {
+    match (origin, cross_session, channel_source) {
+        (InputOrigin::User, None, Some(channel_source)) => {
+            if matches!(channel_source, InputChannelSource::Device(source) if source.client_input_id.trim().is_empty())
+            {
+                return Err(InputMessageValidationError);
+            }
             if message.origin != UserMessageOrigin::User
                 || message.transcript_visibility != TranscriptVisibility::Visible
                 || !message
@@ -174,7 +225,7 @@ pub fn validate_input_message(
                 return Err(InputMessageValidationError);
             }
         }
-        (InputOrigin::Runtime, None) => {
+        (InputOrigin::Runtime, None, None) => {
             if goal_binding.is_none()
                 || message.origin != UserMessageOrigin::Runtime
                 || message.transcript_visibility != TranscriptVisibility::Hidden
@@ -186,8 +237,8 @@ pub fn validate_input_message(
                 return Err(InputMessageValidationError);
             }
         }
-        (InputOrigin::Runtime, Some(binding)) => {
-            let expected_kind = match binding {
+        (InputOrigin::Runtime, Some(envelope), None) => {
+            let expected_kind = match &envelope.binding {
                 CrossSessionInputBinding::ControllerDelivery { .. } => "controller_delivery",
                 CrossSessionInputBinding::ProxyReport {
                     source_run_status, ..
@@ -204,6 +255,14 @@ pub fn validate_input_message(
                     "proxy_report"
                 }
             };
+            if goal_binding.is_some_and(|binding| {
+                !matches!(
+                    envelope.binding,
+                    CrossSessionInputBinding::ControllerDelivery { .. }
+                ) || binding.reply_route.as_ref() != Some(&envelope.reply_route)
+            }) {
+                return Err(InputMessageValidationError);
+            }
             let source_parts = message
                 .parts
                 .iter()
@@ -211,8 +270,7 @@ pub fn validate_input_message(
                     matches!(part, UserPart::InternalContext(part) if part.kind == expected_kind)
                 })
                 .count();
-            if goal_binding.is_some()
-                || message.origin != UserMessageOrigin::Runtime
+            if message.origin != UserMessageOrigin::Runtime
                 || message.transcript_visibility != TranscriptVisibility::Visible
                 || !message
                     .parts
@@ -223,7 +281,11 @@ pub fn validate_input_message(
                 return Err(InputMessageValidationError);
             }
         }
-        (InputOrigin::User, Some(_)) => return Err(InputMessageValidationError),
+        (InputOrigin::User, Some(_), _)
+        | (InputOrigin::User, None, None)
+        | (InputOrigin::Runtime, _, Some(_)) => {
+            return Err(InputMessageValidationError);
+        }
     }
     Ok(())
 }
@@ -271,15 +333,34 @@ pub struct StoredRunSettlement {
     pub finished_at_ms: i64,
 }
 
-/// Goal-bound Run 与 Goal/continuation 在同一 Store 提交中的转换。
+/// 活动 Run 在启动下一次 AgentExecution 前可靠提交的消息与可选 Goal 变化。
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredRunContinuation {
+    pub operation_id: String,
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub messages: Vec<ConversationMessage>,
+    /// 本批最终 AssistantMessage 的可靠 step；只有隐藏消息时仍沿用刚完成的 step。
+    pub message_step: u32,
+    pub goal_effect: Option<StoredGoalSettlementEffect>,
+    pub committed_at_ms: i64,
+}
+
+/// 活动 Run 续跑提交后的权威业务投影。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StoredRunContinuationResult {
+    pub goal: Option<StoredGoal>,
+    pub resume_required: bool,
+}
+
+/// Goal-bound Run 在同一 Store 提交中应用的领域变化。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredGoalSettlementEffect {
-    Continue {
+    Progress {
         expected_goal_id: GoalId,
         expected_generation: u64,
         goal: StoredGoal,
-        next_input: Box<NewStoredInput>,
     },
     Transition {
         expected_goal_id: GoalId,
@@ -289,11 +370,10 @@ pub enum StoredGoalSettlementEffect {
     },
 }
 
-/// Store 原子结算后返回的 Goal 与可选后继权威投影。
+/// Store 原子结算后返回的 Goal 与代理报告权威投影。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StoredRunSettlementResult {
     pub goal: Option<StoredGoal>,
-    pub continuation: Option<AcceptedInput>,
     pub accepted_proxy_report: Option<AcceptedInput>,
     pub resume_required: bool,
 }

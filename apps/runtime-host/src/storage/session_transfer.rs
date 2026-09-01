@@ -340,6 +340,7 @@ impl StorageEngine {
                 approval_mode: fork.session.approval_mode,
                 role: fork.session.role,
                 proxy: None,
+                pc_output_hosting: None,
                 body_generation: 1,
                 message_count,
                 created_at_ms: fork.session.created_at_ms,

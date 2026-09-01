@@ -4,10 +4,12 @@
 //! Runtime Host 进程装配本 crate；本 crate 不依赖 Tauri 或具体进程通信方式。
 
 mod agent_variant;
+mod channel;
 pub mod config;
 mod context_compaction;
 mod conversation_recall;
 mod delegation;
+mod device;
 mod environment;
 mod error;
 mod factory;
@@ -26,6 +28,13 @@ mod storage;
 mod work_plan;
 mod workspace;
 
+pub use channel::{
+    ChannelOutput, ChannelOutputDispatchError, ChannelOutputDispatcher, ChannelOutputFuture,
+    ChannelSpeechRequirementFuture, ChannelSpeechSegment, DesktopInputSource,
+    DeviceDeliveryPreference, DeviceInputSource, InputChannelSource, InputModality,
+    OutputCycleState, OutputPreference, ReplyRoute, ResolvedChannelDelivery,
+    SubmitSessionInputRequest,
+};
 pub use config::{
     ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
@@ -37,6 +46,10 @@ pub use config::{
 };
 pub use conversation_recall::HmacRecallReferenceCodec;
 pub use delegation::DELEGATE_TASK_TOOL_NAME;
+pub use device::{
+    DeviceLifecycle, DeviceNameChange, DevicePublicKey, DeviceRevocation, DeviceRevocationResult,
+    NewPairedDevice, PairedDevice, PcOutputHosting, PcOutputHostingChange,
+};
 pub use environment::{
     ForkSessionEnvironmentFactoryRequest, PreparedSessionEnvironment, SessionEnvironmentFactory,
     SessionEnvironmentFactoryError, SessionEnvironmentFactoryRequest, SessionExecutionEnvironment,
@@ -77,24 +90,27 @@ pub use storage::{
     ContextReplacementResult, ContextReplacementTarget, ConversationMessageLocationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
-    ConversationWindowRequest, CrossSessionInputBinding, ForkedAttachmentReference, GoalClear,
-    GoalHeldInputResume, GoalHeldInputResumeResult, GoalInputBinding, GoalStop, GoalStopResult,
-    InputMessageValidationError, InputOrigin, MessageFeedbackChange, ModelChange,
-    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    ReasoningEffortChange, RecoveredRuntime, RewriteGoalEffect, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
-    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
-    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
-    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredGoal,
-    StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunSettlement, StoredRunSettlementResult,
-    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage,
-    StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace,
-    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, validate_input_message,
+    ConversationWindowRequest, CrossSessionInputBinding, CrossSessionInputEnvelope,
+    ForkedAttachmentReference, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult,
+    GoalInputBinding, GoalStop, GoalStopResult, InputMessageValidationError, InputOrigin,
+    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
+    NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteGoalEffect, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionProxyState, SessionRole, SessionTitleChange, StoreError, StoreErrorKind, StoreFuture,
+    StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredGoal, StoredGoalBudget, StoredGoalObjective,
+    StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
+    StoredInput, StoredInputState, StoredMessageFeedback, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, StoredTodoItemStatus,
+    StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace, StoredWorkspaceLifecycle,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
+    WorkPlanMutationResult, WorkspaceRemoval, execution_context_from_product_history,
+    merge_context_replacement_with_product_history, validate_input_message,
+    validate_input_message_with_channel_source,
 };

@@ -4,6 +4,7 @@
 
 mod command;
 mod config;
+mod device_gateway;
 mod error;
 mod event;
 mod host;
@@ -45,6 +46,7 @@ pub use command::{
     RestoreSessionRequest, RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult,
     ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
     RuntimeCommandResult, SecretValue, SessionHistoryCleanupStatus, SetAuxiliaryVisionModelRequest,
+    SetCurrentControllerOutputHostingRequest, SetCurrentControllerOutputHostingResult,
     SetDefaultModelRequest, SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest,
     SetPersonaResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
     SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
@@ -59,6 +61,15 @@ pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
     ModelConfiguration, ModelConfigurationOrigin,
 };
+pub use device_gateway::{
+    CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot,
+    DeviceConnectionSnapshot, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
+    DeviceGatewayMutationResult, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
+    DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot, DeviceSummarySnapshot,
+    GetDeviceGatewaySnapshotRequest, OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot,
+    RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
+    SpeechServiceStatusSnapshot,
+};
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{
     ChildTaskEvent, RuntimeEvent, RuntimeEventEnvelope, SessionCompactionFinishedOutcome,
@@ -67,9 +78,9 @@ pub use host::{
     RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
 };
 pub use id::{
-    ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, GoalId, IdempotencyKey,
-    IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId, ResourceRefId, RunId,
-    SessionId, TodoItemId, ToolCallId, WorkspaceId,
+    ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, DeviceId, GoalId,
+    IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId,
+    ResourceRefId, RunId, SessionId, TodoItemId, ToolCallId, WorkspaceId,
 };
 pub use memory::{
     MemoryAttributeValue, MemoryCapabilities, PersonaSnapshot, PinnedMemoryCollectionSnapshot,
@@ -95,16 +106,16 @@ pub use product::{
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
     GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ImageInspectionDetailSnapshot,
-    InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
-    ListConversationPageResult, MessageFeedback, ObservedSnapshot, PrioritizeQueuedInputRequest,
-    PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
-    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
-    RecallToolDetailItem, RecallToolDetailSnapshot, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionUsageSnapshot,
-    SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot, ToolEventSnapshot,
-    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
-    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    InputModalitySnapshot, InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
+    ListConversationPageResult, MessageFeedback, ObservedSnapshot, OutputPreferenceSnapshot,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot,
+    QueuedInputSnapshot, ReasoningEffortOptionSnapshot, RecallNavigationTarget,
+    RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot,
+    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
+    ResumeQueuedInputResult, SearchConversationHistoryRequest, SearchConversationHistoryResult,
+    SessionUsageSnapshot, SessionViewSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
+    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
+    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use skill::{
     ActiveSkillSnapshot, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
@@ -115,11 +126,11 @@ pub use skill::{
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
     AttachmentState, AttachmentSummary, ChildTaskSnapshot, ChildTaskStatus,
-    ControllerAvailabilitySnapshot, GuardrailKind, GuardrailMode, PermissionDiagnostic,
-    PermissionDiagnosticCode, PermissionFileStatus, PermissionFileSummary, PermissionScope,
-    ReasoningEffortKey, RunSnapshot, RunStatus, RuntimeLifecycle, SessionCompactionReasonSnapshot,
-    SessionCompactionSnapshot, SessionCompactionTriggerSnapshot, SessionLifecycle,
-    SessionListFilter, SessionProxySnapshot, SessionRoleSnapshot, SessionSummary,
+    ControllerAvailabilitySnapshot, GuardrailKind, GuardrailMode, PcOutputHostingSnapshot,
+    PermissionDiagnostic, PermissionDiagnosticCode, PermissionFileStatus, PermissionFileSummary,
+    PermissionScope, ReasoningEffortKey, RunSnapshot, RunStatus, RuntimeLifecycle,
+    SessionCompactionReasonSnapshot, SessionCompactionSnapshot, SessionCompactionTriggerSnapshot,
+    SessionLifecycle, SessionListFilter, SessionProxySnapshot, SessionRoleSnapshot, SessionSummary,
     SessionTitleOrigin, TokenUsageSnapshot, ToolActivitySnapshot, ToolActivityStatus,
     ToolApprovalSubject, ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
 };

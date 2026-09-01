@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use assistant_protocol::{
-    AttachmentId, ChildTaskId, InputId, RunId, RunStatus, SessionId, WorkspaceId,
+    AttachmentId, ChildTaskId, DeviceId, InputId, RunId, RunStatus, SessionId, WorkspaceId,
 };
 
 use crate::{
@@ -15,6 +15,7 @@ use crate::{
 use super::controller::{ProxyReportDraft, build_proxy_report_input};
 
 pub(super) struct RecoveredRegistries {
+    pub devices: BTreeMap<DeviceId, crate::PairedDevice>,
     pub workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     pub attachments: BTreeMap<AttachmentId, StoredAttachment>,
     pub sessions: BTreeMap<SessionId, Arc<SessionController>>,
@@ -90,6 +91,7 @@ pub(super) fn prepare_interrupted_run_settlements(
                         final_text: None,
                         error: None,
                         accepted_at_ms: finished_at_ms,
+                        reply_route: crate::runtime::controller::reply_route_for_input(input),
                     };
                     build_proxy_report_input(
                         draft,
@@ -147,6 +149,14 @@ fn recovery_run_id() -> RuntimeResult<RunId> {
 pub(super) fn recover_registries(
     recovered: RecoveredRuntime,
 ) -> RuntimeResult<RecoveredRegistries> {
+    let devices = recovered
+        .devices
+        .iter()
+        .map(|device| (device.device_id.clone(), device.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if devices.len() != recovered.devices.len() {
+        return Err(invalid_recovery());
+    }
     let session_roles = recovered
         .sessions
         .iter()
@@ -162,6 +172,13 @@ pub(super) fn recover_registries(
             session.role == crate::SessionRole::Controller
                 && (session.proxy.is_some()
                     || session.lifecycle != crate::StoredSessionLifecycle::Active)
+                || session.pc_output_hosting.as_ref().is_some_and(|hosting| {
+                    session.role != crate::SessionRole::Controller
+                        || devices.get(&hosting.device_id).is_none_or(|device| {
+                            device.lifecycle != crate::DeviceLifecycle::Paired
+                                || device.display_name != hosting.device_name
+                        })
+                })
                 || session.proxy.as_ref().is_some_and(|proxy| {
                     session.role != crate::SessionRole::Standard
                         || proxy.controller_session_id == session.session_id
@@ -188,9 +205,26 @@ pub(super) fn recover_registries(
     let mut input_activations = BTreeMap::new();
     for input in &recovered.inputs {
         let target_role = session_roles.get(&input.session_id).copied();
-        let source_is_valid = match (&input.origin, &input.cross_session_binding) {
-            (crate::InputOrigin::User, None) => true,
-            (crate::InputOrigin::Runtime, None) => input.goal_binding.is_some(),
+        let source_is_valid = match (
+            &input.origin,
+            input
+                .cross_session
+                .as_ref()
+                .map(|envelope| &envelope.binding),
+        ) {
+            (crate::InputOrigin::User, None) => match input.channel_source.as_ref() {
+                Some(crate::InputChannelSource::Desktop(_)) => true,
+                Some(crate::InputChannelSource::Device(source)) => {
+                    !source.client_input_id.trim().is_empty() && target_role.is_some()
+                }
+                None => false,
+            },
+            (crate::InputOrigin::Runtime, None) => {
+                input.channel_source.is_none()
+                    && (input.goal_binding.is_some()
+                        || target_role
+                            .is_some_and(|(role, _)| role == crate::SessionRole::Controller))
+            }
             (
                 crate::InputOrigin::Runtime,
                 Some(crate::CrossSessionInputBinding::ControllerDelivery {
@@ -198,7 +232,7 @@ pub(super) fn recover_registries(
                     ..
                 }),
             ) => {
-                input.goal_binding.is_none()
+                input.channel_source.is_none()
                     && target_role.is_some_and(|(role, _)| role == crate::SessionRole::Standard)
                     && session_roles.get(controller_session_id)
                         == Some(&(
@@ -211,6 +245,7 @@ pub(super) fn recover_registries(
                 Some(crate::CrossSessionInputBinding::ProxyReport { .. }),
             ) => {
                 input.goal_binding.is_none()
+                    && input.channel_source.is_none()
                     && target_role
                         == Some((
                             crate::SessionRole::Controller,
@@ -429,6 +464,7 @@ pub(super) fn recover_registries(
         }
     }
     Ok(RecoveredRegistries {
+        devices,
         workspaces,
         attachments,
         sessions,

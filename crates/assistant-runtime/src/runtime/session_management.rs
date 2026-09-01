@@ -92,7 +92,11 @@ impl AssistantRuntime {
         if source_generation != request.expected_generation {
             return Err(RuntimeError::SnapshotStale);
         }
-        let current = source.conversation_snapshot()?;
+        let current = self
+            .store
+            .load_conversation(&request.session_id)
+            .await
+            .map_err(|source| RuntimeError::from_store("load fork conversation", source))?;
         let target_index = current
             .messages
             .iter()
@@ -782,14 +786,17 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
-        let exists = session
-            .conversation_snapshot()?
-            .messages
-            .iter()
-            .any(|message| {
-                matches!(message, ConversationMessage::Assistant(assistant)
+        let product_history = self
+            .store
+            .load_conversation(&request.session_id)
+            .await
+            .map_err(|source| {
+                RuntimeError::from_store("load message feedback conversation", source)
+            })?;
+        let exists = product_history.messages.iter().any(|message| {
+            matches!(message, ConversationMessage::Assistant(assistant)
                 if assistant.id.as_str() == request.message_id.as_str())
-            });
+        });
         if !exists {
             return Err(RuntimeError::InvalidRequest {
                 reason: "assistant message does not exist in session",
@@ -994,7 +1001,13 @@ impl AssistantRuntime {
             return Ok(ReenterFromUserMessageResult { input_id, run });
         }
         session.ensure_idle()?;
-        let current = session.conversation_snapshot()?;
+        let current = self
+            .store
+            .load_conversation(&request.session_id)
+            .await
+            .map_err(|source| {
+                RuntimeError::from_store("load history rewrite conversation", source)
+            })?;
         let target_message_id =
             agent_types::MessageId::new(request.message_id.as_str()).map_err(|_| {
                 RuntimeError::InvalidRequest {
@@ -1038,11 +1051,10 @@ impl AssistantRuntime {
                     component: "conversation message count",
                 }
             })?;
-        let replacement_journal =
-            InMemoryJournal::from_snapshot(replacement.clone()).map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
-                    component: "replacement conversation journal",
-                }
+        let replacement_context = crate::execution_context_from_product_history(&replacement);
+        let replacement_journal = InMemoryJournal::from_snapshot(replacement_context.clone())
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "replacement conversation journal",
             })?;
         let removed_user_ids = current.messages[target_index..]
             .iter()
@@ -1088,6 +1100,7 @@ impl AssistantRuntime {
                 store: self.store.clone(),
                 recall_reference_codec: self.recall_reference_codec.clone(),
                 controller_tools: self.controller_tool_coordinator(),
+                output_dispatcher: self.output_dispatcher.clone(),
             },
             RunAuthorizationInput {
                 permission_coordinator: self.permission_coordinator.clone(),
@@ -1099,7 +1112,7 @@ impl AssistantRuntime {
                 events: self.event_sender.clone(),
                 goal_binding: None,
                 input_origin: crate::InputOrigin::User,
-                cross_session_binding: None,
+                cross_session: None,
             },
             None,
         )?;
@@ -1137,7 +1150,8 @@ impl AssistantRuntime {
                     agent_variant: request.variant,
                     origin: crate::InputOrigin::User,
                     goal_binding: None,
-                    cross_session_binding: None,
+                    cross_session: None,
+                    channel_source: Some(crate::InputChannelSource::desktop_text()),
                     skill_activation: None,
                     approval_mode,
                     message: new_message.clone(),
@@ -1172,7 +1186,7 @@ impl AssistantRuntime {
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.message_count = replacement_message_count;
-            state.persisted_message_count = replacement.messages.len();
+            state.persisted_message_count = replacement_context.messages.len();
             state.body_generation = rewritten.body_generation;
             state.journal = Some(replacement_journal);
             state.current_variant = rewritten.input.agent_variant;

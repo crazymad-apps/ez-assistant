@@ -96,10 +96,15 @@
   margin-top: 8px;
 }
 
+.composer_actions[data-has-hosting="true"] {
+  grid-template-columns: 28px minmax(102px, auto) auto minmax(4px, 1fr) 18px fit-content(220px) 30px;
+}
+
 .icon_button,
 .send_button,
 .execution_selector,
-.model_selector {
+.model_selector,
+.hosting_trigger {
   min-height: 26px;
   border: 0;
   border-radius: 7px;
@@ -108,6 +113,22 @@
 
   &:hover:not(:disabled) { color: var(--ez-text); background: var(--ez-surface-muted); }
 }
+
+.hosting_trigger {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+
+  &[data-active="true"] { color: var(--ez-primary); background: var(--ez-primary-soft); }
+}
+
+.hosting_menu { width: min(280px, calc(100vw - 16px)); }
+.hosting_menu button { justify-content: flex-start; gap: 9px; }
+.hosting_menu button > svg { flex: 0 0 auto; }
+.hosting_menu strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosting_option_tail { margin-left: auto; }
 
 .icon_button {
   display: grid;

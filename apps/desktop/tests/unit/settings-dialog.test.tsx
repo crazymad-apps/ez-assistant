@@ -20,6 +20,121 @@ afterEach(() => {
 });
 
 describe("SettingsDialog model management", () => {
+  it("keeps Runtime diagnostics and lifecycle controls compact", () => {
+    const store = settingsStore();
+    store.settings.page = "runtime";
+    renderDialog(store);
+
+    const diagnostic_heading = screen.getByRole("heading", { name: "诊断信息" });
+    expect(diagnostic_heading.parentElement).toHaveTextContent(
+      "诊断信息/private/runtime/config.toml",
+    );
+    expect(screen.queryByText("关闭窗口不会默认停止运行时。")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "桌面生命周期" })).toBeVisible();
+  });
+
+  it("manages Gateway access and confirms a visible device candidate without CLI state", async () => {
+    const store = settingsStore();
+    store.settings.page = "devices";
+    store.device_gateway.stale = false;
+    store.device_gateway.snapshot = {
+      enabled: true,
+      available: true,
+      installation_id: "installation-1",
+      certificate_fingerprint: "fingerprint",
+      pairing_window: { expires_at_ms: 10_000 },
+      pending_pairings: [{
+        pairing_request_id: "pairing-1",
+        display_name: "客厅新终端",
+        expires_at_ms: 10_000,
+        remaining_attempts: 5,
+        capabilities: {
+          input_text: true,
+          input_pcm16_16k_mono: false,
+          output_text: true,
+          output_pcm16_16k_mono: false,
+          playback_cancel: false,
+          display_status: true,
+          display_transcript: true,
+        },
+      }],
+      devices: [],
+      speech_services: { asr: "unavailable", tts: "unavailable" },
+    };
+    vi.spyOn(store.device_gateway, "load").mockResolvedValue();
+    const access = vi.spyOn(store.device_gateway, "setAccessEnabled").mockResolvedValue(true);
+    const confirm = vi.spyOn(store.device_gateway, "confirmPairing").mockResolvedValue(true);
+    renderDialog(store);
+
+    expect(screen.getByRole("heading", { name: "智能终端" })).toBeVisible();
+    expect(screen.queryByText("管理局域网智能终端接入、配对和设备身份")).not.toBeInTheDocument();
+    expect(screen.queryByText("已启用并可用")).not.toBeInTheDocument();
+    expect(screen.queryByText("终端发现本机后会显示在这里，输入终端展示或播报的配对码。")).not.toBeInTheDocument();
+    expect(screen.queryByText("本阶段只展示 Host 当前能力，不在这里编辑服务商、模型、声音或密钥。")).not.toBeInTheDocument();
+    expect(screen.getByText("客厅新终端")).toBeVisible();
+    expect(screen.getByPlaceholderText("配对码")).toHaveAccessibleName("客厅新终端 配对码");
+    expect(screen.getAllByText("不可用")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("switch", { name: "智能终端接入" }));
+    expect(access).toHaveBeenCalledWith(false);
+
+    fireEvent.change(screen.getByLabelText("客厅新终端 配对码"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认配对" }));
+    expect(confirm).toHaveBeenCalledWith("pairing-1", "123456", null);
+  });
+
+  it("keeps the paired device list concise and opens connection details on a secondary page", () => {
+    const store = settingsStore();
+    store.settings.page = "devices";
+    store.device_gateway.stale = false;
+    store.device_gateway.snapshot = {
+      enabled: true,
+      available: true,
+      installation_id: "installation-1",
+      certificate_fingerprint: "fingerprint",
+      pending_pairings: [],
+      devices: [{
+        device_id: "device-1",
+        display_name: "Node 模拟终端",
+        lifecycle: "paired",
+        paired_at_ms: 1_725_000_000_000,
+        updated_at_ms: 1_725_000_100_000,
+        revoked_at_ms: null,
+        connection: {
+          connected_at_ms: 1_725_000_200_000,
+          output_preference: "text",
+          capabilities: {
+            input_text: true,
+            input_pcm16_16k_mono: false,
+            output_text: true,
+            output_pcm16_16k_mono: false,
+            playback_cancel: false,
+            display_status: true,
+            display_transcript: true,
+          },
+        },
+      }],
+      speech_services: { asr: "unavailable", tts: "unavailable" },
+    };
+    vi.spyOn(store.device_gateway, "load").mockResolvedValue();
+    renderDialog(store);
+
+    expect(screen.getByRole("img", { name: "在线" })).toBeVisible();
+    expect(screen.queryByText("在线", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("离线不会删除设备身份或当前 PC 输出托管。")).not.toBeInTheDocument();
+    expect(screen.queryByText("文字输入 · 文字输出")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重命名" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "解除配对" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 Node 模拟终端 详情" }));
+    expect(screen.getByRole("heading", { name: "Node 模拟终端" })).toBeVisible();
+    expect(screen.getByText("设备 ID").nextElementSibling).toHaveTextContent("device-1");
+    expect(screen.getByText("输入能力").nextElementSibling).toHaveTextContent("文字");
+    expect(screen.getByText("交互能力").nextElementSibling).toHaveTextContent("状态显示、转写显示");
+
+    fireEvent.click(screen.getByRole("button", { name: "返回设备列表" }));
+    expect(screen.getByRole("heading", { name: "智能终端" })).toBeVisible();
+  });
+
   it("shows the Chinese skill management projection and delegates the name toggle", () => {
     const store = settingsStore();
     store.settings.page = "skills";
@@ -68,6 +183,8 @@ describe("SettingsDialog model management", () => {
     store.settings.models = [existing_default];
     renderDialog(store);
 
+    expect(screen.getByRole("button", { name: /^模型$/ }).querySelector("svg"))
+      .toHaveAttribute("data-icon", "model");
     fireEvent.click(screen.getByRole("button", { name: "primary的更多操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "编辑模型" }));
 

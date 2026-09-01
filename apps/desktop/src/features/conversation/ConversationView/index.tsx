@@ -14,7 +14,6 @@ import { ToolDetailDialog, type ToolDetailView } from "../ToolDetailDialog";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { AttachmentPreviewDialog } from "../../context-panel/AttachmentPreviewDialog";
 import { mergeChildTaskItems } from "../childTaskPresentation";
-import { ChildTaskTree } from "./ChildTaskTree";
 import { groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { AssistantTurn, EmptyConversation, LiveAssistantMessage, UserMessage } from "./MessageViews";
 import styles from "./index.module.scss";
@@ -68,15 +67,6 @@ export const ConversationView = observer(function ConversationView() {
         (task_id) => store.live_execution.runForChildTask(task_id),
       )
     : [];
-  const represented_runs = new Set(conversation_rows.flatMap((row) => (
-    row.type === "assistant_turn" && row.run_id ? [row.run_id] : []
-  )));
-  if (live_run) {
-    represented_runs.add(live_run.run_id);
-  }
-  const unmatched_child_tasks = child_task_id
-    ? []
-    : child_task_items.filter((item) => !represented_runs.has(item.task.parent_run_id));
   const attachment_by_id = useMemo(() => new Map(
     (session_view?.attachments ?? []).map((attachment) => [attachment.attachment_id, attachment]),
   ), [session_view?.attachments]);
@@ -357,12 +347,6 @@ export const ConversationView = observer(function ConversationView() {
           )}
           {history.load_error && <p className={styles.load_error}>{history.load_error}</p>}
           {renderConversationRows(conversation_rows)}
-          {!child_task_id && session_id && (
-            <ChildTaskTree
-              items={unmatched_child_tasks}
-              on_open={(item) => void store.openChildTask(session_id, item.task.child_task_id)}
-            />
-          )}
           {live_run && !conversation_rows.some((row) => row.type === "assistant_turn" && row.run_id === live_run.run_id)
             && (
               <LiveAssistantMessage

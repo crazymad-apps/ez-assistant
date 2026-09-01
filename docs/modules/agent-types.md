@@ -20,9 +20,9 @@
 - `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存策略；
   生成摘要的模型身份、摘要请求自身的 usage 和被压缩历史的累计 usage 分字段保存。
 - `UserPart::Injected` 只保留旧 Conversation 的读取兼容；新产生的变体指令、Goal、WorkPlan、
-  委派和 continuation 使用带 `boundary_id`、`kind` 与可选 `retention_key` 的
-  `UserPart::InternalContext`。两者都不是用户正文，但规范 Part 必须随 User Message 持久化，
-  不能在会话重建时重新猜测生成。
+  委派和 continuation 使用带 `boundary_id` 与 `kind` 的 `UserPart::InternalContext`。两者都不是
+  用户正文，但规范 Part 必须随 User Message 持久化，不能在会话重建时重新猜测生成。旧 JSON 中
+  曾写入的 `retention_key` 只按未知字段兼容忽略，新序列化不再产生该字段。
 - `ContextInsertionPlan` 统一表达规范内部 Part、请求末尾临时指令和 Tool Result 批次后
   request-only 图片信封的位置、存储和可见性；计划本身不携带 Runtime RunId 或产品消息身份。
 - `UserMessageOrigin` 与 `TranscriptVisibility` 是正交应用元数据：旧 JSON 缺字段时必须分别按

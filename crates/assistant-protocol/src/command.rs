@@ -25,6 +25,23 @@ use crate::{
     SystemContextSnapshot, WorkPlanSnapshot, WorkspaceId, WorkspaceSummary,
 };
 
+/// 显式设置当前产品 Controller 的 PC 输出附加托管目标。
+///
+/// `None` 表示解除托管；该动作不影响设备来源输入优先回复其来源设备的规则。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetCurrentControllerOutputHostingRequest {
+    pub device_id: Option<crate::DeviceId>,
+}
+
+/// PC 输出托管变更后的 Controller 最新摘要及实际变更标记。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetCurrentControllerOutputHostingResult {
+    pub session: SessionSummary,
+    pub changed: bool,
+}
+
 /// 查询当前配置总体状态。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -1319,6 +1336,8 @@ pub enum RuntimeCommand {
     SetSessionPinned(SetSessionPinnedRequest),
     /// 设置 Session 主控代理状态。
     SetSessionProxy(SetSessionProxyRequest),
+    /// 设置或解除当前产品 Controller 的 PC 输出附加托管。
+    SetCurrentControllerOutputHosting(SetCurrentControllerOutputHostingRequest),
     /// 保存 Assistant Message 反馈。
     SetMessageFeedback(SetMessageFeedbackRequest),
     /// 切换 Session 模型。
@@ -1443,6 +1462,8 @@ pub enum RuntimeCommandResult {
     SetSessionPinned(SetSessionPinnedResult),
     /// Session 主控代理状态已设置。
     SetSessionProxy(SetSessionProxyResult),
+    /// 当前 Controller 的 PC 输出托管已完成设置或解除。
+    SetCurrentControllerOutputHosting(SetCurrentControllerOutputHostingResult),
     /// Assistant Message 反馈已保存。
     SetMessageFeedback(SetMessageFeedbackResult),
     /// Session 模型已切换。
@@ -1475,6 +1496,7 @@ mod tests {
             lifecycle: crate::SessionLifecycle::Active,
             role: crate::SessionRoleSnapshot::Standard,
             proxy: None,
+            pc_output_hosting: None,
             active_compaction: None,
             current_variant: AgentVariant::Build,
             approval_mode: ApprovalMode::Ask,
@@ -1878,6 +1900,14 @@ mod tests {
                 "get_session",
             ),
             (
+                RuntimeCommand::SetCurrentControllerOutputHosting(
+                    SetCurrentControllerOutputHostingRequest {
+                        device_id: Some(crate::DeviceId::new("device-1").expect("device id")),
+                    },
+                ),
+                "set_current_controller_output_hosting",
+            ),
+            (
                 RuntimeCommand::SubmitInput(SubmitInputRequest {
                     mode: SubmitInputMode::Normal,
                     session_id: session_id.clone(),
@@ -2237,6 +2267,15 @@ mod tests {
                     session: session_summary(),
                 }),
                 "get_session",
+            ),
+            (
+                RuntimeCommandResult::SetCurrentControllerOutputHosting(
+                    SetCurrentControllerOutputHostingResult {
+                        session: session_summary(),
+                        changed: true,
+                    },
+                ),
+                "set_current_controller_output_hosting",
             ),
             (
                 RuntimeCommandResult::SubmitInput(SubmitInputResult {

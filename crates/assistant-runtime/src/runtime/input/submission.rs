@@ -1,14 +1,23 @@
 //! 普通与 Goal 用户输入共享的准备、原子接受和 Session 投影。
+//!
+//! 本模块把 Desktop 与受信任 Channel 输入归一到同一个 Session Input 用例。规范 UserMessage、
+//! Input、首次 Run、可选 Goal/Skill 事实先由 Store 原子接受，成功后才更新 Session 内存投影、
+//! 发布观察事件并唤醒执行队列；Channel 不会因此形成第二套会话或消息存储。
 
-use assistant_protocol::{SessionTitleOrigin, SubmitInputRequest, SubmitInputResult};
+use assistant_protocol::{
+    IdempotencyKey, SessionTitleOrigin, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
 
 use super::super::{
     AssistantRuntime,
     goal::{GoalSubmissionPersistence, PreparedGoalSubmission},
 };
 use crate::{
-    InputOrigin, NewStoredInput, RuntimeError, RuntimeResult, SkillActivationOwner,
-    SkillActivationResolveError, SkillActivationTrigger, SkillName, StoredSkillActivation, id,
+    InputChannelSource, InputOrigin, NewStoredInput, RuntimeError, RuntimeResult,
+    SkillActivationOwner, SkillActivationResolveError, SkillActivationTrigger, SkillName,
+    StoredSkillActivation, SubmitSessionInputRequest, id,
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
@@ -19,10 +28,61 @@ use crate::{
 use super::projection::project_accepted_input;
 
 impl AssistantRuntime {
-    /// 先持久化 Input 与首次 Run，再把它加入目标 Session 的执行 lane。
-    pub async fn submit_input(
+    /// 提交一条由 Host 渠道适配器识别来源的 Session 输入。
+    ///
+    /// Host 负责选择产品路由目标；Runtime 不把 Controller 角色写入通用输入用例。设备来源仍在
+    /// 可靠接受前复核 paired 身份，并把客户端输入身份映射到既有幂等键。
+    ///
+    /// # Errors
+    ///
+    /// 来源授权已失效，或统一输入接受链失败时返回错误。
+    pub async fn submit_session_input(
+        &self,
+        request: SubmitSessionInputRequest,
+    ) -> RuntimeResult<SubmitInputResult> {
+        let mut input = request.input;
+        if let InputChannelSource::Device(source) = &request.source {
+            if self.paired_device(&source.device_id)?.is_none() {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "device source is not authorized",
+                });
+            }
+            if input.mode != SubmitInputMode::Normal
+                || !input.attachment_ids.is_empty()
+                || input.skill_name.is_some()
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "device input contains unsupported product intent",
+                });
+            }
+            input.idempotency_key = Some(device_input_idempotency_key(source)?);
+        }
+        self.accept_session_input(input, request.source).await
+    }
+
+    /// 单元测试使用的 Desktop 输入便利入口；产品 Host 只调用统一 Session 输入用例。
+    #[cfg(test)]
+    pub(crate) async fn submit_input(
         &self,
         request: SubmitInputRequest,
+    ) -> RuntimeResult<SubmitInputResult> {
+        self.submit_session_input(SubmitSessionInputRequest {
+            input: request,
+            source: InputChannelSource::desktop_text(),
+        })
+        .await
+    }
+
+    /// 完成一次 Session Input 的可靠接受与内存投影。
+    ///
+    /// 调用期间持有 Runtime 操作/模型绑定读 gate 和目标 Session mutation gate，保证配置绑定与
+    /// 同 Session 写入顺序稳定；短期 Session 状态锁不会跨越 Store `await`。Store 成功前不修改
+    /// Session 投影、不发布事件、不唤醒队列。可靠事实已经提交但后续投影失败时不回滚 Store，
+    /// 调用返回错误，后续可从 Store 权威事实恢复。
+    async fn accept_session_input(
+        &self,
+        request: SubmitInputRequest,
+        channel_source: InputChannelSource,
     ) -> RuntimeResult<SubmitInputResult> {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
@@ -35,6 +95,7 @@ impl AssistantRuntime {
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
+        // 先命中 Session 内已恢复的幂等事实，使合法重试不受当前配置、附件或 Skill 变化影响。
         if let Some(key) = request.idempotency_key.as_ref()
             && let Some((input_id, run)) = session.find_idempotent(key)?
         {
@@ -60,6 +121,17 @@ impl AssistantRuntime {
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
         let mut message = create_user_message(request.message, files, request.variant)?;
+        // 结构化 channel_source 才是授权和回复路由事实；此 InternalContext 只提示模型本轮交互形态。
+        if let Some(text) = channel_input_context(&channel_source) {
+            InternalBoundaryCoordinator::insert_before(
+                &mut message,
+                InternalBoundarySource::AgentVariant,
+                InternalBoundaryRequest {
+                    source: InternalBoundarySource::ChannelInput,
+                    text,
+                },
+            )?;
+        }
         let (input_id, run_id, approval_mode, should_generate_title) = {
             let state = session.lock_state()?;
             (
@@ -99,7 +171,6 @@ impl AssistantRuntime {
                     &mut message,
                     InternalBoundaryRequest {
                         source: InternalBoundarySource::SkillActivation,
-                        retention_key: Some(format!("skill:{}", definition.name.as_str())),
                         text: render_user_activation(&session.skill_catalog().revision, definition),
                     },
                 )?;
@@ -133,6 +204,8 @@ impl AssistantRuntime {
             .map(|goal| goal.control.to_stored(session.id().clone()));
         let generated_title = should_generate_title.then_some(generated_title);
         let was_proxied = session.lock_state()?.proxy.is_some();
+        // Store 在一个业务操作中提交正文、Input、首次 Run，以及可选 Goal/Skill/标题事实；
+        // 对普通用户输入，它还会原子解除 proxy 并移除尚未领取的 ControllerDelivery。
         let accepted = self
             .store
             .accept_input(NewStoredInput {
@@ -143,7 +216,8 @@ impl AssistantRuntime {
                 agent_variant: request.variant,
                 origin: InputOrigin::User,
                 goal_binding: goal_binding.clone(),
-                cross_session_binding: None,
+                cross_session: None,
+                channel_source: Some(channel_source),
                 skill_activation: skill_activation.clone(),
                 approval_mode,
                 message,
@@ -155,6 +229,7 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("accept input", source))?;
         if accepted.is_duplicate {
+            // Store 级幂等是跨进程重启的最终防线；重复请求不得再次附加消息或修改队列投影。
             let state = session.lock_state()?;
             let run = state
                 .runs
@@ -172,50 +247,56 @@ impl AssistantRuntime {
             .as_ref()
             .map(|prepared| super::super::product::project_goal(&prepared.control))
             .transpose()?;
-        let (projection, queue_revision) = {
-            let mut state = session.lock_state()?;
-            let removed_deliveries = state
-                .inputs
-                .values()
-                .filter(|candidate| {
-                    candidate.stored.state == crate::StoredInputState::Queued
-                        && matches!(
-                            candidate.stored.cross_session_binding,
-                            Some(crate::CrossSessionInputBinding::ControllerDelivery { .. })
-                        )
-                })
-                .map(|candidate| candidate.stored.input_id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            if was_proxied {
-                state.proxy = None;
-            }
-            if !removed_deliveries.is_empty() {
-                state
-                    .session_inputs
-                    .retain(|input_id| !removed_deliveries.contains(input_id));
-                state
-                    .inputs
-                    .retain(|input_id, _| !removed_deliveries.contains(input_id));
-                state
-                    .runs
-                    .retain(|_, run| !removed_deliveries.contains(run.input_id()));
-            }
-            if let Some(title) = generated_title {
-                state.title = title;
-            }
-            let changes_session_queue = accepted.input.goal_binding.is_none();
-            if let Some(PreparedGoalSubmission { control, .. }) = prepared_goal {
-                state.goal = Some(control);
-            }
-            state.queue_paused_by_user = false;
-            let projection = project_accepted_input(&mut state, accepted);
-            if !changes_session_queue && !removed_deliveries.is_empty() {
-                state.queue_revision = state.queue_revision.saturating_add(1);
-            }
-            let queue_revision = (changes_session_queue || !removed_deliveries.is_empty())
-                .then_some(state.queue_revision);
-            (projection, queue_revision)
-        };
+        // 到这里可靠事实已经完成；以下只把 Store 返回结果及其伴随效果镜像到当前 Session 投影。
+        let (projection, queue_revision) =
+            {
+                let mut state = session.lock_state()?;
+                // accept_input 已在 Store 内完成相同删除，这里不能保留一份与持久事实不一致的旧队列。
+                let removed_deliveries =
+                    state
+                        .inputs
+                        .values()
+                        .filter(|candidate| {
+                            candidate.stored.state == crate::StoredInputState::Queued
+                        && candidate.stored.cross_session.as_ref().is_some_and(|envelope| {
+                            matches!(
+                                envelope.binding,
+                                crate::CrossSessionInputBinding::ControllerDelivery { .. }
+                            )
+                        })
+                        })
+                        .map(|candidate| candidate.stored.input_id.clone())
+                        .collect::<std::collections::BTreeSet<_>>();
+                if was_proxied {
+                    state.proxy = None;
+                }
+                if !removed_deliveries.is_empty() {
+                    state
+                        .session_inputs
+                        .retain(|input_id| !removed_deliveries.contains(input_id));
+                    state
+                        .inputs
+                        .retain(|input_id, _| !removed_deliveries.contains(input_id));
+                    state
+                        .runs
+                        .retain(|_, run| !removed_deliveries.contains(run.input_id()));
+                }
+                if let Some(title) = generated_title {
+                    state.title = title;
+                }
+                let changes_session_queue = accepted.input.goal_binding.is_none();
+                if let Some(PreparedGoalSubmission { control, .. }) = prepared_goal {
+                    state.goal = Some(control);
+                }
+                state.queue_paused_by_user = false;
+                let projection = project_accepted_input(&mut state, accepted);
+                if !changes_session_queue && !removed_deliveries.is_empty() {
+                    state.queue_revision = state.queue_revision.saturating_add(1);
+                }
+                let queue_revision = (changes_session_queue || !removed_deliveries.is_empty())
+                    .then_some(state.queue_revision);
+                (projection, queue_revision)
+            };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
             session_id: session.id().clone(),
             run_id: projection.run.run_id.clone(),
@@ -244,6 +325,63 @@ impl AssistantRuntime {
             run: projection.run,
         })
     }
+}
+
+/// 将设备侧输入身份收敛到 Runtime 既有幂等键空间。
+///
+/// 命名空间版本、稳定 Device ID 与设备内 `client_input_id` 一起参与摘要，因此不同设备可以安全
+/// 复用自己的编号；幂等索引不直接采用外部字符串，也不会把设备编号误当成 Runtime Message ID。
+fn device_input_idempotency_key(
+    source: &crate::DeviceInputSource,
+) -> RuntimeResult<IdempotencyKey> {
+    if source.client_input_id.trim().is_empty() || source.client_input_id.len() > 256 {
+        return Err(RuntimeError::InvalidRequest {
+            reason: "device client input id is invalid",
+        });
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"device-input-v1\0");
+    digest.update(source.device_id.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(source.client_input_id.as_bytes());
+    IdempotencyKey::new(format!(
+        "channel:device:{}",
+        URL_SAFE_NO_PAD.encode(digest.finalize())
+    ))
+    .map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "device input idempotency key",
+    })
+}
+
+/// 生成仅供模型理解本轮渠道语义的内部上下文。
+///
+/// 设备身份、模态和输出偏好的权威事实仍是 `InputChannelSource`；此文本不参与授权、幂等或投递
+/// 解析。Desktop 输入返回 `None`，保持既有模型上下文完全不变。
+fn channel_input_context(source: &InputChannelSource) -> Option<String> {
+    let InputChannelSource::Device(source) = source else {
+        return None;
+    };
+    let modality = match source.modality {
+        crate::InputModality::Text => "text",
+        crate::InputModality::SpeechTranscript => "speech_transcript",
+    };
+    let (reply_preference, reply_instruction) = match source.requested_output {
+        crate::OutputPreference::Text => (
+            "text",
+            "Respond normally in text. Do not call the speak tool solely for channel delivery.",
+        ),
+        crate::OutputPreference::Audio => (
+            "audio",
+            "Call the speak tool with a concise, natural spoken reply for this turn before final completion.",
+        ),
+        crate::OutputPreference::TextAndAudio => (
+            "text_and_audio",
+            "Call the speak tool with a concise, natural spoken reply for this turn before final completion.",
+        ),
+    };
+    Some(format!(
+        "<channel_input>\nsource: intelligent_terminal\ninput_modality: {modality}\nreply_preference: {reply_preference}\nreply_instruction: {reply_instruction}\n</channel_input>"
+    ))
 }
 
 fn automatic_session_title(message: &str) -> String {
