@@ -1,6 +1,6 @@
 //! 受控外部 HTTP(S) 链接与固定产品目录打开边界。
 
-use assistant_protocol::WorkspaceId;
+use assistant_protocol::{SessionId, WorkspaceId};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -54,6 +54,32 @@ pub(crate) async fn open_workspace_directory(
         .map_err(|_| ExternalLinkFailure {
             code: "workspace_open_failed",
             message: "无法使用系统文件管理器打开工作空间。",
+        })
+}
+
+#[tauri::command]
+pub(crate) async fn open_session_workspace_directory(
+    app: AppHandle,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    directory_index: usize,
+) -> Result<(), ExternalLinkFailure> {
+    let session_id = SessionId::new(session_id).map_err(|_| ExternalLinkFailure {
+        code: "invalid_session",
+        message: "会话标识无效。",
+    })?;
+    let path = coordinator
+        .session_workspace_directory(session_id, directory_index)
+        .await
+        .map_err(|_| ExternalLinkFailure {
+            code: "workspace_unavailable",
+            message: "无法从 Runtime 获取该会话的工作目录。",
+        })?;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|_| ExternalLinkFailure {
+            code: "workspace_open_failed",
+            message: "无法使用系统文件管理器打开该会话的工作目录。",
         })
 }
 

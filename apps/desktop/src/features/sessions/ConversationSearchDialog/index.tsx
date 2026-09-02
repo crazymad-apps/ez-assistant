@@ -12,7 +12,6 @@ export const ConversationSearchDialog = observer(function ConversationSearchDial
   const store = useRootStore();
   const hit = store.conversation_search.selected_hit;
   const close_button_ref = useRef<HTMLButtonElement>(null);
-  if (!hit) return null;
 
   const recall = store.conversation_search.recall_window;
   return (
@@ -22,7 +21,9 @@ export const ConversationSearchDialog = observer(function ConversationSearchDial
       dialog_class_name={styles.dialog}
       initial_focus_ref={close_button_ref}
       on_close={() => store.conversation_search.closeRecall()}
+      open={hit !== null}
     >
+      {hit && <>
       <header>
         <div>
           <h2 id="conversation-search-dialog-title">{hit.child_task_title ?? hit.session_title}</h2>
@@ -63,6 +64,7 @@ export const ConversationSearchDialog = observer(function ConversationSearchDial
           </button>
         </div>
       </footer>
+      </>}
     </Dialog>
   );
 });

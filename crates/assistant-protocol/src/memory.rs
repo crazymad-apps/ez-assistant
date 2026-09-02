@@ -70,5 +70,8 @@ pub struct PinnedMemoryCollectionSnapshot {
 pub struct SystemContextSnapshot {
     pub session_id: SessionId,
     pub session_created_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace: Option<crate::SessionWorkspaceSnapshot>,
     pub parts: Vec<String>,
 }

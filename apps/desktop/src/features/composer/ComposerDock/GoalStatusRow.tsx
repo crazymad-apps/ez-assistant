@@ -1,5 +1,8 @@
+import { useState } from "react";
 import type { GoalPauseReasonSnapshot, GoalSnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
+import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { ComposerSecondaryDrawer } from "./ComposerSecondaryDrawer";
 import { formatCompact } from "./composerOptions";
 import styles from "./index.module.scss";
@@ -16,6 +19,7 @@ type GoalStatusRowProps = Readonly<{
 
 export function GoalStatusRow(props: GoalStatusRowProps) {
   const action = goalAction(props.goal);
+  const [clear_open, setClearOpen] = useState(false);
 
   async function runAction() {
     if (!action) return;
@@ -29,11 +33,14 @@ export function GoalStatusRow(props: GoalStatusRowProps) {
   }
 
   async function clearGoal() {
-    if (!window.confirm("退出目标？自动续跑控制状态会被清除，任务清单和排队输入会保留。")) return;
-    if (await props.on_clear()) props.on_open_change(false);
+    if (await props.on_clear()) {
+      setClearOpen(false);
+      props.on_open_change(false);
+    }
   }
 
   return (
+    <>
     <ComposerSecondaryDrawer
       actions={<>
         {action && (
@@ -52,7 +59,7 @@ export function GoalStatusRow(props: GoalStatusRowProps) {
             aria-label="退出目标"
             className={styles.goal_close}
             disabled={props.pending}
-            onClick={() => void clearGoal()}
+            onClick={() => setClearOpen(true)}
             title="退出目标"
             type="button"
           >
@@ -87,6 +94,21 @@ export function GoalStatusRow(props: GoalStatusRowProps) {
         </div>
       </section>
     </ComposerSecondaryDrawer>
+    <PresenceBoundary present={clear_open}>
+      {clear_open && (
+        <SessionActionDialog
+          confirm_label="退出目标"
+          is_danger
+          is_pending={props.pending}
+          on_cancel={() => setClearOpen(false)}
+          on_confirm={() => void clearGoal()}
+          title="退出当前目标？"
+        >
+          <p>自动续跑控制状态会被清除，任务清单和排队输入会保留。</p>
+        </SessionActionDialog>
+      )}
+    </PresenceBoundary>
+    </>
   );
 }
 

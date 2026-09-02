@@ -60,7 +60,14 @@ fn configured_model_reads_a_real_attachment_through_the_formal_host() {
                 .unwrap_or("unknown")
         );
     }
-    let registered = client.runtime("register_workspace", json!({ "path": workspace.path() }));
+    let registered = client.runtime(
+        "register_workspace",
+        json!({
+            "label": "attachment-workspace",
+            "primary_directory": workspace.path(),
+            "additional_directories": [],
+        }),
+    );
     let workspace_id = text(&registered["workspace"]["workspace_id"]);
     let created = client.runtime(
         "create_session",

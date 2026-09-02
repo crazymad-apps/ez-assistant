@@ -211,6 +211,33 @@ cargo test -p assistant-protocol
 cargo clippy -p assistant-protocol --all-targets --all-features -- -D warnings
 ```
 
+## v0.22.0 M0 增量基础类型
+
+- Workspace 投影在保留现有 `user_directory` 兼容字段的同时增加 label 与有序附加目录；旧载荷缺失
+  新字段时安全读取为空。
+- 用户消息投影增加有序冻结引用；Session usage 可选增加旁路模型调用聚合，无调用时省略。
+- 自动标题 trigger 与状态基础类型是 additive DTO，只供后续里程碑接入；M0 不增加 Desktop 尚不能
+  处理的 RuntimeCommand 或产品入口。
+
+## v0.22.0 M1 Workspace 编辑与会话快照契约
+
+- `RegisterWorkspaceRequest` 与 `UpdateWorkspaceRequest` 都提交完整表单：label、主目录和有序附加目录；
+  更新以稳定 `WorkspaceId` 定位，不提供分别修改名称或单个目录的碎片命令。
+- `SessionViewSnapshot` 与 `SystemContextSnapshot` 的 Workspace 投影同时携带当前 label、会话创建时
+  冻结的主目录/附加目录，以及冻结目录是否仍与当前 Workspace 相同。协议不暗示既有 Session 的
+  System Prompt、权限或执行目录被 Workspace 编辑热更新。
+- Workspace label 是展示与上下文中的名称，不要求全局唯一；活动 Workspace 的 canonical 主目录仍是
+  唯一身份。附加目录可共享，目录顺序属于稳定业务事实。
+
+## v0.22.0 M6 文本引用契约
+
+- `QuotedTextSnapshot` 携带冻结纯文本 exact、每侧最多 128 个 Unicode 字符的 prefix/suffix、来源展示元数据，以及
+  `ConversationOwner + generation + MessageId + UTF-16 range` direct locator；locator 不是授权凭据。
+- `SubmitInputRequest.quotes` 是缺省为空的有序字段。引用只在发送时以结构化 User Part 进入可靠
+  UserMessage，不拼接 textarea Markdown；`source_available` 由 Runtime 接受输入时重新核对后写入。
+- 引用创建不定义 Runtime command，来源查看复用普通 Conversation 分页命令；协议不包含
+  `PrepareTextQuote`、`ResolveTextQuoteSource`、quote recall reference 或 `text_quote` capability。
+
 ## v0.21.0 M1 设备来源与托管增量
 
 - 新增透明字符串 `DeviceId`；它只表示 Runtime 已登记设备的稳定身份，不承载 connection、地址、

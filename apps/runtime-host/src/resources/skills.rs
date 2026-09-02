@@ -1,4 +1,4 @@
-//! 四个固定本地 Root 的有界 Skill 扫描与 frontmatter 解析。
+//! Workspace 有序目录与用户目录下固定 Skill Root 的有界扫描和 frontmatter 解析。
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,7 +23,7 @@ const MAX_DESCRIPTION_CHARS: usize = 1_024;
 /// 生产使用固定默认值，测试可缩小单项上限而无需创建超大临时文件。
 #[derive(Clone, Copy)]
 struct ScanLimits {
-    /// 四个 Root 合计允许的直接候选目录数。
+    /// 本次全部 Root 合计允许的直接候选目录数。
     candidates: usize,
     /// 单个 `SKILL.md` 的字节上限。
     definition_bytes: u64,
@@ -60,7 +60,7 @@ impl SkillPackageSource for HostSkillPackageSource {
         Box::pin(async move {
             // `std::fs` 和 YAML 解析都在专用阻塞任务中执行，不占用 Runtime 异步执行线程。
             tokio::task::spawn_blocking(move || match user_home {
-                Some(user_home) => scan_sync(&user_home, request.workspace_directory.as_deref()),
+                Some(user_home) => scan_sync(&user_home, &request.workspace_directories),
                 None => SkillScanResult {
                     candidates: Vec::new(),
                     diagnostics: vec![SkillDiagnostic::error(
@@ -81,42 +81,56 @@ impl SkillPackageSource for HostSkillPackageSource {
     }
 }
 
-fn scan_sync(user_home: &Path, workspace: Option<&str>) -> SkillScanResult {
-    scan_sync_with_limits(user_home, workspace, ScanLimits::default())
+fn scan_sync(user_home: &Path, workspace_directories: &[String]) -> SkillScanResult {
+    scan_sync_with_limits(user_home, workspace_directories, ScanLimits::default())
 }
 
 fn scan_sync_with_limits(
     user_home: &Path,
-    workspace: Option<&str>,
+    workspace_directories: &[String],
     limits: ScanLimits,
 ) -> SkillScanResult {
-    // 插入顺序与 Runtime 的 `SkillSource` 排序完全一致；只允许这四个固定 Root。
-    let mut roots = Vec::with_capacity(4);
-    if let Some(workspace) = workspace {
+    // Workspace 根顺序优先，每个根内部再按 `SkillSource` 排序；用户 Root 固定在最后。
+    let mut roots = Vec::with_capacity(workspace_directories.len() * 2 + 2);
+    for (root_order, workspace) in workspace_directories.iter().enumerate() {
         let workspace = Path::new(workspace);
         roots.push((
             SkillSource::WorkspaceEzAssistant,
+            Some(root_order),
             workspace.join(".ez-assistant/skills"),
         ));
         roots.push((
             SkillSource::WorkspaceAgents,
+            Some(root_order),
             workspace.join(".agents/skills"),
         ));
     }
     roots.push((
         SkillSource::UserEzAssistant,
+        None,
         user_home.join(".ez-assistant/skills"),
     ));
-    roots.push((SkillSource::UserAgents, user_home.join(".agents/skills")));
+    roots.push((
+        SkillSource::UserAgents,
+        None,
+        user_home.join(".agents/skills"),
+    ));
 
     let mut result = SkillScanResult {
         complete: true,
         ..SkillScanResult::default()
     };
     let mut candidate_count = 0_usize;
-    for (source, root) in roots {
+    for (source, workspace_root_order, root) in roots {
         // 全局候选超限或任一 Root 读取不完整后立即停止，禁止发布部分扫描结果。
-        if !scan_root(source, &root, limits, &mut candidate_count, &mut result) {
+        if !scan_root(
+            source,
+            workspace_root_order,
+            &root,
+            limits,
+            &mut candidate_count,
+            &mut result,
+        ) {
             result.complete = false;
             break;
         }
@@ -124,6 +138,7 @@ fn scan_sync_with_limits(
     result.candidates.sort_by(|left, right| {
         left.source
             .cmp(&right.source)
+            .then(left.workspace_root_order.cmp(&right.workspace_root_order))
             .then(left.source_path.cmp(&right.source_path))
             .then(left.name.cmp(&right.name))
     });
@@ -133,6 +148,7 @@ fn scan_sync_with_limits(
 
 fn scan_root(
     source: SkillSource,
+    workspace_root_order: Option<usize>,
     root: &Path,
     limits: ScanLimits,
     candidate_count: &mut usize,
@@ -229,7 +245,13 @@ fn scan_root(
             ));
             return false;
         }
-        if let Some(candidate) = scan_candidate(source, &path, limits, &mut result.diagnostics) {
+        if let Some(candidate) = scan_candidate(
+            source,
+            workspace_root_order,
+            &path,
+            limits,
+            &mut result.diagnostics,
+        ) {
             result.candidates.push(candidate);
         }
     }
@@ -238,6 +260,7 @@ fn scan_root(
 
 fn scan_candidate(
     source: SkillSource,
+    workspace_root_order: Option<usize>,
     directory: &Path,
     limits: ScanLimits,
     diagnostics: &mut Vec<SkillDiagnostic>,
@@ -339,6 +362,7 @@ fn scan_candidate(
         name: parsed.name,
         description: parsed.description,
         source,
+        workspace_root_order,
         source_path,
         definition_digest: format!("sha256-v1:{:x}", hasher.finalize()),
         body: parsed.body,
@@ -737,7 +761,10 @@ mod tests {
         for (index, root) in roots.iter().enumerate() {
             write_skill(root, &format!("review-{index}"), "review", "");
         }
-        let scan = scan_sync(&home, Some(workspace.to_str().expect("UTF-8 workspace")));
+        let scan = scan_sync(
+            &home,
+            &[workspace.to_str().expect("UTF-8 workspace").to_owned()],
+        );
         assert!(scan.complete);
         assert_eq!(scan.candidates.len(), 4);
         let discovery = compile_skill_discovery(scan, &[]);
@@ -747,10 +774,43 @@ mod tests {
             SkillSource::WorkspaceEzAssistant
         );
 
-        let empty = scan_sync(temporary.path(), None);
+        let empty = scan_sync(temporary.path(), &[]);
         assert!(empty.complete);
         assert!(empty.candidates.is_empty());
         assert!(empty.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn earlier_workspace_root_wins_before_later_roots_source_kind() {
+        let temporary = TempDir::new().expect("tempdir");
+        let home = temporary.path().join("home");
+        let primary = temporary.path().join("primary");
+        let additional = temporary.path().join("additional");
+        write_skill(&primary.join(".agents/skills"), "primary", "review", "");
+        write_skill(
+            &additional.join(".ez-assistant/skills"),
+            "additional",
+            "review",
+            "",
+        );
+        let scan = scan_sync(
+            &home,
+            &[
+                primary.to_string_lossy().into_owned(),
+                additional.to_string_lossy().into_owned(),
+            ],
+        );
+        let discovery = compile_skill_discovery(scan, &[]);
+        assert_eq!(discovery.winners.len(), 1);
+        assert_eq!(discovery.winners[0].workspace_root_order, Some(0));
+        assert_eq!(discovery.winners[0].source, SkillSource::WorkspaceAgents);
+        assert!(discovery.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == SkillDiagnosticCode::Shadowed
+                && diagnostic
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|path| path.contains("additional"))
+        }));
     }
 
     #[test]
@@ -767,7 +827,7 @@ mod tests {
         )
         .expect("invalid definition");
 
-        let discovery = compile_skill_discovery(scan_sync(temporary.path(), None), &[]);
+        let discovery = compile_skill_discovery(scan_sync(temporary.path(), &[]), &[]);
         assert!(discovery.winners.is_empty());
         for expected in [
             SkillDiagnosticCode::OptionalFieldDefaulted,
@@ -797,7 +857,7 @@ mod tests {
 
         let scan = scan_sync(
             temporary.path(),
-            Some(workspace.to_str().expect("workspace")),
+            &[workspace.to_str().expect("workspace").to_owned()],
         );
         assert!(!scan.complete);
         let discovery = compile_skill_discovery(scan, &[]);
@@ -821,7 +881,7 @@ mod tests {
         let target_root = temporary.path().join("targets");
         let target = write_skill(&target_root, "linked", "linked", "");
         symlink(target, root.join("linked")).expect("candidate symlink");
-        let scan = scan_sync(temporary.path(), None);
+        let scan = scan_sync(temporary.path(), &[]);
         assert!(scan.candidates.is_empty());
         assert!(
             scan.diagnostics
@@ -849,7 +909,7 @@ mod tests {
             let home = temporary.path().join(format!("limit-{index}"));
             let root = home.join(".agents/skills");
             write_skill(&root, "limited", "limited", "");
-            let scan = scan_sync_with_limits(&home, None, limits);
+            let scan = scan_sync_with_limits(&home, &[], limits);
             assert!(scan.candidates.is_empty(), "{code:?}");
             assert!(
                 scan.diagnostics
@@ -865,7 +925,7 @@ mod tests {
         write_skill(&root, "two", "two", "");
         let scan = scan_sync_with_limits(
             &home,
-            None,
+            &[],
             ScanLimits {
                 candidates: 1,
                 ..ScanLimits::default()
@@ -884,14 +944,14 @@ mod tests {
         let temporary = TempDir::new().expect("tempdir");
         let root = temporary.path().join(".agents/skills");
         let skill = write_skill(&root, "stable", "stable", "");
-        let first = scan_sync(temporary.path(), None);
+        let first = scan_sync(temporary.path(), &[]);
         fs::create_dir_all(skill.join("references/nested")).expect("resource directory");
         fs::write(
             skill.join("references/nested/large.bin"),
             vec![7_u8; 64 * 1024],
         )
         .expect("resource bytes");
-        let second = scan_sync(temporary.path(), None);
+        let second = scan_sync(temporary.path(), &[]);
         assert_eq!(first, second);
         assert_eq!(
             first.candidates[0].source_path,

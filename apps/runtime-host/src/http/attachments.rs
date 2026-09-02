@@ -152,7 +152,9 @@ pub(super) async fn upload_attachment(
     }
 }
 
-async fn create_staging_file(state: &HttpState) -> io::Result<(PathBuf, tokio::fs::File)> {
+pub(super) async fn create_staging_file(
+    state: &HttpState,
+) -> io::Result<(PathBuf, tokio::fs::File)> {
     for _ in 0..16 {
         let mut random = [0_u8; RANDOM_NAME_BYTES];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
@@ -176,7 +178,7 @@ async fn create_staging_file(state: &HttpState) -> io::Result<(PathBuf, tokio::f
     ))
 }
 
-fn valid_original_name(name: &str) -> bool {
+pub(super) fn valid_original_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -185,7 +187,7 @@ fn valid_original_name(name: &str) -> bool {
         && !name.contains('\\')
 }
 
-async fn cleanup(path: &PathBuf) {
+pub(super) async fn cleanup(path: &PathBuf) {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -193,7 +195,7 @@ async fn cleanup(path: &PathBuf) {
     }
 }
 
-fn runtime_error(error: RuntimeError) -> Response {
+pub(super) fn runtime_error(error: RuntimeError) -> Response {
     upload_error(error.to_protocol_info())
 }
 

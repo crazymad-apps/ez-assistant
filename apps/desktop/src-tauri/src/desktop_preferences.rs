@@ -9,11 +9,21 @@ use thiserror::Error;
 const PREFERENCES_FILE: &str = "desktop-preferences.json";
 const PREFERENCES_STAGING_FILE: &str = ".desktop-preferences.tmp";
 const MAX_EXPANDED_WORKSPACES: usize = 256;
+const LEFT_SIDEBAR_DEFAULT_WIDTH: i32 = 286;
+const LEFT_SIDEBAR_MIN_WIDTH: i32 = 220;
+const LEFT_SIDEBAR_MAX_WIDTH: i32 = 420;
+const RIGHT_SIDEBAR_DEFAULT_WIDTH: i32 = 326;
+const RIGHT_SIDEBAR_MIN_WIDTH: i32 = 220;
+const RIGHT_SIDEBAR_MAX_WIDTH: i32 = 800;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DesktopPreferences {
     left_sidebar_open: bool,
     right_sidebar_open: bool,
+    #[serde(default = "default_left_sidebar_width")]
+    left_sidebar_width: i32,
+    #[serde(default = "default_right_sidebar_width")]
+    right_sidebar_width: i32,
     #[serde(default)]
     expanded_workspace_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -33,6 +43,8 @@ impl Default for DesktopPreferences {
         Self {
             left_sidebar_open: true,
             right_sidebar_open: true,
+            left_sidebar_width: LEFT_SIDEBAR_DEFAULT_WIDTH,
+            right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             expanded_workspace_ids: None,
             close_behavior: DesktopCloseBehavior::HideToTray,
         }
@@ -113,6 +125,12 @@ fn save_to_directory(
 fn validate(
     mut preferences: DesktopPreferences,
 ) -> Result<DesktopPreferences, DesktopPreferencesError> {
+    preferences.left_sidebar_width = preferences
+        .left_sidebar_width
+        .clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH);
+    preferences.right_sidebar_width = preferences
+        .right_sidebar_width
+        .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH);
     if let Some(expanded_workspace_ids) = &mut preferences.expanded_workspace_ids {
         if expanded_workspace_ids.len() > MAX_EXPANDED_WORKSPACES
             || expanded_workspace_ids
@@ -127,6 +145,14 @@ fn validate(
     Ok(preferences)
 }
 
+const fn default_left_sidebar_width() -> i32 {
+    LEFT_SIDEBAR_DEFAULT_WIDTH
+}
+
+const fn default_right_sidebar_width() -> i32 {
+    RIGHT_SIDEBAR_DEFAULT_WIDTH
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -139,6 +165,8 @@ mod tests {
         let preferences = DesktopPreferences {
             left_sidebar_open: false,
             right_sidebar_open: true,
+            left_sidebar_width: 312,
+            right_sidebar_width: 374,
             expanded_workspace_ids: Some(vec!["workspace-b".to_owned(), "workspace-a".to_owned()]),
             close_behavior: DesktopCloseBehavior::QuitDesktop,
         };
@@ -147,6 +175,8 @@ mod tests {
 
         assert!(!loaded.left_sidebar_open);
         assert!(loaded.right_sidebar_open);
+        assert_eq!(loaded.left_sidebar_width, 312);
+        assert_eq!(loaded.right_sidebar_width, 374);
         assert_eq!(loaded.close_behavior, DesktopCloseBehavior::QuitDesktop);
         assert_eq!(
             loaded
@@ -154,5 +184,23 @@ mod tests {
                 .expect("explicit expansion state"),
             ["workspace-a", "workspace-b"]
         );
+    }
+
+    #[test]
+    fn missing_widths_use_defaults_and_out_of_range_widths_are_clamped() {
+        let legacy: DesktopPreferences =
+            serde_json::from_str(r#"{"left_sidebar_open":true,"right_sidebar_open":false}"#)
+                .expect("legacy preferences");
+        assert_eq!(legacy.left_sidebar_width, LEFT_SIDEBAR_DEFAULT_WIDTH);
+        assert_eq!(legacy.right_sidebar_width, RIGHT_SIDEBAR_DEFAULT_WIDTH);
+
+        let clamped = validate(DesktopPreferences {
+            left_sidebar_width: -10,
+            right_sidebar_width: 9_999,
+            ..DesktopPreferences::default()
+        })
+        .expect("clamped preferences");
+        assert_eq!(clamped.left_sidebar_width, LEFT_SIDEBAR_MIN_WIDTH);
+        assert_eq!(clamped.right_sidebar_width, RIGHT_SIDEBAR_MAX_WIDTH);
     }
 }

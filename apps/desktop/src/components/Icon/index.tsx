@@ -14,6 +14,7 @@ export type IconName =
   | "device"
   | "desktop"
   | "edit"
+  | "external-link"
   | "folder"
   | "fork"
   | "menu"
@@ -23,6 +24,7 @@ export type IconName =
   | "paperclip"
   | "pin"
   | "plus"
+  | "quote"
   | "refresh"
   | "search"
   | "settings"
@@ -62,6 +64,7 @@ const paths: Record<IconName, ReactNode> = {
   ),
   desktop: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
   edit: <><path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" /><path d="m13.7 7.5 3 3" /></>,
+  "external-link": <><path d="M14 4h6v6M20 4l-9 9" /><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></>,
   folder: <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />,
   fork: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6 7v2c0 3 2 4 6 4s6-1 6-4V7M12 13v4" /></>,
   menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
@@ -83,6 +86,7 @@ const paths: Record<IconName, ReactNode> = {
     />
   ),
   plus: <path d="M12 5v14M5 12h14" />,
+  quote: <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
   refresh: <><path d="M20 7v5h-5" /><path d="M18.1 16A7 7 0 1 1 19.6 9L20 12" /></>,
   search: <><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></>,
   settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></>,

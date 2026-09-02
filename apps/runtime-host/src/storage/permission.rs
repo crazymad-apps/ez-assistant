@@ -31,23 +31,33 @@ const DEFAULT_SESSION_ATTACHMENT_RULE_PREFIX: &str = "default-session-attachment
 const DEFAULT_SESSION_MEMORY_RULE_PREFIX: &str = "default-session-memory-";
 
 impl StorageEngine {
-    pub(super) fn ensure_workspace_permission_file(
+    pub(super) fn reconcile_legacy_workspace_permission_file(
         &self,
         workspace: &assistant_runtime::StoredWorkspace,
     ) -> StorageResult<bool> {
         let path = Path::new(&workspace.agent_directory).join(PERMISSION_FILE);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => return Ok(false),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(internal_error(
-                    "workspace permission metadata could not be read",
-                    source,
-                ));
-            }
+        let loaded = load_path(&path)?;
+        let Some(content) = loaded.content.as_deref() else {
+            return Ok(false);
+        };
+        if !loaded.diagnostics.is_empty() {
+            return Ok(false);
         }
-        let content = default_workspace_permission_document(&workspace.user_directory)?;
-        write_default_permission_file(&path, &content)
+        let Ok(mut document) = PermissionDocument::parse(content) else {
+            // 用户可直接维护权限文件；无法证明为旧系统模板时必须原样保留并交给权限诊断链。
+            return Ok(false);
+        };
+        if !remove_legacy_workspace_default_rules(&mut document) {
+            return Ok(false);
+        }
+        let rendered = document.render().map_err(|source| {
+            StoreError::with_source(
+                StoreErrorKind::InvalidData,
+                "workspace permission migration could not be encoded",
+                source,
+            )
+        })?;
+        replace_path(&path, &loaded.revision, &rendered).map(|_| true)
     }
 
     pub(super) fn ensure_session_permission_file(
@@ -230,9 +240,35 @@ fn replace_path(
     Ok(revision(content))
 }
 
-fn default_workspace_permission_document(workspace_path: &str) -> StorageResult<Vec<u8>> {
-    let rules = default_file_permission_rules(DEFAULT_WORKSPACE_RULE_PREFIX, workspace_path, true);
-    render_default_permission_document(rules, "default workspace permissions could not be encoded")
+fn remove_legacy_workspace_default_rules(document: &mut PermissionDocument) -> bool {
+    let read_id = format!(
+        "{DEFAULT_WORKSPACE_RULE_PREFIX}{}",
+        operation_name(PermissionFileOperation::Read)
+    );
+    let Some(workspace_path) = document.rules.iter().find_map(|rule| {
+        if rule.id != read_id {
+            return None;
+        }
+        let PermissionMatcher::File(matcher) = &rule.matcher else {
+            return None;
+        };
+        Some(matcher.path.clone())
+    }) else {
+        return false;
+    };
+    let generated =
+        default_file_permission_rules(DEFAULT_WORKSPACE_RULE_PREFIX, workspace_path.as_str(), true);
+    if !generated
+        .iter()
+        .all(|expected| document.rules.contains(expected))
+    {
+        return false;
+    }
+    // 只有完整七条规则逐字段匹配历史系统模板时才迁移；任一规则被用户修改就全部保留。
+    document
+        .rules
+        .retain(|rule| !generated.iter().any(|expected| expected == rule));
+    true
 }
 
 fn default_session_permission_document(

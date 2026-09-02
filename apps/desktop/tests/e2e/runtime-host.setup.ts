@@ -58,7 +58,11 @@ max_output_tokens = 4096
     const registered = await runtimeCommand(
       discovery,
       "register_workspace",
-      { path: workspace },
+      {
+        label: "E2E Workspace",
+        primary_directory: workspace,
+        additional_directories: [],
+      },
     ) as { workspace: { workspace_id: string } };
     const created = await runtimeCommand(discovery, "create_session", {
       title: "M2 临时会话",

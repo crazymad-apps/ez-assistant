@@ -69,9 +69,9 @@ describe("RuntimeProjectionStore", () => {
 
   it("prepends older pages without duplicating stable message IDs", () => {
     const store = new RuntimeProjectionStore();
-    store.applyLocatedConversationPage("session-1", {
+    store.applySessionSnapshot({
       observed_sequence: 8,
-      value: page(3, [assistant("message-3"), assistant("message-4")], "cursor-2", true),
+      value: sessionView(page(3, [assistant("message-3"), assistant("message-4")], "cursor-2", true)),
     });
 
     expect(store.beginLoadingPrevious("session-1")).toBe(true);
@@ -91,15 +91,15 @@ describe("RuntimeProjectionStore", () => {
     expect(history?.is_loading_previous).toBe(false);
   });
 
-  it("replaces history when a located page belongs to a new generation", () => {
+  it("replaces history when a latest page belongs to a new generation", () => {
     const store = new RuntimeProjectionStore();
-    store.applyLocatedConversationPage("session-1", {
+    store.applySessionSnapshot({
       observed_sequence: 4,
-      value: page(1, [assistant("old-message")], null, false),
+      value: sessionView(page(1, [assistant("old-message")], null, false)),
     });
-    store.applyLocatedConversationPage("session-1", {
+    store.applySessionSnapshot({
       observed_sequence: 5,
-      value: page(2, [assistant("new-message")], null, false),
+      value: sessionView(page(2, [assistant("new-message")], null, false)),
     });
 
     const history = store.conversation_histories.get("session-1");
@@ -109,9 +109,9 @@ describe("RuntimeProjectionStore", () => {
 
   it("uses the server page as authority after a compacted generation change", () => {
     const store = new RuntimeProjectionStore();
-    store.applyLocatedConversationPage("session-1", {
+    store.applySessionSnapshot({
       observed_sequence: 4,
-      value: page(1, [assistant("old-memory-only-message")], null, false),
+      value: sessionView(page(1, [assistant("old-memory-only-message")], null, false)),
     });
     const compacted = page(
       2,
@@ -154,6 +154,13 @@ function page(
     previous_cursor,
     has_more,
   };
+}
+
+function sessionView(conversation: ConversationPage): SessionViewSnapshot {
+  return {
+    session: { session_id: "session-1" },
+    conversation,
+  } as unknown as SessionViewSnapshot;
 }
 
 function assistant(message_id: string): ConversationItem {

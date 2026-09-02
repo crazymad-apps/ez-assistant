@@ -7,9 +7,11 @@ import {
   DropdownMenuTrigger,
 } from "../../components/DropdownMenu";
 import { Icon } from "../../components/Icon";
+import { PresenceBoundary } from "../../components/Presence";
 import { useInputMethodGuard } from "../../components/InputMethodGuard";
 import type { PrepareDeleteSessionResult, SessionSummary } from "../../generated/assistant-protocol";
 import { SessionActionDialog } from "../../features/sessions/SessionActionDialog";
+import { isDraftCustomized } from "../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../stores/RootStoreContext";
 import styles from "./index.module.scss";
 
@@ -28,6 +30,10 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
   const is_archived = session?.lifecycle === "archived";
+  const new_session_draft = store.new_session_drafts.get(store.navigation.selected_draft_key);
+  const draft_workspace = store.projection.application?.workspaces.find(
+    (workspace) => workspace.workspace_id === new_session_draft?.workspace_id,
+  );
   const session_view = session ? store.projection.session_views.get(session.session_id) : undefined;
   const is_controller = session?.role === "controller";
   const is_proxied = Boolean(session?.proxy);
@@ -51,7 +57,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
     setTitle(session?.title ?? "");
     setClearOpen(false);
     setProxyError(null);
-  }, [session?.session_id, session?.title]);
+  }, [session?.session_id, session?.title, store.navigation.selected_draft_key]);
 
   function finishEdit() {
     if (!editing || !session) {
@@ -185,14 +191,18 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
           />
         ) : (
           <button
-            className={styles.session_title_button}
+            className={`${styles.session_title_button} ${styles.title_refresh}`}
             disabled={!session || is_archived}
             onClick={() => setEditing(true)}
             title={session?.title}
             type="button"
+            key={session?.title ?? "new-session"}
           >
-            {session?.title ?? "新会话"}
+            {session?.title ?? (new_session_draft ? "新对话" : "新会话")}
           </button>
+        )}
+        {new_session_draft && (
+          <span className={styles.session_role_badge}>{draft_workspace?.label ?? "未绑定工作空间"}</span>
         )}
         {session && is_controller && (
           <span className={styles.session_role_badge}>主控</span>
@@ -229,6 +239,25 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             <Icon name="more" size={17} />
           </DropdownMenuTrigger>
           <DropdownMenuContent aria-label="会话操作" className={styles.session_menu}>
+            <DropdownMenuItem onSelect={() => store.resetSidebarLayout()}>
+              <span>恢复默认布局</span>
+            </DropdownMenuItem>
+            {new_session_draft && (
+              <DropdownMenuItem
+                onSelect={() => {
+                  if (isDraftCustomized(
+                    new_session_draft,
+                    store.projection.application?.configuration.default_model ?? null,
+                  )) {
+                    setClearOpen(true);
+                  } else {
+                    void store.clearNewSessionDraft(new_session_draft.key);
+                  }
+                }}
+              >
+                <span>清空当前草稿…</span>
+              </DropdownMenuItem>
+            )}
             {session && (
               <DropdownMenuItem
                 disabled={store.pending_session_action}
@@ -279,17 +308,16 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             )}
           </DropdownMenuContent>
         </DropdownMenu>
-        {!store.navigation.right_sidebar_open && (
-          <button
-            aria-label="展开当前上下文"
-            className={styles.context_toggle}
-            onClick={() => store.toggleRightSidebar()}
-            type="button"
-          >
-            <Icon name="sidebar-right" size={17} />
-          </button>
-        )}
+        <button
+          aria-label={store.navigation.effective_right_sidebar_open ? "收起当前上下文" : "展开当前上下文"}
+          className={styles.context_toggle}
+          onClick={() => store.toggleRightSidebar()}
+          type="button"
+        >
+          <Icon name="sidebar-right" size={17} />
+        </button>
       </div>
+      <PresenceBoundary present={delete_preview !== null}>
       {delete_preview && (
         <SessionActionDialog
           confirm_label="永久删除"
@@ -307,6 +335,8 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
           </p>
         </SessionActionDialog>
       )}
+      </PresenceBoundary>
+      <PresenceBoundary present={clear_open && Boolean(session)}>
       {clear_open && session && (
         <SessionActionDialog
           confirm_label="清空历史"
@@ -323,6 +353,23 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
           {store.interaction_error && <p role="alert">{store.interaction_error}</p>}
         </SessionActionDialog>
       )}
+      </PresenceBoundary>
+      <PresenceBoundary present={clear_open && Boolean(new_session_draft)}>
+      {clear_open && new_session_draft && (
+        <SessionActionDialog
+          confirm_label="清空草稿"
+          is_pending={false}
+          on_cancel={() => setClearOpen(false)}
+          on_confirm={() => {
+            setClearOpen(false);
+            void store.clearNewSessionDraft(new_session_draft.key);
+          }}
+          title="清空当前草稿？"
+        >
+          <p>将移除尚未发送的文本、附件和发送设置，不会创建或删除任何会话。</p>
+        </SessionActionDialog>
+      )}
+      </PresenceBoundary>
       {proxy_error && <div className={styles.session_header_error} role="alert">{proxy_error}</div>}
     </header>
   );

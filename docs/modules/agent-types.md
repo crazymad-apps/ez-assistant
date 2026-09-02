@@ -37,6 +37,13 @@
   通过受控构造校验；它不保存 Session 根、外部源路径、Base64 或图片字节。首版只允许
   JPEG、PNG、WebP 和静态 GIF 的规范 MIME/扩展名组合。
 
+## v0.22.0 M0 结构化引用
+
+- `UserPart::QuotedText` 保存用户提交时冻结的纯文本 `exact`、有界前后文、来源展示元数据和
+  direct locator；它属于规范 UserMessage，必须随 Conversation 序列化恢复。
+- `quote_id` 只标识本地 Part，不等同于来源 Message ID。owner、generation、message 与 UTF-16 range
+  只供上层宿主导航，不能作为授权凭据，也不得进入 Provider wire。
+
 ## 验证
 
 ```bash

@@ -47,6 +47,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
             session_id: before_reload.session.session_id.clone(),
             message: "before swap".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -81,6 +82,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
                 session_id: start_session_id,
                 message: "race after swap".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -177,6 +179,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             session_id: first.session.session_id.clone(),
             message: "start with old credential".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -203,6 +206,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             session_id: second.session.session_id.clone(),
             message: "start with new credential".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -235,6 +239,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
                 session_id: second.session.session_id.clone(),
                 message: "must not use stale key".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -562,6 +567,7 @@ async fn deleting_an_idle_session_model_preserves_history_and_requires_reselecti
                 session_id: session.session.session_id.clone(),
                 message: "must not be accepted".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -646,6 +652,7 @@ async fn deleting_a_model_used_by_a_running_run_is_rejected() {
             session_id: session.session.session_id.clone(),
             message: "running".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

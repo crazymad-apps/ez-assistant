@@ -24,6 +24,8 @@ pub struct SkillCandidate {
     pub description: String,
     /// 候选项所属固定扫描层级。
     pub source: SkillSource,
+    /// Workspace 候选所属根目录顺序；用户级候选为 `None`。
+    pub workspace_root_order: Option<usize>,
     /// 供本机诊断和激活后按需访问共享资源使用的候选目录。
     pub source_path: String,
     /// 原始 `SKILL.md` 字节生成的定义身份。
@@ -56,7 +58,7 @@ pub enum SkillDiagnosticCode {
     RootUnreadable,
     /// 至少一个 Root 未完成，禁止发布部分 Winner。
     ScanIncomplete,
-    /// 四个 Root 的候选总数超过上限。
+    /// 本次全部 Root 的候选总数超过上限。
     CandidateLimitExceeded,
     /// 候选目录缺少可读的普通 `SKILL.md`。
     MissingDefinition,
@@ -142,15 +144,15 @@ pub struct SkillScanResult {
     pub candidates: Vec<SkillCandidate>,
     /// 有效和无效候选项产生的全部可定位诊断。
     pub diagnostics: Vec<SkillDiagnostic>,
-    /// 四个应扫描 Root 是否全部完成；为 `false` 时不得选 Winner。
+    /// 本次请求的全部 Root 是否完成；为 `false` 时不得选 Winner。
     pub complete: bool,
 }
 
 /// Runtime 发给 Host 扫描适配器的文件实现无关请求。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillScanRequest {
-    /// 当前 Workspace 的规范绝对目录；未绑定 Workspace 时为 `None`。
-    pub workspace_directory: Option<String>,
+    /// 当前 Workspace 的规范绝对目录，主目录固定为第 0 项。
+    pub workspace_directories: Vec<String>,
 }
 
 /// Skill 包扫描的异步返回类型。
@@ -159,7 +161,7 @@ pub type SkillScanFuture<'a> =
 
 /// Runtime 使用的 Skill 包发现端口；实现不得在扫描时执行包内脚本。
 pub trait SkillPackageSource: Send + Sync {
-    /// 扫描四个固定 Root 并返回文件事实；单个坏包应成为诊断而非端口错误。
+    /// 扫描请求指定的固定 Root 并返回文件事实；单个坏包应成为诊断而非端口错误。
     fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_>;
 }
 
@@ -242,7 +244,7 @@ pub struct SkillNameStateChange {
 /// 当前发现投影能否用于后续 Catalog 构造。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillDiscoveryStatus {
-    /// 四个 Root 均扫描完成，可以消费 Winner。
+    /// 本次请求的全部 Root 均扫描完成，可以消费 Winner。
     Available,
     /// 扫描不完整，只可展示候选和诊断，不能消费部分 Winner。
     Unavailable,
@@ -309,15 +311,15 @@ pub fn compile_skill_discovery(
             continue;
         }
 
-        let best_source = candidates
+        let best_priority = candidates
             .first()
-            .map(|candidate| candidate.source)
+            .map(candidate_priority)
             .expect("grouped candidates are non-empty");
-        let same_source = candidates
+        let same_priority = candidates
             .iter()
-            .filter(|candidate| candidate.source == best_source)
+            .filter(|candidate| candidate_priority(candidate) == best_priority)
             .collect::<Vec<_>>();
-        if same_source.len() > 1 {
+        if same_priority.len() > 1 {
             // 同层没有可证明的稳定胜者，不能拿路径或枚举顺序偷偷裁决。
             scan.diagnostics.push(name_diagnostic(
                 SkillDiagnosticSeverity::Error,
@@ -328,7 +330,7 @@ pub fn compile_skill_discovery(
             continue;
         }
 
-        let winner = same_source[0];
+        let winner = same_priority[0];
         if !winner.model_invocable && !winner.user_invocable {
             scan.diagnostics.push(name_diagnostic(
                 SkillDiagnosticSeverity::Warning,
@@ -340,7 +342,7 @@ pub fn compile_skill_discovery(
         }
         for shadowed in candidates
             .iter()
-            .filter(|candidate| candidate.source != best_source)
+            .filter(|candidate| candidate_priority(candidate) != best_priority)
         {
             let mut diagnostic = name_diagnostic(
                 SkillDiagnosticSeverity::Warning,
@@ -380,9 +382,20 @@ pub fn compile_skill_discovery(
 fn candidate_order(left: &SkillCandidate, right: &SkillCandidate) -> std::cmp::Ordering {
     left.name
         .cmp(&right.name)
-        .then(left.source.cmp(&right.source))
+        .then(candidate_priority(left).cmp(&candidate_priority(right)))
         .then(left.source_path.cmp(&right.source_path))
         .then(left.definition_digest.cmp(&right.definition_digest))
+}
+
+fn candidate_priority(candidate: &SkillCandidate) -> (u8, usize, SkillSource) {
+    match candidate.source {
+        SkillSource::WorkspaceEzAssistant | SkillSource::WorkspaceAgents => (
+            0,
+            candidate.workspace_root_order.unwrap_or(usize::MAX),
+            candidate.source,
+        ),
+        SkillSource::UserEzAssistant | SkillSource::UserAgents => (1, 0, candidate.source),
+    }
 }
 
 fn name_diagnostic(

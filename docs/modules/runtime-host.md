@@ -63,10 +63,10 @@ Worker 池。
   隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
 - 默认 Host 注册正式文件与 Shell 工具，并统一交给 Runtime Authorizer 决策；不得因验证模式
   引入绕过权限规则或审批的 Allow All 产品路径。
-- 正式 Host 在 Workspace 首次注册或恢复发现权限文件缺失时，生成普通的 Workspace
-  `permissions.json`：Plan/Build 默认允许 Workspace 内结构化读取、列目录、查找和搜索，Build
-  默认允许结构化写入、编辑和删除。已存在文件不得覆盖或合并；Shell 和 Workspace 外访问不得
-  加入该默认文档。Runtime 必须加载实际文件，Authorizer 不写死默认放行分支。
+- Workspace 缺省文件能力由 Runtime 根据 Session 冻结的主目录和附加目录派生；Host 不因 Workspace
+  注册、恢复或目录编辑创建、合并或改写普通 `permissions.json`。该文件只保存用户显式规则；缺失文件
+  是合法空作用域。兼容恢复只在完整七条 `default-workspace-*` 规则逐字段匹配历史系统模板时移除它们，
+  任一规则被修改、文档无效或文件安全诊断异常都原样保留。
 
 ## 不应放在本模块的内容
 
@@ -190,12 +190,12 @@ Worker 池。
   按需读取。结构化文件 Authorizer 对 Runtime Home 下任意 Session 的附件目录执行
   Write/Edit/Delete 均拒绝，但允许 Read/List/Search。该逻辑路径规则不能阻止 Shell、同一
   OS 用户或 symlink 目标绕过，因此不得描述为不可绕过的附件隔离。
-- Workspace 与 Session 的默认信任均由 Host 生成的普通 `permissions.json` 表达，不在 Runtime
-  Authorizer 中隐式放行。Session 创建、Fork 和启动恢复只在文件缺失时生成：Plan/Build 默认读取
-  当前 Session 私有目录及附件目录，Build 默认变更 Session 私有目录；不得覆盖或合并既有文件，
-  不得授权 Session 父目录或其他 Session。Session 权限文件位于可写私有目录中，因此 Host
-  infrastructure policy 必须拒绝结构化 Write/Edit/Delete 直接修改该控制文件；Shell 边界仍按
-  当前用户权限如实说明。
+- Workspace 的缺省信任由 Runtime 从 Session 冻结目录派生，Workspace `permissions.json` 只承载
+  显式规则。Session 私有目录与附件目录的默认信任仍由 Host 生成普通 Session 权限文档：Session
+  创建、Fork 和启动恢复只在文件缺失时生成，Plan/Build 默认读取当前 Session 私有目录及附件目录，
+  Build 默认变更 Session 私有目录；不得覆盖或合并既有文件，不得授权 Session 父目录或其他 Session。
+  Session 权限文件位于可写私有目录中，因此 Host infrastructure policy 必须拒绝结构化
+  Write/Edit/Delete 直接修改该控制文件；Shell 边界仍按当前用户权限如实说明。
 - 新 Session 的基础 System Prompt 只要求按需使用本 Run 可用工具，不把某一种 Host 模式或
   工具名单冻结进正文；旧 Session 已持久化的 Prompt 不在恢复时改写。
 - v0.11.0 M5 扩展私有 Web Demo，覆盖 Workspace 登记与选择、Session 创建、附件先上传后提交、
@@ -544,8 +544,9 @@ cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnin
 
 ## v0.19.0 本地 Skill 扫描与名称状态存储
 
-- Host 只扫描当前工作区和用户 Home 各自的 `.ez-assistant/skills`、`.agents/skills`；每个 Root
-  只认直接子目录，不沿工作区祖先或其他客户端目录扩展。
+- Host 只扫描 Session 冻结的有序 Workspace 根目录和用户 Home 各自的
+  `.ez-assistant/skills`、`.agents/skills`；每个 Root 只认直接子目录，不沿工作区祖先或其他客户端
+  目录扩展。
 - `serde-saphyr` 仅在 Host 反序列化 frontmatter。YAML、必填字段或边界不可确定时跳过候选；
   可选字段无法采用时使用缺省并生成诊断，不修改源文件，也不执行包内脚本。
 - 发现扫描只读取 `SKILL.md`，对候选数、定义/frontmatter 大小和候选特殊类型设固定上限；
@@ -555,7 +556,7 @@ cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnin
 - 新 Session 的 `skill_catalog_json` 保存 Runtime 编译出的精确 `SKILL.md` 正文、definition digest 和
   共享源目录；普通资源树不枚举、不复制、不建立索引，Runtime Home 与 Session 目录均不创建
   Skill 暂存或私有副本。
-- 普通资源按 Skill 指令通过既有文件/Shell 工具读取四个共享 Root 中的当前文件，并继续服从具体
+- 普通资源按 Skill 指令通过既有文件/Shell 工具读取共享 Root 中的当前文件，并继续服从具体
   工具的路径与权限规则；Host 不增加 Skill 级权限门禁。
 - SQLite 迁移给旧 Session 写入 `legacy_unavailable` 缺省；恢复只校验 Catalog 结构与 revision，
   不因共享资源变化拒绝恢复。Fork 只复制 SQLite 中的 Catalog 事实，Session 删除不触碰共享源文件。
@@ -582,5 +583,24 @@ cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnin
   同一次 SQLite transaction；只有 JSONL 已发布且 SQLite finalize 成功后才清理 pending。
 - 启动恢复按同一 ready 载荷重放全部事实，不能只恢复成功 Tool Result 而遗漏其 Skill Activation；
   owner、Session、parent Run、message id、Model trigger 与 `skill:<name>` retention 关系均需交叉校验。
-- parent 与 child 复用同一原子提交协议，但分别写入各自 Conversation owner；共享 Skill 包仍留在四个
+- parent 与 child 复用同一原子提交协议，但分别写入各自 Conversation owner；共享 Skill 包仍留在
   扫描 Root，不因激活复制到 Runtime Home 或 Session 目录。
+
+## v0.22.0 M0 兼容迁移基线
+
+- SQLite 对 Workspace label/附加目录、Session 冻结附加目录、可空唯一 materialization key、自动
+  标题 pending 和旁路 usage 聚合采用 additive migration；重复初始化必须幂等。
+- 旧 Workspace label 由主目录 basename 回填，Workspace 与 Session 附加目录默认为空，旧 Session
+  不补自动标题。目录 JSON 在 Store 边界按绝对路径、顺序、去重和数量上限 fail-closed。
+- 迁移与损坏数据测试只使用内存 SQLite 或隔离 `TempDir`，不得以版本开发为由打开或修改用户实际
+  Runtime Home。
+
+## v0.22.0 M1 Workspace 多目录装配边界
+
+- Host 在 Store 边界对完整 Workspace 表单做 canonicalize，并验证目录绝对、存在、可读、UTF-8、
+  数量上限与无 canonical 重复；活动 Workspace 主目录全局唯一，附加目录允许跨 Workspace 共享。
+- 新 Session 的系统上下文明确写入 label、主目录语义、有序附加目录和“工作区不是强沙盒”；根
+  `AGENTS.md` 按主目录到附加目录顺序读取并标注来源根。Skill 扫描使用相同根顺序，根内仍保持
+  `.ez-assistant` 优先于 `.agents`，用户来源顺序不变。
+- SQLite 保存 Workspace 当前目录与 Session 冻结目录两类事实。恢复 Session 只要求关联 Workspace
+  仍存在，不用当前 Workspace 目录覆盖或否定历史冻结环境；相关迁移与恢复测试只使用隔离目录。

@@ -1,5 +1,7 @@
 //! SQLite schema 初始化与当前格式核验。
 
+use std::path::Path;
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{StorageResult, internal_error};
@@ -39,7 +41,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     archived_at_ms      INTEGER,
     is_pinned           INTEGER NOT NULL DEFAULT 0 CHECK (is_pinned IN (0, 1)),
     title_origin        TEXT NOT NULL DEFAULT 'generated'
-                            CHECK (title_origin IN ('generated', 'user'))
+                            CHECK (title_origin IN ('generated', 'user')),
+    materialization_key TEXT,
+    automatic_title_pending INTEGER NOT NULL DEFAULT 0
+                            CHECK (automatic_title_pending IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS session_history_operations (
@@ -158,7 +163,9 @@ CREATE TABLE IF NOT EXISTS session_goals (
 
 CREATE TABLE IF NOT EXISTS workspaces (
     workspace_id       TEXT PRIMARY KEY,
+    label              TEXT NOT NULL,
     user_directory     TEXT NOT NULL UNIQUE,
+    additional_directories_json TEXT NOT NULL DEFAULT '[]',
     agent_directory    TEXT NOT NULL UNIQUE,
     lifecycle          TEXT NOT NULL CHECK (lifecycle IN ('active', 'removed')),
     created_at_ms      INTEGER NOT NULL,
@@ -170,6 +177,7 @@ CREATE TABLE IF NOT EXISTS session_resources (
     session_id             TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
     workspace_id           TEXT REFERENCES workspaces(workspace_id),
     working_directory      TEXT NOT NULL,
+    additional_workspace_directories_json TEXT NOT NULL DEFAULT '[]',
     attachment_directory   TEXT NOT NULL UNIQUE,
     private_directory      TEXT NOT NULL UNIQUE,
     created_at_ms          INTEGER NOT NULL
@@ -279,6 +287,10 @@ CREATE TABLE IF NOT EXISTS session_usage (
     cached_request_count          INTEGER NOT NULL DEFAULT 0 CHECK (cached_request_count >= 0),
     reasoning_tokens_sum          INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens_sum >= 0),
     reasoning_request_count       INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_request_count >= 0),
+    auxiliary_request_count       INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_request_count >= 0),
+    auxiliary_input_tokens_sum    INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_input_tokens_sum >= 0),
+    auxiliary_output_tokens_sum   INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_output_tokens_sum >= 0),
+    auxiliary_total_tokens_sum    INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_total_tokens_sum >= 0),
     latest_input_tokens           INTEGER,
     latest_output_tokens          INTEGER,
     latest_total_tokens           INTEGER,
@@ -458,7 +470,7 @@ END;
 "#;
 
 const REQUIRED_PROJECTIONS: &[&str] = &[
-    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin, pc_output_device_id FROM sessions LIMIT 0",
+    "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin, pc_output_device_id, materialization_key, automatic_title_pending FROM sessions LIMIT 0",
     "SELECT device_id, display_name, public_key, lifecycle, paired_at_ms, updated_at_ms, revoked_at_ms FROM devices LIMIT 0",
     "SELECT operation_id, session_id, kind, state, source_generation, result_generation, compacted_message_count, retained_message_count, created_at_ms, finished_at_ms FROM session_history_operations LIMIT 0",
     "SELECT enabled, content, revision, updated_at_ms FROM persona WHERE singleton_key = 1",
@@ -469,15 +481,15 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, revision, objective, items_json, last_operation_id, updated_at_ms FROM session_work_plans LIMIT 0",
     "SELECT session_id, operation_id, revision, objective, items_json, updated_at_ms FROM work_plan_completion_receipts LIMIT 0",
     "SELECT goal_id, session_id, objective_message_id, objective_payload_json, objective_hash, state, pause_reason_json, generation, turn, max_runs, max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens, usage_complete, consecutive_failures, created_at_ms, updated_at_ms, completed_at_ms FROM session_goals LIMIT 0",
-    "SELECT workspace_id, user_directory, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
-    "SELECT session_id, workspace_id, working_directory, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
+    "SELECT workspace_id, label, user_directory, additional_directories_json, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
+    "SELECT session_id, workspace_id, working_directory, additional_workspace_directories_json, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
     "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs LIMIT 0",
     "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
-    "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
+    "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, auxiliary_request_count, auxiliary_input_tokens_sum, auxiliary_output_tokens_sum, auxiliary_total_tokens_sum, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
     "SELECT session_id, owner_kind, owner_id, request_id, run_id, request_kind, provider, model_id, input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, completed_at_ms FROM model_request_records LIMIT 0",
     "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, final_message_id, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM child_tasks LIMIT 0",
     "SELECT receipt_id, child_task_id, session_id, step, assistant_json, results_json, state, created_at_ms FROM child_pending_tool_exchanges LIMIT 0",
@@ -560,6 +572,69 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
         "message_step",
         "ALTER TABLE child_body_appends ADD COLUMN message_step INTEGER CHECK (message_step IS NULL OR message_step > 0)",
     )?;
+    ensure_column(
+        &transaction,
+        "workspaces",
+        "label",
+        "ALTER TABLE workspaces ADD COLUMN label TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        &transaction,
+        "workspaces",
+        "additional_directories_json",
+        "ALTER TABLE workspaces ADD COLUMN additional_directories_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    backfill_workspace_labels(&transaction)?;
+    ensure_column(
+        &transaction,
+        "session_resources",
+        "additional_workspace_directories_json",
+        "ALTER TABLE session_resources ADD COLUMN additional_workspace_directories_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "materialization_key",
+        "ALTER TABLE sessions ADD COLUMN materialization_key TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "sessions",
+        "automatic_title_pending",
+        "ALTER TABLE sessions ADD COLUMN automatic_title_pending INTEGER NOT NULL DEFAULT 0 CHECK (automatic_title_pending IN (0, 1))",
+    )?;
+    transaction
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS sessions_materialization_key
+             ON sessions(materialization_key) WHERE materialization_key IS NOT NULL",
+            [],
+        )
+        .map_err(|source| {
+            internal_error(
+                "session materialization identity could not be initialized",
+                source,
+            )
+        })?;
+    for (column, migration) in [
+        (
+            "auxiliary_request_count",
+            "ALTER TABLE session_usage ADD COLUMN auxiliary_request_count INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_request_count >= 0)",
+        ),
+        (
+            "auxiliary_input_tokens_sum",
+            "ALTER TABLE session_usage ADD COLUMN auxiliary_input_tokens_sum INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_input_tokens_sum >= 0)",
+        ),
+        (
+            "auxiliary_output_tokens_sum",
+            "ALTER TABLE session_usage ADD COLUMN auxiliary_output_tokens_sum INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_output_tokens_sum >= 0)",
+        ),
+        (
+            "auxiliary_total_tokens_sum",
+            "ALTER TABLE session_usage ADD COLUMN auxiliary_total_tokens_sum INTEGER NOT NULL DEFAULT 0 CHECK (auxiliary_total_tokens_sum >= 0)",
+        ),
+    ] {
+        ensure_column(&transaction, "session_usage", column, migration)?;
+    }
     transaction
         .execute(
             "INSERT OR IGNORE INTO session_usage (session_id, backfilled, updated_at_ms)
@@ -803,6 +878,39 @@ fn ensure_column(
         .map_err(|source| internal_error("runtime database schema could not be migrated", source))
 }
 
+/// 旧 Workspace 没有独立标签；迁移只从已经持久化的主目录确定性补齐，不访问目录内容。
+fn backfill_workspace_labels(transaction: &rusqlite::Transaction<'_>) -> StorageResult<()> {
+    let rows = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT workspace_id, user_directory FROM workspaces
+                 WHERE label = '' ORDER BY workspace_id",
+            )
+            .map_err(|source| internal_error("workspace labels could not be inspected", source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| internal_error("workspace labels could not be inspected", source))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| internal_error("workspace labels could not be inspected", source))?
+    };
+    for (workspace_id, directory) in rows {
+        let label = Path::new(&directory)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("工作空间");
+        transaction
+            .execute(
+                "UPDATE workspaces SET label = ?1 WHERE workspace_id = ?2 AND label = ''",
+                (label, workspace_id),
+            )
+            .map_err(|source| internal_error("workspace labels could not be migrated", source))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,6 +976,88 @@ mod tests {
                 [],
             )
             .expect("legacy-compatible run insert");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT materialization_key, automatic_title_pending FROM sessions
+                     WHERE session_id = 's-legacy'",
+                    [],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("session v0.22 defaults"),
+            (None, 0)
+        );
+        connection
+            .execute(
+                "INSERT INTO sessions (session_id, title, model_key, system_prompt_json, lifecycle,
+                    body_generation, message_count, created_at_ms, updated_at_ms)
+                 VALUES ('s-null-key', 'Null key', 'fixture', '{}', 'active', 1, 0, 2, 2)",
+                [],
+            )
+            .expect("multiple null materialization keys remain valid");
+        connection
+            .execute(
+                "UPDATE sessions SET materialization_key = 'materialize-1'
+                 WHERE session_id = 's-legacy'",
+                [],
+            )
+            .expect("first materialization key");
+        assert!(
+            connection
+                .execute(
+                    "UPDATE sessions SET materialization_key = 'materialize-1'
+                     WHERE session_id = 's-null-key'",
+                    [],
+                )
+                .is_err(),
+            "non-null materialization keys must be unique"
+        );
+        connection
+            .execute(
+                "INSERT INTO session_resources (
+                    session_id, workspace_id, working_directory, attachment_directory,
+                    private_directory, created_at_ms
+                 ) VALUES ('s-legacy', NULL, '/tmp/private', '/tmp/attachments',
+                           '/tmp/private', 1)",
+                [],
+            )
+            .expect("legacy-compatible resources insert");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT additional_workspace_directories_json FROM session_resources
+                     WHERE session_id = 's-legacy'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("session resource v0.22 default"),
+            "[]"
+        );
+        connection
+            .execute(
+                "INSERT INTO session_usage (session_id) VALUES ('s-legacy')",
+                [],
+            )
+            .expect("legacy-compatible usage insert");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT auxiliary_request_count, auxiliary_input_tokens_sum,
+                            auxiliary_output_tokens_sum, auxiliary_total_tokens_sum
+                     FROM session_usage WHERE session_id = 's-legacy'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .expect("auxiliary usage defaults"),
+            (0, 0, 0, 0)
+        );
 
         let values = connection
             .query_row(
@@ -946,6 +1136,45 @@ mod tests {
                 })
                 .expect("legacy sessions start without goals"),
             0
+        );
+    }
+
+    #[test]
+    fn legacy_workspace_label_is_derived_once_and_directories_default_empty() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE workspaces (
+                    workspace_id TEXT PRIMARY KEY,
+                    user_directory TEXT NOT NULL UNIQUE,
+                    agent_directory TEXT NOT NULL UNIQUE,
+                    lifecycle TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    removed_at_ms INTEGER
+                 );
+                 INSERT INTO workspaces (
+                    workspace_id, user_directory, agent_directory, lifecycle,
+                    created_at_ms, updated_at_ms
+                 ) VALUES (
+                    'w-legacy', '/tmp/legacy-project', '/tmp/runtime/w-legacy',
+                    'active', 1, 1
+                 );",
+            )
+            .expect("legacy workspace schema");
+
+        initialize(&mut connection).expect("first migration");
+        initialize(&mut connection).expect("idempotent second migration");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT label, additional_directories_json FROM workspaces
+                     WHERE workspace_id = 'w-legacy'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .expect("migrated workspace defaults"),
+            ("legacy-project".to_owned(), "[]".to_owned())
         );
     }
 }

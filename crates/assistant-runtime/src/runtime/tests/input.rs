@@ -1,9 +1,119 @@
 use super::*;
 
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, CancelQueuedInputRequest, IdempotencyKey, RetryRunRequest,
-    SetSessionApprovalModeRequest, SubmitInputRequest,
+    AgentVariant, ApprovalMode, CancelQueuedInputRequest, ConversationItem, ConversationOwner,
+    IdempotencyKey, ListConversationPageRequest, PartId, QuotedTextSnapshot,
+    QuotedTextSourceRoleSnapshot, RetryRunRequest, SetSessionApprovalModeRequest,
+    SubmitInputRequest,
 };
+
+#[tokio::test]
+async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_user_part() {
+    let runtime = runtime(Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("a-quote-1", "first"))),
+            ModelScript::Events(message_events(&assistant_text("a-quote-2", "second"))),
+        ],
+    )));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    let first = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "prefix selected suffix".to_owned(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("first input");
+    wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
+    let page = runtime
+        .list_conversation_page(ListConversationPageRequest {
+            owner: ConversationOwner::MainSession {
+                session_id: session_id.clone(),
+            },
+            cursor: None,
+            limit: 20,
+        })
+        .await
+        .expect("page")
+        .snapshot
+        .value;
+    let source_message_id = page
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationItem::User(message) => Some(message.message_id.clone()),
+            ConversationItem::Assistant(_) | ConversationItem::ContextSummary { .. } => None,
+        })
+        .expect("source user message");
+    let quote = QuotedTextSnapshot {
+        quote_id: PartId::new("quote-1").expect("quote id"),
+        exact: "selected".to_owned(),
+        prefix: "prefix ".to_owned(),
+        suffix: " suffix".to_owned(),
+        source_owner: page.owner.clone(),
+        source_generation: page.generation,
+        source_message_id: source_message_id.clone(),
+        text_start_utf16: 7,
+        text_end_utf16: 15,
+        source_role: QuotedTextSourceRoleSnapshot::User,
+        source_label: "source session".to_owned(),
+        source_created_at_ms: None,
+        source_available: true,
+    };
+    let mut stale = quote.clone();
+    stale.source_generation += 1;
+    let normalized = runtime
+        .normalize_quotes(&session_id, &[stale])
+        .await
+        .expect("stale source should degrade");
+    assert!(!normalized[0].source_available);
+
+    let second = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: String::new(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: vec![quote],
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("quoted input");
+    wait_for_terminal(&runtime, &session_id, &second.run.run_id).await;
+    let conversation = runtime
+        .conversation_snapshot(&session_id)
+        .await
+        .expect("conversation");
+    let quoted = conversation
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::User(message) => {
+                message.parts.iter().find_map(|part| match part {
+                    UserPart::QuotedText(quote) => Some(quote),
+                    _ => None,
+                })
+            }
+            _ => None,
+        });
+    let quoted = quoted.expect("quoted part");
+    assert_eq!(quoted.exact, "selected");
+    assert!(quoted.source_available);
+}
 
 #[tokio::test]
 async fn repeated_idempotency_key_returns_the_first_input_and_run() {
@@ -29,6 +139,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
             session_id: session.session.session_id.clone(),
             message: "first payload".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: Some(key.clone()),
         })
@@ -41,6 +152,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
             session_id: session.session.session_id.clone(),
             message: "different payload is ignored for the same key".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: Some("INVALID-SKILL-NAME".to_owned()),
             idempotency_key: Some(key),
         })
@@ -105,6 +217,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             session_id: session.session.session_id.clone(),
             message: "active".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -120,6 +233,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             session_id: session.session.session_id.clone(),
             message: "queued".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -201,6 +315,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -216,6 +331,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
             session_id: session.session.session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -266,6 +382,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
                     UserPart::Text(part) => Some(part.text.as_str()),
                     UserPart::Injected(_)
                     | UserPart::InternalContext(_)
+                    | UserPart::QuotedText(_)
                     | UserPart::FileReferences(_) => None,
                 })
             }
@@ -309,6 +426,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
             session_id: session.session.session_id.clone(),
             message: "retry me".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

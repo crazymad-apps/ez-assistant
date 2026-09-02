@@ -136,6 +136,45 @@
 - M4 只读展示 Host 的 ASR/TTS `ready | degraded | unavailable`，不增加 Provider、模型、声音和密钥
   编辑表单；真实语音输入、播放及系统权限验证必须等待对应语音里程碑。
 
+## v0.22.0 M1 Workspace 编辑交互边界
+
+- Workspace 左栏、新会话菜单和右侧上下文统一使用 label；新建与编辑共用一个产品弹窗，同时编辑
+  名称、主目录及有序附加目录，不在全局设置中增加 Workspace 管理页。
+- 左栏 Workspace 菜单与右侧 Workspace Section 的编辑按钮只打开同一编辑状态。右侧名称取当前
+  Workspace，目录取 Session 创建时冻结快照；目录变化时明确提示既有会话仍使用旧目录，不能据此
+  修改 Session System Prompt。
+- 右侧目录的打开动作以 Session 与冻结目录序号请求受信任原生桥接，不能仅按当前 Workspace ID
+  重新查主目录；复制动作只复制已投影路径。脏表单关闭使用产品 Dialog，不调用浏览器确认框。
+
+## v0.22.0 M5 Composer 图片粘贴与 selection 生命周期
+
+- Composer 只检查本次 `paste` 事件中的 `image/*` 文件项；纯文本粘贴保持浏览器原生行为，图文混合
+  粘贴在当前选区插入文字并按剪贴板顺序暂存图片。Web `File`、Base64 与 Object URL 不进入草稿事实。
+- 剪贴板图片通过原始字节 Tauri command 写入匿名临时文件，并与文件选择器结果统一为原生 selection。
+  原生层按 magic bytes 识别真实图片类型，限制单文件 32 MiB、单 Composer 32 项、进程内临时图片
+  256 MiB；任何一项失败都释放本批已创建 selection，不留下半批 Tag。
+- 附件 Tag 正文打开统一详情弹窗，移除按钮保持独立命中区。selection 上传前由受控句柄预览，上传后
+  可回退到 Runtime 附件预览；界面不得展示或复制物理路径。
+- selection 随对应 Workspace/unbound 草稿保存于当前进程，切换草稿不互相混合。显式移除、草稿清空、
+  Workspace 移除、可靠发送成功、TTL 回收或应用退出都会释放临时资源；失败重试继续复用仍有效 selection。
+- 普通 Session 与首次物化都允许“附件非空、文本为空”的提交。发送按钮布局继续使用自适应宽度和
+  文本控件最大宽度，不能因草稿态缺少可选控件而把右侧模型/发送操作挤出 Composer。
+
+## v0.22.0 M6 会话文本引用交互边界
+
+- Conversation 以可靠消息正文根为边界，Selection 两端在同一根即可跨文本节点、行内代码、链接和
+  强调；跨消息、工具块、交互控件和流式未可靠正文直接拒绝。浮动气泡执行纯前端冻结动作，不发送
+  Runtime command；右键和 `Shift+F10` 保持 WebView 原生行为。
+- `QuoteTextProjection` 用 TreeWalker 连接可引用文本节点，生成 UTF-16 range、exact 与 Unicode 有界
+  prefix/suffix；prefix/suffix 每侧最多 128 个 Unicode 字符，链接、代码和强调等渲染结构统一冻结为
+  可见纯文本，不反向转换或匹配 raw Markdown。
+- `ComposerQuoteStore` 仅在 WebView 生命周期内按主 Session 保存最多 16 条引用；子任务选区仍加入其
+  父 Session Composer。引用与附件在同一 Context Item 区按用户加入顺序展示，点击 Tag 打开统一详情；
+  失败保留，可靠发送成功才移除。内部 locator 不进入产品文案。
+- 来源定位直接复用持久 locator 和普通 Conversation 分页；`TransientFocusStore` 只持有一个瞬时 range。
+  优先用 CSS Highlight 非侵入高亮，不支持时退化为可回收描边；新定位、发送同步起点、滚动、会话或
+  子任务切换、定位失败、超时、组件卸载都必须清理，发送后不得残留。
+
 ## 不应放在本模块的内容
 
 - Agent Loop、模型 Provider 和工具选择策略。

@@ -177,6 +177,7 @@ impl AssistantRuntime {
             snapshot: SystemContextSnapshot {
                 session_id: request.session_id,
                 session_created_at_ms: summary.created_at_ms,
+                workspace: self.session_workspace_snapshot(&session)?,
                 parts: session.system_prompt().parts().to_vec(),
             },
         })

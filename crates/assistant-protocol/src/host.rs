@@ -32,6 +32,7 @@ pub enum RuntimeHostFeature {
     QueueControl,
     ApprovalQueue,
     SessionManagement,
+    SessionMaterialization,
 }
 
 /// 当前 Host 实例公开给客户端的传输能力，不包含地址、Token 或业务状态。

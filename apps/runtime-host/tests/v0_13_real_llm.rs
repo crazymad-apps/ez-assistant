@@ -50,7 +50,14 @@ fn real_llm_delegates_parallel_read_only_tasks_and_parent_summarizes() {
         "ready"
     );
     let workspace_id = text(
-        &client.runtime("register_workspace", json!({ "path": workspace.path() }))["workspace"]["workspace_id"],
+        &client.runtime(
+            "register_workspace",
+            json!({
+                "label": "real-llm-workspace",
+                "primary_directory": workspace.path(),
+                "additional_directories": [],
+            }),
+        )["workspace"]["workspace_id"],
     );
     let session_id = text(
         &client.runtime(

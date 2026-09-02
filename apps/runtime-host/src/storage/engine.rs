@@ -118,6 +118,7 @@ impl StorageEngine {
             recall_index_available,
         };
         engine.recover_session_deletions()?;
+        engine.recover_materialization_orphans()?;
         engine.repair_workspace_resources()?;
         engine.repair_session_resources()?;
         engine.recover_attachments()?;
@@ -181,8 +182,9 @@ impl StorageEngine {
                     "INSERT INTO sessions (
                         session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
-                        updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11)",
+                        updated_at_ms, archived_at_ms, is_pinned, title_origin,
+                        materialization_key, automatic_title_pending
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11, ?12, ?13)",
                     params![
                         session.session_id.as_str(),
                         session.title,
@@ -201,6 +203,8 @@ impl StorageEngine {
                             SessionTitleOrigin::Generated => "generated",
                             SessionTitleOrigin::User => "user",
                         },
+                        session.materialization_key.as_ref().map(|key| key.as_str()),
+                        i64::from(session.automatic_title_pending),
                     ],
                 )
                 .map_err(|source| {
@@ -245,6 +249,8 @@ impl StorageEngine {
             current_variant: session.current_variant,
             approval_mode: session.approval_mode,
             role: session.role,
+            materialization_key: session.materialization_key,
+            automatic_title_pending: session.automatic_title_pending,
             proxy: None,
             pc_output_hosting: None,
             body_generation: 1,
@@ -419,7 +425,8 @@ impl StorageEngine {
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
                         archived_at_ms, is_pinned, title_origin,
-                        sessions.pc_output_device_id, devices.display_name
+                        sessions.pc_output_device_id, devices.display_name,
+                        sessions.materialization_key, sessions.automatic_title_pending
                  FROM sessions
                  LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
                  ORDER BY created_at_ms, session_id",
@@ -449,6 +456,8 @@ impl StorageEngine {
                     row.get::<_, String>(18)?,
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, i64>(22)?,
                 ))
             })
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
@@ -477,6 +486,8 @@ impl StorageEngine {
                 title_origin,
                 pc_output_device_id,
                 pc_output_device_name,
+                materialization_key,
+                automatic_title_pending,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -521,6 +532,24 @@ impl StorageEngine {
                     "standard" => assistant_runtime::SessionRole::Standard,
                     "controller" => assistant_runtime::SessionRole::Controller,
                     _ => return Err(invalid_data("stored session role is invalid")),
+                },
+                materialization_key: materialization_key
+                    .map(assistant_protocol::IdempotencyKey::new)
+                    .transpose()
+                    .map_err(|source| {
+                        invalid_data_with_source(
+                            "stored session materialization key is invalid",
+                            source,
+                        )
+                    })?,
+                automatic_title_pending: match automatic_title_pending {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(invalid_data(
+                            "stored automatic title pending state is invalid",
+                        ));
+                    }
                 },
                 proxy: match (proxy_controller_session_id, proxy_changed_at_ms) {
                     (Some(controller_session_id), Some(changed_at_ms)) => {

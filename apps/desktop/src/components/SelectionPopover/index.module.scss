@@ -85,6 +85,10 @@ div.trigger[data-variant="field"] {
   background: var(--ez-surface);
   box-shadow: var(--ez-shadow-popover);
   opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
 }
 
 .popover[data-width="content"] {
@@ -92,7 +96,8 @@ div.trigger[data-variant="field"] {
   max-width: calc(100vw - 16px);
 }
 
-.popover[data-position-ready="true"] { opacity: 1; }
+.popover[data-position-ready="true"][data-presence="entered"] { opacity: 1; transform: translateY(0); }
+.popover[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
 
 .title {
   display: block;

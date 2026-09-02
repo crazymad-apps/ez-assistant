@@ -18,6 +18,7 @@ mod engine;
 mod filesystem;
 mod goal;
 mod input_state;
+mod materialization;
 mod memory;
 mod mode;
 mod permission;
@@ -41,7 +42,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-use std::time::Duration;
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use assistant_runtime::StoreError;
 
@@ -65,3 +66,62 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 type StorageResult<T> = Result<T, StoreError>;
+
+/// 解码持久化的有序附加目录，并在 Store 边界拒绝损坏或越界 JSON。
+fn decode_additional_directories(
+    value: &str,
+    invalid_message: &'static str,
+) -> StorageResult<Vec<String>> {
+    let directories = serde_json::from_str::<Vec<String>>(value)
+        .map_err(|source| invalid_data_with_source(invalid_message, source))?;
+    if directories.len() > 15 {
+        return Err(invalid_data(invalid_message));
+    }
+    let mut unique = BTreeSet::new();
+    for directory in &directories {
+        if !Path::new(directory).is_absolute() || !unique.insert(directory.as_str()) {
+            return Err(invalid_data(invalid_message));
+        }
+    }
+    Ok(directories)
+}
+
+#[cfg(test)]
+mod directory_decode_tests {
+    use super::*;
+
+    #[test]
+    fn additional_directory_json_round_trips_in_order() {
+        assert_eq!(
+            decode_additional_directories(
+                r#"["/workspace/docs","/workspace/assets"]"#,
+                "invalid directories",
+            )
+            .expect("valid directory list"),
+            ["/workspace/docs", "/workspace/assets"]
+        );
+    }
+
+    #[test]
+    fn additional_directory_json_fails_closed_when_damaged_or_invalid() {
+        for value in [
+            "not-json",
+            r#"{"path":"/workspace/docs"}"#,
+            r#"["relative/path"]"#,
+            r#"["/workspace/docs","/workspace/docs"]"#,
+        ] {
+            assert!(
+                decode_additional_directories(value, "invalid directories").is_err(),
+                "value should be rejected: {value}"
+            );
+        }
+
+        let too_many = serde_json::to_string(
+            &(0..16)
+                .map(|index| format!("/workspace/{index}"))
+                .collect::<Vec<_>>(),
+        )
+        .expect("encode fixture");
+        assert!(decode_additional_directories(&too_many, "invalid directories").is_err());
+    }
+}

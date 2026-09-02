@@ -5,10 +5,12 @@ import type {
   ChildTaskTreeItemSnapshot,
   MessageId,
   SessionSummary,
+  QuotedTextSnapshot,
   ToolCallId,
   UserMessageSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import { thumbnailAttachment } from "../../../native-bridge/nativeResource";
 import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import {
@@ -21,6 +23,7 @@ import {
 } from "./conversationRows";
 import { AssistantSegmentView, LiveSteps } from "./ToolSegments";
 import { DeviceMessageSourceDialog } from "./DeviceMessageSourceDialog";
+import { QuoteDetailDialog } from "../QuoteDetailDialog";
 import styles from "./index.module.scss";
 
 export function UserMessage(props: Readonly<{
@@ -29,12 +32,15 @@ export function UserMessage(props: Readonly<{
   on_attachment_click: (attachment: AttachmentSummary) => void;
   source_session?: SessionSummary;
   on_source_open: (session: SessionSummary) => void;
+  on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
 }>) {
   const images = props.attachments.filter((attachment) => attachment.media_type?.startsWith("image/"));
   const files = props.attachments.filter((attachment) => !attachment.media_type?.startsWith("image/"));
   const source = props.message.source ?? { type: "user" as const };
+  const quotes = props.message.quotes ?? [];
   const is_external = source.type === "controller_delivery" || source.type === "proxy_report";
   const [device_source_open, setDeviceSourceOpen] = useState(false);
+  const [quote_detail, setQuoteDetail] = useState<QuotedTextSnapshot | null>(null);
   return (
     <article
       className={`${styles.user_message}${is_external ? ` ${styles.external_message}` : ""}`}
@@ -80,10 +86,25 @@ export function UserMessage(props: Readonly<{
           ))}
         </div>
       )}
+      {quotes.length > 0 && (
+        <div aria-label="消息引用" className={styles.user_quotes}>
+          {quotes.map((quote) => (
+            <button key={quote.quote_id} onClick={() => setQuoteDetail(quote)} type="button">
+              <Icon name="quote" size={12} />
+              <span>{quote.exact}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {source.type === "proxy_report" ? (
         <ProxyReportBody text={props.message.text} />
       ) : (
-        <div className={styles.user_bubble}>{props.message.text}</div>
+        <div
+          className={styles.user_bubble}
+          data-quote-content="true"
+          data-quote-role="user"
+          data-quote-root="true"
+        >{props.message.text}</div>
       )}
       {source.type === "device" && (
         <button
@@ -102,9 +123,20 @@ export function UserMessage(props: Readonly<{
         </div>
       )}
       <time>{formatTime(props.message.created_at_ms)}</time>
+      <PresenceBoundary present={source.type === "device" && device_source_open}>
       {source.type === "device" && device_source_open ? (
         <DeviceMessageSourceDialog on_close={() => setDeviceSourceOpen(false)} source={source} />
       ) : null}
+      </PresenceBoundary>
+      <PresenceBoundary present={quote_detail !== null}>
+      {quote_detail && (
+        <QuoteDetailDialog
+          on_close={() => setQuoteDetail(null)}
+          on_locate={() => props.on_quote_locate?.(quote_detail) ?? Promise.resolve(false)}
+          quote={quote_detail}
+        />
+      )}
+      </PresenceBoundary>
     </article>
   );
 }
@@ -137,7 +169,12 @@ function ProxyReportBody(props: Readonly<{ text: string }>) {
   return (
     <div className={styles.proxy_report_body} data-expanded={expanded}>
       <div className={styles.proxy_report_viewport} ref={viewport_ref}>
-        <div className={styles.user_bubble}>{props.text}</div>
+        <div
+          className={styles.user_bubble}
+          data-quote-content="true"
+          data-quote-role="user"
+          data-quote-root="true"
+        >{props.text}</div>
       </div>
       {is_overflowing && (expanded ? (
         <button
@@ -213,7 +250,13 @@ export function AssistantTurn(props: Readonly<{
       ) : (
         <div className={styles.assistant_segments}>
           {props.messages.map((message) => (
-            <div className={styles.assistant_step} data-message-id={message.message_id} key={message.message_id}>
+            <div
+              className={styles.assistant_step}
+              data-message-id={message.message_id}
+              data-quote-role="assistant"
+              data-quote-root="true"
+              key={message.message_id}
+            >
               {message.segments.map((segment, index) => {
                 const state_key = segmentStateKey(message.message_id, segment, index);
                 return (

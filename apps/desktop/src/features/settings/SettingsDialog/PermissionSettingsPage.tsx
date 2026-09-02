@@ -12,11 +12,13 @@ import type {
 } from "../../../generated/assistant-protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import {
   SelectionPopover,
   type SelectionOption,
 } from "../../../components/SelectionPopover";
 import { SettingsPageContainer } from "./SettingsPageContainer";
+import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import styles from "./index.module.scss";
 
 type MatcherType = "general" | "file" | "shell";
@@ -76,6 +78,8 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
   const { onDirtyChange } = props;
   const [selected_key, setSelectedKey] = useState("session");
   const [editing, setEditing] = useState<RuleForm | null>(null);
+  const [pending_scope_key, setPendingScopeKey] = useState<string | null>(null);
+  const [deleting_rule, setDeletingRule] = useState<PermissionRuleDefinition | null>(null);
   const documents = settings.permission_documents;
   const selected = useMemo(
     () => documents.find((document) => scopeKey(document) === selected_key) ?? documents[0] ?? null,
@@ -111,16 +115,32 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
     if (saved) setEditing(null);
   }
 
-  async function deleteRule(rule: PermissionRuleDefinition) {
-    if (!selected || !window.confirm(`删除规则“${rule.id}”？`)) return;
-    await settings.replacePermissionDocument(
+  async function confirmDeleteRule() {
+    if (!selected || !deleting_rule) return;
+    const deleted = await settings.replacePermissionDocument(
       selected.scope,
       selected.revision,
       {
         schema_version: selected.schema_version,
-        rules: selected.rules.filter((candidate) => candidate.id !== rule.id),
+        rules: selected.rules.filter((candidate) => candidate.id !== deleting_rule.id),
       },
     );
+    if (deleted) setDeletingRule(null);
+  }
+
+  function selectScope(scope_key: string) {
+    if (editing) {
+      setPendingScopeKey(scope_key);
+      return;
+    }
+    setSelectedKey(scope_key);
+  }
+
+  function confirmScopeChange() {
+    if (!pending_scope_key) return;
+    setEditing(null);
+    setSelectedKey(pending_scope_key);
+    setPendingScopeKey(null);
   }
 
   return (
@@ -132,11 +152,7 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
               <button
                 aria-selected={scopeKey(document) === selected_key}
                 key={scopeKey(document)}
-                onClick={() => {
-                  if (editing && !window.confirm("当前规则尚未保存，确定切换范围吗？")) return;
-                  setEditing(null);
-                  setSelectedKey(scopeKey(document));
-                }}
+                onClick={() => selectScope(scopeKey(document))}
                 role="tab"
                 type="button"
               >
@@ -212,7 +228,7 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
                       <button aria-label="编辑规则" onClick={() => setEditing(formFromRule(rule))} type="button">
                         <Icon name="edit" size={14} />
                       </button>
-                      <button aria-label="删除规则" onClick={() => void deleteRule(rule)} type="button">
+                      <button aria-label="删除规则" onClick={() => setDeletingRule(rule)} type="button">
                         <Icon name="trash" size={14} />
                       </button>
                     </div>
@@ -226,6 +242,34 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
           )}
         </>
       )}
+      <PresenceBoundary present={pending_scope_key !== null}>
+        {pending_scope_key && (
+          <SessionActionDialog
+            confirm_label="切换范围"
+            is_danger
+            is_pending={false}
+            on_cancel={() => setPendingScopeKey(null)}
+            on_confirm={confirmScopeChange}
+            title="放弃未保存的规则修改？"
+          >
+            <p>当前规则尚未保存，继续后这些修改将丢失。</p>
+          </SessionActionDialog>
+        )}
+      </PresenceBoundary>
+      <PresenceBoundary present={deleting_rule !== null}>
+        {deleting_rule && (
+          <SessionActionDialog
+            confirm_label="删除规则"
+            is_danger
+            is_pending={settings.pending_action === "permission:save"}
+            on_cancel={() => setDeletingRule(null)}
+            on_confirm={() => void confirmDeleteRule()}
+            title={`删除规则“${deleting_rule.id}”？`}
+          >
+            <p>删除后，相关操作将继续由下一层权限规则和审批模式判断。</p>
+          </SessionActionDialog>
+        )}
+      </PresenceBoundary>
     </SettingsPageContainer>
   );
 });

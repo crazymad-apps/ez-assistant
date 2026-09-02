@@ -26,6 +26,7 @@ use crate::{
 };
 
 use super::projection::project_accepted_input;
+use crate::runtime::quote::insert_quotes;
 
 impl AssistantRuntime {
     /// 提交一条由 Host 渠道适配器识别来源的 Session 输入。
@@ -49,6 +50,7 @@ impl AssistantRuntime {
             }
             if input.mode != SubmitInputMode::Normal
                 || !input.attachment_ids.is_empty()
+                || !input.quotes.is_empty()
                 || input.skill_name.is_some()
             {
                 return Err(RuntimeError::InvalidRequest {
@@ -87,9 +89,12 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
-        if request.message.trim().is_empty() {
+        if request.message.trim().is_empty()
+            && request.attachment_ids.is_empty()
+            && request.quotes.is_empty()
+        {
             return Err(RuntimeError::InvalidRequest {
-                reason: "message must not be blank",
+                reason: "input must contain text, attachments, or quotes",
             });
         }
         let session = self.session(&request.session_id)?;
@@ -103,6 +108,9 @@ impl AssistantRuntime {
         }
         session.ensure_not_compacting()?;
         session.ensure_healthy()?;
+        let quotes = self
+            .normalize_quotes(&request.session_id, &request.quotes)
+            .await?;
         let model_key = session.model_key()?;
         let configuration = self.config_registry.snapshot()?;
         if configuration
@@ -121,6 +129,7 @@ impl AssistantRuntime {
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
         let mut message = create_user_message(request.message, files, request.variant)?;
+        insert_quotes(&mut message, &quotes)?;
         // 结构化 channel_source 才是授权和回复路由事实；此 InternalContext 只提示模型本轮交互形态。
         if let Some(text) = channel_input_context(&channel_source) {
             InternalBoundaryCoordinator::insert_before(
@@ -384,7 +393,7 @@ fn channel_input_context(source: &InputChannelSource) -> Option<String> {
     ))
 }
 
-fn automatic_session_title(message: &str) -> String {
+pub(in crate::runtime) fn automatic_session_title(message: &str) -> String {
     let line = message
         .lines()
         .map(str::trim)

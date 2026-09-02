@@ -122,6 +122,9 @@ pub enum RuntimeError {
     /// WorkPlan revision 已被其他写入更新。
     #[error("work plan revision changed in session `{session_id}")]
     WorkPlanRevisionConflict { session_id: SessionId },
+    /// 首次发送幂等键已经绑定到另一份业务内容。
+    #[error("materialization key was reused with different content")]
+    MaterializationConflict,
     /// Session 内部结算不变量已被破坏，后续变更被拒绝。
     #[error("session `{session_id}` is faulted")]
     SessionFaulted {
@@ -343,6 +346,10 @@ impl RuntimeError {
             Self::WorkPlanRevisionConflict { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::WorkPlanRevisionConflict,
                 "work plan changed; reload the latest plan",
+            ),
+            Self::MaterializationConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::Conflict,
+                "materialization key was reused with different content",
             ),
             Self::SessionFaulted { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,

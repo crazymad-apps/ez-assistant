@@ -9,10 +9,15 @@ import type {
   ModelKey,
   PrepareDeleteSessionResult,
   SessionId,
+  UpdateWorkspaceRequest,
   WorkspaceId,
+  WorkspaceSummary,
 } from "../generated/assistant-protocol";
 import { exportSessionMarkdown } from "../native-bridge/nativeResource";
-import { openWorkspaceDirectory } from "../native-bridge/openWorkspaceDirectory";
+import {
+  openSessionWorkspaceDirectory,
+  openWorkspaceDirectory,
+} from "../native-bridge/openWorkspaceDirectory";
 import { chooseWorkspaceDirectory } from "../native-bridge/workspaceDirectory";
 import type { ConnectionStore } from "./ConnectionStore";
 import type { NavigationStore } from "./NavigationStore";
@@ -30,6 +35,7 @@ type SessionManagementState = {
     session_id: SessionId;
     tone: "success" | "warning" | "neutral";
     message: string;
+    action?: "retry_title";
   }> | null;
 };
 
@@ -38,6 +44,7 @@ type SessionManagementDependencies = Readonly<{
   navigation: NavigationStore;
   runtime: RuntimeLifecycleCoordinator;
   save_preferences: () => void;
+  select_draft: (workspace_id: WorkspaceId | null) => void;
   select_session: (session_id: SessionId) => Promise<void>;
   state: SessionManagementState;
 }>;
@@ -45,33 +52,6 @@ type SessionManagementDependencies = Readonly<{
 /** Handles session and workspace commands while RootStore remains the UI-facing facade. */
 export class SessionManagementController {
   constructor(private readonly dependencies: SessionManagementDependencies) {}
-
-  async createSession(workspace_id?: WorkspaceId | null): Promise<void> {
-    const { connection, runtime, state } = this.dependencies;
-    if (
-      !runtime.client
-      || connection.state !== "connected"
-      || state.pending_session_action
-      || state.pending_workspace_action
-    ) {
-      return;
-    }
-    state.pending_session_action = true;
-    try {
-      const result = await runtime.client.command({
-        type: "create_session",
-        payload: { title: null, model_key: null, workspace_id: workspace_id ?? null },
-      });
-      await runtime.loadApplication();
-      await this.dependencies.select_session(result.payload.session.session_id);
-    } catch (error: unknown) {
-      connection.markDisconnected(displayError(error));
-    } finally {
-      runInAction(() => {
-        state.pending_session_action = false;
-      });
-    }
-  }
 
   async forkSession(
     session_id: SessionId,
@@ -243,6 +223,25 @@ export class SessionManagementController {
     }
   }
 
+  async generateSessionTitle(session_id: SessionId): Promise<boolean> {
+    const { connection, runtime, state } = this.dependencies;
+    const client = runtime.client;
+    if (!client || connection.state !== "connected") return false;
+    state.interaction_error = null;
+    state.session_notice = null;
+    try {
+      await client.command({ type: "generate_session_title", payload: { session_id } });
+      await runtime.loadSession(session_id);
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      await runtime.loadSession(session_id);
+      return false;
+    }
+  }
+
   async cancelSessionCompaction(session_id: SessionId, operation_id: string): Promise<boolean> {
     const { runtime, state } = this.dependencies;
     if (!runtime.client || state.pending_compaction_cancel_session_id) {
@@ -299,38 +298,70 @@ export class SessionManagementController {
     }
   }
 
-  async addWorkspace(): Promise<void> {
+  async chooseWorkspaceDirectory(): Promise<string | null> {
+    try {
+      return await chooseWorkspaceDirectory();
+    } catch (error: unknown) {
+      runInAction(() => {
+        this.dependencies.state.interaction_error = displayError(error);
+      });
+      return null;
+    }
+  }
+
+  async registerWorkspace(input: Readonly<{
+    label: string;
+    primary_directory: string;
+    additional_directories: string[];
+  }>): Promise<boolean> {
     const { connection, navigation, runtime, state } = this.dependencies;
     const client = runtime.client;
     if (!client || connection.state !== "connected" || state.pending_workspace_action || state.pending_session_action) {
-      return;
+      return false;
     }
     state.pending_workspace_action = true;
     state.interaction_error = null;
     try {
-      const path = await chooseWorkspaceDirectory();
-      if (!path) {
-        return;
-      }
-      const workspace_result = await client.command({ type: "register_workspace", payload: { path } });
+      const workspace_result = await client.command({ type: "register_workspace", payload: input });
       const workspace_id = workspace_result.payload.workspace.workspace_id;
       await runtime.loadApplication();
       navigation.ensureWorkspaceExpanded(workspace_id);
       this.dependencies.save_preferences();
-      if (workspace_result.payload.restored) {
-        await runtime.selectInitialSession();
-        return;
-      }
-      const session_result = await client.command({
-        type: "create_session",
-        payload: { title: null, model_key: null, workspace_id },
-      });
-      await runtime.loadApplication();
-      await this.dependencies.select_session(session_result.payload.session.session_id);
+      this.dependencies.select_draft(workspace_id);
+      return true;
     } catch (error: unknown) {
       runInAction(() => {
         state.interaction_error = displayError(error);
       });
+      return false;
+    } finally {
+      runInAction(() => {
+        state.pending_workspace_action = false;
+      });
+    }
+  }
+
+  async updateWorkspace(input: UpdateWorkspaceRequest): Promise<WorkspaceSummary | null> {
+    const { connection, runtime, state } = this.dependencies;
+    const client = runtime.client;
+    if (!client || connection.state !== "connected" || state.pending_workspace_action) {
+      return null;
+    }
+    state.pending_workspace_action = true;
+    state.interaction_error = null;
+    try {
+      const result = await client.command({ type: "update_workspace", payload: input });
+      await runtime.loadApplication();
+      const selected_session_id = this.dependencies.navigation.selected_session_id;
+      if (selected_session_id) {
+        await runtime.loadSession(selected_session_id);
+      }
+      return result.payload.workspace;
+    } catch (error: unknown) {
+      runInAction(() => {
+        state.interaction_error = displayError(error);
+      });
+      return null;
     } finally {
       runInAction(() => {
         state.pending_workspace_action = false;
@@ -367,6 +398,17 @@ export class SessionManagementController {
     this.dependencies.state.interaction_error = null;
     try {
       await openWorkspaceDirectory(workspace_id);
+    } catch (error: unknown) {
+      runInAction(() => {
+        this.dependencies.state.interaction_error = displayError(error);
+      });
+    }
+  }
+
+  async openSessionWorkspaceDirectory(session_id: SessionId, directory_index: number): Promise<void> {
+    this.dependencies.state.interaction_error = null;
+    try {
+      await openSessionWorkspaceDirectory(session_id, directory_index);
     } catch (error: unknown) {
       runInAction(() => {
         this.dependencies.state.interaction_error = displayError(error);

@@ -97,9 +97,9 @@ impl Error for SkillNameError {}
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSource {
-    /// 当前工作区的 `.ez-assistant/skills`。
+    /// 某个 Workspace 根目录的 `.ez-assistant/skills`。
     WorkspaceEzAssistant,
-    /// 当前工作区的 `.agents/skills`。
+    /// 某个 Workspace 根目录的 `.agents/skills`。
     WorkspaceAgents,
     /// 用户 Home 下的 `.ez-assistant/skills`。
     UserEzAssistant,

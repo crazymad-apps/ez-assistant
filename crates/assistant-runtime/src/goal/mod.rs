@@ -102,7 +102,9 @@ impl GoalControl {
                 UserPart::FileReferences(part) => {
                     Some(GoalObjectivePart::FileReferences(part.clone()))
                 }
-                UserPart::Injected(_) | UserPart::InternalContext(_) => None,
+                UserPart::Injected(_) | UserPart::InternalContext(_) | UserPart::QuotedText(_) => {
+                    None
+                }
             })
             .collect::<Vec<_>>();
         let payload_hash = objective_hash(&payload)?;

@@ -13,6 +13,8 @@ pub struct SessionExecutionEnvironment {
     pub workspace_id: Option<WorkspaceId>,
     /// Agent 默认工作的用户目录；未绑定 Workspace 时指向 Session 私有目录。
     pub working_directory: String,
+    /// 创建 Session 时冻结的有序 Workspace 附加目录；后续 Workspace 编辑不会改写。
+    pub additional_workspace_directories: Vec<String>,
     /// Workspace 范围、可由多个 Session 复用的 Agent 私有目录。
     pub workspace_private_directory: Option<String>,
     /// Session 范围、持久保存上传附件的静态目录。
@@ -26,7 +28,9 @@ pub struct SessionExecutionEnvironment {
 /// Environment Factory 构造绑定环境时需要的稳定 Workspace 投影。
 pub struct WorkspaceEnvironmentSource<'a> {
     pub workspace_id: &'a WorkspaceId,
+    pub label: &'a str,
     pub user_directory: &'a str,
+    pub additional_directories: &'a [String],
     pub agent_directory: &'a str,
 }
 

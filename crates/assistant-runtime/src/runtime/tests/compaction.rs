@@ -55,6 +55,7 @@ async fn submit_completed_turn(
             session_id: session_id.clone(),
             message: text.to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -311,6 +312,7 @@ async fn manual_compaction_rejects_a_session_with_an_active_run() {
             session_id: session_id.clone(),
             message: "running turn".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -496,6 +498,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
             session_id: session_id.clone(),
             message: "must not queue during compact".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

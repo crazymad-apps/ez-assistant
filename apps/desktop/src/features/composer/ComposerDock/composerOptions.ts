@@ -5,6 +5,7 @@ export const SLASH_COMMANDS = [
   { name: "/mode", description: "切换构建或规划模式", picker: "variant" as const },
   { name: "/approval", description: "切换询问或自动审批", picker: "approval" as const },
   { name: "/compact", description: "压缩较早上下文", picker: null },
+  { name: "/title", description: "根据当前对话更新标题", picker: null },
   { name: "/new", description: "新建会话", picker: null },
   { name: "/help", description: "查看指令与键盘说明", picker: null },
 ] as const;

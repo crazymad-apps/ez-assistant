@@ -267,6 +267,8 @@ impl AssistantRuntime {
                     current_variant,
                     approval_mode,
                     role: crate::SessionRole::Standard,
+                    materialization_key: None,
+                    automatic_title_pending: super::automatic_title_enabled_by_default(),
                     created_at_ms,
                 },
                 conversation,
@@ -423,6 +425,7 @@ impl AssistantRuntime {
             crate::id::generate("delete").map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "delete operation id random source",
             })?;
+        session.cancel_title_generation()?;
         self.store
             .delete_session(SessionDeletion {
                 session_id: request.session_id.clone(),
@@ -483,11 +486,17 @@ impl AssistantRuntime {
 
         let current_environment = session.environment().clone();
         let expected_role = session.role()?;
-        let workspace = current_environment
+        let mut workspace = current_environment
             .workspace_id
             .as_ref()
             .map(|workspace_id| self.workspace_for_session_context(workspace_id))
             .transpose()?;
+        if let Some(workspace) = workspace.as_mut() {
+            // Clear 会重建上下文，但不能把 Workspace 后续编辑的目录热更新进既有 Session。
+            workspace.user_directory = current_environment.working_directory.clone();
+            workspace.additional_directories =
+                current_environment.additional_workspace_directories.clone();
+        }
         let memory_context =
             self.store.load_memory_context().await.map_err(|source| {
                 RuntimeError::from_store("load memory context for clear", source)
@@ -500,7 +509,9 @@ impl AssistantRuntime {
                     .as_ref()
                     .map(|workspace| WorkspaceEnvironmentSource {
                         workspace_id: &workspace.workspace_id,
+                        label: &workspace.label,
                         user_directory: &workspace.user_directory,
+                        additional_directories: &workspace.additional_directories,
                         agent_directory: &workspace.agent_directory,
                     }),
                 memory_context: &memory_context,
@@ -512,13 +523,14 @@ impl AssistantRuntime {
             });
         }
         let skill_catalog = self
-            .prepare_session_skill_catalog(
-                workspace
-                    .as_ref()
-                    .map(|workspace| workspace.user_directory.as_str()),
-            )
+            .prepare_session_skill_catalog(workspace.as_ref().map(|workspace| {
+                std::iter::once(workspace.user_directory.clone())
+                    .chain(workspace.additional_directories.iter().cloned())
+                    .collect()
+            }))
             .await?;
         let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
+        session.cancel_title_generation()?;
         let cleared = self
             .store
             .clear_session_history(SessionHistoryClear {
@@ -696,6 +708,7 @@ impl AssistantRuntime {
         let session = self.session(&request.session_id)?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
+        session.cancel_title_generation()?;
         let changed_at_ms = now_ms()?;
         self.store
             .rename_session(SessionTitleChange {
@@ -709,6 +722,7 @@ impl AssistantRuntime {
             let mut state = session.lock_state()?;
             state.title = title.to_owned();
             state.title_origin = SessionTitleOrigin::User;
+            state.automatic_title_pending = false;
         }
         let summary = session.summary()?;
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
@@ -1239,7 +1253,7 @@ fn fork_title(source: &str) -> String {
     title
 }
 
-fn supports_effort(
+pub(super) fn supports_effort(
     capabilities: &crate::ResolvedModelCapabilities,
     effort: ProtocolEffort,
 ) -> bool {

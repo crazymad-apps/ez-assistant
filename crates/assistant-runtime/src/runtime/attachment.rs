@@ -24,6 +24,17 @@ pub struct StagedAttachmentUpload {
     pub media_type: Option<String>,
 }
 
+/// Host 已按 manifest 选择键完成流式接收、等待首次发送统一物化的文件。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedSessionAttachment {
+    pub selection_key: String,
+    pub original_name: String,
+    pub staging_path: String,
+    pub blob_hash: String,
+    pub size_bytes: u64,
+    pub media_type: Option<String>,
+}
+
 impl AssistantRuntime {
     /// 在 Host 读取上传正文前检查 Session 生命周期；内容去重必须等 Hash 形成后完成。
     pub async fn begin_attachment_upload(&self, session_id: &SessionId) -> RuntimeResult<()> {
@@ -192,7 +203,7 @@ impl AssistantRuntime {
     }
 }
 
-fn summary(stored: &StoredAttachment) -> AttachmentSummary {
+pub(super) fn summary(stored: &StoredAttachment) -> AttachmentSummary {
     AttachmentSummary {
         attachment_id: stored.attachment_id.clone(),
         session_id: stored.session_id.clone(),

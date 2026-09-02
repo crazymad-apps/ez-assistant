@@ -3,15 +3,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApprovalDecision,
   GoalStateSnapshot,
+  QuotedTextSnapshot,
+  SessionId,
   SessionViewSnapshot,
   SkillSummarySnapshot,
   SubmitInputMode,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import { useInputMethodGuard } from "../../../components/InputMethodGuard";
 import { Tooltip } from "../../../components/Tooltip";
+import type { NewSessionDraft, NewSessionDraftKey } from "../../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
+import { AttachmentDetailDialog } from "./AttachmentDetailDialog";
+import { QuoteDetailDialog } from "../../conversation/QuoteDetailDialog";
 import {
   formatCompact,
   SLASH_COMMANDS,
@@ -30,6 +36,17 @@ import { type ComposerAttachment, useComposerAttachments } from "./useComposerAt
 import styles from "./index.module.scss";
 
 export const ComposerDock = observer(function ComposerDock({ read_only = false }: Readonly<{
+  read_only?: boolean;
+}>) {
+  const store = useRootStore();
+  const draft_key = store.navigation.selected_draft_key;
+  if (draft_key) {
+    return read_only ? null : <NewSessionDraftComposer draft_key={draft_key} />;
+  }
+  return <SessionComposerDock read_only={read_only} />;
+});
+
+const SessionComposerDock = observer(function SessionComposerDock({ read_only = false }: Readonly<{
   read_only?: boolean;
 }>) {
   const store = useRootStore();
@@ -56,8 +73,9 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   const attachment_flow = useComposerAttachments({
     disabled: store.composer_pending || store.pending_compaction_session_id === session_id,
     on_error: (message) => store.showInteractionError(message),
-    session_id,
+    owner_key: session_id,
   });
+  const quotes = store.composer_quotes.get(session_id);
 
   const model_options = useMemo(() =>
     (application?.models ?? []).flatMap((model) => model.model_key && model.is_valid ? [{
@@ -140,8 +158,8 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       return;
     }
     setDraft("");
-    if (attachment_flow.attachments.length > 0 || goal_armed || selected_skill) {
-      store.showInteractionError("/compact 必须单独使用，请先移除附件、目标和技能标记。");
+    if (attachment_flow.attachments.length > 0 || quotes.length > 0 || goal_armed || selected_skill) {
+      store.showInteractionError("/compact 必须单独使用，请先移除附件、引用、目标和技能标记。");
       return;
     }
     if (
@@ -168,7 +186,12 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       await submitCompaction();
       return;
     }
-    if (!value.trim() || model_required || store.composer_pending || attachment_flow.pending) {
+    if (value.trim() === "/title") {
+      setDraft("");
+      await store.generateSessionTitle(session!.session_id);
+      return;
+    }
+    if ((!value.trim() && attachment_flow.attachments.length === 0 && quotes.length === 0) || model_required || store.composer_pending || attachment_flow.pending) {
       return;
     }
     if (slash_query) {
@@ -184,20 +207,47 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     }
     const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
     const submitted = selected_skill
-      ? await store.submitInput(
-        session!.session_id,
-        value,
-        session!.current_variant,
-        attachment_ids,
-        mode,
-        selected_skill.name,
-      )
-      : await store.submitInput(session!.session_id, value, session!.current_variant, attachment_ids, mode);
+      ? quotes.length > 0
+        ? await store.submitInput(
+          session!.session_id,
+          value,
+          session!.current_variant,
+          attachment_ids,
+          mode,
+          selected_skill.name,
+          quotes,
+        )
+        : await store.submitInput(
+          session!.session_id,
+          value,
+          session!.current_variant,
+          attachment_ids,
+          mode,
+          selected_skill.name,
+        )
+      : quotes.length > 0
+        ? await store.submitInput(
+          session!.session_id,
+          value,
+          session!.current_variant,
+          attachment_ids,
+          mode,
+          null,
+          quotes,
+        )
+        : await store.submitInput(
+          session!.session_id,
+          value,
+          session!.current_variant,
+          attachment_ids,
+          mode,
+        );
     if (submitted) {
       setDraft("");
       setGoalArmed(false);
       setSelectedSkill(null);
       attachment_flow.clear();
+      store.composer_quotes.clear(session!.session_id);
     }
   }
 
@@ -207,6 +257,19 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
         void submitCompaction();
       } else {
         setDraft("/compact");
+        requestAnimationFrame(() => textarea_ref.current?.focus());
+      }
+      return;
+    }
+    if (command.name === "/title") {
+      if (command.disabled_reason) {
+        setDraft("");
+        store.showInteractionError(command.disabled_reason);
+      } else if (draft.trim() === "/title") {
+        setDraft("");
+        void store.generateSessionTitle(session!.session_id);
+      } else {
+        setDraft("/title");
         requestAnimationFrame(() => textarea_ref.current?.focus());
       }
       return;
@@ -236,7 +299,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     }
     if (command.name === "/new") {
       setDraft("");
-      void store.createSession(session!.workspace_id);
+      store.openNewSessionDraft(session!.workspace_id);
       return;
     }
     setDraft("");
@@ -262,9 +325,12 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      const exact = slash_query === null
-        ? undefined
-        : slash_items.find((item) => item.name === slash_query.trim());
+      const exact_command = SLASH_COMMANDS.find(
+        (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
+      );
+      const exact = exact_command
+        ? { ...exact_command, disabled_reason: slashDisabledReason(exact_command.name, session_view) }
+        : undefined;
       if (exact) {
         handleSlashCommand(exact);
         return;
@@ -288,9 +354,10 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
 
   const goal = session_view.goal;
   const compaction_cancels_from_primary = Boolean(manual_compaction?.cancellable);
-  const goal_stops_from_primary = !compaction_cancels_from_primary && !draft.trim() && goal?.state === "running";
-  const run_interrupts_from_primary = !draft.trim() && !goal_stops_from_primary && Boolean(session.active_run_id);
-  const primary_action_available = compaction_cancels_from_primary || Boolean(draft.trim()) || goal_stops_from_primary || run_interrupts_from_primary;
+  const has_composer_content = Boolean(draft.trim() || attachment_flow.attachments.length || quotes.length);
+  const goal_stops_from_primary = !compaction_cancels_from_primary && !has_composer_content && goal?.state === "running";
+  const run_interrupts_from_primary = !has_composer_content && !goal_stops_from_primary && Boolean(session.active_run_id);
+  const primary_action_available = compaction_cancels_from_primary || has_composer_content || goal_stops_from_primary || run_interrupts_from_primary;
   const primary_action = resolvePrimaryAction(compaction_cancels_from_primary, goal_stops_from_primary, run_interrupts_from_primary);
   const primary_label = primaryActionLabel(primary_action);
   const execution_initial_category = active_overlay === "execution"
@@ -331,7 +398,18 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
       {store.session_notice?.session_id === session.session_id && (
         <div className={styles.session_notice} data-tone={store.session_notice.tone} role="status">
           <span>{store.session_notice.message}</span>
-          <button aria-label="关闭状态提示" onClick={() => store.clearSessionNotice(session.session_id)} type="button"><Icon name="x" size={14} /></button>
+          <div className={styles.session_notice_actions}>
+            {store.session_notice.action === "retry_title" && (
+              <button className={styles.session_notice_action} onClick={() => void store.generateSessionTitle(session.session_id)} type="button">重试</button>
+            )}
+            <button aria-label="关闭状态提示" onClick={() => store.clearSessionNotice(session.session_id)} type="button"><Icon name="x" size={14} /></button>
+          </div>
+        </div>
+      )}
+      {!read_only && session_view.title_generation?.trigger === "manual" && (
+        <div className={styles.compaction_status} role="status">
+          <span className={styles.loading_ring} />
+          <strong>正在生成标题</strong>
         </div>
       )}
       {!read_only && goal && (
@@ -391,11 +469,8 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
           {session.proxy && (
             <div className={styles.proxy_takeover_hint}>当前由主控代理；发送消息后将由你接管并退出代理。</div>
           )}
-          {slash_items.length > 0 && (
-            <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} />
-          )}
-          {show_help && <SlashCommandHelp on_close={() => setShowHelp(false)} />}
-          {skill_picker_open && (
+          <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
+          <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
             <SkillPicker
               on_close={() => {
                 setSkillPickerOpen(false);
@@ -406,9 +481,9 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
                 setSkillPickerOpen(false);
                 requestAnimationFrame(() => textarea_ref.current?.focus());
               }}
+              open={skill_picker_open}
               skills={availableUserSkills(session_view.skill_catalog.skills)}
             />
-          )}
           {(goal_armed || selected_skill) && (
             <div className={styles.draft_tags}>
               {goal_armed && <span>
@@ -421,25 +496,16 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               </span>}
             </div>
           )}
-          {attachment_flow.attachments.length > 0 && (
-            <div aria-label="待发送附件" className={styles.attachment_list}>
-              {attachment_flow.attachments.map((attachment) => (
-                <div data-state={attachment.state} key={attachment.selection_id} title={attachment.error ?? attachment.original_name}>
-                  <Icon name="paperclip" size={14} />
-                  <span>{attachment.original_name}</span>
-                  <small>{attachmentStateLabel(attachment)}</small>
-                  <button
-                    aria-label={`移除附件 ${attachment.original_name}`}
-                    title={attachment.state === "uploading" ? "取消上传" : "移除附件"}
-                    onClick={() => attachment_flow.remove(attachment)}
-                    type="button"
-                  >
-                    <Icon name="x" size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <ComposerAttachmentContext
+            attachments={attachment_flow.attachments}
+            on_quote_locate={(quote) => store.locateTextQuoteSource(session.session_id, quote)}
+            on_quote_remove={(quote) => store.composer_quotes.remove(session.session_id, quote.quote_id)}
+            on_remove={attachment_flow.remove}
+            owner_key={session.session_id}
+            paste_pending={attachment_flow.paste_pending}
+            quotes={quotes}
+            session_id={session.session_id}
+          />
           <textarea
             aria-label="输入消息"
             disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
@@ -448,6 +514,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleTextareaKeyDown}
             onKeyUp={input_method.onKeyUp}
+            onPaste={(event) => handleComposerPaste(event, draft, setDraft, attachment_flow.pasteImages)}
             placeholder={model_required
               ? "请先选择一个可用模型"
               : manual_compaction || compaction_command_pending
@@ -459,7 +526,7 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
             rows={2}
             value={draft}
           />
-          <footer className={styles.composer_actions} data-has-hosting={session.role === "controller"}>
+          <footer className={styles.composer_actions}>
             <Tooltip content="添加附件">
               <button
                 aria-label="添加附件"
@@ -511,18 +578,18 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
               trigger_class_name={styles.model_selector}
             />
             <button
-              aria-label={draft.trim() && !compaction_cancels_from_primary ? "发送消息" : primary_label}
+              aria-label={has_composer_content && !compaction_cancels_from_primary ? "发送消息" : primary_label}
               className={styles.send_button}
               data-action={primary_action}
               disabled={(store.composer_pending && !compaction_cancels_from_primary)
                 || attachment_flow.pending
                 || !primary_action_available
                 || store.pending_compaction_cancel_session_id === session.session_id
-                || (Boolean(draft.trim()) && model_required && !compaction_cancels_from_primary)}
+                || (has_composer_content && model_required && !compaction_cancels_from_primary)}
               onClick={() => {
                 if (compaction_cancels_from_primary && manual_compaction) {
                   void store.cancelSessionCompaction(session.session_id, manual_compaction.compaction_id);
-                } else if (draft.trim()) {
+                } else if (has_composer_content) {
                   void submitDraft();
                 } else if (goal_stops_from_primary && goal) {
                   void store.stopGoal(session.session_id, goal.goal_id, goal.generation);
@@ -541,11 +608,393 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   );
 });
 
+const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draft_key }: Readonly<{
+  draft_key: NewSessionDraftKey;
+}>) {
+  const store = useRootStore();
+  const application = store.projection.application;
+  const draft = store.new_session_drafts.get(draft_key);
+  const [skill_picker_open, setSkillPickerOpen] = useState(false);
+  const [active_overlay, setActiveOverlay] = useState<"execution" | "model" | null>(null);
+  const [show_help, setShowHelp] = useState(false);
+  const [slash_active_index, setSlashActiveIndex] = useState(0);
+  const textarea_ref = useRef<HTMLTextAreaElement>(null);
+  const slash_ref = useRef<HTMLDivElement>(null);
+  const input_method = useInputMethodGuard();
+  const attachment_flow = useComposerAttachments({
+    attachments: draft?.attachments ?? [],
+    disabled: store.composer_pending,
+    on_attachments_change: (attachments) => store.new_session_drafts.updateAttachments(draft_key, attachments),
+    on_error: (message) => store.showInteractionError(message),
+    owner_key: draft_key,
+  });
+  const model_options = useMemo(() =>
+    (application?.models ?? []).flatMap((model) => model.model_key && model.is_valid ? [{
+      value: model.model_key,
+      label: model.display_name,
+      description: [model.provider ?? model.protocol, model.model, model.context_window_tokens ? formatCompact(model.context_window_tokens) : null]
+        .filter(Boolean).join(" · "),
+    }] : []), [application?.models]);
+  const selected_skill = draft?.skill_options.find((skill) => skill.name === draft.selected_skill_name) ?? null;
+  const slash_query = draft?.text.startsWith("/") && !draft.text.includes("\n")
+    ? draft.text.toLocaleLowerCase()
+    : null;
+  const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
+    .filter((item) => item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)))
+    .map((item) => ({ ...item, disabled_reason: draftSlashDisabledReason(item.name, draft) }));
+
+  useEffect(() => {
+    const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
+    setSlashActiveIndex(Math.max(0, first_enabled));
+  }, [slash_query]);
+  useEffect(() => {
+    setSkillPickerOpen(false);
+    setActiveOverlay(null);
+    setShowHelp(false);
+  }, [draft_key]);
+  useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
+
+  if (!draft) return null;
+  const current_draft = draft;
+  const model_required = draft.model_key === null;
+  const can_send = Boolean(draft.text.trim() || draft.attachments.length || draft.quotes.length);
+
+  function updateOverlay(overlay: "execution" | "model", open: boolean) {
+    setActiveOverlay((current) => open ? overlay : current === overlay ? null : current);
+  }
+
+  function handleSlashCommand(command: SlashCommandItem) {
+    if (command.disabled_reason) {
+      store.new_session_drafts.updateText(draft_key, "");
+      store.showInteractionError(command.disabled_reason);
+      return;
+    }
+    store.new_session_drafts.updateText(draft_key, "");
+    if (command.name === "/goal") {
+      store.new_session_drafts.updateGoalArmed(draft_key, true);
+    } else if (command.name === "/skill") {
+      setSkillPickerOpen(true);
+    } else if (command.name === "/model") {
+      setActiveOverlay("model");
+    } else if (command.name === "/mode" || command.name === "/approval") {
+      setActiveOverlay("execution");
+    } else if (command.name === "/new") {
+      store.openNewSessionDraft(current_draft.workspace_id);
+    } else {
+      setShowHelp(true);
+    }
+    requestAnimationFrame(() => textarea_ref.current?.focus());
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (input_method.shouldIgnoreKeyDown(event)) return;
+    if (slash_items.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const next = nextEnabledSlashIndex(slash_items, slash_active_index, direction);
+      setSlashActiveIndex(next);
+      slash_ref.current?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (event.key === "Escape" && slash_query !== null) {
+      event.preventDefault();
+      store.new_session_drafts.updateText(draft_key, current_draft.text.slice(1));
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const exact_command = SLASH_COMMANDS.find(
+        (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
+      );
+      const command = exact_command
+        ? { ...exact_command, disabled_reason: draftSlashDisabledReason(exact_command.name, draft) }
+        : slash_query === null ? undefined : slash_items[slash_active_index];
+      if (command) handleSlashCommand(command);
+      else void store.materializeNewSessionDraft(draft_key);
+    }
+  }
+
+  return (
+    <div className={styles.dock}>
+      {store.interaction_error && (
+        <div className={styles.error_notice} role="alert">
+          <span>{store.interaction_error}</span>
+          <button aria-label="关闭错误提示" onClick={() => store.clearInteractionError()} type="button"><Icon name="x" size={14} /></button>
+        </div>
+      )}
+      <section className={styles.composer}>
+        <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
+        <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
+          <SkillPicker
+            on_close={() => setSkillPickerOpen(false)}
+            on_select={(skill) => {
+              store.new_session_drafts.updateSelectedSkill(draft_key, skill.name);
+              setSkillPickerOpen(false);
+              requestAnimationFrame(() => textarea_ref.current?.focus());
+            }}
+            open={skill_picker_open}
+            skills={availableUserSkills(draft.skill_options)}
+          />
+        {(draft.goal_armed || selected_skill) && (
+          <div className={styles.draft_tags}>
+            {draft.goal_armed && <span>
+              目标
+              <button aria-label="取消目标标记" onClick={() => store.new_session_drafts.updateGoalArmed(draft_key, false)} type="button"><Icon name="x" size={12} /></button>
+            </span>}
+            {selected_skill && <span title={selected_skill.name}>
+              {selected_skill.name}
+              <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => store.new_session_drafts.updateSelectedSkill(draft_key, null)} type="button"><Icon name="x" size={12} /></button>
+            </span>}
+          </div>
+        )}
+          <ComposerAttachmentContext
+            attachments={attachment_flow.attachments}
+            on_remove={attachment_flow.remove}
+            owner_key={draft_key}
+            paste_pending={attachment_flow.paste_pending}
+            session_id={null}
+        />
+        <textarea
+          aria-label="输入消息"
+          disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
+          onChange={(event) => store.new_session_drafts.updateText(draft_key, event.target.value)}
+          onCompositionEnd={input_method.onCompositionEnd}
+          onCompositionStart={input_method.onCompositionStart}
+          onKeyDown={handleKeyDown}
+          onKeyUp={input_method.onKeyUp}
+          onPaste={(event) => handleComposerPaste(
+            event,
+            draft.text,
+            (value) => store.new_session_drafts.updateText(draft_key, value),
+            attachment_flow.pasteImages,
+          )}
+          placeholder={model_required ? "请先选择一个可用模型" : "输入消息…  / 使用指令"}
+          ref={textarea_ref}
+          rows={2}
+          value={draft.text}
+        />
+        <footer className={styles.composer_actions}>
+          <Tooltip content="添加附件">
+            <button aria-label="添加附件" className={styles.icon_button} disabled={store.composer_pending || attachment_flow.pending} onClick={() => void attachment_flow.choose()} type="button">
+              <Icon name="plus" size={17} />
+            </button>
+          </Tooltip>
+          <ExecutionSettingsPopover
+            approval_mode={draft.approval_mode}
+            disabled={store.composer_pending}
+            initial_category={null}
+            on_approval_change={(mode) => {
+              store.new_session_drafts.updateApprovalMode(draft_key, mode);
+              return Promise.resolve(true);
+            }}
+            on_open_change={(open) => updateOverlay("execution", open)}
+            on_variant_change={(variant) => {
+              store.new_session_drafts.updateVariant(draft_key, variant);
+              return Promise.resolve(true);
+            }}
+            open={active_overlay === "execution"}
+            trigger_class_name={styles.execution_selector}
+            variant={draft.variant}
+          />
+          <span className={styles.action_spacer} />
+          <ModelSettingsPopover
+            disabled={store.composer_pending}
+            effort={draft.reasoning_effort}
+            effort_options={[]}
+            initial_category={null}
+            model_display_name={draft.model_key ? modelDisplayName(application, draft.model_key) : "未选择模型"}
+            model_key={draft.model_key}
+            model_options={model_options}
+            on_effort_change={(effort) => {
+              store.new_session_drafts.updateReasoningEffort(draft_key, effort);
+              return Promise.resolve(true);
+            }}
+            on_model_change={(model_key) => {
+              store.new_session_drafts.updateModel(draft_key, model_key);
+              return Promise.resolve(true);
+            }}
+            on_open_change={(open) => updateOverlay("model", open)}
+            open={active_overlay === "model"}
+            trigger_class_name={styles.model_selector}
+          />
+          <button
+            aria-label="发送消息"
+            className={styles.send_button}
+            data-action="send"
+            disabled={!can_send || model_required || store.composer_pending || attachment_flow.pending}
+            onClick={() => void store.materializeNewSessionDraft(draft_key)}
+            type="button"
+          >
+            <Icon name="arrow-down" size={16} />
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+});
+
 function ContextUsageRing({ view }: Readonly<{ view: SessionViewSnapshot }>) {
   const context = view.usage.context;
   const degrees = context ? Math.min(360, Math.max(0, context.usage_basis_points * 0.036)) : 0;
   const label = context ? `${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%` : "暂无用量数据";
-  return <span aria-label={`上下文用量：${label}`} className={styles.context_ring} role="img" style={{ "--context-degrees": `${degrees}deg` } as React.CSSProperties} tabIndex={0}><span>{label}</span></span>;
+  return (
+    <Tooltip content={label}>
+      <span
+        aria-label={`上下文用量：${label}`}
+        className={styles.context_ring}
+        role="img"
+        style={{ "--context-degrees": `${degrees}deg` } as React.CSSProperties}
+        tabIndex={0}
+      />
+    </Tooltip>
+  );
+}
+
+function ComposerAttachmentContext(props: Readonly<{
+  attachments: readonly ComposerAttachment[];
+  on_remove: (attachment: ComposerAttachment) => void;
+  paste_pending: boolean;
+  session_id: SessionId | null;
+  owner_key: string;
+  quotes?: readonly QuotedTextSnapshot[];
+  on_quote_remove?: (quote: QuotedTextSnapshot) => void;
+  on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
+}>) {
+  const [detail, setDetail] = useState<ComposerAttachment | null>(null);
+  const [quote_detail, setQuoteDetail] = useState<QuotedTextSnapshot | null>(null);
+  const [order, setOrder] = useState<readonly string[]>([]);
+  const previous_owner_key = useRef(props.owner_key);
+  const quotes = props.quotes ?? [];
+  const context_items = [
+    ...props.attachments.map((attachment) => ({ key: `attachment:${attachment.selection_id}`, type: "attachment" as const, attachment })),
+    ...quotes.map((quote) => ({ key: `quote:${quote.quote_id}`, type: "quote" as const, quote })),
+  ];
+  useEffect(() => {
+    const available = new Set(context_items.map((item) => item.key));
+    const owner_changed = previous_owner_key.current !== props.owner_key;
+    previous_owner_key.current = props.owner_key;
+    if (owner_changed) {
+      setDetail(null);
+      setQuoteDetail(null);
+    }
+    setOrder((current) => [
+      ...(owner_changed ? [] : current.filter((key) => available.has(key))),
+      ...context_items.map((item) => item.key).filter((key) => owner_changed || !current.includes(key)),
+    ]);
+  }, [props.attachments, props.owner_key, props.quotes]);
+  const by_key = new Map(context_items.map((item) => [item.key, item]));
+  return (
+    <>
+      {(context_items.length > 0 || props.paste_pending) && (
+        <div aria-label="待发送附件和引用" className={styles.attachment_list}>
+          {order.flatMap((key) => {
+            const item = by_key.get(key);
+            if (!item) return [];
+            if (item.type === "quote") return [(
+              <div data-state="selected" key={item.key} title={item.quote.exact}>
+                <button
+                  aria-label={`查看引用 ${item.quote.exact}`}
+                  className={styles.attachment_body}
+                  onClick={() => setQuoteDetail(item.quote)}
+                  type="button"
+                >
+                  <Icon name="quote" size={14} />
+                  <span>{item.quote.exact}</span>
+                  <small>{item.quote.source_label}</small>
+                </button>
+                <button
+                  aria-label={`移除引用 ${item.quote.exact}`}
+                  className={styles.attachment_remove}
+                  onClick={() => {
+                    if (quote_detail?.quote_id === item.quote.quote_id) setQuoteDetail(null);
+                    props.on_quote_remove?.(item.quote);
+                  }}
+                  type="button"
+                >
+                  <Icon name="x" size={13} />
+                </button>
+              </div>
+            )];
+            const attachment = item.attachment;
+            return [(
+            <div data-state={attachment.state} key={item.key} title={attachment.error ?? attachment.original_name}>
+              <button
+                aria-label={`查看附件 ${attachment.original_name}`}
+                className={styles.attachment_body}
+                onClick={() => setDetail(attachment)}
+                type="button"
+              >
+                <Icon name="paperclip" size={14} />
+                <span>{attachment.original_name}</span>
+                <small>{attachmentStateLabel(attachment)}</small>
+              </button>
+              <button
+                aria-label={`移除附件 ${attachment.original_name}`}
+                className={styles.attachment_remove}
+                title={attachment.state === "uploading" ? "取消上传" : "移除附件"}
+                onClick={() => {
+                  if (detail?.selection_id === attachment.selection_id) setDetail(null);
+                  props.on_remove(attachment);
+                }}
+                type="button"
+              >
+                <Icon name="x" size={13} />
+              </button>
+            </div>
+            )];
+          })}
+          {props.paste_pending && <div className={styles.attachment_pending} role="status">正在添加图片…</div>}
+        </div>
+      )}
+      <PresenceBoundary present={detail !== null}>
+      {detail && (
+        <AttachmentDetailDialog
+          attachment={detail}
+          on_close={() => setDetail(null)}
+          session_id={props.session_id}
+        />
+      )}
+      </PresenceBoundary>
+      <PresenceBoundary present={quote_detail !== null}>
+      {quote_detail && (
+        <QuoteDetailDialog
+          on_close={() => setQuoteDetail(null)}
+          on_locate={() => props.on_quote_locate?.(quote_detail) ?? Promise.resolve(false)}
+          quote={quote_detail}
+        />
+      )}
+      </PresenceBoundary>
+    </>
+  );
+}
+
+function handleComposerPaste(
+  event: React.ClipboardEvent<HTMLTextAreaElement>,
+  current_value: string,
+  set_value: (value: string) => void,
+  paste_images: (files: readonly File[]) => Promise<boolean>,
+) {
+  const images = Array.from(event.clipboardData.items)
+    .filter((item) => item.kind === "file" && item.type.toLocaleLowerCase().startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+  if (images.length === 0) return;
+
+  event.preventDefault();
+  const pasted_text = event.clipboardData.getData("text/plain");
+  if (pasted_text) {
+    const target = event.currentTarget;
+    const start = target.selectionStart ?? current_value.length;
+    const end = target.selectionEnd ?? start;
+    const next = `${current_value.slice(0, start)}${pasted_text}${current_value.slice(end)}`;
+    const cursor = start + pasted_text.length;
+    set_value(next);
+    requestAnimationFrame(() => {
+      target.focus();
+      target.setSelectionRange(cursor, cursor);
+    });
+  }
+  void paste_images(images);
 }
 
 function resizeTextarea(textarea: HTMLTextAreaElement | null) {
@@ -593,8 +1042,19 @@ function slashDisabledReason(
     if (availableUserSkills(view.skill_catalog.skills).length === 0) return "当前会话没有用户可选技能";
     return null;
   }
+  if (command_name === "/title" && view?.session.role === "controller") return "主控标题固定";
   if (command_name !== "/goal") return null;
   if (view?.goal) return "当前会话已有目标，请先继续或退出现有目标";
+  return null;
+}
+
+function draftSlashDisabledReason(command_name: string, draft: NewSessionDraft | null): string | null {
+  if (command_name === "/compact" || command_name === "/title") return "发送第一条消息后可用";
+  if (command_name === "/skill") {
+    if (!draft || draft.skill_status === "failed") return "当前工作空间的技能信息不可用";
+    if (draft.skill_status !== "ready") return "正在读取当前工作空间的技能";
+    if (availableUserSkills(draft.skill_options).length === 0) return "当前工作空间没有用户可选技能";
+  }
   return null;
 }
 

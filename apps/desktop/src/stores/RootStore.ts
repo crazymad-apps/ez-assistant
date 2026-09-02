@@ -15,9 +15,11 @@ import type {
   MessageId,
   MessageFeedback,
   ModelKey,
+  QuotedTextSnapshot,
   PrepareDeleteSessionResult,
   RecallNavigationTarget,
   RunId,
+  SessionMaterializationManifest,
   SessionId,
   ToolCallId,
   ToolDetailSnapshot,
@@ -26,25 +28,41 @@ import type {
   WorkspaceId,
 } from "../generated/assistant-protocol";
 import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
+import {
+  materializeNewSession,
+  NativeResourceFailure,
+  releaseAttachmentSelection,
+} from "../native-bridge/nativeResource";
 import { RuntimeClientError } from "../runtime-client/RuntimeClient";
 import { ConnectionStore } from "./ConnectionStore";
+import { ComposerQuoteStore } from "./ComposerQuoteStore";
 import { ConversationSearchStore } from "./ConversationSearchStore";
 import { DesktopLifecycleStore } from "./DesktopLifecycleStore";
 import { DeviceGatewayStore } from "./DeviceGatewayStore";
 import { LiveExecutionStore } from "./LiveExecutionStore";
 import { MemorySettingsStore } from "./MemorySettingsStore";
 import { NavigationStore, type ConversationLocation } from "./NavigationStore";
+import {
+  draftKeyForWorkspace,
+  NewSessionDraftStore,
+  type NewSessionDraft,
+  type NewSessionDraftKey,
+} from "./NewSessionDraftStore";
 import { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
 import { RuntimeProjectionStore } from "./RuntimeProjectionStore";
 import { RunInteractionController } from "./RunInteractionController";
 import { SessionManagementController } from "./SessionManagementController";
 import { SettingsStore } from "./SettingsStore";
+import { TransientFocusStore } from "./TransientFocusStore";
 
 export class RootStore {
   readonly connection = new ConnectionStore();
+  readonly composer_quotes = new ComposerQuoteStore();
+  readonly transient_focus = new TransientFocusStore();
   readonly projection = new RuntimeProjectionStore();
   readonly live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
+  readonly new_session_drafts = new NewSessionDraftStore();
   readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
   readonly memory_settings: MemorySettingsStore;
@@ -52,6 +70,10 @@ export class RootStore {
   readonly desktop_lifecycle: DesktopLifecycleStore;
   pending_session_action = false;
   pending_workspace_action = false;
+  workspace_editor: Readonly<
+    | { mode: "create"; primary_directory: string }
+    | { mode: "edit"; workspace_id: WorkspaceId }
+  > | null = null;
   composer_pending = false;
   interaction_error: string | null = null;
   pending_queue_input_id: InputId | null = null;
@@ -63,6 +85,7 @@ export class RootStore {
     session_id: SessionId;
     tone: "success" | "warning" | "neutral";
     message: string;
+    action?: "retry_title";
   }> | null = null;
 
   readonly #runtime: RuntimeLifecycleCoordinator;
@@ -71,6 +94,7 @@ export class RootStore {
   #disposed = false;
   #preferences_save_timer: number | null = null;
   #conversation_search_revision = 0;
+  #title_notice_timer: number | null = null;
   #runtime_state_disposer: IReactionDisposer;
 
   constructor() {
@@ -84,6 +108,26 @@ export class RootStore {
       },
       refresh_device_gateway: () => this.device_gateway.scheduleRefresh(),
       mark_device_gateway_stale: () => this.device_gateway.markStale(),
+      on_title_generation_finished: (session_id, trigger, outcome) => {
+        if (trigger !== "manual") return;
+        if (this.#title_notice_timer !== null) {
+          window.clearTimeout(this.#title_notice_timer);
+          this.#title_notice_timer = null;
+        }
+        runInAction(() => {
+          this.session_notice = outcome === "succeeded"
+            ? { session_id, tone: "success", message: "标题已更新。" }
+            : outcome === "failed"
+              ? { session_id, tone: "warning", message: "标题生成失败。", action: "retry_title" }
+              : null;
+        });
+        if (outcome === "succeeded") {
+          this.#title_notice_timer = window.setTimeout(() => {
+            this.#title_notice_timer = null;
+            runInAction(() => this.clearSessionNotice(session_id));
+          }, 1600);
+        }
+      },
     });
     this.device_gateway = new DeviceGatewayStore({
       get_client: () => this.#runtime.client,
@@ -124,6 +168,7 @@ export class RootStore {
       navigation: this.navigation,
       runtime: this.#runtime,
       save_preferences: () => this.#schedulePreferencesSave(),
+      select_draft: (workspace_id) => this.openNewSessionDraft(workspace_id),
       select_session: (session_id) => this.selectSession(session_id),
       state: this,
     });
@@ -135,6 +180,7 @@ export class RootStore {
     makeObservable(this, {
       pending_session_action: observable,
       pending_workspace_action: observable,
+      workspace_editor: observable,
       composer_pending: observable,
       interaction_error: observable,
       pending_queue_input_id: observable,
@@ -155,19 +201,27 @@ export class RootStore {
       selectConversationHistoryHit: action,
       openConversationHistoryHit: action,
       openRecallNavigationTarget: action,
+      locateTextQuoteSource: action,
       cancelChildTask: action,
-      createSession: action,
+      openNewSessionDraft: action,
+      clearNewSessionDraft: action,
+      materializeNewSessionDraft: action,
       forkSession: action,
       prepareDeleteSession: action,
       deleteSession: action,
       clearSession: action,
       compactSession: action,
+      generateSessionTitle: action,
       cancelSessionCompaction: action,
       setSessionProxy: action,
       clearSessionNotice: action,
       addWorkspace: action,
+      openWorkspaceEditor: action,
+      closeWorkspaceEditor: action,
+      saveWorkspaceEditor: action,
       removeWorkspace: action,
       openWorkspace: action,
+      openSessionWorkspaceDirectory: action,
       copyWorkspacePath: action,
       submitInput: action,
       exportSession: action,
@@ -199,6 +253,9 @@ export class RootStore {
       toggleWorkspace: action,
       toggleLeftSidebar: action,
       toggleRightSidebar: action,
+      setSidebarWidth: action,
+      resetSidebarWidth: action,
+      resetSidebarLayout: action,
       dispose: action,
     });
   }
@@ -241,12 +298,29 @@ export class RootStore {
     this.#schedulePreferencesSave();
   }
 
+  setSidebarWidth(side: "left" | "right", width: number, persist = false): void {
+    this.navigation.setSidebarWidth(side, width);
+    if (persist) this.#schedulePreferencesSave();
+  }
+
+  resetSidebarWidth(side: "left" | "right"): void {
+    this.navigation.resetSidebarWidth(side);
+    this.#schedulePreferencesSave();
+  }
+
+  resetSidebarLayout(): void {
+    this.navigation.resetSidebarLayout();
+    this.#schedulePreferencesSave();
+  }
+
   async selectSession(session_id: SessionId): Promise<void> {
+    this.transient_focus.clear();
     this.navigation.selectSession(session_id);
     await this.#runtime.loadSession(session_id);
   }
 
   async openChildTask(session_id: SessionId, child_task_id: ChildTaskId): Promise<void> {
+    this.transient_focus.clear();
     if (this.navigation.selected_session_id !== session_id) {
       await this.selectSession(session_id);
     }
@@ -255,10 +329,12 @@ export class RootStore {
   }
 
   closeChildTask(): void {
+    this.transient_focus.clear();
     this.navigation.closeChildTask();
   }
 
   async navigateBack(): Promise<void> {
+    this.transient_focus.clear();
     const location = this.navigation.goBack();
     if (location) {
       const loaded = await this.#loadConversationLocation(location);
@@ -269,6 +345,7 @@ export class RootStore {
   }
 
   async navigateForward(): Promise<void> {
+    this.transient_focus.clear();
     const location = this.navigation.goForward();
     if (location) {
       const loaded = await this.#loadConversationLocation(location);
@@ -379,12 +456,113 @@ export class RootStore {
     this.navigation.navigateTo(location);
   }
 
+  async locateTextQuoteSource(session_id: SessionId, quote: QuotedTextSnapshot): Promise<boolean> {
+    const source_session_id = quote.source_owner.session_id;
+    if (!quote.source_available || source_session_id !== session_id) return false;
+    this.transient_focus.clear();
+    const location: ConversationLocation = {
+      session_id: source_session_id,
+      child_task_id: quote.source_owner.type === "child_task"
+        ? quote.source_owner.child_task_id
+        : null,
+      anchor_message_id: quote.source_message_id,
+      scroll_offset: null,
+    };
+    if (!await this.#loadConversationLocation(location, quote.source_generation)) return false;
+    runInAction(() => {
+      this.navigation.navigateTo(location);
+      this.transient_focus.focus(quote);
+    });
+    return true;
+  }
+
   async cancelChildTask(session_id: SessionId, child_task_id: ChildTaskId): Promise<void> {
     await this.#run_interaction.cancelChildTask(session_id, child_task_id);
   }
 
-  async createSession(workspace_id?: WorkspaceId | null): Promise<void> {
-    await this.#session_management.createSession(workspace_id);
+  openNewSessionDraft(workspace_id: WorkspaceId | null = null): void {
+    this.transient_focus.clear();
+    if (workspace_id) {
+      const workspace = this.projection.application?.workspaces.find((item) => (
+        item.workspace_id === workspace_id && item.lifecycle === "active"
+      ));
+      if (!workspace) {
+        this.interaction_error = "工作空间当前不可用，请选择其他工作空间。";
+        return;
+      }
+    }
+    const key = draftKeyForWorkspace(workspace_id);
+    this.new_session_drafts.open(key, this.projection.application?.configuration.default_model ?? null);
+    this.navigation.selectDraft(key);
+    this.interaction_error = null;
+    void this.#loadNewSessionDraftSkills(key);
+  }
+
+  async clearNewSessionDraft(key: NewSessionDraftKey): Promise<void> {
+    const removed = this.new_session_drafts.remove(key);
+    if (removed) await releaseDraftSelections(removed);
+    if (this.navigation.selected_draft_key === key) {
+      this.new_session_drafts.open(key, this.projection.application?.configuration.default_model ?? null);
+    }
+  }
+
+  async materializeNewSessionDraft(key: NewSessionDraftKey): Promise<boolean> {
+    this.transient_focus.clear();
+    const draft = this.new_session_drafts.get(key);
+    if (
+      !draft
+      || this.navigation.selected_draft_key !== key
+      || this.connection.state !== "connected"
+      || this.composer_pending
+    ) {
+      return false;
+    }
+    if (!this.connection.capabilities?.features?.includes("session_materialization")) {
+      this.interaction_error = "当前 Runtime 不支持新会话首次发送，请重启或完成应用更新。";
+      return false;
+    }
+    if (!draft.text.trim() && draft.attachments.length === 0 && draft.quotes.length === 0) {
+      return false;
+    }
+    const manifest = draft.materialization_attempt ?? materializationManifest(draft);
+    if (!draft.materialization_attempt) {
+      this.new_session_drafts.beginMaterialization(key, manifest);
+    }
+    this.composer_pending = true;
+    this.interaction_error = null;
+    this.new_session_drafts.setAttachmentTransferState(key, "uploading");
+    try {
+      const result = await materializeNewSession(manifest, createOperationId("materialize"));
+      runInAction(() => {
+        this.new_session_drafts.remove(key);
+        this.navigation.selectSession(result.session.session_id, false);
+        if (result.session.workspace_id) {
+          this.navigation.ensureWorkspaceExpanded(result.session.workspace_id);
+        }
+      });
+      try {
+        await this.#runtime.loadApplication();
+        await this.#runtime.loadSession(result.session.session_id);
+      } catch (error: unknown) {
+        runInAction(() => this.connection.markDisconnected(displayError(error)));
+      }
+      this.#schedulePreferencesSave();
+      return true;
+    } catch (error: unknown) {
+      const message = displayError(error);
+      runInAction(() => {
+        if (!(error instanceof NativeResourceFailure && error.code === "materialization_response_unknown")) {
+          this.new_session_drafts.clearMaterializationAttempt(key);
+        }
+        this.new_session_drafts.setAttachmentTransferState(key, "failed", message);
+        this.interaction_error = message;
+      });
+      return false;
+    } finally {
+      runInAction(() => {
+        this.composer_pending = false;
+      });
+    }
   }
 
   async forkSession(
@@ -411,6 +589,10 @@ export class RootStore {
     return this.#session_management.compactSession(session_id, expected_generation);
   }
 
+  generateSessionTitle(session_id: SessionId): Promise<boolean> {
+    return this.#session_management.generateSessionTitle(session_id);
+  }
+
   cancelSessionCompaction(session_id: SessionId, operation_id: string): Promise<boolean> {
     return this.#session_management.cancelSessionCompaction(session_id, operation_id);
   }
@@ -426,15 +608,60 @@ export class RootStore {
   }
 
   async addWorkspace(): Promise<void> {
-    await this.#session_management.addWorkspace();
+    if (this.pending_workspace_action || this.pending_session_action) return;
+    const primary_directory = await this.#session_management.chooseWorkspaceDirectory();
+    if (primary_directory) {
+      runInAction(() => {
+        this.workspace_editor = { mode: "create", primary_directory };
+      });
+    }
+  }
+
+  openWorkspaceEditor(workspace_id: WorkspaceId): void {
+    this.workspace_editor = { mode: "edit", workspace_id };
+  }
+
+  closeWorkspaceEditor(): void {
+    if (!this.pending_workspace_action) this.workspace_editor = null;
+  }
+
+  async chooseWorkspaceDirectory(): Promise<string | null> {
+    return this.#session_management.chooseWorkspaceDirectory();
+  }
+
+  async saveWorkspaceEditor(input: Readonly<{
+    label: string;
+    primary_directory: string;
+    additional_directories: string[];
+  }>): Promise<boolean> {
+    const editor = this.workspace_editor;
+    if (!editor) return false;
+    const saved = editor.mode === "create"
+      ? await this.#session_management.registerWorkspace(input)
+      : await this.#session_management.updateWorkspace({ workspace_id: editor.workspace_id, ...input }) !== null;
+    if (saved) {
+      runInAction(() => {
+        this.workspace_editor = null;
+      });
+    }
+    return saved;
   }
 
   async removeWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
-    return this.#session_management.removeWorkspace(workspace_id);
+    const removed = await this.#session_management.removeWorkspace(workspace_id);
+    if (removed) {
+      const draft = this.new_session_drafts.remove(draftKeyForWorkspace(workspace_id));
+      if (draft) await releaseDraftSelections(draft);
+    }
+    return removed;
   }
 
   async openWorkspace(workspace_id: WorkspaceId): Promise<void> {
     await this.#session_management.openWorkspace(workspace_id);
+  }
+
+  async openSessionWorkspaceDirectory(session_id: SessionId, directory_index: number): Promise<void> {
+    await this.#session_management.openSessionWorkspaceDirectory(session_id, directory_index);
   }
 
   async copyWorkspacePath(path: string): Promise<void> {
@@ -456,8 +683,18 @@ export class RootStore {
     attachment_ids: readonly AttachmentId[] = [],
     mode: SubmitInputMode = "normal",
     skill_name: string | null = null,
+    quotes: readonly QuotedTextSnapshot[] = [],
   ): Promise<boolean> {
-    return this.#run_interaction.submitInput(session_id, message, variant, attachment_ids, mode, skill_name);
+    this.transient_focus.clear();
+    return this.#run_interaction.submitInput(
+      session_id,
+      message,
+      variant,
+      attachment_ids,
+      mode,
+      skill_name,
+      quotes,
+    );
   }
 
   async exportSession(session_id: SessionId, title: string): Promise<boolean> {
@@ -623,62 +860,88 @@ export class RootStore {
         type: "get_conversation_page_around_run",
         payload: { session_id, run_id, limit: 30 },
       });
-      return runInAction(() => {
-        const applied = this.projection.applyLocatedConversationPage(session_id, result.payload.snapshot);
-        if (applied) {
-          this.navigation.requestConversationAnchor(result.payload.anchor_message_id);
-        }
-        return applied;
-      });
+      const location: ConversationLocation = {
+        session_id,
+        child_task_id: null,
+        anchor_message_id: result.payload.anchor_message_id,
+        scroll_offset: null,
+      };
+      const loaded = await this.#loadConversationLocation(
+        location,
+        result.payload.snapshot.value.generation,
+      );
+      if (loaded) {
+        runInAction(() => this.navigation.requestConversationAnchor(
+          result.payload.anchor_message_id,
+        ));
+      }
+      return loaded;
     } catch (error: unknown) {
       runInAction(() => this.projection.failLoadingPrevious(session_id, displayError(error)));
       return false;
     }
   }
 
-  async #loadConversationLocation(location: ConversationLocation): Promise<boolean> {
-    const client = this.#runtime.client;
-    if (!client) {
+  async #loadConversationLocation(
+    location: ConversationLocation,
+    expected_generation?: number,
+  ): Promise<boolean> {
+    if (!this.#runtime.client) {
       this.showInteractionError("Runtime 当前不可用。");
       return false;
     }
     try {
-      let located: Awaited<ReturnType<typeof client.command<"get_conversation_page_around_message">>> | null = null;
-      if (location.anchor_message_id) {
-        located = await client.command({
-          type: "get_conversation_page_around_message",
-          payload: {
-            owner: location.child_task_id
-              ? {
-                  type: "child_task",
-                  session_id: location.session_id,
-                  child_task_id: location.child_task_id,
-                }
-              : { type: "main_session", session_id: location.session_id },
-            message_id: location.anchor_message_id,
-            limit: 30,
-          },
-        });
+      const selected_location = this.navigation.selected_session_id === location.session_id
+        && this.navigation.selected_child_task_id === location.child_task_id;
+      const current = this.#conversationHistoryForLocation(location);
+      if (
+        selected_location
+        && location.anchor_message_id
+        && current
+        && (expected_generation === undefined || current.generation === expected_generation)
+        && current.items.some((item) => item.message_id === location.anchor_message_id)
+      ) {
+        return true;
       }
+
       await this.#runtime.loadSession(location.session_id);
       if (location.child_task_id) {
         await this.#runtime.loadChildTask(location.session_id, location.child_task_id);
       }
-      if (located) {
-        runInAction(() => {
-          const applied = location.child_task_id
-            ? this.projection.applyLocatedChildConversationPage(
-                location.child_task_id,
-                located.payload.snapshot,
-              )
-            : this.projection.applyLocatedConversationPage(
-                location.session_id,
-                located.payload.snapshot,
-              );
-          if (applied && location.anchor_message_id) {
-            this.navigation.requestConversationAnchor(location.anchor_message_id);
-          }
-        });
+
+      let history = this.#conversationHistoryForLocation(location);
+      if (!history) {
+        throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法读取。");
+      }
+      if (expected_generation !== undefined && history.generation !== expected_generation) {
+        throw new RuntimeClientError("snapshot_stale", "引用来源已更新。");
+      }
+      while (
+        location.anchor_message_id
+        && !history.items.some((item) => item.message_id === location.anchor_message_id)
+      ) {
+        if (!history.has_more || !history.previous_cursor) {
+          throw new RuntimeClientError("message_not_found", "来源消息已不可用。");
+        }
+        const previous_cursor = history.previous_cursor;
+        const previous_item_count = history.items.length;
+        const loaded = await this.loadPreviousConversationPage(
+          location.session_id,
+          location.child_task_id,
+        );
+        history = this.#conversationHistoryForLocation(location);
+        if (!loaded || !history) {
+          throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法读取。");
+        }
+        if (expected_generation !== undefined && history.generation !== expected_generation) {
+          throw new RuntimeClientError("snapshot_stale", "引用来源已更新。");
+        }
+        if (
+          history.previous_cursor === previous_cursor
+          && history.items.length === previous_item_count
+        ) {
+          throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法继续加载。");
+        }
       }
       return true;
     } catch (error: unknown) {
@@ -687,6 +950,12 @@ export class RootStore {
       ));
       return false;
     }
+  }
+
+  #conversationHistoryForLocation(location: ConversationLocation) {
+    return location.child_task_id
+      ? this.projection.child_conversation_histories.get(location.child_task_id)
+      : this.projection.conversation_histories.get(location.session_id);
   }
 
   async getSystemContext(session_id: SessionId): Promise<SystemContextSnapshot> {
@@ -709,13 +978,21 @@ export class RootStore {
 
   dispose(): void {
     this.#disposed = true;
+    this.transient_focus.clear();
     this.#runtime.dispose();
     this.device_gateway.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
+    for (const draft of this.new_session_drafts.clear()) {
+      void releaseDraftSelections(draft);
+    }
     if (this.#preferences_save_timer !== null) {
       window.clearTimeout(this.#preferences_save_timer);
       this.#preferences_save_timer = null;
+    }
+    if (this.#title_notice_timer !== null) {
+      window.clearTimeout(this.#title_notice_timer);
+      this.#title_notice_timer = null;
     }
   }
 
@@ -728,11 +1005,62 @@ export class RootStore {
       void saveDesktopPreferences({
         left_sidebar_open: this.navigation.left_sidebar_open,
         right_sidebar_open: this.navigation.right_sidebar_open,
+        left_sidebar_width: this.navigation.left_sidebar_width,
+        right_sidebar_width: this.navigation.right_sidebar_width,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
         close_behavior: this.desktop_lifecycle.close_behavior,
       }).catch(() => undefined);
     }, 120);
   }
+
+  async #loadNewSessionDraftSkills(key: NewSessionDraftKey): Promise<void> {
+    const client = this.#runtime.client;
+    const draft = this.new_session_drafts.get(key);
+    if (!client || !draft || !this.new_session_drafts.beginSkillLoad(key)) return;
+    try {
+      const result = await client.command({
+        type: "list_skills",
+        payload: draft.workspace_id ? { workspace_id: draft.workspace_id } : {},
+      });
+      runInAction(() => {
+        this.new_session_drafts.applySkillOptions(key, result.payload.snapshot.skills);
+      });
+    } catch {
+      runInAction(() => this.new_session_drafts.failSkillLoad(key));
+    }
+  }
+}
+
+function materializationManifest(draft: NewSessionDraft): SessionMaterializationManifest {
+  return {
+    idempotency_key: createOperationId("new-session"),
+    ...(draft.workspace_id ? { workspace_id: draft.workspace_id } : {}),
+    ...(draft.model_key ? { model_key: draft.model_key } : {}),
+    ...(draft.reasoning_effort ? { reasoning_effort: draft.reasoning_effort } : {}),
+    variant: draft.variant,
+    approval_mode: draft.approval_mode,
+    message: draft.text,
+    mode: draft.goal_armed ? "start_goal" : "normal",
+    attachments: draft.attachments.map((attachment) => ({
+      selection_key: attachment.selection_id,
+      original_name: attachment.original_name,
+      size_bytes: attachment.size_bytes,
+    })),
+    quotes: [...draft.quotes],
+    ...(draft.selected_skill_name ? { skill_name: draft.selected_skill_name } : {}),
+  };
+}
+
+async function releaseDraftSelections(draft: NewSessionDraft): Promise<void> {
+  await Promise.allSettled(
+    draft.attachments.map((attachment) => releaseAttachmentSelection(attachment.selection_id)),
+  );
+}
+
+function createOperationId(prefix: string): string {
+  return typeof crypto.randomUUID === "function"
+    ? `${prefix}-${crypto.randomUUID()}`
+    : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function displayError(error: unknown): string {

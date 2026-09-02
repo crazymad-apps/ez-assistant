@@ -1,0 +1,24 @@
+.collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--ez-motion-collapse-enter) var(--ez-ease-standard),
+    opacity var(--ez-motion-collapse-enter) var(--ez-ease-standard);
+}
+
+.collapse[data-presence="entering"],
+.collapse[data-presence="exiting"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.collapse[data-presence="exiting"] {
+  transition-duration: var(--ez-motion-collapse-exit);
+}
+
+.content {
+  min-height: 0;
+  overflow: hidden;
+}

@@ -9,6 +9,7 @@ import {
 import { createPortal } from "react-dom";
 import { Icon } from "../Icon";
 import { useInputMethodGuard } from "../InputMethodGuard";
+import { usePresence, type Presence } from "../Presence";
 import styles from "./index.module.scss";
 
 export type SelectionOption<T extends string> = Readonly<{
@@ -47,6 +48,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
     : props.options;
   const selected_index = Math.max(0, visible_options.findIndex((option) => option.value === props.selected));
   const listbox_visible = props.open && visible_options.length > 0;
+  const listbox_presence = usePresence(listbox_visible, 90);
   const active_index_ref = useRef(selected_index);
   const focus_index_on_open_ref = useRef<number | null>(null);
   const [editable_active_index, setEditableActiveIndex] = useState(selected_index);
@@ -78,7 +80,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
       cancelAnimationFrame(focus_frame);
       document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
     };
-  }, [props.editable, props.open, props.on_open_change, selected_index]);
+  }, [listbox_presence.mounted, props.editable, props.open, props.on_open_change, selected_index]);
 
   useEffect(() => {
     if (!props.open) {
@@ -232,8 +234,9 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
           <Icon name="chevron-down" size={14} />
         </button>
       )}
-      {listbox_visible && (
-        <SelectionPortal
+      <SelectionPortal
+          open={listbox_visible}
+          presence={listbox_presence}
           id={listbox_id}
           aria_label={props.aria_label}
           content_width={props.content_width ?? "default"}
@@ -248,7 +251,6 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
           title={props.title}
           trigger_ref={trigger_ref}
         />
-      )}
     </>
   );
 }
@@ -262,8 +264,10 @@ function SelectionPortal<T extends string>(props: Readonly<{
   on_active_index_change: (index: number) => void;
   on_key_down: (event: React.KeyboardEvent<HTMLDivElement>) => void;
   on_select: (value: T) => void;
+  open: boolean;
   options: readonly SelectionOption<T>[];
   popover_ref: React.RefObject<HTMLDivElement | null>;
+  presence: Presence;
   selected: T;
   title?: string;
   trigger_ref: React.RefObject<HTMLElement | null>;
@@ -271,6 +275,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
   const [position, setPosition] = useState({ left: 0, top: 0, min_width: 0, ready: false });
 
   useLayoutEffect(() => {
+    if (!props.open) return undefined;
     function updatePosition() {
       const trigger = props.trigger_ref.current;
       const popover = props.popover_ref.current;
@@ -311,20 +316,26 @@ function SelectionPortal<T extends string>(props: Readonly<{
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };
-  }, [props.match_trigger_width, props.popover_ref, props.trigger_ref]);
+  }, [props.match_trigger_width, props.open, props.popover_ref, props.presence.mounted, props.trigger_ref]);
+
+  if (!props.presence.mounted) return null;
 
   const overlay_root = document.querySelector<HTMLElement>("#overlay-root") ?? document.body;
   return createPortal(
     <div
       className={styles.popover}
       aria-label={props.aria_label}
+      aria-hidden={props.presence.state === "exiting" ? true : undefined}
       data-position-ready={position.ready}
+      data-presence={props.presence.state}
       data-width={props.content_width}
       id={props.id}
+      inert={props.presence.state === "exiting" ? true : undefined}
       onKeyDown={props.on_key_down}
       ref={props.popover_ref}
       role="listbox"
       style={{ left: position.left, minWidth: position.min_width || undefined, top: position.top }}
+      onTransitionEnd={props.presence.onTransitionEnd}
     >
       {props.title && <strong className={styles.title}>{props.title}</strong>}
       <div className={styles.option_scroll}>

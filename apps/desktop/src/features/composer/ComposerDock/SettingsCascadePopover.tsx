@@ -108,7 +108,12 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   function closeAndRestoreFocus() {
     props.on_open_change(false);
     setSecondaryCategoryId(null);
-    requestAnimationFrame(() => trigger_ref.current?.focus());
+    requestAnimationFrame(() => {
+      const active_element = document.activeElement;
+      if (!active_element || active_element === document.body) {
+        trigger_ref.current?.focus();
+      }
+    });
   }
 
   function openCategory(index: number) {
@@ -204,11 +209,11 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
         <span>{props.trigger_content}</span>
         <Icon name="chevron-down" size={14} />
       </button>
-      {props.open && (
         <AnchoredOverlay
           aria_label={props.aria_label}
           class_name={styles.settings_cascade}
           on_request_close={closeAndRestoreFocus}
+          open={props.open}
           overlay_ref={overlay_ref}
           trigger_ref={trigger_ref}
         >
@@ -264,7 +269,6 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
             </div>
           )}
         </AnchoredOverlay>
-      )}
     </>
   );
 }

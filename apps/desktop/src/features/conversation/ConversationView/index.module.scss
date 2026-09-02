@@ -91,7 +91,6 @@
 }
 
 .context_summary_text {
-  grid-column: 1 / -1;
   min-width: 0;
   padding: 12px 14px;
   border: 1px solid var(--ez-border);
@@ -101,6 +100,11 @@
   font-size: var(--ez-font-base);
   -webkit-user-select: text;
   user-select: text;
+}
+
+.context_summary_collapse {
+  min-width: 0;
+  grid-column: 1 / -1;
 }
 
 .user_message,
@@ -272,6 +276,19 @@
   span { overflow: hidden; font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 }
 
+.user_quotes {
+  display: flex;
+  max-width: min(74%, 620px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-bottom: 5px;
+
+  button { display: flex; min-width: 0; max-width: 300px; min-height: 27px; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--ez-primary-border); border-radius: 7px; color: var(--ez-primary); background: var(--ez-primary-soft); }
+  svg { flex: 0 0 auto; }
+  span { overflow: hidden; font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
+}
+
 .user_images {
   display: flex;
   max-width: min(74%, 620px);
@@ -322,6 +339,44 @@
     user-select: none;
   }
 }
+
+[data-transient-focus="true"] {
+  outline: 2px solid color-mix(in srgb, var(--ez-primary) 55%, transparent);
+  outline-offset: 5px;
+  border-radius: 8px;
+}
+
+:global(::highlight(quote-source)) {
+  color: inherit;
+  background: color-mix(in srgb, var(--ez-primary) 24%, transparent);
+}
+
+.quote_bubble {
+  position: fixed;
+  z-index: var(--ez-z-popover);
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: 8px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-small);
+  transform: translate(-50%, -100%);
+  opacity: 1;
+  transition:
+    opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
+
+  button { display: flex; min-height: 30px; align-items: center; gap: 6px; padding: 0 9px; border: 0; color: var(--ez-text-secondary); background: transparent; }
+  button:hover { color: var(--ez-primary); background: var(--ez-primary-soft); }
+}
+
+.quote_bubble[data-presence="entering"],
+.quote_bubble[data-presence="exiting"] {
+  opacity: 0;
+  transform: translate(-50%, calc(-100% + 4px));
+}
+
+.quote_bubble[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
 
 .reasoning {
   color: var(--ez-text-muted);

@@ -51,6 +51,9 @@ pub(super) struct ManagedSession {
     pub session_id: String,
     pub title: String,
     pub workspace_id: Option<String>,
+    pub workspace_label: Option<String>,
+    pub workspace_primary_directory: Option<String>,
+    pub workspace_additional_directories: Vec<String>,
     pub proxy_enabled: bool,
     pub can_accept_message: bool,
 }
@@ -96,6 +99,7 @@ pub(crate) fn reply_route_for_input(input: &crate::StoredInput) -> ReplyRoute {
 /// 工具实例共享的 Runtime 私有协调器；不持有 Controller Session mutation gate。
 pub(crate) struct ControllerToolCoordinator {
     sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+    workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
     store: Arc<dyn RuntimeStore>,
     events: ObservationCoordinator,
@@ -105,6 +109,7 @@ pub(crate) struct ControllerToolCoordinator {
 impl ControllerToolCoordinator {
     pub(super) fn new(
         sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+        workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
         config_registry: Arc<ConfigRegistry>,
         store: Arc<dyn RuntimeStore>,
         events: ObservationCoordinator,
@@ -112,6 +117,7 @@ impl ControllerToolCoordinator {
     ) -> Self {
         Self {
             sessions,
+            workspaces,
             config_registry,
             store,
             events,
@@ -125,6 +131,12 @@ impl ControllerToolCoordinator {
     ) -> RuntimeResult<Vec<ManagedSession>> {
         self.ensure_current_controller(controller_session_id)?;
         let sessions = self.session_values()?;
+        let workspaces =
+            self.workspaces
+                .read()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "workspace registry",
+                })?;
         let mut managed = sessions
             .into_iter()
             .filter_map(|session| {
@@ -146,6 +158,21 @@ impl ControllerToolCoordinator {
                         .workspace_id
                         .as_ref()
                         .map(|id| id.as_str().to_owned()),
+                    workspace_label: session
+                        .environment()
+                        .workspace_id
+                        .as_ref()
+                        .and_then(|id| workspaces.get(id))
+                        .map(|workspace| workspace.label.clone()),
+                    workspace_primary_directory: session
+                        .environment()
+                        .workspace_id
+                        .as_ref()
+                        .map(|_| session.environment().working_directory.clone()),
+                    workspace_additional_directories: session
+                        .environment()
+                        .additional_workspace_directories
+                        .clone(),
                     proxy_enabled,
                     can_accept_message: proxy_enabled
                         && !state

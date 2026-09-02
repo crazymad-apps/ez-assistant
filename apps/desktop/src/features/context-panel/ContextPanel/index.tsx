@@ -6,10 +6,13 @@ import type {
   SystemContextSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
+import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { AttachmentPreviewDialog } from "../AttachmentPreviewDialog";
 import { SystemContextDialog } from "../SystemContextDialog";
 import { ContextRing, ContextSection } from "./ContextSection";
+import { ContextSectionLayout } from "./ContextSectionLayout";
 import {
   childStatusLabel,
   formatApprovalMode,
@@ -35,6 +38,12 @@ export const ContextPanel = observer(function ContextPanel() {
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
   const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
+  const session_workspace = session_view?.workspace;
+  const draft_key = store.navigation.selected_draft_key;
+  const new_session_draft = store.new_session_drafts.get(draft_key);
+  const draft_workspace = application?.workspaces.find(
+    (item) => item.workspace_id === new_session_draft?.workspace_id,
+  );
   const attachments = session_view?.attachments ?? [];
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
   const [system_context, setSystemContext] = useState<SystemContextSnapshot | null>(null);
@@ -42,8 +51,9 @@ export const ContextPanel = observer(function ContextPanel() {
   const [system_context_loading, setSystemContextLoading] = useState(false);
   const [locating_run_id, setLocatingRunId] = useState<string | null>(null);
   const [section_state, setSectionState] = useState<Record<string, Partial<Record<ContextSectionKey, boolean>>>>({});
+  const [all_workspace_directories_visible, setAllWorkspaceDirectoriesVisible] = useState(false);
   const model = application?.models.find((item) => item.model_key === session?.model_key);
-  const section_owner = session_id ?? "unselected";
+  const section_owner = session_id ?? draft_key ?? "unselected";
   const sectionIsOpen = (section: ContextSectionKey) => section_state[section_owner]?.[section] ?? true;
   const toggleSection = (section: ContextSectionKey) => {
     setSectionState((current) => ({
@@ -59,6 +69,7 @@ export const ContextPanel = observer(function ContextPanel() {
     setSystemContext(null);
     setSystemContextError(null);
     setSystemContextLoading(false);
+    setAllWorkspaceDirectoriesVisible(false);
   }, [session_id]);
 
   const locateRun = async (run_id: string) => {
@@ -84,15 +95,70 @@ export const ContextPanel = observer(function ContextPanel() {
     }
   };
 
+  if (new_session_draft) {
+    const draft_model = application?.models.find((item) => item.model_key === new_session_draft.model_key);
+    const draft_directories = draft_workspace
+      ? [draft_workspace.user_directory, ...draft_workspace.additional_directories]
+      : [];
+    return (
+      <aside className={styles.panel} aria-label="当前上下文">
+        <header className={styles.panel_header}>
+          <h2>当前上下文</h2>
+        </header>
+        <ContextSectionLayout>
+          <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="草稿设置">
+            <dl className={styles.definition_list}>
+              <div><dt>模型</dt><dd>{formatModelIdentity(draft_model?.display_name, new_session_draft.model_key)}</dd></div>
+              <div><dt>执行方式</dt><dd>{formatVariant(new_session_draft.variant)} · {formatApprovalMode(new_session_draft.approval_mode)}</dd></div>
+            </dl>
+          </ContextSection>
+          <ContextSection
+            action={draft_workspace ? (
+              <Tooltip content="编辑工作空间">
+                <button
+                  aria-label="编辑工作空间"
+                  className={styles.section_header_action}
+                  disabled={store.pending_workspace_action}
+                  onClick={() => store.openWorkspaceEditor(draft_workspace.workspace_id)}
+                  type="button"
+                ><Icon name="edit" size={14} /></button>
+              </Tooltip>
+            ) : undefined}
+            is_open={sectionIsOpen("workspace")}
+            on_toggle={() => toggleSection("workspace")}
+            title="工作区"
+          >
+            {draft_workspace ? (
+              <>
+                <strong className={styles.workspace_label}>{draft_workspace.label}</strong>
+                <div className={styles.workspace_directories}>
+                  {draft_directories.map((directory, index) => (
+                    <div className={styles.path_row} key={directory} title={directory}>
+                      <span aria-label={index === 0 ? "主目录" : undefined} className={styles.directory_icon} data-primary={index === 0 ? "true" : undefined}>
+                        <Icon name="folder" size={16} />
+                      </span>
+                      <span className={styles.path_text}>{directory}</span>
+                      <div className={styles.path_actions}>
+                        {index === 0 && <button aria-label={`打开 ${directory}`} onClick={() => void store.openWorkspace(draft_workspace.workspace_id)} type="button"><Icon name="external-link" size={13} /></button>}
+                        <button aria-label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} type="button"><Icon name="copy" size={13} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : <p className={styles.empty_row}>未绑定目录</p>}
+          </ContextSection>
+        </ContextSectionLayout>
+      </aside>
+    );
+  }
+
   return (
     <aside className={styles.panel} aria-label="当前上下文">
       <header className={styles.panel_header}>
         <h2>当前上下文</h2>
-        <button aria-label="收起当前上下文" onClick={() => store.toggleRightSidebar()} type="button">
-          <Icon name="sidebar-right" size={17} />
-        </button>
       </header>
-      <div className={styles.panel_scroll}>
+      <ContextSectionLayout>
         <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="会话">
           {session ? (
             <dl className={styles.definition_list}>
@@ -140,32 +206,55 @@ export const ContextPanel = observer(function ContextPanel() {
           )}
           {system_context_error && <p className={styles.context_error}>{system_context_error}</p>}
         </ContextSection>
-        <ContextSection is_open={sectionIsOpen("workspace")} on_toggle={() => toggleSection("workspace")} title="工作区">
-          {workspace && session ? (
+        <ContextSection
+          action={workspace ? (
+            <Tooltip content="编辑工作空间">
+              <button
+                aria-label="编辑工作空间"
+                className={styles.section_header_action}
+                disabled={store.pending_workspace_action}
+                onClick={() => store.openWorkspaceEditor(workspace.workspace_id)}
+                type="button"
+              ><Icon name="edit" size={14} /></button>
+            </Tooltip>
+          ) : undefined}
+          is_open={sectionIsOpen("workspace")}
+          on_toggle={() => toggleSection("workspace")}
+          title="工作区"
+        >
+          {workspace && session && session_workspace ? (
             <>
-              <div className={styles.path_row} title={workspace.user_directory}>
-                <Icon name="folder" size={16} />
-                <span>{workspace.user_directory}</span>
+              <strong className={styles.workspace_label}>{session_workspace.label}</strong>
+              <div className={styles.workspace_directories}>
+                {[session_workspace.primary_directory, ...session_workspace.additional_directories]
+                  .slice(0, all_workspace_directories_visible ? undefined : 3)
+                  .map((directory, index) => (
+                    <div className={styles.path_row} key={directory} title={directory}>
+                      {index === 0 ? (
+                        <Tooltip content="主目录">
+                          <span aria-label="主目录" className={styles.directory_icon} data-primary="true" role="img">
+                            <Icon name="folder" size={16} />
+                          </span>
+                        </Tooltip>
+                      ) : (
+                        <span className={styles.directory_icon}>
+                          <Icon name="folder" size={16} />
+                        </span>
+                      )}
+                      <span className={styles.path_text}>{directory}</span>
+                      <div className={styles.path_actions}>
+                        <button aria-label={`打开 ${directory}`} onClick={() => void store.openSessionWorkspaceDirectory(session.session_id, index)} type="button"><Icon name="external-link" size={13} /></button>
+                        <button aria-label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} type="button"><Icon name="copy" size={13} /></button>
+                      </div>
+                    </div>
+                  ))}
+                {!all_workspace_directories_visible && session_workspace.additional_directories.length > 2 && (
+                  <button className={styles.more_directories} onClick={() => setAllWorkspaceDirectoriesVisible(true)} type="button">
+                    显示其余 {session_workspace.additional_directories.length - 2} 条
+                  </button>
+                )}
               </div>
-              <div className={styles.workspace_actions}>
-                <button
-                  onClick={() => void store.openWorkspace(workspace.workspace_id)}
-                  title="在文件管理器中打开"
-                  type="button"
-                >
-                  <Icon name="folder" size={14} />
-                  打开目录
-                </button>
-                <button
-                  onClick={() => void store.copyWorkspacePath(workspace.user_directory)}
-                  title="复制工作目录路径"
-                  type="button"
-                >
-                  <Icon name="copy" size={14} />
-                  复制路径
-                </button>
-              </div>
-              <p className={styles.workspace_note}>命令行仍以当前用户权限运行，工作区不是强沙盒。</p>
+              {!session_workspace.directories_match_current && <p className={styles.workspace_changed_note}>本会话继续使用创建时的工作目录。</p>}
             </>
           ) : <p className={styles.empty_row}>未绑定目录</p>}
         </ContextSection>
@@ -265,16 +354,20 @@ export const ContextPanel = observer(function ContextPanel() {
             </div>
           ) : <p className={styles.empty_row}>还没有运行记录</p>}
         </ContextSection>
-      </div>
+      </ContextSectionLayout>
+      <PresenceBoundary present={preview_attachment !== null}>
       {preview_attachment && (
         <AttachmentPreviewDialog
           attachment={preview_attachment}
           on_close={() => setPreviewAttachment(null)}
         />
       )}
+      </PresenceBoundary>
+      <PresenceBoundary present={system_context !== null}>
       {system_context && (
         <SystemContextDialog on_close={() => setSystemContext(null)} snapshot={system_context} />
       )}
+      </PresenceBoundary>
     </aside>
   );
 });

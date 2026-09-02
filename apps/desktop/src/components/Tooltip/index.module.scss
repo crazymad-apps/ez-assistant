@@ -15,10 +15,18 @@
   font-size: var(--ez-font-small);
   line-height: 1.35;
   pointer-events: none;
-  transition: opacity var(--ez-motion-fast) var(--ez-ease-standard);
+  transform: translateY(2px) scale(0.98);
+  transition:
+    opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
   white-space: normal;
 
-  &[data-position-ready="true"] {
+  &[data-position-ready="true"][data-presence="entered"] {
     opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  &[data-presence="exiting"] {
+    transition-duration: var(--ez-motion-menu-exit);
   }
 }

@@ -5,10 +5,11 @@ use agent_model::{
 use agent_types::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
     ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, InternalContextPart,
-    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
-    SystemMessage, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition,
-    ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultPart,
-    ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, QuotedTextPart,
+    QuotedTextSourceOwner, QuotedTextSourceRole, ReasoningPart, SystemMessage, TextPart,
+    TokenUsage, ToolCall, ToolCallId, ToolChoice, ToolDefinition, ToolImageReference, ToolMessage,
+    ToolName, ToolResult, ToolResultContent, ToolResultPart, ToolResultStatus,
+    TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
 use serde_json::{Value, json};
 

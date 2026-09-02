@@ -5,7 +5,10 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { AppShell } from "../../src/app/AppShell";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("AppShell session header", () => {
   it("shows the milestone version next to the application title", () => {
@@ -119,6 +122,73 @@ describe("AppShell session header", () => {
     fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "归档会话" }));
     expect(archive).toHaveBeenCalledWith("session-1");
+  });
+
+  it("keeps the context toggle beside the session more button while the sidebar opens and closes", () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
+    const store = storeWithSessions();
+    store.navigation.setViewportWidth(1400);
+    renderShell(store);
+
+    const header = screen.getByLabelText("会话标题栏");
+    const more = within(header).getByRole("button", { name: "更多会话操作" });
+    const collapse = within(header).getByRole("button", { name: "收起当前上下文" });
+    expect(more.compareDocumentPosition(collapse) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(within(screen.getByLabelText("当前上下文")).queryByRole("button", {
+      name: "收起当前上下文",
+    })).not.toBeInTheDocument();
+
+    fireEvent.click(collapse);
+
+    expect(store.navigation.right_sidebar_open).toBe(false);
+    expect(within(header).getByRole("button", { name: "展开当前上下文" })).toBeVisible();
+  });
+
+  it("resizes the visible sidebar with separator keyboard semantics and restores defaults", () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
+    const store = storeWithSessions();
+    store.navigation.setViewportWidth(1400);
+    renderShell(store);
+
+    const separator = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    expect(separator).toHaveAttribute("aria-valuenow", "286");
+    fireEvent.keyDown(separator, { key: "ArrowRight" });
+    expect(store.navigation.left_sidebar_width).toBe(294);
+    fireEvent.keyDown(separator, { key: "ArrowRight", shiftKey: true });
+    expect(store.navigation.left_sidebar_width).toBe(318);
+    fireEvent.keyDown(separator, { key: "Home" });
+    expect(store.navigation.left_sidebar_width).toBe(220);
+    fireEvent.doubleClick(separator);
+    expect(store.navigation.left_sidebar_width).toBe(286);
+
+    store.navigation.setSidebarWidth("right", 400);
+    fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "恢复默认布局" }));
+    expect(store.navigation.left_sidebar_open).toBe(true);
+    expect(store.navigation.right_sidebar_open).toBe(true);
+    expect(store.navigation.right_sidebar_width).toBe(326);
+  });
+
+  it("updates sidebar width immediately while pointer dragging", () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
+    const store = storeWithSessions();
+    store.navigation.setViewportWidth(1400);
+    renderShell(store);
+
+    const separator = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    const captured = new Set<number>();
+    Object.defineProperties(separator, {
+      setPointerCapture: { value: (pointer_id: number) => captured.add(pointer_id) },
+      hasPointerCapture: { value: (pointer_id: number) => captured.has(pointer_id) },
+      releasePointerCapture: { value: (pointer_id: number) => captured.delete(pointer_id) },
+    });
+
+    fireEvent.pointerDown(separator, { button: 0, clientX: 300, pointerId: 7 });
+    expect(document.documentElement).toHaveAttribute("data-sidebar-resizing", "left");
+    fireEvent.pointerMove(separator, { clientX: 332, pointerId: 7 });
+    expect(store.navigation.left_sidebar_width).toBe(318);
+    fireEvent.pointerUp(separator, { clientX: 332, pointerId: 7 });
+    expect(document.documentElement).not.toHaveAttribute("data-sidebar-resizing");
   });
 
   it("previews the exact runtime impact before permanently deleting a session", async () => {

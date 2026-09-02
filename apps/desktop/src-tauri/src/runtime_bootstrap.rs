@@ -12,9 +12,9 @@ use std::{
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use assistant_protocol::{
-    GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult, RuntimeHostCapabilities,
-    RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus, ShutdownRuntimeRequest,
-    WorkspaceId,
+    GetSessionViewRequest, GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult,
+    RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
+    SessionId, ShutdownRuntimeRequest, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -272,6 +272,44 @@ impl RuntimeBootstrapCoordinator {
                 "Runtime 返回了不匹配的 Workspace 结果。",
             )),
         }
+    }
+
+    pub(crate) async fn session_workspace_directory(
+        &self,
+        session_id: SessionId,
+        directory_index: usize,
+    ) -> Result<String, RuntimeBootstrapError> {
+        let result = self
+            .send_runtime_command(
+                "desktop-open-session-workspace-directory",
+                RuntimeCommand::GetSessionView(GetSessionViewRequest { session_id }),
+            )
+            .await?;
+        let RuntimeCommandResult::GetSessionView(result) = result else {
+            return Err(bootstrap_error(
+                RuntimeBootstrapErrorCode::ComponentMismatch,
+                "Runtime 返回了不匹配的 Session View 结果。",
+            ));
+        };
+        let workspace = result.snapshot.value.workspace.ok_or_else(|| {
+            bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeUnavailable,
+                "该会话未绑定工作空间。",
+            )
+        })?;
+        if directory_index == 0 {
+            return Ok(workspace.primary_directory);
+        }
+        workspace
+            .additional_directories
+            .get(directory_index - 1)
+            .cloned()
+            .ok_or_else(|| {
+                bootstrap_error(
+                    RuntimeBootstrapErrorCode::RuntimeUnavailable,
+                    "该会话的工作目录不存在。",
+                )
+            })
     }
 
     async fn send_runtime_command(

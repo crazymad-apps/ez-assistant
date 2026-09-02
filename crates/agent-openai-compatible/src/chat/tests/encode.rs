@@ -77,6 +77,44 @@ fn encode_user_message_with_multiple_parts_uses_text_part_array() {
 }
 
 #[test]
+fn encode_quoted_text_projects_frozen_context_without_local_identity() {
+    let message = ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
+        id: message_id("message_quote"),
+        parts: vec![UserPart::QuotedText(QuotedTextPart {
+            quote_id: part_id("local-quote-id"),
+            exact: "selected <text>".to_owned(),
+            prefix: "before & context".to_owned(),
+            suffix: "after context".to_owned(),
+            source_owner: QuotedTextSourceOwner::MainSession {
+                session_id: "private-session".to_owned(),
+            },
+            source_generation: 2,
+            source_message_id: message_id("private-message"),
+            text_start_utf16: 7,
+            text_end_utf16: 22,
+            source_role: QuotedTextSourceRole::Assistant,
+            source_label: "Assistant \"A\"".to_owned(),
+            source_created_at_ms: Some(42),
+            source_available: true,
+        })],
+    });
+
+    let encoded = encode_request(&request(vec![message]), &base_adapter(), MODEL)
+        .expect("encode quoted text");
+    let json = serde_json::to_value(encoded).expect("request JSON");
+    let content = json["messages"][0]["content"]
+        .as_str()
+        .expect("single text content");
+    assert!(content.contains("<content format=\"text\">selected &lt;text&gt;</content>"));
+    assert!(content.contains("<prefix>before &amp; context</prefix>"));
+    assert!(!content.contains("private-session"));
+    assert!(!content.contains("private-message"));
+    assert!(!content.contains("local-quote-id"));
+}
+
+#[test]
 fn encode_file_references_preserves_part_and_file_order_with_xml_text_escaping() {
     let adapter = base_adapter();
     let message = ConversationMessage::User(UserMessage {

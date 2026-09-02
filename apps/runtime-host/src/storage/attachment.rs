@@ -28,6 +28,11 @@ impl StorageEngine {
             staging_path,
             upload.size_bytes,
         )?;
+        attachment_io::validate_staging_hash(
+            staging_path,
+            &upload.original_name,
+            &upload.blob_hash,
+        )?;
 
         if let Some(existing) =
             self.attachment_by_blob_hash(&upload.session_id, &upload.blob_hash)?

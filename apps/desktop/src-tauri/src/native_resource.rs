@@ -2,9 +2,11 @@
 
 use std::{
     collections::HashMap,
+    fs::File,
+    io::Write as _,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -12,20 +14,24 @@ use std::{
 
 use assistant_protocol::{
     AttachmentId, AttachmentState, ChildTaskId, GetAttachmentRequest, MessageId, ResourceRefId,
-    RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, SessionId, UploadAttachmentResult,
+    RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, RuntimeHostFeature, SessionId,
+    SessionMaterializationManifest, SessionMaterializationResult, UploadAttachmentResult,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, ipc::InvokeBody};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
 use crate::runtime_bootstrap::RuntimeBootstrapCoordinator;
 
-const MAX_SELECTIONS: usize = 32;
+const MAX_SELECTIONS: usize = 256;
+const MAX_SELECTIONS_PER_SEND: usize = 32;
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CLIPBOARD_TEMP_BYTES: u64 = 256 * 1024 * 1024;
 const SELECTION_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_PREVIEW_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -38,10 +44,17 @@ pub(crate) struct NativeResourceBridge {
 
 #[derive(Clone)]
 struct SelectedAttachment {
-    path: PathBuf,
+    source: SelectedAttachmentSource,
     original_name: String,
     size_bytes: u64,
+    media_type: Option<String>,
     selected_at_ms: u64,
+}
+
+#[derive(Clone)]
+enum SelectedAttachmentSource {
+    ExternalPath(PathBuf),
+    OwnedTempFile(Arc<File>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -49,6 +62,15 @@ pub(crate) struct AttachmentSelection {
     selection_id: String,
     original_name: String,
     size_bytes: u64,
+    media_type: Option<String>,
+    origin: AttachmentSelectionOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AttachmentSelectionOrigin {
+    FilePicker,
+    Clipboard,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -80,6 +102,9 @@ enum NativeResourceErrorCode {
     SelectionLimitReached,
     AttachmentUnavailable,
     UploadFailed,
+    MaterializationUnsupported,
+    MaterializationFailed,
+    MaterializationResponseUnknown,
     PreviewUnavailable,
     ResourceNotPreviewable,
     ResourceTooLarge,
@@ -188,6 +213,12 @@ pub(crate) async fn choose_attachment_files(
     if selections.is_empty() {
         return Ok(Vec::new());
     }
+    if selections.len() > MAX_SELECTIONS_PER_SEND {
+        return Err(error(
+            NativeResourceErrorCode::SelectionLimitReached,
+            "一次最多选择 32 个待发送附件。",
+        ));
+    }
 
     let mut prepared = Vec::with_capacity(selections.len());
     for selection in selections {
@@ -223,7 +254,7 @@ pub(crate) async fn choose_attachment_files(
     if state.len().saturating_add(prepared.len()) > MAX_SELECTIONS {
         return Err(error(
             NativeResourceErrorCode::SelectionLimitReached,
-            "一次最多保留 32 个待发送附件。",
+            "当前草稿保留的附件过多，请先发送或移除部分附件。",
         ));
     }
     let mut result = Vec::with_capacity(prepared.len());
@@ -232,9 +263,10 @@ pub(crate) async fn choose_attachment_files(
         state.insert(
             selection_id.clone(),
             SelectedAttachment {
-                path,
+                source: SelectedAttachmentSource::ExternalPath(path),
                 original_name: original_name.clone(),
                 size_bytes,
+                media_type: None,
                 selected_at_ms: now,
             },
         );
@@ -242,9 +274,122 @@ pub(crate) async fn choose_attachment_files(
             selection_id,
             original_name,
             size_bytes,
+            media_type: None,
+            origin: AttachmentSelectionOrigin::FilePicker,
         });
     }
     Ok(result)
+}
+
+/// 将一次 Composer paste 中的原始图片字节登记到现有 selection 池。
+///
+/// raw body 与展示元数据只存在于 Tauri IPC；真实媒体类型由 magic bytes 决定，Web MIME 只用于
+/// 提前拒绝明显不合法的调用。匿名临时文件的最后一个句柄随 selection 释放而回收。
+#[tauri::command]
+pub(crate) fn stage_clipboard_image(
+    bridge: State<'_, NativeResourceBridge>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<AttachmentSelection, NativeResourceError> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(error(
+            NativeResourceErrorCode::InvalidRequest,
+            "剪贴板图片必须使用原始字节传输。",
+        ));
+    };
+    let media_type_hint = request
+        .headers()
+        .get("x-ez-media-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let original_name = request
+        .headers()
+        .get("x-ez-original-name")
+        .and_then(|value| value.to_str().ok())
+        .and_then(decode_header_value);
+    stage_clipboard_image_bytes(&bridge, bytes, media_type_hint, original_name.as_deref())
+}
+
+fn stage_clipboard_image_bytes(
+    bridge: &NativeResourceBridge,
+    bytes: &[u8],
+    media_type_hint: &str,
+    original_name: Option<&str>,
+) -> Result<AttachmentSelection, NativeResourceError> {
+    if bytes.is_empty() || bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "剪贴板图片为空或超过 32 MiB 限制。",
+        ));
+    }
+    if !media_type_hint.to_ascii_lowercase().starts_with("image/") {
+        return Err(error(
+            NativeResourceErrorCode::InvalidRequest,
+            "剪贴板内容没有声明为图片。",
+        ));
+    }
+    let kind = infer::get(bytes).filter(|kind| kind.mime_type().starts_with("image/"));
+    let kind = kind.ok_or_else(|| {
+        error(
+            NativeResourceErrorCode::InvalidRequest,
+            "剪贴板内容不是受支持的图片文件。",
+        )
+    })?;
+    let mut file = tempfile::tempfile().map_err(|_| unavailable("无法暂存剪贴板图片。"))?;
+    file.write_all(bytes)
+        .and_then(|_| file.flush())
+        .map_err(|_| unavailable("无法暂存剪贴板图片。"))?;
+
+    let now = now_ms();
+    let mut state = bridge
+        .selections
+        .lock()
+        .map_err(|_| unavailable("附件选择状态不可用。"))?;
+    state.retain(|_, item| {
+        now.saturating_sub(item.selected_at_ms) <= SELECTION_TTL.as_millis() as u64
+    });
+    if state.len() >= MAX_SELECTIONS {
+        return Err(error(
+            NativeResourceErrorCode::SelectionLimitReached,
+            "当前草稿保留的附件过多，请先发送或移除部分附件。",
+        ));
+    }
+    let owned_bytes = state
+        .values()
+        .filter(|item| matches!(&item.source, SelectedAttachmentSource::OwnedTempFile(_)))
+        .map(|item| item.size_bytes)
+        .sum::<u64>();
+    if owned_bytes.saturating_add(bytes.len() as u64) > MAX_CLIPBOARD_TEMP_BYTES {
+        return Err(error(
+            NativeResourceErrorCode::SelectionLimitReached,
+            "剪贴板图片暂存总量已达到 256 MiB 限制。",
+        ));
+    }
+
+    let selection_id = bridge.allocate_id("selection");
+    let fallback_name = format!(
+        "clipboard-image-{}.{}",
+        selection_id.rsplit('-').next().unwrap_or("1"),
+        kind.extension()
+    );
+    let original_name = safe_original_name(original_name).unwrap_or(fallback_name);
+    let media_type = kind.mime_type().to_owned();
+    state.insert(
+        selection_id.clone(),
+        SelectedAttachment {
+            source: SelectedAttachmentSource::OwnedTempFile(Arc::new(file)),
+            original_name: original_name.clone(),
+            size_bytes: bytes.len() as u64,
+            media_type: Some(media_type.clone()),
+            selected_at_ms: now,
+        },
+    );
+    Ok(AttachmentSelection {
+        selection_id,
+        original_name,
+        size_bytes: bytes.len() as u64,
+        media_type: Some(media_type),
+        origin: AttachmentSelectionOrigin::Clipboard,
+    })
 }
 
 #[tauri::command]
@@ -319,6 +464,79 @@ pub(crate) async fn upload_selected_attachment(
     result
 }
 
+/// 把同一草稿的原生 selection 作为一个 multipart 请求发送到首次物化入口。
+///
+/// selection 在明确失败时继续保留；只有收到可靠成功响应后才统一移除。请求发送阶段断连时无法判断
+/// Runtime 是否已经提交，因此返回独立错误码，让 Desktop 使用原 manifest 与幂等键重试。
+#[tauri::command]
+pub(crate) async fn materialize_new_session(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    manifest: SessionMaterializationManifest,
+    operation_id: String,
+) -> Result<SessionMaterializationResult, NativeResourceError> {
+    if manifest.attachments.len() > MAX_SELECTIONS_PER_SEND {
+        return Err(error(
+            NativeResourceErrorCode::SelectionLimitReached,
+            "一次最多发送 32 个附件。",
+        ));
+    }
+    let mut selected = Vec::with_capacity(manifest.attachments.len());
+    for declared in &manifest.attachments {
+        let attachment = bridge.selected(&declared.selection_key)?;
+        if attachment.original_name != declared.original_name
+            || attachment.size_bytes != declared.size_bytes
+        {
+            return Err(error(
+                NativeResourceErrorCode::InvalidRequest,
+                "附件选择与首次发送内容不一致。",
+            ));
+        }
+        selected.push((declared.selection_key.clone(), attachment));
+    }
+    let bootstrap = coordinator
+        .bootstrap()
+        .await
+        .map_err(|_| runtime_unavailable())?;
+    if !bootstrap
+        .capabilities
+        .features
+        .contains(&RuntimeHostFeature::SessionMaterialization)
+    {
+        return Err(error(
+            NativeResourceErrorCode::MaterializationUnsupported,
+            "当前 Runtime 不支持新会话首次发送，请重启或完成应用更新。",
+        ));
+    }
+    if let Some(maximum) = bootstrap.capabilities.max_attachment_bytes
+        && selected.iter().any(|(_, item)| item.size_bytes > maximum)
+    {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "附件超过 Runtime 允许的单文件大小。",
+        ));
+    }
+    let cancellation = bridge.register_operation(&operation_id)?;
+    let result = materialize_selected(
+        &bridge.http,
+        &bootstrap.base_url,
+        &bootstrap.access_token,
+        &manifest,
+        &selected,
+        cancellation,
+    )
+    .await;
+    bridge.finish_operation(&operation_id);
+    if result.is_ok()
+        && let Ok(mut selections) = bridge.selections.lock()
+    {
+        for (selection_id, _) in &selected {
+            selections.remove(selection_id);
+        }
+    }
+    result
+}
+
 #[tauri::command]
 pub(crate) async fn preview_attachment(
     bridge: State<'_, NativeResourceBridge>,
@@ -347,6 +565,27 @@ pub(crate) async fn preview_attachment(
         .await
         .map_err(|_| runtime_unavailable())?;
     decode_preview_response(response).await
+}
+
+#[tauri::command]
+pub(crate) async fn preview_attachment_selection(
+    bridge: State<'_, NativeResourceBridge>,
+    selection_id: String,
+) -> Result<AttachmentPreview, NativeResourceError> {
+    let selected = bridge.selected(&selection_id)?;
+    if selected.size_bytes > MAX_PREVIEW_RESPONSE_BYTES as u64 {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "附件预览超过大小限制。",
+        ));
+    }
+    let bytes = read_selected_bytes(&selected, Some(MAX_PREVIEW_RESPONSE_BYTES)).await?;
+    let media_type = selected
+        .media_type
+        .clone()
+        .or_else(|| infer::get(&bytes).map(|kind| kind.mime_type().to_owned()))
+        .unwrap_or_else(|| media_type_from_name(&selected.original_name).to_owned());
+    preview_from_bytes(bytes, media_type)
 }
 
 #[tauri::command]
@@ -454,6 +693,13 @@ async fn decode_preview_response(
             "附件预览超过大小限制。",
         ));
     }
+    preview_from_bytes(bytes.to_vec(), media_type)
+}
+
+fn preview_from_bytes(
+    bytes: Vec<u8>,
+    media_type: String,
+) -> Result<AttachmentPreview, NativeResourceError> {
     let size_bytes = bytes.len() as u64;
     if media_type.starts_with("image/") {
         let data_url = format!("data:{media_type};base64,{}", STANDARD.encode(&bytes));
@@ -466,7 +712,7 @@ async fn decode_preview_response(
         });
     }
     if media_type.starts_with("text/") || media_type.starts_with("application/json") {
-        let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        let text = String::from_utf8(bytes).map_err(|_| {
             error(
                 NativeResourceErrorCode::ResourceNotPreviewable,
                 "文件不是有效的 UTF-8 文本。",
@@ -757,15 +1003,7 @@ async fn upload_selected(
     selected: &SelectedAttachment,
     cancellation: CancellationToken,
 ) -> Result<UploadAttachmentResult, NativeResourceError> {
-    let file = tokio::fs::File::open(&selected.path).await.map_err(|_| {
-        error(
-            NativeResourceErrorCode::SelectionUnavailable,
-            "无法读取所选附件。",
-        )
-    })?;
-    let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
-    let part = Part::stream_with_length(body, selected.size_bytes)
-        .file_name(selected.original_name.clone());
+    let part = selected_part(selected).await?;
     let request = http
         .post(format!(
             "{base_url}/sessions/{}/attachments",
@@ -792,6 +1030,195 @@ async fn upload_selected(
                 "Runtime 返回了无效的附件结果。",
             )
         })
+}
+
+async fn materialize_selected(
+    http: &reqwest::Client,
+    base_url: &str,
+    access_token: &str,
+    manifest: &SessionMaterializationManifest,
+    selected: &[(String, SelectedAttachment)],
+    cancellation: CancellationToken,
+) -> Result<SessionMaterializationResult, NativeResourceError> {
+    let manifest_json = serde_json::to_vec(manifest).map_err(|_| {
+        error(
+            NativeResourceErrorCode::InvalidRequest,
+            "无法编码首次发送内容。",
+        )
+    })?;
+    let mut form = Form::new().part("manifest", Part::bytes(manifest_json));
+    for (selection_id, attachment) in selected {
+        let part = selected_part(attachment).await?;
+        form = form.part(selection_id.clone(), part);
+    }
+    let request = http
+        .post(format!("{base_url}/session-materializations"))
+        .bearer_auth(access_token)
+        .multipart(form)
+        .send();
+    let response = tokio::select! {
+        () = cancellation.cancelled() => {
+            return Err(error(NativeResourceErrorCode::Cancelled, "首次发送已取消。"));
+        }
+        response = request => response.map_err(|_| error(
+            NativeResourceErrorCode::MaterializationResponseUnknown,
+            "未能确认 Runtime 是否已接受首次发送，请直接重试。",
+        ))?,
+    };
+    if !response.status().is_success() {
+        return Err(decode_runtime_failure(
+            response,
+            NativeResourceErrorCode::MaterializationFailed,
+        )
+        .await);
+    }
+    response
+        .json::<SessionMaterializationResult>()
+        .await
+        .map_err(|_| {
+            error(
+                NativeResourceErrorCode::MaterializationResponseUnknown,
+                "Runtime 已响应，但结果无法确认，请直接重试。",
+            )
+        })
+}
+
+async fn selected_part(selected: &SelectedAttachment) -> Result<Part, NativeResourceError> {
+    let body = match &selected.source {
+        SelectedAttachmentSource::ExternalPath(path) => {
+            let file = tokio::fs::File::open(path).await.map_err(|_| {
+                error(
+                    NativeResourceErrorCode::SelectionUnavailable,
+                    "无法读取所选附件。",
+                )
+            })?;
+            reqwest::Body::wrap_stream(ReaderStream::new(file))
+        }
+        SelectedAttachmentSource::OwnedTempFile(_) => {
+            reqwest::Body::from(read_selected_bytes(selected, None).await?)
+        }
+    };
+    Ok(Part::stream_with_length(body, selected.size_bytes)
+        .file_name(selected.original_name.clone()))
+}
+
+async fn read_selected_bytes(
+    selected: &SelectedAttachment,
+    maximum: Option<usize>,
+) -> Result<Vec<u8>, NativeResourceError> {
+    let bytes = match &selected.source {
+        SelectedAttachmentSource::ExternalPath(path) => {
+            let mut file = tokio::fs::File::open(path).await.map_err(|_| {
+                error(
+                    NativeResourceErrorCode::SelectionUnavailable,
+                    "无法读取所选附件。",
+                )
+            })?;
+            let mut bytes = Vec::new();
+            if let Some(maximum) = maximum {
+                file.take(maximum.saturating_add(1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+            } else {
+                file.read_to_end(&mut bytes).await
+            }
+            .map_err(|_| unavailable("无法读取所选附件。"))?;
+            bytes
+        }
+        SelectedAttachmentSource::OwnedTempFile(file) => {
+            let file = Arc::clone(file);
+            let size = usize::try_from(selected.size_bytes).map_err(|_| {
+                error(
+                    NativeResourceErrorCode::ResourceTooLarge,
+                    "附件大小超出当前平台限制。",
+                )
+            })?;
+            tokio::task::spawn_blocking(move || read_owned_file(&file, size))
+                .await
+                .map_err(|_| unavailable("无法读取剪贴板图片。"))?
+                .map_err(|_| unavailable("无法读取剪贴板图片。"))?
+        }
+    };
+    if maximum.is_some_and(|maximum| bytes.len() > maximum) {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "附件预览超过大小限制。",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn read_owned_file(file: &File, size: usize) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+
+    let mut bytes = vec![0; size];
+    let mut offset = 0;
+    while offset < size {
+        let read = file.read_at(&mut bytes[offset..], offset as u64)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "clipboard temp file ended early",
+            ));
+        }
+        offset += read;
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn read_owned_file(file: &File, size: usize) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::fs::FileExt as _;
+
+    let mut bytes = vec![0; size];
+    let mut offset = 0;
+    while offset < size {
+        let read = file.seek_read(&mut bytes[offset..], offset as u64)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "clipboard temp file ended early",
+            ));
+        }
+        offset += read;
+    }
+    Ok(bytes)
+}
+
+fn decode_header_value(value: &str) -> Option<String> {
+    let query = format!("value={value}");
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "value")
+        .map(|(_, value)| value.into_owned())
+}
+
+fn safe_original_name(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Path::new(value)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .map(str::to_owned)
+}
+
+fn media_type_from_name(name: &str) -> &'static str {
+    match Path::new(name)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some(
+            "txt" | "md" | "csv" | "log" | "rs" | "ts" | "tsx" | "js" | "jsx" | "css" | "scss"
+            | "html" | "xml" | "toml" | "yaml" | "yml",
+        ) => "text/plain",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn get_attachment(
@@ -971,6 +1398,58 @@ fn error(code: NativeResourceErrorCode, message: impl Into<String>) -> NativeRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+    #[tokio::test]
+    async fn clipboard_image_uses_magic_bytes_and_owned_selection_reader() {
+        let bridge = NativeResourceBridge::new();
+        let selected =
+            stage_clipboard_image_bytes(&bridge, PNG, "image/jpeg", Some("folder/screenshot.png"))
+                .expect("stage image");
+
+        assert_eq!(selected.original_name, "screenshot.png");
+        assert_eq!(selected.media_type.as_deref(), Some("image/png"));
+        assert!(matches!(
+            selected.origin,
+            AttachmentSelectionOrigin::Clipboard
+        ));
+        let attachment = bridge.selected(&selected.selection_id).expect("selection");
+        assert_eq!(
+            read_selected_bytes(&attachment, Some(MAX_PREVIEW_RESPONSE_BYTES))
+                .await
+                .expect("owned bytes"),
+            PNG
+        );
+    }
+
+    #[test]
+    fn clipboard_image_rejects_fake_mime_and_process_temp_limit() {
+        let bridge = NativeResourceBridge::new();
+        let fake =
+            stage_clipboard_image_bytes(&bridge, b"not an image", "image/png", Some("fake.png"))
+                .expect_err("fake image must fail");
+        assert!(matches!(fake.code, NativeResourceErrorCode::InvalidRequest));
+
+        let owned = tempfile::tempfile().expect("temp file");
+        bridge.selections.lock().expect("selections").insert(
+            "existing".to_owned(),
+            SelectedAttachment {
+                source: SelectedAttachmentSource::OwnedTempFile(Arc::new(owned)),
+                original_name: "existing.png".to_owned(),
+                size_bytes: MAX_CLIPBOARD_TEMP_BYTES,
+                media_type: Some("image/png".to_owned()),
+                selected_at_ms: now_ms(),
+            },
+        );
+        let limited = stage_clipboard_image_bytes(&bridge, PNG, "image/png", Some("next.png"))
+            .expect_err("process total must fail");
+        assert!(matches!(
+            limited.code,
+            NativeResourceErrorCode::SelectionLimitReached
+        ));
+        assert_eq!(bridge.selections.lock().expect("selections").len(), 1);
+    }
 
     #[test]
     fn export_name_never_contains_path_components() {

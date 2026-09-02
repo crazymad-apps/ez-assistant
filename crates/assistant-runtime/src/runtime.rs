@@ -10,20 +10,23 @@ mod delegation;
 mod device;
 pub(crate) mod goal;
 mod input;
+mod materialization;
 mod memory;
 mod model;
 mod permission;
 pub(crate) mod product;
+mod quote;
 mod recovery;
 mod session_management;
 mod shutdown;
 mod skills;
 mod tasks;
+mod title;
 mod tool_assembly;
 mod work_plan;
 mod workspace;
 
-pub use attachment::StagedAttachmentUpload;
+pub use attachment::{StagedAttachmentUpload, StagedSessionAttachment};
 pub(crate) use channel::{
     MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE, MAX_SPEAK_TEXT_CHARS, SpeakAuthorizationFacts,
     resolve_output_cycle_deliveries,
@@ -71,6 +74,12 @@ use crate::{
 
 const CONTEXT_WINDOW_THRESHOLD: f64 = 0.8;
 
+/// 单元测试中的脚本模型默认只描述主 Agent 调用；标题链路由专门测试显式开启。
+/// 正式库与 Runtime Host 构建始终启用自动标题资格。
+const fn automatic_title_enabled_by_default() -> bool {
+    !cfg!(test)
+}
+
 pub(crate) fn now_ms() -> RuntimeResult<i64> {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
         RuntimeError::InternalStateUnavailable {
@@ -89,7 +98,7 @@ pub struct AssistantRuntime {
     config: RuntimeConfig,
     lifecycle: RwLock<RuntimeLifecycle>,
     sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
-    workspaces: RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>,
+    workspaces: Arc<RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>>,
     attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
     devices: RwLock<BTreeMap<DeviceId, crate::PairedDevice>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
@@ -219,7 +228,7 @@ impl AssistantRuntime {
         let permission_scopes = permission_scopes(&recovered);
         let permission_coordinator =
             Arc::new(PermissionCoordinator::open(permission_store, permission_scopes).await);
-        Self::from_recovered(
+        let runtime = Self::from_recovered(
             config,
             config_source,
             model_catalog,
@@ -232,7 +241,9 @@ impl AssistantRuntime {
             permission_coordinator,
             recovered,
             Arc::new(crate::HmacRecallReferenceCodec::new(recall_reference_key)),
-        )
+        )?;
+        runtime.resume_pending_title_generations()?;
+        Ok(runtime)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -256,7 +267,7 @@ impl AssistantRuntime {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
             sessions: Arc::new(RwLock::new(recovered.sessions)),
-            workspaces: RwLock::new(recovered.workspaces),
+            workspaces: Arc::new(RwLock::new(recovered.workspaces)),
             attachments: RwLock::new(recovered.attachments),
             devices: RwLock::new(recovered.devices),
             delete_confirmations: Mutex::new(BTreeMap::new()),
@@ -284,6 +295,27 @@ impl AssistantRuntime {
             root_cancellation: CancellationToken::new(),
             tasks: Arc::new(RuntimeTasks::new()),
         })
+    }
+
+    fn resume_pending_title_generations(&self) -> RuntimeResult<()> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "session registry",
+            })?
+            .values()
+            .filter(|session| {
+                session
+                    .lock_state()
+                    .is_ok_and(|state| state.automatic_title_pending)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in sessions {
+            title::schedule_automatic_title(self.title_generation_context(), session);
+        }
+        Ok(())
     }
 
     /// 返回构造时已经校验的 Runtime 配置。
@@ -591,18 +623,16 @@ impl AssistantRuntime {
                     .as_ref()
                     .map(|workspace| WorkspaceEnvironmentSource {
                         workspace_id: &workspace.workspace_id,
+                        label: &workspace.label,
                         user_directory: &workspace.user_directory,
+                        additional_directories: &workspace.additional_directories,
                         agent_directory: &workspace.agent_directory,
                     }),
                 memory_context: &memory_context,
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
         let skill_catalog = self
-            .prepare_session_skill_catalog(
-                workspace
-                    .as_ref()
-                    .map(|workspace| workspace.user_directory.as_str()),
-            )
+            .prepare_session_skill_catalog(workspace.as_ref().map(workspace_directories))
             .await?;
         let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
         let stored = self
@@ -619,6 +649,10 @@ impl AssistantRuntime {
                 current_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
                 role,
+                materialization_key: None,
+                automatic_title_pending: role == crate::SessionRole::Standard
+                    && title_origin == assistant_protocol::SessionTitleOrigin::Generated
+                    && automatic_title_enabled_by_default(),
                 created_at_ms: now_ms()?,
             })
             .await
@@ -708,7 +742,7 @@ impl AssistantRuntime {
 
     async fn prepare_session_skill_catalog(
         &self,
-        workspace_directory: Option<&str>,
+        workspace_directories: Option<Vec<String>>,
     ) -> RuntimeResult<crate::SessionSkillCatalog> {
         let states = self
             .store
@@ -718,7 +752,7 @@ impl AssistantRuntime {
         let scan = match self
             .skill_package_source
             .scan(crate::SkillScanRequest {
-                workspace_directory: workspace_directory.map(str::to_owned),
+                workspace_directories: workspace_directories.unwrap_or_default(),
             })
             .await
         {
@@ -978,6 +1012,12 @@ impl AssistantRuntime {
     fn session_for_test(&self, session_id: &SessionId) -> Arc<SessionController> {
         self.session(session_id).expect("session exists")
     }
+}
+
+fn workspace_directories(workspace: &StoredWorkspace) -> Vec<String> {
+    std::iter::once(workspace.user_directory.clone())
+        .chain(workspace.additional_directories.iter().cloned())
+        .collect()
 }
 
 fn random_recall_key() -> [u8; 32] {

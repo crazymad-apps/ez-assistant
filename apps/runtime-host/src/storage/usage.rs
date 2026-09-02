@@ -23,7 +23,9 @@ impl StorageEngine {
             .query_row(
                 "SELECT request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum,
                         cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum,
-                        reasoning_request_count, latest_input_tokens, latest_output_tokens,
+                        reasoning_request_count, auxiliary_request_count,
+                        auxiliary_input_tokens_sum, auxiliary_output_tokens_sum,
+                        auxiliary_total_tokens_sum, latest_input_tokens, latest_output_tokens,
                         latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens
                  FROM session_usage WHERE session_id = ?1",
                 [session_id.as_str()],
@@ -265,7 +267,7 @@ fn record_usage(
 fn decode_session_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSessionUsage> {
     let request_count = non_negative_u64(row.get(0)?, "session request count is invalid")
         .map_err(to_sqlite_error)?;
-    let latest_input = row.get::<_, Option<i64>>(8)?;
+    let latest_input = row.get::<_, Option<i64>>(12)?;
     Ok(StoredSessionUsage {
         request_count,
         input_tokens: decode_u64(row, 1, "session input token sum is invalid")?,
@@ -275,6 +277,18 @@ fn decode_session_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSessi
         cached_request_count: decode_u64(row, 5, "session cached request count is invalid")?,
         reasoning_tokens: decode_u64(row, 6, "session reasoning token sum is invalid")?,
         reasoning_request_count: decode_u64(row, 7, "session reasoning request count is invalid")?,
+        auxiliary_request_count: decode_u64(row, 8, "session auxiliary request count is invalid")?,
+        auxiliary_input_tokens: decode_u64(row, 9, "session auxiliary input token sum is invalid")?,
+        auxiliary_output_tokens: decode_u64(
+            row,
+            10,
+            "session auxiliary output token sum is invalid",
+        )?,
+        auxiliary_total_tokens: decode_u64(
+            row,
+            11,
+            "session auxiliary total token sum is invalid",
+        )?,
         latest: latest_input
             .map(|input_tokens| -> rusqlite::Result<TokenUsage> {
                 Ok(TokenUsage {
@@ -283,16 +297,16 @@ fn decode_session_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSessi
                         "latest input token usage is invalid",
                     )
                     .map_err(to_sqlite_error)?,
-                    output_tokens: decode_u64(row, 9, "latest output token usage is invalid")?,
-                    total_tokens: decode_u64(row, 10, "latest total token usage is invalid")?,
+                    output_tokens: decode_u64(row, 13, "latest output token usage is invalid")?,
+                    total_tokens: decode_u64(row, 14, "latest total token usage is invalid")?,
                     cached_input_tokens: decode_optional_u64(
                         row,
-                        11,
+                        15,
                         "latest cached token usage is invalid",
                     )?,
                     reasoning_tokens: decode_optional_u64(
                         row,
-                        12,
+                        16,
                         "latest reasoning token usage is invalid",
                     )?,
                 })

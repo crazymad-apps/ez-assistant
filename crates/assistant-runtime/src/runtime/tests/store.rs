@@ -12,18 +12,20 @@ use crate::{
     ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
     ConversationWindowRequest, MemoryContextSnapshot, MessageFeedbackChange, ModelChange,
     NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PersonaMutation,
-    PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
-    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionTitleChange, SkillNameState, SkillNameStateChange, StoreError,
-    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredSession, StoredSessionFork,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, QueuePriorityChange, RecoveredRuntime, RewriteResult, RuntimeStore,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionTitleChange,
+    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, SkillNameState,
+    SkillNameStateChange, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
+    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
+    StoredConversationRawWindow, StoredConversationWindow, StoredMessageFeedback,
+    StoredPinnedMemory, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionMaterialization,
     StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -154,6 +156,10 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.register_workspace(registration)
     }
 
+    fn update_workspace(&self, update: WorkspaceUpdate) -> StoreFuture<'_, StoredWorkspace> {
+        self.inner.update_workspace(update)
+    }
+
     fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace> {
         self.inner.remove_workspace(removal)
     }
@@ -164,6 +170,13 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession> {
         self.inner.create_session(session)
+    }
+
+    fn materialize_session(
+        &self,
+        materialization: NewStoredSessionMaterialization,
+    ) -> StoreFuture<'_, StoredSessionMaterialization> {
+        self.inner.materialize_session(materialization)
     }
 
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
@@ -377,6 +390,17 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()> {
         self.inner.rename_session(change)
+    }
+
+    fn disable_automatic_title(&self, session_id: &SessionId) -> StoreFuture<'_, ()> {
+        self.inner.disable_automatic_title(session_id)
+    }
+
+    fn commit_session_title_generation(
+        &self,
+        commit: SessionTitleGenerationCommit,
+    ) -> StoreFuture<'_, SessionTitleGenerationCommitResult> {
+        self.inner.commit_session_title_generation(commit)
     }
 
     fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()> {

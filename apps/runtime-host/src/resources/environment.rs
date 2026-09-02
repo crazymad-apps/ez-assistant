@@ -39,18 +39,24 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         let attachment_directory = path_text(&session_directory.join("attachments"))?;
         let tool_image_directory = path_text(&session_directory.join("tool-images"))?;
         let private_directory = path_text(&session_directory.join("private"))?;
-        let (workspace_id, working_directory, workspace_private_directory) =
-            match &request.workspace {
-                Some(workspace) => (
-                    Some(workspace.workspace_id.clone()),
-                    workspace.user_directory.to_owned(),
-                    Some(workspace.agent_directory.to_owned()),
-                ),
-                None => (None, private_directory.clone(), None),
-            };
+        let (
+            workspace_id,
+            working_directory,
+            additional_workspace_directories,
+            workspace_private_directory,
+        ) = match &request.workspace {
+            Some(workspace) => (
+                Some(workspace.workspace_id.clone()),
+                workspace.user_directory.to_owned(),
+                workspace.additional_directories.to_vec(),
+                Some(workspace.agent_directory.to_owned()),
+            ),
+            None => (None, private_directory.clone(), Vec::new(), None),
+        };
         let environment = SessionExecutionEnvironment {
             workspace_id,
             working_directory,
+            additional_workspace_directories,
             workspace_private_directory,
             session_attachment_directory: attachment_directory,
             session_tool_image_directory: tool_image_directory,
@@ -78,10 +84,20 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
             .map_err(SessionEnvironmentFactoryError::with_source)?;
             parts.push(snapshot.into_content());
         }
-        if let Some(workspace) = &request.workspace
-            && let Some(instructions) = read_workspace_instructions(workspace.user_directory)?
-        {
-            parts.push(render_workspace_instructions(&instructions));
+        if let Some(workspace) = &request.workspace {
+            let roots = std::iter::once(workspace.user_directory)
+                .chain(workspace.additional_directories.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            parts.push(render_workspace_context(workspace.label, &roots));
+            for (root_order, root) in roots.iter().enumerate() {
+                if let Some(instructions) = read_workspace_instructions(root)? {
+                    parts.push(render_workspace_instructions(
+                        root_order,
+                        root,
+                        &instructions,
+                    ));
+                }
+            }
         }
         parts.push(render_directory_prompt(&environment));
         ensure_context_limit(&parts)?;
@@ -99,6 +115,10 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         let environment = SessionExecutionEnvironment {
             workspace_id: request.source_environment.workspace_id.clone(),
             working_directory: request.source_environment.working_directory.clone(),
+            additional_workspace_directories: request
+                .source_environment
+                .additional_workspace_directories
+                .clone(),
             workspace_private_directory: request
                 .source_environment
                 .workspace_private_directory
@@ -152,9 +172,28 @@ fn render_persona(content: &str) -> String {
     format!("<persona>\n{}\n</persona>", escape_xml(content))
 }
 
-fn render_workspace_instructions(content: &str) -> String {
+fn render_workspace_context(label: &str, roots: &[&str]) -> String {
+    let mut lines = vec![
+        "<workspace_context>".to_owned(),
+        format!("  <label>{}</label>", escape_xml(label)),
+        "  <directory_semantics>The first root is the primary working directory used for relative file paths and Shell cwd. Additional roots must be addressed with explicit absolute paths. Registered roots are working context, not an operating-system sandbox.</directory_semantics>".to_owned(),
+    ];
+    for (index, root) in roots.iter().enumerate() {
+        lines.push(format!(
+            "  <root order=\"{index}\" role=\"{}\">{}</root>",
+            if index == 0 { "primary" } else { "additional" },
+            escape_xml(root)
+        ));
+    }
+    lines.push("</workspace_context>".to_owned());
+    lines.join("\n")
+}
+
+fn render_workspace_instructions(root_order: usize, root: &str, content: &str) -> String {
     format!(
-        "<workspace_instructions file=\"AGENTS.md\">\n{}\n</workspace_instructions>",
+        "<workspace_instructions root_order=\"{}\" root=\"{}\" file=\"AGENTS.md\">\n{}\n</workspace_instructions>",
+        root_order,
+        escape_xml(root),
         escape_xml(content)
     )
 }
@@ -186,6 +225,17 @@ fn render_directory_prompt(environment: &SessionExecutionEnvironment) -> String 
             escape_xml(&environment.working_directory)
         ),
     ];
+    for (index, directory) in environment
+        .additional_workspace_directories
+        .iter()
+        .enumerate()
+    {
+        lines.push(format!(
+            "  <additional_workspace_directory order=\"{}\">{}</additional_workspace_directory>",
+            index + 1,
+            escape_xml(directory)
+        ));
+    }
     if let Some(directory) = environment.workspace_private_directory.as_deref() {
         lines.push(format!(
             "  <workspace_private_directory>{}</workspace_private_directory>",
@@ -236,7 +286,9 @@ mod tests {
     ) -> WorkspaceEnvironmentSource<'a> {
         WorkspaceEnvironmentSource {
             workspace_id,
+            label: "Example Workspace",
             user_directory: user_directory.to_str().expect("UTF-8 workspace path"),
+            additional_directories: &[],
             agent_directory: agent_directory.to_str().expect("UTF-8 agent path"),
         }
     }
@@ -294,8 +346,9 @@ mod tests {
             })
             .expect("bound environment");
         assert_eq!(bound.environment.workspace_id, Some(workspace_id));
+        assert!(bound.system_prompt.parts()[1].contains("Example Workspace"));
         assert!(bound.system_prompt.parts()[1].contains("project&lt;&amp;"));
-        assert!(bound.system_prompt.parts()[1].contains("workspace_private_directory"));
+        assert!(bound.system_prompt.parts()[2].contains("workspace_private_directory"));
     }
 
     #[test]
@@ -333,7 +386,7 @@ mod tests {
             })
             .expect("prepared environment");
         let parts = prepared.system_prompt.parts();
-        assert_eq!(parts.len(), 5);
+        assert_eq!(parts.len(), 6);
         assert_eq!(parts[0], BASE_SYSTEM_PROMPT);
         assert_eq!(
             parts[1],
@@ -342,10 +395,14 @@ mod tests {
         assert!(parts[2].starts_with("<pinned_memories>"));
         assert!(parts[2].contains("Prefer concise &lt;answers&gt;."));
         assert_eq!(
-            parts[3],
-            "<workspace_instructions file=\"AGENTS.md\">\nUse &lt;workspace&gt; &amp; tests.\n</workspace_instructions>"
+            parts[4],
+            format!(
+                "<workspace_instructions root_order=\"0\" root=\"{}\" file=\"AGENTS.md\">\nUse &lt;workspace&gt; &amp; tests.\n</workspace_instructions>",
+                workspace.to_string_lossy()
+            )
         );
-        assert!(parts[4].starts_with("<runtime_directories>"));
+        assert!(parts[3].starts_with("<workspace_context>"));
+        assert!(parts[5].starts_with("<runtime_directories>"));
     }
 
     #[test]
@@ -371,6 +428,62 @@ mod tests {
                 .parts()
                 .iter()
                 .all(|part| !part.contains("workspace_instructions"))
+        );
+    }
+
+    #[test]
+    fn workspace_roots_and_agents_instructions_preserve_primary_then_additional_order() {
+        let root = TempDir::new().expect("runtime home");
+        let primary = root.path().join("primary");
+        let docs = root.path().join("docs");
+        let agent_directory = root.path().join("agent");
+        for directory in [&primary, &docs, &agent_directory] {
+            fs::create_dir_all(directory).expect("directory");
+        }
+        fs::write(primary.join(AGENTS_FILE), "primary rules").expect("primary instructions");
+        fs::write(docs.join(AGENTS_FILE), "docs rules").expect("additional instructions");
+        let workspace_id = WorkspaceId::new("w-multi-root").expect("workspace id");
+        let additional = vec![docs.to_string_lossy().into_owned()];
+        let source = WorkspaceEnvironmentSource {
+            workspace_id: &workspace_id,
+            label: "Multi Root",
+            user_directory: primary.to_str().expect("primary path"),
+            additional_directories: &additional,
+            agent_directory: agent_directory.to_str().expect("agent path"),
+        };
+        let prepared = HostSessionEnvironmentFactory::new(root.path())
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &SessionId::new("s-multi-root").expect("session id"),
+                workspace: Some(source),
+                memory_context: &MemoryContextSnapshot::default(),
+            })
+            .expect("environment");
+
+        assert_eq!(
+            prepared.environment.working_directory,
+            primary.to_string_lossy()
+        );
+        assert_eq!(
+            prepared.environment.additional_workspace_directories,
+            additional
+        );
+        let parts = prepared.system_prompt.parts();
+        let primary_index = parts
+            .iter()
+            .position(|part| part.contains("primary rules"))
+            .expect("primary instructions");
+        let docs_index = parts
+            .iter()
+            .position(|part| part.contains("docs rules"))
+            .expect("additional instructions");
+        assert!(primary_index < docs_index);
+        assert!(parts[1].contains("role=\"primary\""));
+        assert!(parts[1].contains("role=\"additional\""));
+        assert!(
+            parts
+                .last()
+                .expect("directory prompt")
+                .contains("<additional_workspace_directory order=\"1\">")
         );
     }
 

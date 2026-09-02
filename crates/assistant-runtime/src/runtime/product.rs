@@ -125,6 +125,7 @@ impl AssistantRuntime {
                             }
                             UserPart::Injected(_)
                             | UserPart::InternalContext(_)
+                            | UserPart::QuotedText(_)
                             | UserPart::FileReferences(_) => {}
                         }
                     }
@@ -311,6 +312,7 @@ impl AssistantRuntime {
             let usage = project_usage(&stored_usage, &summary, self)?;
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
+            let workspace = self.session_workspace_snapshot(&session)?;
             let (work_plan, goal, skill_catalog, active_skills) = {
                 let state = session.lock_state()?;
                 (
@@ -320,6 +322,11 @@ impl AssistantRuntime {
                     project_active_skills(&state)?,
                 )
             };
+            let title_generation = session
+                .lock_state()?
+                .active_title_generation
+                .as_ref()
+                .map(|active| active.snapshot.clone());
             let child_tasks = self.child_tasks.list_for_session(&request.session_id)?;
             let mut child_task_items = Vec::with_capacity(child_tasks.len());
             for task in child_tasks {
@@ -332,6 +339,8 @@ impl AssistantRuntime {
                         observed_sequence: end,
                         value: SessionViewSnapshot {
                             session: summary,
+                            title_generation,
+                            workspace,
                             conversation_generation: generation,
                             composer_capabilities,
                             work_plan,
@@ -1684,11 +1693,68 @@ pub(super) fn project_conversation(
                     .flatten()
                     .filter_map(|file| context.attachment_by_path.get(&file.readable_path).cloned())
                     .collect();
+                let quotes = user
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserPart::QuotedText(quoted) => {
+                            Some(assistant_protocol::QuotedTextSnapshot {
+                                quote_id: protocol_part_id(quoted.quote_id.as_str()).ok()?,
+                                exact: quoted.exact.clone(),
+                                prefix: quoted.prefix.clone(),
+                                suffix: quoted.suffix.clone(),
+                                source_owner: match &quoted.source_owner {
+                                    agent_types::QuotedTextSourceOwner::MainSession {
+                                        session_id,
+                                    } => assistant_protocol::ConversationOwner::MainSession {
+                                        session_id: assistant_protocol::SessionId::new(
+                                            session_id.clone(),
+                                        )
+                                        .ok()?,
+                                    },
+                                    agent_types::QuotedTextSourceOwner::ChildTask {
+                                        session_id,
+                                        child_task_id,
+                                    } => assistant_protocol::ConversationOwner::ChildTask {
+                                        session_id: assistant_protocol::SessionId::new(
+                                            session_id.clone(),
+                                        )
+                                        .ok()?,
+                                        child_task_id: assistant_protocol::ChildTaskId::new(
+                                            child_task_id.clone(),
+                                        )
+                                        .ok()?,
+                                    },
+                                },
+                                source_generation: quoted.source_generation,
+                                source_message_id: protocol_message_id(
+                                    quoted.source_message_id.as_str(),
+                                )
+                                .ok()?,
+                                text_start_utf16: quoted.text_start_utf16,
+                                text_end_utf16: quoted.text_end_utf16,
+                                source_role: match quoted.source_role {
+                                    agent_types::QuotedTextSourceRole::User => {
+                                        assistant_protocol::QuotedTextSourceRoleSnapshot::User
+                                    }
+                                    agent_types::QuotedTextSourceRole::Assistant => {
+                                        assistant_protocol::QuotedTextSourceRoleSnapshot::Assistant
+                                    }
+                                },
+                                source_label: quoted.source_label.clone(),
+                                source_created_at_ms: quoted.source_created_at_ms,
+                                source_available: quoted.source_available,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 items.push(ConversationItem::User(UserMessageSnapshot {
                     message_id: protocol_message_id(user.id.as_str())?,
                     input_id: context.input_by_message.get(user.id.as_str()).cloned(),
                     text: user_text(user),
                     attachment_ids,
+                    quotes,
                     source: context
                         .source_by_message
                         .get(user.id.as_str())
@@ -2110,6 +2176,14 @@ fn project_usage(
         previous_turn: previous.map(usage_totals),
         latest_cache_hit_basis_points,
         overall_cache_hit_basis_points,
+        auxiliary: (stored.auxiliary_request_count > 0).then_some(
+            assistant_protocol::AuxiliaryUsageSnapshot {
+                request_count: stored.auxiliary_request_count,
+                input_tokens: stored.auxiliary_input_tokens,
+                output_tokens: stored.auxiliary_output_tokens,
+                total_tokens: stored.auxiliary_total_tokens,
+            },
+        ),
         context,
     })
 }
@@ -2330,9 +2404,10 @@ fn user_text(message: &agent_types::UserMessage) -> String {
         .iter()
         .filter_map(|part| match part {
             UserPart::Text(text) => Some(text.text.as_str()),
-            UserPart::Injected(_) | UserPart::InternalContext(_) | UserPart::FileReferences(_) => {
-                None
-            }
+            UserPart::Injected(_)
+            | UserPart::InternalContext(_)
+            | UserPart::QuotedText(_)
+            | UserPart::FileReferences(_) => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

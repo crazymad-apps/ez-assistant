@@ -122,7 +122,14 @@ fn run_read_image_case(source_model_key: &str) {
     let access_token = host.access_token().to_owned();
     let mut client = host.connect();
     assert_responses_route(&mut client);
-    let registered = client.runtime("register_workspace", json!({"path": workspace.path()}));
+    let registered = client.runtime(
+        "register_workspace",
+        json!({
+            "label": "responses-workspace",
+            "primary_directory": workspace.path(),
+            "additional_directories": [],
+        }),
+    );
     let workspace_id = text(&registered["workspace"]["workspace_id"]);
     let created = client.runtime(
         "create_session",

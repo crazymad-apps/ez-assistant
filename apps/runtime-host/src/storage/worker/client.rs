@@ -16,21 +16,22 @@ use assistant_runtime::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange, PendingChildToolExchange,
-    PendingToolExchange, PermissionFileLoad, PermissionFileRevision, PermissionFileScope,
-    PermissionFileStore, PermissionStoreFuture, PersonaMutation, PersonaSnapshot,
-    PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange, ReasoningEffortChange,
-    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange,
+    PendingChildToolExchange, PendingToolExchange, PermissionFileLoad, PermissionFileRevision,
+    PermissionFileScope, PermissionFileStore, PermissionStoreFuture, PersonaMutation,
+    PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
+    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
+    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SkillNameState,
-    SkillNameStateChange, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationWindow, StoredMessageFeedback,
-    StoredPinnedMemory, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionFork,
-    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
+    StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage, StoredWorkPlan,
+    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
+    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -300,6 +301,13 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn update_workspace(&self, update: WorkspaceUpdate) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            self.request(|reply| Command::UpdateWorkspace { update, reply })
+                .await
+        })
+    }
+
     fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace> {
         Box::pin(async move {
             self.request(|reply| Command::RemoveWorkspace { removal, reply })
@@ -318,6 +326,19 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             self.request(|reply| Command::CreateSession { session, reply })
                 .await
+        })
+    }
+
+    fn materialize_session(
+        &self,
+        materialization: NewStoredSessionMaterialization,
+    ) -> StoreFuture<'_, StoredSessionMaterialization> {
+        Box::pin(async move {
+            self.request(|reply| Command::MaterializeSession {
+                materialization: Box::new(materialization),
+                reply,
+            })
+            .await
         })
     }
 
@@ -669,6 +690,24 @@ impl RuntimeStore for LocalRuntimeStore {
     fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             self.request(|reply| Command::RenameSession { change, reply })
+                .await
+        })
+    }
+
+    fn disable_automatic_title(&self, session_id: &SessionId) -> StoreFuture<'_, ()> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::DisableAutomaticTitle { session_id, reply })
+                .await
+        })
+    }
+
+    fn commit_session_title_generation(
+        &self,
+        commit: SessionTitleGenerationCommit,
+    ) -> StoreFuture<'_, SessionTitleGenerationCommitResult> {
+        Box::pin(async move {
+            self.request(|reply| Command::CommitSessionTitleGeneration { commit, reply })
                 .await
         })
     }

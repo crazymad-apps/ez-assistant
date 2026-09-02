@@ -300,6 +300,7 @@ fn latest_user_text(request: &ModelRequest) -> String {
                         UserPart::Text(part) => Some(part.text.as_str()),
                         UserPart::Injected(_)
                         | UserPart::InternalContext(_)
+                        | UserPart::QuotedText(_)
                         | UserPart::FileReferences(_) => None,
                     })
                     .collect::<Vec<_>>()

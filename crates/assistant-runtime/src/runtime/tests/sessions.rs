@@ -4,7 +4,7 @@ use crate::{
     SkillPackageSource, SkillScanFuture, SkillScanRequest, SkillScanResult, SkillSource,
 };
 
-struct StaticSkillPackageSource;
+pub(super) struct StaticSkillPackageSource;
 
 impl SkillPackageSource for StaticSkillPackageSource {
     fn scan(&self, _request: SkillScanRequest) -> SkillScanFuture<'_> {
@@ -14,6 +14,7 @@ impl SkillPackageSource for StaticSkillPackageSource {
                     name: SkillName::parse("review").expect("name"),
                     description: "Review changes".to_owned(),
                     source: SkillSource::UserAgents,
+                    workspace_root_order: None,
                     source_path: "/fixture/review".to_owned(),
                     definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
                     body: "Review carefully.".to_owned(),
@@ -496,6 +497,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
             message: "review this change".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: Some("review".to_owned()),
             idempotency_key: None,
         })
@@ -641,6 +643,7 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
             message: "review with a skill".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -728,6 +731,7 @@ async fn goal_and_skill_keep_objective_clean_and_internal_boundaries_ordered() {
             message: "ship release".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: Some("review".to_owned()),
             idempotency_key: None,
         })
@@ -826,6 +830,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             session_id: session.session.session_id.clone(),
             message: "must not commit".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

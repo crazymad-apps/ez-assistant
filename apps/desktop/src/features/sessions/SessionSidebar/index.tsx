@@ -7,8 +7,10 @@ import {
   DropdownMenuTrigger,
 } from "../../../components/DropdownMenu";
 import { Icon } from "../../../components/Icon";
+import { Collapse } from "../../../components/Collapse";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { draftKeyForWorkspace } from "../../../stores/NewSessionDraftStore";
 import { workspaceDisplayName } from "../sessionFormatters";
 import { SessionList, WorkspaceGroup } from "./WorkspaceGroup";
 import { ControllerSection } from "./ControllerSection";
@@ -118,15 +120,24 @@ export const SessionSidebar = observer(function SessionSidebar() {
                 {active_workspaces.map((workspace) => (
                   <DropdownMenuItem
                     key={workspace.workspace_id}
-                    onSelect={() => void store.createSession(workspace.workspace_id)}
+                    onSelect={() => store.openNewSessionDraft(workspace.workspace_id)}
                   >
                     <Icon name="folder" size={15} />
-                    <span>{workspaceDisplayName(workspace.user_directory)}</span>
+                    <span>{workspace.label}</span>
+                    {store.new_session_drafts.hasDraft(draftKeyForWorkspace(workspace.workspace_id)) && (
+                      <em className={styles.draft_indicator}>有草稿</em>
+                    )}
+                    {workspaceDisplayName(workspace.user_directory) !== workspace.label && (
+                      <small>{workspaceDisplayName(workspace.user_directory)}</small>
+                    )}
                   </DropdownMenuItem>
                 ))}
-                <DropdownMenuItem onSelect={() => void store.createSession(null)}>
+                <DropdownMenuItem onSelect={() => store.openNewSessionDraft(null)}>
                   <Icon name="message" size={15} />
-                  <span>独立会话</span>
+                  <span>未绑定工作空间</span>
+                  {store.new_session_drafts.hasDraft(draftKeyForWorkspace(null)) && (
+                    <em className={styles.draft_indicator}>有草稿</em>
+                  )}
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void store.addWorkspace()}>
                   <Icon name="plus" size={15} />
@@ -219,15 +230,17 @@ export const SessionSidebar = observer(function SessionSidebar() {
                 <Icon name="chevron-down" size={14} />
               </button>
             </div>
-            {workspace_section_open && (
-              groups.map((group) => (
-                <WorkspaceGroup
-                  key={group.workspace.workspace_id}
-                  sessions={group.sessions}
-                  workspace={group.workspace}
-                />
-              ))
-            )}
+            <Collapse open={workspace_section_open}>
+              <div>
+                {groups.map((group) => (
+                  <WorkspaceGroup
+                    key={group.workspace.workspace_id}
+                    sessions={group.sessions}
+                    workspace={group.workspace}
+                  />
+                ))}
+              </div>
+            </Collapse>
             {unbound.length > 0 && (
               <section className={styles.unbound_section}>
                 <div className={styles.section_header}>
@@ -249,7 +262,7 @@ export const SessionSidebar = observer(function SessionSidebar() {
                           store.pending_session_action ||
                           store.pending_workspace_action
                         }
-                        onClick={() => void store.createSession(null)}
+                        onClick={() => store.openNewSessionDraft(null)}
                         type="button"
                       >
                         <Icon name="plus" size={14} />
@@ -266,9 +279,9 @@ export const SessionSidebar = observer(function SessionSidebar() {
                     <Icon name="chevron-down" size={14} />
                   </button>
                 </div>
-                {unbound_section_open && (
+                <Collapse open={unbound_section_open}>
                   <SessionList indent="root" sessions={unbound} />
-                )}
+                </Collapse>
               </section>
             )}
             {sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}

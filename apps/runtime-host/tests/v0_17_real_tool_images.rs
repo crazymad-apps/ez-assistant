@@ -49,7 +49,14 @@ fn run_read_image_case(model_key: &str) {
     let mut client = host.connect();
     let configuration = client.runtime("get_config_status", json!({}));
     assert_eq!(configuration["status"]["state"], "ready");
-    let registered = client.runtime("register_workspace", json!({ "path": workspace.path() }));
+    let registered = client.runtime(
+        "register_workspace",
+        json!({
+            "label": "real-tool-images",
+            "primary_directory": workspace.path(),
+            "additional_directories": [],
+        }),
+    );
     let workspace_id = text(&registered["workspace"]["workspace_id"]);
     let created = client.runtime(
         "create_session",

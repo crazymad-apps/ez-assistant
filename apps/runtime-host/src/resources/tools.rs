@@ -543,6 +543,7 @@ mod tests {
         SessionExecutionEnvironment {
             workspace_id: None,
             working_directory: root.path().join(workdir).to_string_lossy().into_owned(),
+            additional_workspace_directories: Vec::new(),
             workspace_private_directory: None,
             session_attachment_directory: attachments.to_string_lossy().into_owned(),
             session_tool_image_directory: tool_images.to_string_lossy().into_owned(),

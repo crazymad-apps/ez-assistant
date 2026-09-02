@@ -10,7 +10,7 @@ use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, ReasoningEffortKey, RunId,
     RunSnapshot, SessionCompactionSnapshot, SessionId, SessionLifecycle, SessionSummary,
-    SessionTitleOrigin,
+    SessionTitleGenerationSnapshot, SessionTitleOrigin,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use tokio_util::sync::CancellationToken;
@@ -75,6 +75,10 @@ pub(crate) struct SessionState {
     pub(crate) output_cycle: Option<crate::OutputCycleState>,
     /// 仅属于当前 Runtime 进程；不得进入 Store 或恢复投影。
     pub(crate) active_compaction: Option<ActiveSessionCompaction>,
+    /// Store 中可恢复的自动标题资格。
+    pub(crate) automatic_title_pending: bool,
+    /// 当前进程中唯一有效的标题旁路调用。
+    pub(crate) active_title_generation: Option<ActiveSessionTitleGeneration>,
     pub(crate) is_faulted: bool,
     pub(crate) updated_at_ms: i64,
     pub(crate) archived_at_ms: Option<i64>,
@@ -91,6 +95,14 @@ pub(crate) struct SessionState {
 pub(crate) struct ActiveSessionCompaction {
     pub(crate) snapshot: SessionCompactionSnapshot,
     pub(crate) cancellation: Option<CancellationToken>,
+}
+
+/// 当前标题旁路的受控进程内身份和取消句柄。
+#[derive(Clone)]
+pub(crate) struct ActiveSessionTitleGeneration {
+    pub(crate) task_id: String,
+    pub(crate) snapshot: SessionTitleGenerationSnapshot,
+    pub(crate) cancellation: CancellationToken,
 }
 
 /// 一条已接受 Input 的持久事实及其首次、最近 Run 关联。
@@ -201,6 +213,8 @@ impl SessionController {
                 active_run: None,
                 output_cycle: None,
                 active_compaction: None,
+                automatic_title_pending: stored.automatic_title_pending,
+                active_title_generation: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
@@ -292,6 +306,8 @@ impl SessionController {
                 active_run: None,
                 output_cycle: None,
                 active_compaction: None,
+                automatic_title_pending: stored.automatic_title_pending,
+                active_title_generation: None,
                 is_faulted: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
@@ -375,6 +391,15 @@ impl SessionController {
 
     pub(crate) fn reasoning_effort(&self) -> RuntimeResult<Option<ReasoningEffortKey>> {
         Ok(self.lock_state()?.reasoning_effort)
+    }
+
+    /// 在持有 Session mutation gate 时撤销当前标题旁路，不留下可恢复 UI 状态。
+    pub(crate) fn cancel_title_generation(&self) -> RuntimeResult<()> {
+        let mut state = self.lock_state()?;
+        if let Some(active) = state.active_title_generation.take() {
+            active.cancellation.cancel();
+        }
+        Ok(())
     }
 
     pub(crate) fn role(&self) -> RuntimeResult<SessionRole> {

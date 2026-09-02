@@ -21,6 +21,7 @@ async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available
                 session_id: session.session.session_id.clone(),
                 message: "must not start".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             }).await,
@@ -64,6 +65,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -138,6 +140,7 @@ async fn completed_model_usage_is_projected_as_a_runtime_event_and_persisted_in_
             session_id: session.session.session_id.clone(),
             message: "report usage".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -210,6 +213,7 @@ async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
             session_id: session.session.session_id.clone(),
             message: "hello".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -266,6 +270,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
             session_id: session.session.session_id.clone(),
             message: "use echo".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -403,6 +408,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
             session_id: session.session.session_id.clone(),
             message: "use the tool".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -427,6 +433,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
             session_id: session.session.session_id.clone(),
             message: "must not be appended".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

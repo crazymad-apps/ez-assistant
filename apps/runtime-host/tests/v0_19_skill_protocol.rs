@@ -29,7 +29,14 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
     let first_host = HostProcess::start(runtime_home.path());
     let mut client = first_host.connect();
     let workspace_id = string(
-        &client.runtime("register_workspace", json!({"path": workspace.path()}))["workspace"]["workspace_id"],
+        &client.runtime(
+            "register_workspace",
+            json!({
+                "label": "skill-workspace",
+                "primary_directory": workspace.path(),
+                "additional_directories": [],
+            }),
+        )["workspace"]["workspace_id"],
     );
     let listed = client.runtime("list_skills", json!({"workspace_id":workspace_id}));
     assert_eq!(skill(&listed, "review")["health"], "ready");
@@ -173,7 +180,14 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
     let first_host = HostProcess::start(runtime_home.path());
     let mut client = first_host.connect();
     let workspace_id = string(
-        &client.runtime("register_workspace", json!({"path": workspace.path()}))["workspace"]["workspace_id"],
+        &client.runtime(
+            "register_workspace",
+            json!({
+                "label": "skill-activation-workspace",
+                "primary_directory": workspace.path(),
+                "additional_directories": [],
+            }),
+        )["workspace"]["workspace_id"],
     );
     let session_id = string(
         &client.runtime(

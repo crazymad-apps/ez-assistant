@@ -36,7 +36,14 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
     let host = HostProcess::start(runtime_home.path());
     let mut client = host.connect();
     let workspace_id = text(
-        &client.runtime("register_workspace", json!({"path":workspace.path()}))["workspace"]["workspace_id"],
+        &client.runtime(
+            "register_workspace",
+            json!({
+                "label": "inspect-images-workspace",
+                "primary_directory": workspace.path(),
+                "additional_directories": [],
+            }),
+        )["workspace"]["workspace_id"],
     );
     let session_id = text(
         &client.runtime(

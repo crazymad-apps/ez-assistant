@@ -28,7 +28,11 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
     let mut first = first_host.connect();
     let workspace_id = first.runtime(
         "register_workspace",
-        json!({ "path": workspace_directory.path() }),
+        json!({
+            "label": "approval-workspace",
+            "primary_directory": workspace_directory.path(),
+            "additional_directories": [],
+        }),
     )["workspace"]["workspace_id"]
         .as_str()
         .expect("workspace id")
@@ -163,7 +167,7 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
 }
 
 #[test]
-fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host() {
+fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
     let provider = FakeProvider::start();
     let runtime_home = TempDir::new().expect("isolated Runtime Home");
     write_config(
@@ -176,7 +180,11 @@ fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host
     let mut client = host.connect();
     let workspace = client.runtime(
         "register_workspace",
-        json!({ "path": workspace_directory.path() }),
+        json!({
+            "label": "permission-workspace",
+            "primary_directory": workspace_directory.path(),
+            "additional_directories": [],
+        }),
     )["workspace"]
         .clone();
     let workspace_id = workspace["workspace_id"].as_str().expect("workspace id");
@@ -220,15 +228,9 @@ fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host
             .is_empty()
     );
     let permission_path = std::path::Path::new(&agent_directory).join("permissions.json");
-    let permission_document: Value =
-        serde_json::from_slice(&fs::read(&permission_path).expect("read Workspace permissions"))
-            .expect("parse Workspace permissions");
-    assert_eq!(
-        permission_document["rules"]
-            .as_array()
-            .expect("default rules")
-            .len(),
-        7
+    assert!(
+        !permission_path.exists(),
+        "implicit Workspace defaults must not create a permission file"
     );
 
     let plan = client.runtime(
@@ -254,11 +256,10 @@ fn default_workspace_read_permissions_apply_to_plan_and_build_in_the_formal_host
             .expect("Plan approval list")
             .is_empty()
     );
-    let unchanged: Value = serde_json::from_slice(
-        &fs::read(permission_path).expect("read unchanged Workspace permissions"),
-    )
-    .expect("parse unchanged Workspace permissions");
-    assert_eq!(unchanged, permission_document);
+    assert!(
+        !permission_path.exists(),
+        "using implicit defaults must not materialize explicit rules"
+    );
 
     let write_path = workspace_directory
         .path()

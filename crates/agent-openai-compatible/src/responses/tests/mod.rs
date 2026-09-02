@@ -8,10 +8,11 @@ use agent_testkit::{BodyStep, EventCollector, RecordedResponse, RecordedTranspor
 use agent_types::{
     AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
     FileReferencesPart, FinishReason, InternalContextPart, MessageId, ModelIdentity,
-    OpaqueProviderState, PartId, ProviderId, ReasoningPart, TextPart, TokenUsage, ToolCall,
-    ToolCallId, ToolChoice, ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult,
-    ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage,
-    UserMessageOrigin, UserPart,
+    OpaqueProviderState, PartId, ProviderId, QuotedTextPart, QuotedTextSourceOwner,
+    QuotedTextSourceRole, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice,
+    ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent,
+    ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin,
+    UserPart,
 };
 use serde_json::{Value, json};
 
@@ -241,6 +242,48 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
     assert_eq!(value["input"][4]["content"][0]["text"], "summarize");
     assert!(value["input"][4].get("origin").is_none());
     assert!(value["input"][4].get("transcript_visibility").is_none());
+}
+
+#[test]
+fn quoted_text_is_a_stable_input_text_without_local_identity() {
+    let request = request(vec![ConversationMessage::User(UserMessage {
+        origin: Default::default(),
+        transcript_visibility: Default::default(),
+        id: message_id("quoted-user"),
+        parts: vec![UserPart::QuotedText(QuotedTextPart {
+            quote_id: part_id("local-quote-id"),
+            exact: "selected <text>".to_owned(),
+            prefix: "before & context".to_owned(),
+            suffix: "after context".to_owned(),
+            source_owner: QuotedTextSourceOwner::MainSession {
+                session_id: "private-session".to_owned(),
+            },
+            source_generation: 2,
+            source_message_id: message_id("private-message"),
+            text_start_utf16: 7,
+            text_end_utf16: 22,
+            source_role: QuotedTextSourceRole::User,
+            source_label: "User".to_owned(),
+            source_created_at_ms: None,
+            source_available: true,
+        })],
+    })]);
+    let encoded = encode_request_with_images(
+        &request,
+        &agent_model::PreparedModelImages::default(),
+        &adapter(),
+        "fixture-model",
+    )
+    .expect("encode quoted text");
+    let value = serde_json::to_value(encoded).expect("request JSON");
+    let content = value["input"][0]["content"][0]["text"]
+        .as_str()
+        .expect("quoted input text");
+    assert!(content.contains("<content format=\"text\">selected &lt;text&gt;</content>"));
+    assert!(content.contains("<prefix>before &amp; context</prefix>"));
+    assert!(!content.contains("private-session"));
+    assert!(!content.contains("private-message"));
+    assert!(!content.contains("local-quote-id"));
 }
 
 #[test]

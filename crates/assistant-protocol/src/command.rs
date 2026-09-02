@@ -369,8 +369,12 @@ pub struct ValidateModelConnectionResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RegisterWorkspaceRequest {
-    /// 用户选择的本机绝对 UTF-8 目录路径。
-    pub path: String,
+    /// 用户可编辑的展示名称；允许重名。
+    pub label: String,
+    /// 用户选择的本机绝对 UTF-8 主目录。
+    pub primary_directory: String,
+    /// 按用户顺序登记的附加目录。
+    pub additional_directories: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -380,6 +384,22 @@ pub struct RegisterWorkspaceResult {
     /// 本次登记是否恢复了一条已假删的 Workspace 记录。
     #[serde(default)]
     pub restored: bool,
+}
+
+/// 用完整表单更新 Workspace 当前元数据；既有 Session 的冻结环境保持不变。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UpdateWorkspaceRequest {
+    pub workspace_id: WorkspaceId,
+    pub label: String,
+    pub primary_directory: String,
+    pub additional_directories: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UpdateWorkspaceResult {
+    pub workspace: WorkspaceSummary,
 }
 
 /// 查询一个 Workspace；已移除 Workspace 仍可查询。
@@ -674,6 +694,9 @@ pub struct SubmitInputRequest {
     /// 按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 按用户加入 Composer 的顺序提交的冻结文本引用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quotes: Vec<crate::QuotedTextSnapshot>,
     /// 从目标 Session 冻结 Catalog 中选择的单个 Skill 名称。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -953,6 +976,19 @@ pub struct RenameSessionRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RenameSessionResult {
     pub session: SessionSummary,
+}
+
+/// 基于命令到达时的最新稳定 Conversation 旁路生成当前 Session 标题。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GenerateSessionTitleRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GenerateSessionTitleResult {
+    pub generation: crate::SessionTitleGenerationSnapshot,
 }
 
 /// 显式设置 Session 的固定状态；重复提交相同目标值保持幂等。
@@ -1269,6 +1305,8 @@ pub enum RuntimeCommand {
     ValidateModelConnection(ValidateModelConnectionRequest),
     /// 登记或恢复 Workspace。
     RegisterWorkspace(RegisterWorkspaceRequest),
+    /// 更新 Workspace 当前名称与目录。
+    UpdateWorkspace(UpdateWorkspaceRequest),
     /// 查询 Workspace。
     GetWorkspace(GetWorkspaceRequest),
     /// 列出活动 Workspace。
@@ -1332,6 +1370,8 @@ pub enum RuntimeCommand {
     RestoreSession(RestoreSessionRequest),
     /// 修改 Session 标题。
     RenameSession(RenameSessionRequest),
+    /// 使用最新稳定 Conversation 手动触发标题旁路生成。
+    GenerateSessionTitle(GenerateSessionTitleRequest),
     /// 设置 Session 固定状态。
     SetSessionPinned(SetSessionPinnedRequest),
     /// 设置 Session 主控代理状态。
@@ -1404,6 +1444,8 @@ pub enum RuntimeCommandResult {
     ValidateModelConnection(ValidateModelConnectionResult),
     /// Workspace 已登记或恢复。
     RegisterWorkspace(RegisterWorkspaceResult),
+    /// Workspace 当前元数据已更新。
+    UpdateWorkspace(UpdateWorkspaceResult),
     /// Workspace 查询已返回。
     GetWorkspace(GetWorkspaceResult),
     /// Workspace 列表已返回。
@@ -1458,6 +1500,7 @@ pub enum RuntimeCommandResult {
     RestoreSession(RestoreSessionResult),
     /// Session 标题已修改。
     RenameSession(RenameSessionResult),
+    GenerateSessionTitle(GenerateSessionTitleResult),
     /// Session 固定状态已设置。
     SetSessionPinned(SetSessionPinnedResult),
     /// Session 主控代理状态已设置。
@@ -1583,7 +1626,9 @@ mod tests {
     fn workspace_summary() -> WorkspaceSummary {
         WorkspaceSummary {
             workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+            label: "Workspace".to_owned(),
             user_directory: "/workspace".to_owned(),
+            additional_directories: Vec::new(),
             agent_directory: "/runtime/workspaces/workspace-1/agent".to_owned(),
             lifecycle: crate::WorkspaceLifecycle::Active,
             created_at_ms: 1,
@@ -1656,6 +1701,7 @@ mod tests {
             message: "hello".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         });
@@ -1705,6 +1751,7 @@ mod tests {
                 AttachmentId::new("attachment-2").expect("attachment id"),
                 AttachmentId::new("attachment-1").expect("attachment id"),
             ],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         };
@@ -1718,6 +1765,7 @@ mod tests {
             message: "ship".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         };
@@ -1807,9 +1855,20 @@ mod tests {
             ),
             (
                 RuntimeCommand::RegisterWorkspace(RegisterWorkspaceRequest {
-                    path: "/workspace".to_owned(),
+                    label: "workspace".to_owned(),
+                    primary_directory: "/workspace".to_owned(),
+                    additional_directories: vec!["/docs".to_owned()],
                 }),
                 "register_workspace",
+            ),
+            (
+                RuntimeCommand::UpdateWorkspace(UpdateWorkspaceRequest {
+                    workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+                    label: "renamed".to_owned(),
+                    primary_directory: "/workspace".to_owned(),
+                    additional_directories: vec!["/docs".to_owned()],
+                }),
+                "update_workspace",
             ),
             (
                 RuntimeCommand::GetWorkspace(GetWorkspaceRequest {
@@ -1914,6 +1973,7 @@ mod tests {
                     message: "hello".to_owned(),
                     variant: AgentVariant::Build,
                     attachment_ids: Vec::new(),
+                    quotes: Vec::new(),
                     skill_name: None,
                     idempotency_key: None,
                 }),
@@ -2155,6 +2215,12 @@ mod tests {
                     restored: false,
                 }),
                 "register_workspace",
+            ),
+            (
+                RuntimeCommandResult::UpdateWorkspace(UpdateWorkspaceResult {
+                    workspace: workspace_summary(),
+                }),
+                "update_workspace",
             ),
             (
                 RuntimeCommandResult::GetWorkspace(GetWorkspaceResult {

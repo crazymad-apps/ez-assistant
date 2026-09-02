@@ -1,0 +1,17 @@
+.backdrop { position: fixed; inset: 0; z-index: var(--ez-z-modal); display: grid; place-items: center; padding: 24px; background: rgb(36 42 54 / 28%); backdrop-filter: blur(2px); }
+.dialog { width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 40px)); overflow: hidden auto; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-large); background: var(--ez-surface); box-shadow: var(--ez-shadow-shell); }
+.dialog > header { display: flex; min-height: 56px; align-items: center; justify-content: space-between; padding: 9px 12px 9px 15px; border-bottom: 1px solid var(--ez-border); }
+.dialog > header > div { display: flex; align-items: center; gap: 9px; color: var(--ez-primary); }
+.dialog h2 { margin: 0; color: var(--ez-text); font-size: var(--ez-font-large); }
+.dialog header button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; border: 0; color: var(--ez-text-muted); background: transparent; }
+.dialog main { padding: 16px; }
+.dialog dl { display: grid; gap: 7px; margin: 0 0 14px; }
+.dialog dl > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; }
+.dialog dt { color: var(--ez-text-muted); }
+.dialog dd { margin: 0; color: var(--ez-text-secondary); overflow-wrap: anywhere; }
+.dialog blockquote { margin: 0; padding: 14px; border: 1px solid var(--ez-border); border-radius: 9px; color: var(--ez-text-secondary); background: var(--ez-surface-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dialog mark { padding: 1px 2px; border-radius: 3px; color: inherit; background: var(--ez-primary-soft); }
+.dialog main p { margin: 12px 0 0; color: var(--ez-text-muted); }
+.dialog > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 0 13px 13px; }
+.dialog > footer button { min-height: 32px; padding: 0 12px; border: 1px solid var(--ez-border-strong); border-radius: 7px; color: var(--ez-text-secondary); background: var(--ez-surface); }
+.dialog > footer button:first-child:not(:disabled) { border-color: var(--ez-primary); color: var(--ez-primary); }

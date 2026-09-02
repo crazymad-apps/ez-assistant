@@ -1,0 +1,54 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ez-z-modal);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(36 42 54 / 28%);
+  backdrop-filter: blur(2px);
+}
+
+.dialog {
+  display: grid;
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 40px));
+  grid-template-rows: auto minmax(150px, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-large);
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-shell);
+
+  > header { display: flex; min-height: 56px; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 12px 9px 15px; border-bottom: 1px solid var(--ez-border); }
+  > header > div { display: flex; min-width: 0; align-items: center; gap: 9px; }
+  > header > div > span { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 8px; color: var(--ez-primary); background: var(--ez-primary-soft); }
+  > header section { min-width: 0; }
+  h2 { margin: 0; overflow: hidden; font-size: var(--ez-font-large); text-overflow: ellipsis; white-space: nowrap; }
+  header small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  > header > button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; border: 0; border-radius: 7px; color: var(--ez-text-muted); background: transparent; }
+  > main { min-height: 0; overflow: auto; padding: 15px; }
+  dl { display: grid; gap: 7px; margin: 0 0 14px; }
+  dl > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; }
+  dt { color: var(--ez-text-muted); }
+  dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ez-text-secondary); }
+  > footer { display: flex; justify-content: flex-end; padding: 0 13px 13px; }
+  > footer button { min-height: 30px; padding: 0 12px; border: 1px solid var(--ez-border-strong); border-radius: 7px; color: var(--ez-text-secondary); background: var(--ez-surface); }
+}
+
+.preview {
+  display: grid;
+  min-height: 170px;
+  place-items: center;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--ez-border);
+  border-radius: 9px;
+  background: var(--ez-surface-subtle);
+
+  img { display: block; max-width: 100%; max-height: 420px; object-fit: contain; }
+  pre { width: 100%; margin: 0; color: var(--ez-text-secondary); font: var(--ez-font-small)/1.65 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+}
+
+.state { color: var(--ez-text-muted); text-align: center; }
+.error { color: var(--ez-danger); text-align: center; }

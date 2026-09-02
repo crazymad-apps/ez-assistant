@@ -18,6 +18,7 @@ import type { ConnectionStore } from "./ConnectionStore";
 import type { LiveExecutionStore } from "./LiveExecutionStore";
 import type { NavigationStore } from "./NavigationStore";
 import type { RuntimeProjectionStore } from "./RuntimeProjectionStore";
+import { workspaceForDraftKey } from "./NewSessionDraftStore";
 
 const MAX_AUTOMATIC_RECONNECTS = 3;
 
@@ -29,6 +30,11 @@ type RuntimeLifecycleDependencies = Readonly<{
   report_interaction_error: (message: string) => void;
   refresh_device_gateway: () => void;
   mark_device_gateway_stale: () => void;
+  on_title_generation_finished: (
+    session_id: SessionId,
+    trigger: "automatic" | "manual",
+    outcome: "succeeded" | "failed" | "cancelled",
+  ) => void;
 }>;
 
 /** Owns Runtime transport, snapshot/event synchronization, and reconnect timers. */
@@ -96,6 +102,22 @@ export class RuntimeLifecycleCoordinator {
     const { navigation, projection } = this.dependencies;
     const application = projection.application;
     if (!application) {
+      return;
+    }
+    const draft_key = navigation.selected_draft_key;
+    const draft_workspace_id = draft_key ? workspaceForDraftKey(draft_key) : null;
+    const draft_is_available = draft_key === "unbound" || Boolean(
+      draft_workspace_id
+      && application.workspaces.some((workspace) => (
+        workspace.workspace_id === draft_workspace_id && workspace.lifecycle === "active"
+      )),
+    );
+    if (draft_key && draft_is_available) {
+      if (!navigation.workspace_expansion_initialized) {
+        for (const workspace of application.workspaces) {
+          navigation.ensureWorkspaceExpanded(workspace.workspace_id);
+        }
+      }
       return;
     }
     const current_id = navigation.selected_session_id;
@@ -315,6 +337,13 @@ export class RuntimeLifecycleCoordinator {
     }
     this.dependencies.live_execution.buffer(envelope);
     const event = envelope.event;
+    if (event.type === "session_title_generation_finished") {
+      this.dependencies.on_title_generation_finished(
+        event.session_id,
+        event.trigger,
+        event.outcome,
+      );
+    }
     if (event.type === "session_deleted") {
       if (this.dependencies.navigation.selected_session_id === event.session_id) {
         this.dependencies.navigation.selectSession(null, false);
@@ -329,6 +358,8 @@ export class RuntimeLifecycleCoordinator {
       || event.type === "session_changed"
       || event.type === "session_compaction_started"
       || event.type === "session_compaction_finished"
+      || event.type === "session_title_generation_started"
+      || event.type === "session_title_generation_finished"
       || event.type === "conversation_committed"
       || event.type === "run_started"
       || event.type === "run_finished"
@@ -448,6 +479,8 @@ function sessionIdForRefresh(event: RuntimeEvent): SessionId | null {
     case "queue_changed":
     case "session_compaction_started":
     case "session_compaction_finished":
+    case "session_title_generation_started":
+    case "session_title_generation_finished":
     case "work_plan_changed":
     case "goal_changed":
     case "permission_reloaded":

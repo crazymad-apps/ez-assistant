@@ -5,7 +5,7 @@ use std::{fs, path::Path};
 use assistant_protocol::WorkspaceId;
 use assistant_runtime::{
     NewWorkspaceRegistration, StoreError, StoreErrorKind, StoredWorkspace,
-    StoredWorkspaceLifecycle, WorkspaceRemoval,
+    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -76,58 +76,39 @@ impl StorageEngine {
         registration: NewWorkspaceRegistration,
     ) -> StorageResult<StoredWorkspace> {
         super::filesystem::validate_workspace_component(&registration.workspace_id)?;
-        let requested = Path::new(&registration.requested_directory);
-        if !requested.is_absolute() {
-            return Err(StoreError::new(
-                StoreErrorKind::InvalidInput,
-                "workspace path must be absolute",
-            ));
-        }
-        let canonical = fs::canonicalize(requested).map_err(|source| {
-            StoreError::with_source(
-                StoreErrorKind::ResourceUnavailable,
-                "workspace directory is unavailable",
-                source,
-            )
-        })?;
-        let metadata = fs::metadata(&canonical).map_err(|source| {
-            StoreError::with_source(
-                StoreErrorKind::ResourceUnavailable,
-                "workspace directory is unavailable",
-                source,
-            )
-        })?;
-        if !metadata.is_dir() {
-            return Err(StoreError::new(
-                StoreErrorKind::ResourceUnavailable,
-                "workspace directory is unavailable",
-            ));
-        }
-        let canonical = canonical.to_str().ok_or_else(|| {
-            StoreError::new(
-                StoreErrorKind::InvalidInput,
-                "workspace path must be valid UTF-8",
-            )
-        })?;
+        let (canonical, additional_directories) = canonicalize_workspace_directories(
+            &registration.requested_primary_directory,
+            &registration.requested_additional_directories,
+        )?;
 
-        if let Some(mut existing) = self.workspace_by_user_directory(canonical)? {
+        if let Some(mut existing) = self.workspace_by_user_directory(&canonical)? {
             self.prepare_workspace_agent_directory(&existing)?;
-            let _ = self.ensure_workspace_permission_file(&existing)?;
-            if existing.lifecycle == StoredWorkspaceLifecycle::Removed {
-                self.connection
-                    .execute(
-                        "UPDATE workspaces
-                         SET lifecycle = 'active', updated_at_ms = ?1, removed_at_ms = NULL
-                         WHERE workspace_id = ?2 AND lifecycle = 'removed'",
-                        params![registration.changed_at_ms, existing.workspace_id.as_str()],
-                    )
-                    .map_err(|source| {
-                        database_write_error("workspace could not be restored", source)
-                    })?;
-                existing.lifecycle = StoredWorkspaceLifecycle::Active;
-                existing.updated_at_ms = registration.changed_at_ms;
-                existing.removed_at_ms = None;
-            }
+            let _ = self.reconcile_legacy_workspace_permission_file(&existing)?;
+            let additional_json =
+                serde_json::to_string(&additional_directories).map_err(|source| {
+                    internal_error("workspace directories could not be encoded", source)
+                })?;
+            self.connection
+                .execute(
+                    "UPDATE workspaces
+                     SET label = ?1, additional_directories_json = ?2, lifecycle = 'active',
+                         updated_at_ms = ?3, removed_at_ms = NULL
+                     WHERE workspace_id = ?4",
+                    params![
+                        registration.label,
+                        additional_json,
+                        registration.changed_at_ms,
+                        existing.workspace_id.as_str()
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("workspace could not be restored", source)
+                })?;
+            existing.label = registration.label;
+            existing.additional_directories = additional_directories;
+            existing.lifecycle = StoredWorkspaceLifecycle::Active;
+            existing.updated_at_ms = registration.changed_at_ms;
+            existing.removed_at_ms = None;
             return Ok(existing);
         }
 
@@ -146,37 +127,33 @@ impl StorageEngine {
             .ok_or_else(|| invalid_data("workspace agent directory is not valid UTF-8"))?;
         let workspace = StoredWorkspace {
             workspace_id: registration.workspace_id,
-            user_directory: canonical.to_owned(),
+            label: registration.label,
+            user_directory: canonical.clone(),
+            additional_directories: additional_directories.clone(),
             agent_directory: agent_directory_text.to_owned(),
             lifecycle: StoredWorkspaceLifecycle::Active,
             created_at_ms: registration.changed_at_ms,
             updated_at_ms: registration.changed_at_ms,
             removed_at_ms: None,
         };
-        let permission_created = match self.ensure_workspace_permission_file(&workspace) {
-            Ok(created) => created,
-            Err(error) => {
-                let _ = fs::remove_dir(&agent_directory);
-                let _ = fs::remove_dir(&workspace_directory);
-                return Err(error);
-            }
-        };
+        let additional_json = serde_json::to_string(&additional_directories).map_err(|source| {
+            internal_error("workspace directories could not be encoded", source)
+        })?;
         let inserted = self.connection.execute(
             "INSERT INTO workspaces (
-                workspace_id, user_directory, agent_directory, lifecycle,
-                created_at_ms, updated_at_ms, removed_at_ms
-             ) VALUES (?1, ?2, ?3, 'active', ?4, ?4, NULL)",
+                workspace_id, label, user_directory, additional_directories_json,
+                agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, NULL)",
             params![
                 workspace.workspace_id.as_str(),
+                workspace.label,
                 canonical,
+                additional_json,
                 agent_directory_text,
                 registration.changed_at_ms,
             ],
         );
         if let Err(source) = inserted {
-            if permission_created {
-                let _ = fs::remove_file(agent_directory.join("permissions.json"));
-            }
             let _ = fs::remove_dir(&agent_directory);
             let _ = fs::remove_dir(&workspace_directory);
             return Err(database_write_error(
@@ -185,6 +162,55 @@ impl StorageEngine {
             ));
         }
         sync_directory(&self.workspaces_directory)?;
+        Ok(workspace)
+    }
+
+    pub(super) fn update_workspace(
+        &mut self,
+        update: WorkspaceUpdate,
+    ) -> StorageResult<StoredWorkspace> {
+        super::filesystem::validate_workspace_component(&update.workspace_id)?;
+        let mut workspace = self.get_workspace(&update.workspace_id)?;
+        if workspace.lifecycle != StoredWorkspaceLifecycle::Active {
+            return Err(StoreError::new(
+                StoreErrorKind::Conflict,
+                "removed workspace cannot be updated",
+            ));
+        }
+        let (primary_directory, additional_directories) = canonicalize_workspace_directories(
+            &update.requested_primary_directory,
+            &update.requested_additional_directories,
+        )?;
+        if let Some(existing) = self.workspace_by_user_directory(&primary_directory)?
+            && existing.workspace_id != update.workspace_id
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::Conflict,
+                "workspace primary directory belongs to another workspace",
+            ));
+        }
+        let additional_json = serde_json::to_string(&additional_directories).map_err(|source| {
+            internal_error("workspace directories could not be encoded", source)
+        })?;
+        self.connection
+            .execute(
+                "UPDATE workspaces
+                 SET label = ?1, user_directory = ?2, additional_directories_json = ?3,
+                     updated_at_ms = ?4
+                 WHERE workspace_id = ?5 AND lifecycle = 'active'",
+                params![
+                    update.label,
+                    primary_directory,
+                    additional_json,
+                    update.changed_at_ms,
+                    update.workspace_id.as_str(),
+                ],
+            )
+            .map_err(|source| database_write_error("workspace could not be updated", source))?;
+        workspace.label = update.label;
+        workspace.user_directory = primary_directory;
+        workspace.additional_directories = additional_directories;
+        workspace.updated_at_ms = update.changed_at_ms;
         Ok(workspace)
     }
 
@@ -205,7 +231,7 @@ impl StorageEngine {
         let workspaces = self.load_workspaces(true)?;
         for workspace in &workspaces {
             self.prepare_workspace_agent_directory(workspace)?;
-            let _ = self.ensure_workspace_permission_file(workspace)?;
+            let _ = self.reconcile_legacy_workspace_permission_file(workspace)?;
         }
         Ok(workspaces)
     }
@@ -233,12 +259,12 @@ impl StorageEngine {
 
     fn load_workspaces(&self, include_removed: bool) -> StorageResult<Vec<StoredWorkspace>> {
         let sql = if include_removed {
-            "SELECT workspace_id, user_directory, agent_directory, lifecycle,
-                    created_at_ms, updated_at_ms, removed_at_ms
+            "SELECT workspace_id, label, user_directory, additional_directories_json,
+                    agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
              FROM workspaces ORDER BY workspace_id"
         } else {
-            "SELECT workspace_id, user_directory, agent_directory, lifecycle,
-                    created_at_ms, updated_at_ms, removed_at_ms
+            "SELECT workspace_id, label, user_directory, additional_directories_json,
+                    agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
              FROM workspaces WHERE lifecycle = 'active' ORDER BY workspace_id"
         };
         let mut statement = self
@@ -261,8 +287,8 @@ impl StorageEngine {
     ) -> StorageResult<Option<StoredWorkspace>> {
         self.connection
             .query_row(
-                "SELECT workspace_id, user_directory, agent_directory, lifecycle,
-                        created_at_ms, updated_at_ms, removed_at_ms
+                "SELECT workspace_id, label, user_directory, additional_directories_json,
+                        agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
                  FROM workspaces WHERE workspace_id = ?1",
                 [workspace_id.as_str()],
                 read_workspace_row,
@@ -279,8 +305,8 @@ impl StorageEngine {
     ) -> StorageResult<Option<StoredWorkspace>> {
         self.connection
             .query_row(
-                "SELECT workspace_id, user_directory, agent_directory, lifecycle,
-                        created_at_ms, updated_at_ms, removed_at_ms
+                "SELECT workspace_id, label, user_directory, additional_directories_json,
+                        agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
                  FROM workspaces WHERE user_directory = ?1",
                 [user_directory],
                 read_workspace_row,
@@ -312,6 +338,59 @@ impl StorageEngine {
     }
 }
 
+fn canonicalize_workspace_directories(
+    primary_directory: &str,
+    additional_directories: &[String],
+) -> StorageResult<(String, Vec<String>)> {
+    let mut canonical = Vec::with_capacity(additional_directories.len() + 1);
+    for requested in
+        std::iter::once(primary_directory).chain(additional_directories.iter().map(String::as_str))
+    {
+        let requested = Path::new(requested);
+        if !requested.is_absolute() {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "workspace path must be absolute",
+            ));
+        }
+        let directory = fs::canonicalize(requested).map_err(|source| {
+            StoreError::with_source(
+                StoreErrorKind::ResourceUnavailable,
+                "workspace directory is unavailable",
+                source,
+            )
+        })?;
+        let metadata = fs::metadata(&directory).map_err(|source| {
+            StoreError::with_source(
+                StoreErrorKind::ResourceUnavailable,
+                "workspace directory is unavailable",
+                source,
+            )
+        })?;
+        if !metadata.is_dir() || fs::read_dir(&directory).is_err() {
+            return Err(StoreError::new(
+                StoreErrorKind::ResourceUnavailable,
+                "workspace directory is unavailable",
+            ));
+        }
+        let directory = directory.to_str().ok_or_else(|| {
+            StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "workspace path must be valid UTF-8",
+            )
+        })?;
+        if canonical.iter().any(|existing| existing == directory) {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "workspace directories must be unique",
+            ));
+        }
+        canonical.push(directory.to_owned());
+    }
+    let primary = canonical.remove(0);
+    Ok((primary, canonical))
+}
+
 fn is_moved_workspace_agent_directory(path: &Path, workspace_id: &str) -> bool {
     path.is_absolute()
         && path.file_name().and_then(|value| value.to_str()) == Some("agent")
@@ -335,7 +414,17 @@ fn is_moved_workspace_agent_directory(path: &Path, workspace_id: &str) -> bool {
             == Some("data")
 }
 
-type WorkspaceRow = (String, String, String, String, i64, i64, Option<i64>);
+type WorkspaceRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+);
 
 fn read_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRow> {
     Ok((
@@ -346,11 +435,23 @@ fn read_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRow>
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn parse_workspace_row(row: WorkspaceRow) -> StorageResult<StoredWorkspace> {
-    let (workspace_id, user_directory, agent_directory, lifecycle, created, updated, removed) = row;
+    let (
+        workspace_id,
+        label,
+        user_directory,
+        additional_directories_json,
+        agent_directory,
+        lifecycle,
+        created,
+        updated,
+        removed,
+    ) = row;
     let workspace_id = WorkspaceId::new(workspace_id)
         .map_err(|source| invalid_data_with_source("stored workspace id is invalid", source))?;
     let lifecycle = match lifecycle.as_str() {
@@ -361,9 +462,18 @@ fn parse_workspace_row(row: WorkspaceRow) -> StorageResult<StoredWorkspace> {
     if !Path::new(&user_directory).is_absolute() || !Path::new(&agent_directory).is_absolute() {
         return Err(invalid_data("stored workspace path is invalid"));
     }
+    if label.is_empty() {
+        return Err(invalid_data("stored workspace label is invalid"));
+    }
+    let additional_directories = super::decode_additional_directories(
+        &additional_directories_json,
+        "stored workspace additional directories are invalid",
+    )?;
     Ok(StoredWorkspace {
         workspace_id,
+        label,
         user_directory,
+        additional_directories,
         agent_directory,
         lifecycle,
         created_at_ms: created,

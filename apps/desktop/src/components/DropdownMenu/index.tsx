@@ -12,6 +12,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { usePresence } from "../Presence";
 import styles from "./index.module.scss";
 
 type DropdownMenuContextValue = {
@@ -137,7 +138,8 @@ export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
 export function DropdownMenuContent(props: DropdownMenuContentProps) {
   const menu = useDropdownMenu();
   const content_ref = menu.menu_ref;
-  const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
+  const presence = usePresence(menu.open, 90);
+  const [position, setPosition] = useState({ left: 0, top: 0, ready: false, side: "below" as "above" | "below" });
 
   useLayoutEffect(() => {
     if (!menu.open) {
@@ -162,10 +164,11 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
         window.innerWidth - content_rect.width - viewport_padding,
       );
       const room_below = window.innerHeight - trigger_rect.bottom - viewport_padding;
-      const top = room_below >= content_rect.height + gap
+      const side = room_below >= content_rect.height + gap ? "below" : "above";
+      const top = side === "below"
         ? trigger_rect.bottom + gap
         : Math.max(viewport_padding, trigger_rect.top - content_rect.height - gap);
-      setPosition({ left, top, ready: true });
+      setPosition({ left, top, ready: true, side });
     }
 
     updatePosition();
@@ -175,7 +178,7 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };
-  }, [content_ref, menu.open, menu.trigger_ref, props.align]);
+  }, [content_ref, menu.open, menu.trigger_ref, presence.mounted, props.align]);
 
   useEffect(() => {
     if (!menu.open || !position.ready) {
@@ -188,9 +191,9 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
       target?.focus();
       menu.focus_item_on_open_ref.current = null;
     }
-  }, [content_ref, menu.focus_item_on_open_ref, menu.open, position.ready]);
+  }, [content_ref, menu.focus_item_on_open_ref, menu.open, position.ready, presence.mounted]);
 
-  if (!menu.open) {
+  if (!presence.mounted) {
     return null;
   }
 
@@ -200,8 +203,12 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
     <div
       {...content_props}
       className={[styles.content, className].filter(Boolean).join(" ")}
+      aria-hidden={presence.state === "exiting" ? true : undefined}
       data-position-ready={position.ready}
+      data-presence={presence.state}
+      data-side={position.side}
       id={menu.content_id}
+      inert={presence.state === "exiting" ? true : undefined}
       onKeyDown={(event) => {
         content_props.onKeyDown?.(event);
         if (event.defaultPrevented) {
@@ -225,6 +232,7 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
       ref={content_ref}
       role="menu"
       style={{ ...style, left: position.left, top: position.top }}
+      onTransitionEnd={presence.onTransitionEnd}
     />,
     overlay_root,
   );

@@ -1,11 +1,13 @@
 import {
   useEffect,
   useLayoutEffect,
+  useRef,
   useState,
   type ReactNode,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { usePresence } from "../../../components/Presence";
 
 type AnchoredOverlayProps = Readonly<{
   aria_label: string;
@@ -13,6 +15,7 @@ type AnchoredOverlayProps = Readonly<{
   class_name: string;
   horizontal_align?: "start" | "center";
   on_request_close: () => void;
+  open?: boolean;
   overlay_ref: RefObject<HTMLDivElement | null>;
   placement?: "above" | "auto";
   trigger_ref: RefObject<HTMLElement | null>;
@@ -20,9 +23,14 @@ type AnchoredOverlayProps = Readonly<{
 
 /** Composer 私有浮层定位器；权威业务状态仍由 Runtime 快照提供。 */
 export function AnchoredOverlay(props: AnchoredOverlayProps) {
+  const open = props.open ?? true;
+  const presence = usePresence(open, 90);
+  const retained_children_ref = useRef(props.children);
+  if (open) retained_children_ref.current = props.children;
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
 
   useLayoutEffect(() => {
+    if (!open || !presence.mounted) return undefined;
     function updatePosition() {
       const trigger = props.trigger_ref.current;
       const overlay = props.overlay_ref.current;
@@ -62,11 +70,14 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
     props.children,
     props.horizontal_align,
     props.overlay_ref,
+    open,
+    presence.mounted,
     props.placement,
     props.trigger_ref,
   ]);
 
   useEffect(() => {
+    if (!open) return undefined;
     function closeOnOutsidePointer(event: PointerEvent) {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -76,18 +87,24 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
     }
     document.addEventListener("pointerdown", closeOnOutsidePointer, true);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
-  }, [props.on_request_close, props.overlay_ref, props.trigger_ref]);
+  }, [open, props.on_request_close, props.overlay_ref, props.trigger_ref]);
+
+  if (!presence.mounted) return null;
 
   const overlay_root = document.querySelector<HTMLElement>("#overlay-root") ?? document.body;
   return createPortal(
     <div
       aria-label={props.aria_label}
+      aria-hidden={presence.state === "exiting" ? true : undefined}
       className={props.class_name}
       data-position-ready={position.ready}
+      data-presence={presence.state}
+      inert={presence.state === "exiting" ? true : undefined}
+      onTransitionEnd={presence.onTransitionEnd}
       ref={props.overlay_ref}
       style={{ left: position.left, top: position.top }}
     >
-      {props.children}
+      {open ? props.children : retained_children_ref.current}
     </div>,
     overlay_root,
   );

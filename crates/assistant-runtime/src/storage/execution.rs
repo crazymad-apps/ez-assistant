@@ -217,10 +217,12 @@ pub fn validate_input_message_with_channel_source(
             }
             if message.origin != UserMessageOrigin::User
                 || message.transcript_visibility != TranscriptVisibility::Visible
-                || !message
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, UserPart::Text(_) | UserPart::FileReferences(_)))
+                || !message.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        UserPart::Text(_) | UserPart::FileReferences(_) | UserPart::QuotedText(_)
+                    )
+                })
             {
                 return Err(InputMessageValidationError);
             }

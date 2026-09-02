@@ -18,8 +18,9 @@ pub use conversation::{
     AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
     ConversationSnapshot, ConversationValidationError, FileReference, FileReferencesPart,
     MAX_PROVIDER_STATE_ITEM_BYTES, MAX_PROVIDER_STATE_TURN_BYTES, OpaqueProviderState,
-    ProviderStateError, ReasoningPart, SystemMessage, TextPart, ToolCall, ToolMessage,
-    TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    ProviderStateError, QuotedTextPart, QuotedTextSourceOwner, QuotedTextSourceRole, ReasoningPart,
+    SystemMessage, TextPart, ToolCall, ToolMessage, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
 pub use insertion::{

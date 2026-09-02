@@ -572,6 +572,7 @@ async fn authenticated_loop(
                                     if let Err(error) = cancel_active_controller_run(shared.runtime.as_ref()).await {
                                         let (code, recoverable) = input_error(&error);
                                         send_wire_error(socket, code, Some(envelope.message_id.clone()), recoverable).await?;
+                                        continue;
                                     }
                                     *voice_turn.lock().await = Some(VoiceTurnAggregation::new(
                                         request.client_input_id.clone(),
@@ -592,17 +593,37 @@ async fn authenticated_loop(
                             }
                             "listen_stop" => {
                                 let request = envelope.payload::<ListenStop>()?;
-                                let Some(utterance) = receiving.take() else {
+                                let Some(utterance) = receiving.as_ref() else {
                                     send_wire_error(socket, "audio_stream_not_active", Some(envelope.message_id), true).await?;
                                     continue;
                                 };
-                                if utterance.stream_id != request.stream_id
-                                    || utterance.last_sequence() != Some(request.last_sequence)
-                                    || utterance.pcm.is_empty()
-                                {
+                                if utterance.stream_id != request.stream_id {
                                     send_wire_error(socket, "invalid_listen_stop", Some(envelope.message_id), true).await?;
                                     continue;
                                 }
+                                if utterance.pcm.is_empty() {
+                                    let Some(empty) = receiving.take() else {
+                                        return Err(ConnectionError::InvalidMessage);
+                                    };
+                                    let mut aggregation = voice_turn.lock().await;
+                                    resume_or_clear_voice_turn(&mut aggregation);
+                                    drop(aggregation);
+                                    send_payload(socket, "state_changed", &InteractionStateChanged {
+                                        run_id: None,
+                                        client_input_id: Some(empty.client_input_id),
+                                        state: "idle".to_owned(),
+                                        reason: Some("no_speech_recognized".to_owned()),
+                                    }).await?;
+                                    continue;
+                                }
+                                if utterance.last_sequence() != Some(request.last_sequence) {
+                                    send_wire_error(socket, "invalid_listen_stop", Some(envelope.message_id), true).await?;
+                                    continue;
+                                }
+                                // 完整校验后才转移 PCM 所有权；可恢复的错误 stop 不能破坏活动采集。
+                                let Some(utterance) = receiving.take() else {
+                                    return Err(ConnectionError::InvalidMessage);
+                                };
                                 if !client_inputs.remember(
                                     &utterance.client_input_id,
                                     input_fingerprint(b"speech", &utterance.pcm, utterance.output_preference),
@@ -668,9 +689,7 @@ async fn authenticated_loop(
                                 if receiving.as_ref().is_some_and(|active| active.stream_id == request.stream_id) {
                                     if let Some(cancelled) = receiving.take() {
                                         let mut aggregation = voice_turn.lock().await;
-                                        if aggregation.as_ref().is_some_and(VoiceTurnAggregation::is_empty) {
-                                            *aggregation = None;
-                                        }
+                                        resume_or_clear_voice_turn(&mut aggregation);
                                         drop(aggregation);
                                         send_payload(socket, "state_changed", &InteractionStateChanged {
                                             run_id: None,
@@ -1175,6 +1194,21 @@ impl VoiceTurnAggregation {
     }
 }
 
+/// 当前尚未接管的录音段结束后恢复 logical voice turn 的收口时钟。
+///
+/// 空聚合没有任何可提交事实，直接清除；已有分段则重新启动 commit deadline。该转换只修改
+/// Gateway 的易失聚合状态，不提交 Runtime Input，也不取消已经运行的 ASR。
+fn resume_or_clear_voice_turn(aggregation: &mut Option<VoiceTurnAggregation>) {
+    if aggregation
+        .as_ref()
+        .is_some_and(VoiceTurnAggregation::is_empty)
+    {
+        *aggregation = None;
+    } else if let Some(aggregation) = aggregation.as_mut() {
+        aggregation.schedule_commit();
+    }
+}
+
 async fn process_voice_turn(
     socket: &mut WebSocket,
     shared: &GatewayShared,
@@ -1369,6 +1403,7 @@ async fn submit_speech_input(
                 variant,
                 mode: SubmitInputMode::Normal,
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             },
@@ -1476,6 +1511,7 @@ async fn submit_text_input(
                 variant,
                 mode: SubmitInputMode::Normal,
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             },
@@ -1858,6 +1894,32 @@ mod tests {
 
         assert!(!aggregation.ready_to_commit());
         assert_eq!(aggregation.merged_transcript(), Ok(None));
+    }
+
+    #[test]
+    fn cancelled_uncommitted_segment_clears_empty_turn_or_resumes_existing_commit() {
+        let mut empty = Some(VoiceTurnAggregation::new(
+            "empty".to_owned(),
+            OutputPreferenceSnapshot::Text,
+        ));
+        resume_or_clear_voice_turn(&mut empty);
+        assert!(empty.is_none());
+
+        let mut existing =
+            VoiceTurnAggregation::new("logical-input".to_owned(), OutputPreferenceSnapshot::Text);
+        assert!(matches!(
+            existing.admit_segment("first".to_owned(), [9; 32], 9),
+            Some(SegmentAdmission::New { .. })
+        ));
+        existing.pause_commit();
+        let mut existing = Some(existing);
+        resume_or_clear_voice_turn(&mut existing);
+        assert!(
+            existing
+                .as_ref()
+                .and_then(|aggregation| aggregation.commit_deadline)
+                .is_some()
+        );
     }
 
     #[test]

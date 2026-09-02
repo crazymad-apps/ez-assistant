@@ -408,6 +408,10 @@ async fn dispatch_runtime(
             RuntimeCommandResult::RegisterWorkspace(runtime.register_workspace(request).await?),
             false,
         ),
+        RuntimeCommand::UpdateWorkspace(request) => (
+            RuntimeCommandResult::UpdateWorkspace(runtime.update_workspace(request).await?),
+            false,
+        ),
         RuntimeCommand::GetWorkspace(request) => (
             RuntimeCommandResult::GetWorkspace(runtime.get_workspace(request)?),
             false,
@@ -549,6 +553,12 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::RenameSession(request) => (
             RuntimeCommandResult::RenameSession(runtime.rename_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::GenerateSessionTitle(request) => (
+            RuntimeCommandResult::GenerateSessionTitle(
+                runtime.generate_session_title(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::SetSessionPinned(request) => (

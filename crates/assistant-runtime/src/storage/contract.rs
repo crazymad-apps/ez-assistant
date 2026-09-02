@@ -15,18 +15,19 @@ use super::{
     ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
     ConversationWindowRequest, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
     GoalStopResult, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, QueuePriorityChange, ReasoningEffortChange,
-    RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
-    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionMaterialization,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    ReasoningEffortChange, RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear,
+    SessionHistoryClearResult, SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionTitleChange, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
+    StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval,
+    StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage, StoredWorkPlan,
+    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
+    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -102,6 +103,9 @@ pub trait RuntimeStore: Send + Sync {
         registration: NewWorkspaceRegistration,
     ) -> StoreFuture<'_, StoredWorkspace>;
 
+    /// 更新 Workspace 当前元数据，不修改既有 Session 冻结资源。
+    fn update_workspace(&self, update: WorkspaceUpdate) -> StoreFuture<'_, StoredWorkspace>;
+
     /// 假删 Workspace，不删除任何目录或历史绑定。
     fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace>;
 
@@ -110,6 +114,12 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 创建 Session 稳定事实及其空 Conversation。
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;
+
+    /// 原子物化新 Session、附件、首个 Input/Run 及其 Goal/Skill 伴随事实。
+    fn materialize_session(
+        &self,
+        materialization: NewStoredSessionMaterialization,
+    ) -> StoreFuture<'_, StoredSessionMaterialization>;
 
     /// 基于已校验的正文前缀原子创建独立 Session，并重写 Attachment 稳定视图。
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork>;
@@ -278,6 +288,15 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 修改 Session 标题并持久化用户来源。
     fn rename_session(&self, change: SessionTitleChange) -> StoreFuture<'_, ()>;
+
+    /// 手动触发开始前可靠撤销后续自动标题资格。
+    fn disable_automatic_title(&self, session_id: &SessionId) -> StoreFuture<'_, ()>;
+
+    /// 原子结算标题候选、自动资格与旁路模型用量。
+    fn commit_session_title_generation(
+        &self,
+        commit: SessionTitleGenerationCommit,
+    ) -> StoreFuture<'_, SessionTitleGenerationCommitResult>;
 
     /// 幂等设置 Session 固定状态。
     fn set_session_pinned(&self, change: SessionPinnedChange) -> StoreFuture<'_, ()>;

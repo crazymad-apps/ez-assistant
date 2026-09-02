@@ -2,6 +2,8 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon, type IconName } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
+import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import type { SettingsPage } from "../../../stores/SettingsStore";
 import { ModelsSettingsPage } from "./ModelsSettingsPage";
@@ -26,6 +28,9 @@ export const SettingsDialog = observer(function SettingsDialog() {
   const settings = store.settings;
   const close_button_ref = useRef<HTMLButtonElement>(null);
   const [form_dirty, setFormDirty] = useState(false);
+  const [pending_navigation, setPendingNavigation] = useState<Readonly<
+    { type: "close" } | { type: "page"; page: SettingsPage }
+  > | null>(null);
 
   useEffect(() => {
     if (settings.is_open && settings.page === "memory") {
@@ -33,27 +38,42 @@ export const SettingsDialog = observer(function SettingsDialog() {
     }
   }, [settings.is_open, settings.page, store.memory_settings]);
 
-  if (!settings.is_open) return null;
-
   function requestClose() {
-    if (form_dirty && !window.confirm("当前表单尚未保存，确定关闭设置吗？")) return;
+    if (form_dirty) {
+      setPendingNavigation({ type: "close" });
+      return;
+    }
     setFormDirty(false);
     settings.close();
   }
 
   function selectPage(page: SettingsPage) {
-    if (form_dirty && !window.confirm("当前表单尚未保存，确定切换页面吗？")) return;
+    if (form_dirty) {
+      setPendingNavigation({ type: "page", page });
+      return;
+    }
     setFormDirty(false);
     settings.selectPage(page);
   }
 
+  function confirmNavigation() {
+    const navigation = pending_navigation;
+    if (!navigation) return;
+    setPendingNavigation(null);
+    setFormDirty(false);
+    if (navigation.type === "close") settings.close();
+    else settings.selectPage(navigation.page);
+  }
+
   return (
+    <>
     <Dialog
       aria_label="设置"
       backdrop_class_name={styles.backdrop}
       dialog_class_name={styles.dialog}
       initial_focus_ref={close_button_ref}
       on_close={requestClose}
+      open={settings.is_open}
     >
         <header className={styles.dialog_header}>
           <h2>设置</h2>
@@ -91,5 +111,20 @@ export const SettingsDialog = observer(function SettingsDialog() {
           </div>
         </div>
     </Dialog>
+    <PresenceBoundary present={pending_navigation !== null}>
+      {pending_navigation && (
+        <SessionActionDialog
+          confirm_label={pending_navigation.type === "close" ? "关闭设置" : "切换页面"}
+          is_danger
+          is_pending={false}
+          on_cancel={() => setPendingNavigation(null)}
+          on_confirm={confirmNavigation}
+          title="放弃未保存的修改？"
+        >
+          <p>当前表单尚未保存，继续后这些修改将丢失。</p>
+        </SessionActionDialog>
+      )}
+    </PresenceBoundary>
+    </>
   );
 });

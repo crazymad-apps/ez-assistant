@@ -66,6 +66,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
             session_id: session.session.session_id.clone(),
             message: "fail once".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -82,6 +83,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
             session_id: session.session.session_id.clone(),
             message: "overflow once".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -146,6 +148,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             session_id: session.session.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -166,6 +169,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             session_id: session.session.session_id.clone(),
             message: "continue".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -264,6 +268,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
             session_id: session.session.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -284,6 +289,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
             session_id: session.session.session_id.clone(),
             message: "continue after provider overflow".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -359,6 +365,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
             session_id: session.session.session_id.clone(),
             message: "retry unavailable model".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -466,6 +473,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
             session_id: session.session.session_id.clone(),
             message: "stream then fail".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -504,6 +512,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
             session_id: session.session.session_id.clone(),
             message: "panic".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -561,6 +570,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             session_id: session.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -576,6 +586,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             session_id: session.session.session_id.clone(),
             message: "must remain queued".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -603,6 +614,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
                 session_id: session.session.session_id,
                 message: "must be rejected".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -626,6 +638,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
                 session_id: session.session.session_id.clone(),
                 message: " \n\t".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })

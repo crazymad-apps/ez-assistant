@@ -8,7 +8,7 @@
 
 ```text
 apps/
-  desktop/                         Tauri 2 + Vanilla TypeScript 桌面应用
+  desktop/                         Tauri 2 + React/MobX/Sass 桌面应用
   runtime-host/                    正式 Assistant Runtime 产品进程入口
 crates/
   agent-types/                     Provider-neutral 规范消息与工具值类型

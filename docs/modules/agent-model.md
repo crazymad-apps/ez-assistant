@@ -40,6 +40,13 @@
 - 不依赖 Tauri、Runtime、数据库和具体 Provider Adapter。
 - 不持久化 Trace；attempt observer 只报告原生事实，记录失败不能改变模型结果。
 
+## v0.22.0 M0 单轮收集边界
+
+- `collect_model_turn` 只收集一次已装配的 `ModelService` 调用，通过 `LifecycleValidator`
+  强制执行事件生命周期，并返回最终 `AssistantMessage` 或规范 `ModelError`。
+- helper 不选择模型、不构造业务输入、不设置超时，也不持有 Session、标题、压缩或其他领域语义；
+  Rolling Summary 与后续旁路推理只能在调用方解释结果。
+
 ## 验证
 
 ```bash

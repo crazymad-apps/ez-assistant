@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -13,6 +13,9 @@ import type {
 } from "../../src/generated/assistant-protocol";
 import {
   chooseAttachmentFiles,
+  previewAttachmentSelection,
+  releaseAttachmentSelection,
+  stageClipboardImage,
   uploadSelectedAttachment,
 } from "../../src/native-bridge/nativeResource";
 import { RootStore } from "../../src/stores/RootStore";
@@ -20,16 +23,109 @@ import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ComposerDock } from "../../src/features/composer/ComposerDock";
 
 vi.mock("../../src/native-bridge/nativeResource", () => ({
+  NativeResourceFailure: class NativeResourceFailure extends Error {
+    code: string | null = null;
+  },
   cancelResourceOperation: vi.fn().mockResolvedValue(undefined),
   chooseAttachmentFiles: vi.fn(),
+  materializeNewSession: vi.fn(),
+  previewAttachment: vi.fn(),
+  previewAttachmentSelection: vi.fn(),
   releaseAttachmentSelection: vi.fn().mockResolvedValue(undefined),
+  stageClipboardImage: vi.fn(),
   uploadSelectedAttachment: vi.fn(),
 }));
 
 describe("ComposerDock", () => {
   afterEach(() => {
     cleanup();
+    vi.clearAllMocks();
     vi.restoreAllMocks();
+  });
+
+  it("keeps workspace drafts isolated and allows an attachment-only first send", async () => {
+    const user = userEvent.setup();
+    const store = new RootStore();
+    store.connection.markConnected("instance-1", {
+      protocol_version: 1,
+      runtime_version: "test",
+      max_command_bytes: 64 * 1024,
+      max_attachment_bytes: null,
+      sse: true,
+      streaming_upload: true,
+      features: ["session_materialization"],
+    });
+    store.projection.applyApplicationSnapshot(observed(applicationSnapshot()));
+    store.openNewSessionDraft("workspace-1");
+    const materialize = vi.spyOn(store, "materializeNewSessionDraft").mockResolvedValue(false);
+    vi.mocked(chooseAttachmentFiles).mockResolvedValue([{
+      selection_id: "selection-1",
+      original_name: "screen.png",
+      size_bytes: 12,
+    }]);
+    render(
+      <RootStoreProvider store={store}>
+        <ComposerDock />
+      </RootStoreProvider>,
+    );
+
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    await user.type(input, "工作区一草稿");
+    act(() => store.openNewSessionDraft(null));
+    expect(input).toHaveValue("");
+    act(() => store.openNewSessionDraft("workspace-1"));
+    expect(input).toHaveValue("工作区一草稿");
+
+    fireEvent.change(input, { target: { value: "" } });
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    expect(await screen.findByText("screen.png")).toBeVisible();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(materialize).toHaveBeenCalledWith("workspace:workspace-1");
+  });
+
+  it("keeps pasted image attachments isolated between workspace drafts", async () => {
+    const store = new RootStore();
+    store.connection.markConnected("instance-1", {
+      protocol_version: 1,
+      runtime_version: "test",
+      max_command_bytes: 64 * 1024,
+      max_attachment_bytes: null,
+      sse: true,
+      streaming_upload: true,
+      features: ["session_materialization"],
+    });
+    store.projection.applyApplicationSnapshot(observed(applicationSnapshot()));
+    store.openNewSessionDraft("workspace-1");
+    vi.mocked(stageClipboardImage).mockImplementation(async (file) => ({
+      selection_id: `selection-${file.name}`,
+      original_name: file.name,
+      size_bytes: file.size,
+      media_type: file.type,
+      origin: "clipboard",
+    }));
+    render(
+      <RootStoreProvider store={store}>
+        <ComposerDock />
+      </RootStoreProvider>,
+    );
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    fireEvent(input, clipboardEvent([
+      new File([new Uint8Array([1])], "workspace-one.png", { type: "image/png" }),
+    ], ""));
+    expect(await screen.findByRole("button", { name: "查看附件 workspace-one.png" })).toBeVisible();
+
+    act(() => store.openNewSessionDraft(null));
+    expect(screen.queryByRole("button", { name: "查看附件 workspace-one.png" })).not.toBeInTheDocument();
+    fireEvent(input, clipboardEvent([
+      new File([new Uint8Array([2])], "standalone.png", { type: "image/png" }),
+    ], ""));
+    expect(await screen.findByRole("button", { name: "查看附件 standalone.png" })).toBeVisible();
+
+    act(() => store.openNewSessionDraft("workspace-1"));
+    expect(await screen.findByRole("button", { name: "查看附件 workspace-one.png" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看附件 standalone.png" })).not.toBeInTheDocument();
   });
 
   it("routes an exact standalone /compact command without creating an input", async () => {
@@ -50,6 +146,40 @@ describe("ComposerDock", () => {
     await waitFor(() => expect(compact).toHaveBeenCalledWith("session-1", 1));
     expect(submit).not.toHaveBeenCalled();
     await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it("routes an exact /title command through the title side path", async () => {
+    const store = renderComposer();
+    const generate_title = vi.spyOn(store, "generateSessionTitle").mockResolvedValue(true);
+    const submit = vi.spyOn(store, "submitInput");
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    fireEvent.change(input, { target: { value: "/title" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(generate_title).toHaveBeenCalledWith("session-1"));
+    expect(submit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("");
+  });
+
+  it("keeps title retry and close controls together without shrinking the retry label", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer();
+    const generate_title = vi.spyOn(store, "generateSessionTitle").mockResolvedValue(true);
+    act(() => {
+      store.session_notice = {
+        session_id: "session-1",
+        tone: "warning",
+        message: "标题生成失败。",
+        action: "retry_title",
+      };
+    });
+
+    const retry = screen.getByRole("button", { name: "重试" });
+    const close = screen.getByRole("button", { name: "关闭状态提示" });
+    expect(retry.parentElement).toBe(close.parentElement);
+    await user.click(retry);
+    expect(generate_title).toHaveBeenCalledWith("session-1");
   });
 
   it("clears /compact when the session is busy", async () => {
@@ -115,13 +245,13 @@ describe("ComposerDock", () => {
     await waitFor(() => expect(input).toHaveValue(""));
 
     await user.type(input, "/model");
-    fireEvent.keyDown(input, { key: "Enter" });
+    await user.keyboard("{Enter}");
     await user.click(await screen.findByRole("menuitemradio", { name: /备用模型/ }));
     await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", "alternate"));
     await waitFor(() => expect(screen.queryByRole("menuitemradio", { name: /备用模型/ })).not.toBeInTheDocument());
 
     await user.type(input, "/mode");
-    fireEvent.keyDown(input, { key: "Enter" });
+    await user.keyboard("{Enter}");
     await user.click(await screen.findByRole("menuitemradio", { name: /规划/ }));
     expect(set_variant).toHaveBeenCalledWith("session-1", "plan");
   });
@@ -176,6 +306,9 @@ describe("ComposerDock", () => {
     expect(queue_trigger).toHaveAttribute("aria-expanded", "true");
     await user.click(queue_trigger);
     expect(queue_trigger).toHaveAttribute("aria-expanded", "false");
+    const exiting_queue = screen.getByText("再运行测试", { exact: true }).closest<HTMLElement>('[aria-hidden="true"]');
+    expect(exiting_queue).not.toBeNull();
+    if (exiting_queue) fireEvent.transitionEnd(exiting_queue);
     expect(screen.queryByText("再运行测试", { exact: true })).not.toBeInTheDocument();
     await user.click(queue_trigger);
     expect(screen.queryByText("先检查构建", { exact: true })).not.toBeInTheDocument();
@@ -342,6 +475,149 @@ describe("ComposerDock", () => {
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
   });
 
+  it("opens attachment details from the tag body while keeping remove separate", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    vi.mocked(chooseAttachmentFiles).mockResolvedValue([{
+      selection_id: "selection-detail",
+      original_name: "notes.md",
+      size_bytes: 2048,
+      media_type: null,
+      origin: "file_picker",
+    }]);
+    vi.mocked(previewAttachmentSelection).mockResolvedValue({
+      kind: "text",
+      media_type: "text/markdown",
+      size_bytes: 2048,
+      text: "# Preview",
+      data_url: null,
+    });
+
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(await screen.findByRole("button", { name: "查看附件 notes.md" }));
+    expect(await screen.findByRole("dialog", { name: "notes.md" })).toBeVisible();
+    expect(await screen.findByText("# Preview")).toBeVisible();
+    expect(screen.getByText("text/markdown")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "关闭附件详情" }));
+
+    await user.click(screen.getByRole("button", { name: "移除附件 notes.md" }));
+    expect(screen.queryByRole("button", { name: "查看附件 notes.md" })).not.toBeInTheDocument();
+    expect(releaseAttachmentSelection).toHaveBeenCalledWith("selection-detail");
+  });
+
+  it("keeps pure text paste native and inserts mixed clipboard text at the current selection", async () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "before after" } });
+    input.setSelectionRange(7, 12);
+
+    const pure_text = clipboardEvent([], "native text");
+    fireEvent(input, pure_text);
+    expect(pure_text.defaultPrevented).toBe(false);
+    expect(stageClipboardImage).not.toHaveBeenCalled();
+
+    const image = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    vi.mocked(stageClipboardImage).mockResolvedValue({
+      selection_id: "selection-paste",
+      original_name: "shot.png",
+      size_bytes: 3,
+      media_type: "image/png",
+      origin: "clipboard",
+    });
+    const mixed = clipboardEvent([image], "middle");
+    fireEvent(input, mixed);
+
+    expect(mixed.defaultPrevented).toBe(true);
+    expect(input).toHaveValue("before middle");
+    expect(await screen.findByRole("button", { name: "查看附件 shot.png" })).toBeVisible();
+    expect(stageClipboardImage).toHaveBeenCalledWith(image);
+  });
+
+  it("rolls back a clipboard image batch when staging fails midway", async () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement;
+    const first = new File([new Uint8Array([1])], "first.png", { type: "image/png" });
+    const second = new File([new Uint8Array([2])], "second.png", { type: "image/png" });
+    vi.mocked(stageClipboardImage)
+      .mockResolvedValueOnce({
+        selection_id: "selection-first",
+        original_name: "first.png",
+        size_bytes: 1,
+        media_type: "image/png",
+        origin: "clipboard",
+      })
+      .mockRejectedValueOnce(new Error("图片内容无效"));
+
+    fireEvent(input, clipboardEvent([first, second], "保留这段文字"));
+    expect(input).toHaveValue("保留这段文字");
+    await waitFor(() => expect(releaseAttachmentSelection).toHaveBeenCalledWith("selection-first"));
+    expect(screen.queryByRole("button", { name: /查看附件 first\.png/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("图片内容无效");
+  });
+
+  it("keeps multiple pasted images ordered and rejects a batch beyond composer capacity", async () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement;
+    const first = new File([new Uint8Array([1])], "first.png", { type: "image/png" });
+    const second = new File([new Uint8Array([2])], "second.png", { type: "image/png" });
+    vi.mocked(stageClipboardImage).mockImplementation(async (file) => ({
+      selection_id: `selection-${file.name}`,
+      original_name: file.name,
+      size_bytes: file.size,
+      media_type: file.type,
+      origin: "clipboard",
+    }));
+
+    fireEvent(input, clipboardEvent([first, second], ""));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /查看附件/ })).toHaveLength(2));
+    expect(screen.getAllByRole("button", { name: /查看附件/ }).map((button) => button.textContent)).toEqual([
+      expect.stringContaining("first.png"),
+      expect.stringContaining("second.png"),
+    ]);
+
+    vi.mocked(stageClipboardImage).mockClear();
+    const overflow = Array.from({ length: 31 }, (_, index) => (
+      new File([new Uint8Array([index])], `extra-${index}.png`, { type: "image/png" })
+    ));
+    fireEvent(input, clipboardEvent(overflow, "文字仍保留"));
+    expect(input).toHaveValue("文字仍保留");
+    expect(stageClipboardImage).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("每条消息最多添加 32 个附件");
+    expect(screen.getAllByRole("button", { name: /查看附件/ })).toHaveLength(2);
+  });
+
+  it("allows an attachment-only input in an existing session", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer();
+    vi.mocked(chooseAttachmentFiles).mockResolvedValue([{
+      selection_id: "selection-image-only",
+      original_name: "image.png",
+      size_bytes: 3,
+    }]);
+    vi.mocked(uploadSelectedAttachment).mockResolvedValue({
+      attachment: {
+        attachment_id: "attachment-image-only",
+        session_id: "session-1",
+        original_name: "image.png",
+        size_bytes: 3,
+        agent_readable_path: "/private/runtime/attachment-image-only",
+        state: "ready",
+        created_at_ms: 1,
+      },
+    });
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
+
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(
+      "session-1",
+      "",
+      "build",
+      ["attachment-image-only"],
+      "normal",
+    ));
+  });
+
   it("uses the model cascade and keeps image handling out of the composer", async () => {
     const user = userEvent.setup();
     const store = renderComposer({
@@ -362,6 +638,33 @@ describe("ComposerDock", () => {
     await user.click(screen.getByRole("menuitem", { name: /推理强度/ }));
     await user.click(screen.getByRole("menuitemradio", { name: /最大/ }));
     expect(set_effort).toHaveBeenCalledWith("session-1", "max");
+  });
+
+  it("positions both settings overlays after their Presence content mounts", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    await user.click(screen.getByRole("button", { name: "执行设置" }));
+    await expectPositionedOverlay("执行设置");
+
+    await user.click(screen.getByRole("button", { name: "模型设置" }));
+    await expectPositionedOverlay("模型设置");
+  });
+
+  it("shows the context percentage and token usage in a positioned tooltip", async () => {
+    renderComposer({
+      context_usage: {
+        used_tokens: 52_000,
+        window_tokens: 1_000_000,
+        usage_basis_points: 520,
+      },
+    });
+
+    const ring = screen.getByRole("img", { name: "上下文用量：52K / 1000K · 5.2%" });
+    fireEvent.focus(ring);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("52K / 1000K · 5.2%");
+    await waitFor(() => expect(tooltip).toHaveAttribute("data-position-ready", "true"));
   });
 
   it("loads a missing historical model as unselected and blocks messages until reselection", async () => {
@@ -459,9 +762,6 @@ describe("ComposerDock", () => {
     const store = renderComposer({ work_plan: workPlan(), goal: goalSnapshot("paused") });
     const resume_goal = vi.spyOn(store, "resumeGoal").mockResolvedValue(true);
     const clear_goal = vi.spyOn(store, "clearGoal").mockResolvedValue(true);
-    const confirm_exit = vi.spyOn(window, "confirm")
-      .mockReturnValueOnce(false)
-      .mockReturnValue(true);
 
     const todo_summary = screen.getByRole("button", { name: /工作计划/ });
     expect(todo_summary).toHaveTextContent("编写客户端交互");
@@ -496,9 +796,9 @@ describe("ComposerDock", () => {
     await waitFor(() => expect(resume_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
 
     await user.click(screen.getByRole("button", { name: "退出目标" }));
-    expect(confirm_exit).toHaveBeenCalledTimes(1);
     expect(clear_goal).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "退出目标" }));
+    const exit_dialog = screen.getByRole("dialog", { name: "退出当前目标？" });
+    await user.click(within(exit_dialog).getByRole("button", { name: "退出目标" }));
     await waitFor(() => expect(clear_goal).toHaveBeenCalledWith("session-1", "goal-1", 2));
   });
 
@@ -665,6 +965,7 @@ function renderComposer(overrides: Readonly<{
   queue?: QueueSnapshot;
   approvals?: readonly ApprovalSnapshot[];
   child_tasks?: readonly ChildTaskTreeItemSnapshot[];
+  context_usage?: SessionViewSnapshot["usage"]["context"];
   read_only?: boolean;
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
@@ -698,6 +999,15 @@ function renderComposer(overrides: Readonly<{
   return store;
 }
 
+async function expectPositionedOverlay(label: string): Promise<void> {
+  await waitFor(() => {
+    const overlay = document.querySelector<HTMLElement>(`#overlay-root > [aria-label="${label}"]`);
+    expect(overlay).not.toBeNull();
+    expect(overlay).toHaveAttribute("data-position-ready", "true");
+    expect(overlay).toHaveAttribute("data-presence", "entered");
+  });
+}
+
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
@@ -708,7 +1018,9 @@ function applicationSnapshot(): ApplicationSnapshot {
     ],
     workspaces: [{
       workspace_id: "workspace-1",
+      label: "project",
       user_directory: "/workspace/project",
+      additional_directories: [],
       agent_directory: "/runtime/workspaces/1",
       lifecycle: "active",
       created_at_ms: 1,
@@ -750,6 +1062,7 @@ function sessionView(overrides: Readonly<{
   queue?: QueueSnapshot;
   approvals?: readonly ApprovalSnapshot[];
   child_tasks?: readonly ChildTaskTreeItemSnapshot[];
+  context_usage?: SessionViewSnapshot["usage"]["context"];
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
@@ -778,7 +1091,7 @@ function sessionView(overrides: Readonly<{
       previous_turn: null,
       latest_cache_hit_basis_points: null,
       overall_cache_hit_basis_points: null,
-      context: null,
+      context: overrides.context_usage ?? null,
     },
     child_tasks: [...(overrides.child_tasks ?? [])],
     skill_catalog: overrides.skill_catalog ?? {
@@ -909,6 +1222,21 @@ function approvalSnapshot(): ApprovalSnapshot {
 
 function observed<T>(value: T, observed_sequence = 1): { observed_sequence: number; value: T } {
   return { observed_sequence, value };
+}
+
+function clipboardEvent(files: readonly File[], text: string): ClipboardEvent {
+  const event = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      getData: (format: string) => format === "text/plain" ? text : "",
+      items: files.map((file) => ({
+        getAsFile: () => file,
+        kind: "file",
+        type: file.type,
+      })),
+    },
+  });
+  return event;
 }
 
 function domRect(left: number, top: number, width: number, height: number): DOMRect {

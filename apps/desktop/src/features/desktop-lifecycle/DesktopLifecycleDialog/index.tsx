@@ -6,7 +6,6 @@ import styles from "./index.module.scss";
 export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog() {
   const lifecycle = useRootStore().desktop_lifecycle;
   const intent = lifecycle.intent;
-  if (!intent) return null;
 
   const stops_runtime = intent !== "quit_desktop" || lifecycle.stop_runtime_on_quit;
   const title = intent === "restart_runtime"
@@ -31,6 +30,7 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
       dialog_class_name={styles.dialog}
       dismissible={!lifecycle.pending}
       on_close={() => lifecycle.dismiss()}
+      open={intent !== null}
     >
         <header>
           <h3 id="desktop-lifecycle-title">{title}</h3>

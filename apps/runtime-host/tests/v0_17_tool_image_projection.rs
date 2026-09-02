@@ -34,7 +34,14 @@ fn formal_host_projects_main_and_child_tool_images_across_restart_and_failures()
     let first_host = HostProcess::start(runtime_home.path());
     let mut first = first_host.connect();
     let workspace_id = text(
-        &first.runtime("register_workspace", json!({"path": workspace.path()}))["workspace"]["workspace_id"],
+        &first.runtime(
+            "register_workspace",
+            json!({
+                "label": "tool-image-workspace",
+                "primary_directory": workspace.path(),
+                "additional_directories": [],
+            }),
+        )["workspace"]["workspace_id"],
     );
     let session_id = text(
         &first.runtime(

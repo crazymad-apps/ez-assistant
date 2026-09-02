@@ -19,9 +19,7 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let _mutation = self.workspace_mutation_gate.lock().await;
         let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
-        let (discovery, states) = self
-            .discover_skills(workspace.as_ref().map(|item| item.user_directory.as_str()))
-            .await?;
+        let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
         Ok(ListSkillsResult {
             snapshot: project_skill_management(&discovery, &states),
         })
@@ -37,9 +35,7 @@ impl AssistantRuntime {
         let _mutation = self.workspace_mutation_gate.lock().await;
         let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
         let name = SkillName::parse(request.name).map_err(|_| RuntimeError::SkillNameInvalid)?;
-        let (discovery, states) = self
-            .discover_skills(workspace.as_ref().map(|item| item.user_directory.as_str()))
-            .await?;
+        let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
         let management = project_skill_management(&discovery, &states);
         let detail = management
             .skills
@@ -81,9 +77,7 @@ impl AssistantRuntime {
             })
             .await
             .map_err(|source| RuntimeError::from_store("set skill enabled", source))?;
-        let (discovery, states) = self
-            .discover_skills(workspace.as_ref().map(|item| item.user_directory.as_str()))
-            .await?;
+        let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
         self.publish(RuntimeEvent::SkillSettingsChanged {
             name: name.as_str().to_owned(),
             enabled: request.enabled,
@@ -104,7 +98,7 @@ impl AssistantRuntime {
 
     async fn discover_skills(
         &self,
-        workspace_directory: Option<&str>,
+        workspace: Option<&StoredWorkspace>,
     ) -> RuntimeResult<(SkillDiscovery, Vec<SkillNameState>)> {
         let states = self
             .store
@@ -114,7 +108,13 @@ impl AssistantRuntime {
         let scan = match self
             .skill_package_source
             .scan(SkillScanRequest {
-                workspace_directory: workspace_directory.map(str::to_owned),
+                workspace_directories: workspace
+                    .map(|workspace| {
+                        std::iter::once(workspace.user_directory.clone())
+                            .chain(workspace.additional_directories.iter().cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
             .await
         {
@@ -143,15 +143,9 @@ fn current_skill_body(discovery: &SkillDiscovery, name: &SkillName) -> Option<St
     if discovery.status != SkillDiscoveryStatus::Available {
         return None;
     }
-    let best_source = discovery
-        .candidates
+    let winner = discovery
+        .winners
         .iter()
-        .find(|candidate| &candidate.name == name)?
-        .source;
-    let mut candidates = discovery
-        .candidates
-        .iter()
-        .filter(|candidate| &candidate.name == name && candidate.source == best_source);
-    let body = candidates.next()?.body.clone();
-    candidates.next().is_none().then_some(body)
+        .find(|candidate| &candidate.name == name)?;
+    Some(winner.body.clone())
 }

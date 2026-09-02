@@ -9,9 +9,8 @@
 }
 
 .title_bar {
-  display: grid;
+  display: flex;
   min-width: 0;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   padding: 0 16px;
@@ -27,15 +26,13 @@
     white-space: nowrap;
   }
 
-  &[data-platform="linux"] {
-    grid-template-columns: 32px minmax(0, 1fr) auto auto;
-    padding-right: 0;
-  }
+  &[data-platform="linux"] { padding-right: 0; }
 }
 
 .app_title {
   display: flex;
   min-width: 0;
+  flex: 1 1 auto;
   align-items: baseline;
   gap: 7px;
 
@@ -123,34 +120,87 @@
 }
 
 .app_body {
-  display: grid;
+  position: relative;
+  display: flex;
+  flex-wrap: nowrap;
   height: 100%;
   min-width: 0;
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
-  grid-template-columns: minmax(0, 1fr);
-  transition: grid-template-columns 160ms var(--ez-ease-standard);
 }
 
-.app_shell[data-left-sidebar="true"] .app_body {
-  grid-template-columns: 286px minmax(500px, 1fr);
+.app_body > aside {
+  flex: 0 0 auto;
+  transition: width var(--ez-motion-sidebar-enter) var(--ez-ease-standard);
 }
 
-.app_shell[data-right-sidebar="true"] .app_body {
-  grid-template-columns: minmax(500px, 1fr) 326px;
+.app_shell[data-left-sidebar="true"] .app_body > aside:first-child {
+  width: var(--ez-left-sidebar-width);
 }
 
-.app_shell[data-left-sidebar="true"][data-right-sidebar="true"] .app_body {
-  grid-template-columns: 286px minmax(500px, 1fr) 326px;
+.app_shell[data-right-sidebar="true"] .app_body > aside:last-child {
+  width: var(--ez-right-sidebar-width);
+}
+
+:global(html[data-sidebar-resizing]) .app_body > aside {
+  transition: none;
+}
+
+.sidebar_resize_handle {
+  position: relative;
+  z-index: 8;
+  min-width: 0;
+  width: 8px;
+  height: 100%;
+  flex: 0 0 8px;
+  margin-inline: -4px;
+  outline: 0;
+  cursor: col-resize;
+  touch-action: none;
+
+  &::after {
+    position: absolute;
+    width: 1px;
+    background: transparent;
+    content: "";
+    inset: 0 auto 0 50%;
+    transform: translateX(-0.5px);
+    transition: background-color var(--ez-motion-fast) var(--ez-ease-standard);
+  }
+
+  &:hover::after,
+  &:focus-visible::after,
+  &[data-dragging="true"]::after {
+    background: var(--ez-primary);
+  }
+}
+
+:global(html[data-sidebar-resizing]) {
+  cursor: col-resize;
+  user-select: none;
+
+  * { cursor: col-resize !important; }
+}
+
+.sr_only {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .conversation_area {
   position: relative;
   isolation: isolate;
   display: grid;
+  width: 0;
+  flex: 1 1 auto;
   height: 100%;
-  min-width: 0;
+  min-width: 500px;
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
@@ -370,6 +420,19 @@
   &:disabled { opacity: 1; }
 }
 
+.title_refresh {
+  animation: title-refresh 110ms ease-out;
+}
+
+@keyframes title-refresh {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .title_refresh { animation: none; }
+}
+
 .session_title_input {
   border-color: var(--ez-primary);
 
@@ -478,42 +541,4 @@
   grid-row: 4;
   min-width: 0;
   min-height: 0;
-}
-
-@media (max-width: 1180px) {
-  .app_shell[data-left-sidebar="true"] .app_body { grid-template-columns: 252px minmax(500px, 1fr); }
-  .app_shell[data-right-sidebar="true"] .app_body { grid-template-columns: minmax(500px, 1fr) 294px; }
-  .app_shell[data-left-sidebar="true"][data-right-sidebar="true"] .app_body { grid-template-columns: 252px minmax(500px, 1fr) 294px; }
-}
-
-@media (max-width: 1120px) {
-  .app_shell[data-right-sidebar="true"] .app_body,
-  .app_shell[data-left-sidebar="true"][data-right-sidebar="true"] .app_body {
-    grid-template-columns: 252px minmax(0, 1fr);
-  }
-
-  .app_shell[data-left-sidebar="false"][data-right-sidebar="true"] .app_body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .app_body > aside:last-child,
-  .context_toggle {
-    display: none;
-  }
-}
-
-@media (max-width: 760px) {
-  .title_bar {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .app_shell[data-left-sidebar="true"] .app_body,
-  .app_shell[data-left-sidebar="true"][data-right-sidebar="true"] .app_body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .app_body > aside:first-child,
-  .title_icon {
-    display: none;
-  }
 }

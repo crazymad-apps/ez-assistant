@@ -337,6 +337,11 @@ fn encode_user_message(
                     text: context.text.clone(),
                 });
             }
+            UserPart::QuotedText(quoted) => {
+                parts.push(ChatContentPart::Text {
+                    text: crate::shared::render_quoted_text(quoted),
+                });
+            }
             UserPart::FileReferences(files) => {
                 let mut ordinary = Vec::new();
                 for file in &files.files {

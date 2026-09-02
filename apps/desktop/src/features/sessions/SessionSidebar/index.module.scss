@@ -120,6 +120,16 @@
   }
 }
 
+.new_session_menu small { margin-left: auto; color: var(--ez-text-muted); font-size: 11px; }
+
+.draft_indicator {
+  margin-left: auto;
+  color: var(--ez-accent);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .list_tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -431,6 +441,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.title_refresh {
+  animation: title-refresh 110ms ease-out;
+}
+
+@keyframes title-refresh {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .title_refresh { animation: none; }
 }
 
 .pin_icon {

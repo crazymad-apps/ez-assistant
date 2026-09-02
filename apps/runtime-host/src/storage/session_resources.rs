@@ -59,8 +59,9 @@ impl StorageEngine {
                 .execute(
                     "INSERT OR IGNORE INTO session_resources (
                         session_id, workspace_id, working_directory,
-                        attachment_directory, private_directory, created_at_ms
-                     ) VALUES (?1, NULL, ?2, ?3, ?2, ?4)",
+                        additional_workspace_directories_json, attachment_directory,
+                        private_directory, created_at_ms
+                     ) VALUES (?1, NULL, ?2, '[]', ?3, ?2, ?4)",
                     params![session_id.as_str(), private, attachment, created_at_ms],
                 )
                 .map_err(|source| {
@@ -207,8 +208,9 @@ impl StorageEngine {
             .execute(
                 "INSERT INTO session_resources (
                     session_id, workspace_id, working_directory,
-                    attachment_directory, private_directory, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    additional_workspace_directories_json, attachment_directory,
+                    private_directory, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     session.session_id.as_str(),
                     session
@@ -217,6 +219,13 @@ impl StorageEngine {
                         .as_ref()
                         .map(WorkspaceId::as_str),
                     session.environment.working_directory,
+                    serde_json::to_string(&session.environment.additional_workspace_directories,)
+                        .map_err(|source| {
+                        super::internal_error(
+                            "session additional directories could not be encoded",
+                            source,
+                        )
+                    })?,
                     session.environment.session_attachment_directory,
                     session.environment.session_private_directory,
                     session.created_at_ms,
@@ -235,7 +244,8 @@ impl StorageEngine {
         let row = self
             .connection
             .query_row(
-                "SELECT r.workspace_id, r.working_directory, w.user_directory,
+                "SELECT r.workspace_id, r.working_directory,
+                        r.additional_workspace_directories_json, w.user_directory,
                         w.agent_directory, r.attachment_directory, r.private_directory
                  FROM session_resources r
                  LEFT JOIN workspaces w ON w.workspace_id = r.workspace_id
@@ -245,10 +255,11 @@ impl StorageEngine {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -263,17 +274,15 @@ impl StorageEngine {
             .transpose()?;
         let workspace_private_directory = match workspace_id.as_ref() {
             Some(_) => {
-                let user_directory = row
-                    .2
-                    .as_deref()
-                    .ok_or_else(|| invalid_data("stored session workspace is invalid"))?;
-                if row.1 != user_directory || row.3.is_none() {
+                // Workspace 当前目录可以在 Session 创建后编辑；恢复只要求绑定仍存在且
+                // Workspace 私有目录可解析，不能拿当前目录覆盖或拒绝冻结目录。
+                if row.3.is_none() || row.4.is_none() {
                     return Err(invalid_data("stored session workspace is invalid"));
                 }
-                row.3
+                row.4
             }
             None => {
-                if row.2.is_some() || row.3.is_some() || row.1 != row.5 {
+                if row.3.is_some() || row.4.is_some() || row.1 != row.6 {
                     return Err(invalid_data(
                         "stored unbound session environment is invalid",
                     ));
@@ -284,12 +293,16 @@ impl StorageEngine {
         let environment = SessionExecutionEnvironment {
             workspace_id,
             working_directory: row.1,
+            additional_workspace_directories: super::decode_additional_directories(
+                &row.2,
+                "stored session additional workspace directories are invalid",
+            )?,
             workspace_private_directory,
-            session_attachment_directory: row.4,
+            session_attachment_directory: row.5,
             session_tool_image_directory: path_text(
                 &self.session_directory(session_id)?.join("tool-images"),
             )?,
-            session_private_directory: row.5,
+            session_private_directory: row.6,
         };
         self.validate_stored_session_environment(session_id, &environment)?;
         Ok(environment)
@@ -307,6 +320,8 @@ impl StorageEngine {
                     ));
                 }
                 if session.environment.working_directory != workspace.user_directory
+                    || session.environment.additional_workspace_directories
+                        != workspace.additional_directories
                     || session.environment.workspace_private_directory.as_deref()
                         != Some(workspace.agent_directory.as_str())
                 {
@@ -327,6 +342,10 @@ impl StorageEngine {
             }
             None => {
                 if session.environment.workspace_private_directory.is_some()
+                    || !session
+                        .environment
+                        .additional_workspace_directories
+                        .is_empty()
                     || session.environment.working_directory
                         != session.environment.session_private_directory
                 {
@@ -385,6 +404,10 @@ impl StorageEngine {
             || path_text(&expected_tool_image)? != environment.session_tool_image_directory
             || path_text(&expected_private)? != environment.session_private_directory
             || !Path::new(&environment.working_directory).is_absolute()
+            || environment
+                .additional_workspace_directories
+                .iter()
+                .any(|path| !Path::new(path).is_absolute())
             || environment
                 .workspace_private_directory
                 .as_deref()

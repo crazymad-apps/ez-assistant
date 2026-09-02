@@ -86,6 +86,7 @@ pub(crate) struct RuntimeToolAuthorizer {
     permission_scopes: Vec<PermissionFileScope>,
     permission_coordinator: Arc<PermissionCoordinator>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
+    workspace_roots: Vec<AbsolutePath>,
     private_roots: Vec<AbsolutePath>,
     approval_resolver: Arc<dyn PermissionApprovalResolver>,
     goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
@@ -110,12 +111,21 @@ impl RuntimeToolAuthorizer {
         if let Some(workspace_private_directory) = &environment.workspace_private_directory {
             private_roots.push(absolute(workspace_private_directory)?);
         }
+        let workspace_roots = if environment.workspace_id.is_some() {
+            std::iter::once(&environment.working_directory)
+                .chain(environment.additional_workspace_directories.iter())
+                .map(|path| absolute(path))
+                .collect::<RuntimeResult<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             variant: scope.variant,
             approval_mode: scope.approval_mode,
             permission_scopes,
             permission_coordinator,
             infrastructure_policies,
+            workspace_roots,
             private_roots,
             approval_resolver,
             goal_signal_latch: None,
@@ -241,7 +251,19 @@ impl RuntimeToolAuthorizer {
         }
 
         if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
-            let mut path_effects = vec![(false, false, false); facts.paths.len()];
+            // Workspace 缺省能力只依赖 Session 创建时冻结的目录，不落入可编辑权限文件。
+            // 显式 Deny/Ask 仍在最终合并时优先于这份隐式 Allow。
+            let mut path_effects = facts
+                .paths
+                .iter()
+                .map(|path| {
+                    (
+                        false,
+                        false,
+                        self.workspace_default_allows(facts.operation, path),
+                    )
+                })
+                .collect::<Vec<_>>();
             for load in &loads {
                 let Some(document) = &load.document else {
                     return deny("permission rules are unavailable");
@@ -284,7 +306,9 @@ impl RuntimeToolAuthorizer {
         // 这样局部 Allow 无法绕过更高层显式 Deny，规则合并结果也与遍历顺序无关。
         let mut deny_rule = false;
         let mut ask_rule = false;
-        let mut allow_rule = false;
+        let mut allow_rule = invocation
+            .facts::<FileAuthorizationFacts>()
+            .is_some_and(|facts| self.workspace_default_allows(facts.operation, &facts.path));
         for load in &loads {
             let Some(document) = &load.document else {
                 return deny("permission rules are unavailable");
@@ -392,6 +416,23 @@ impl RuntimeToolAuthorizer {
         })
         .await
         .unwrap_or(false)
+    }
+
+    fn workspace_default_allows(&self, operation: FileOperation, target: &AbsolutePath) -> bool {
+        let operation_allowed = match operation {
+            FileOperation::Read
+            | FileOperation::List
+            | FileOperation::Find
+            | FileOperation::Search => true,
+            FileOperation::Write | FileOperation::Edit | FileOperation::Delete => {
+                self.variant == AgentVariant::Build
+            }
+        };
+        operation_allowed
+            && self
+                .workspace_roots
+                .iter()
+                .any(|root| target.as_path().starts_with(root.as_path()))
     }
 }
 
@@ -784,6 +825,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_defaults_use_frozen_primary_and_additional_roots() {
+        let root = TempDir::new().expect("tempdir");
+        let environment = environment(&root);
+        let permissions = coordinator([
+            (PermissionFileScope::Global, empty_document()),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let rejecting_approval = Arc::new(StaticApproval(ToolAuthorization::Deny {
+            reason: "unexpected approval".to_owned(),
+        }));
+        let plan = test_authorizer(
+            AgentVariant::Plan,
+            ApprovalMode::Ask,
+            scopes(),
+            permissions.clone(),
+            Vec::new(),
+            &environment,
+            rejecting_approval.clone(),
+        )
+        .expect("plan authorizer");
+        let build = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Ask,
+            scopes(),
+            permissions,
+            Vec::new(),
+            &environment,
+            rejecting_approval,
+        )
+        .expect("build authorizer");
+        let primary = PathBuf::from(&environment.working_directory).join("src/lib.rs");
+        let additional =
+            PathBuf::from(&environment.additional_workspace_directories[0]).join("docs/design.md");
+        let outside = root.path().join("outside/readme.md");
+
+        for operation in [
+            FileOperation::Read,
+            FileOperation::List,
+            FileOperation::Find,
+            FileOperation::Search,
+        ] {
+            assert_eq!(
+                authorize_file_operation(&plan, &environment, &primary, operation).await,
+                ToolAuthorization::Allow
+            );
+            assert_eq!(
+                authorize_file_operation(&build, &environment, &additional, operation).await,
+                ToolAuthorization::Allow
+            );
+        }
+        for operation in [
+            FileOperation::Write,
+            FileOperation::Edit,
+            FileOperation::Delete,
+        ] {
+            assert_eq!(
+                authorize_file_operation(&build, &environment, &additional, operation).await,
+                ToolAuthorization::Allow
+            );
+            assert!(matches!(
+                authorize_file_operation(&plan, &environment, &primary, operation).await,
+                ToolAuthorization::Deny { .. }
+            ));
+        }
+        assert_eq!(
+            authorize_file_operation(&build, &environment, &outside, FileOperation::Read).await,
+            ToolAuthorization::Deny {
+                reason: "scripted rejection".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_batch_default_requires_every_path_to_be_in_a_frozen_root() {
+        let root = TempDir::new().expect("tempdir");
+        let environment = environment(&root);
+        let permissions = coordinator([
+            (PermissionFileScope::Global, empty_document()),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Ask,
+            scopes(),
+            permissions,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(ToolAuthorization::Deny {
+                reason: "unexpected approval".to_owned(),
+            })),
+        )
+        .expect("authorizer");
+        let primary = PathBuf::from(&environment.working_directory).join("a.png");
+        let additional =
+            PathBuf::from(&environment.additional_workspace_directories[0]).join("b.png");
+        assert_eq!(
+            authorize_batch_read(&authorizer, &environment, &[&primary, &additional]).await,
+            ToolAuthorization::Allow
+        );
+
+        let outside = root.path().join("outside.png");
+        assert_eq!(
+            authorize_batch_read(&authorizer, &environment, &[&primary, &outside]).await,
+            ToolAuthorization::Deny {
+                reason: "scripted rejection".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn plan_child_can_write_only_inside_its_additional_private_root() {
         let root = TempDir::new().expect("tempdir");
         let environment = environment(&root);
@@ -950,10 +1105,25 @@ mod tests {
         environment: &SessionExecutionEnvironment,
         target: &std::path::Path,
     ) -> ToolAuthorization {
+        authorize_file_operation(authorizer, environment, target, FileOperation::Write).await
+    }
+
+    async fn authorize_file_operation(
+        authorizer: &RuntimeToolAuthorizer,
+        environment: &SessionExecutionEnvironment,
+        target: &std::path::Path,
+        operation: FileOperation,
+    ) -> ToolAuthorization {
+        let tool_name = match operation {
+            FileOperation::Write => "write_file",
+            FileOperation::Edit => "edit_file",
+            FileOperation::Delete => "delete_file",
+            _ => "read_file",
+        };
         let mut registry = ToolRegistry::new();
         registry
             .register(FileFactsTool {
-                operation: FileOperation::Write,
+                operation,
                 resolver: SessionPathResolver::new(
                     AbsolutePath::new(&environment.working_directory).expect("working directory"),
                 ),
@@ -963,7 +1133,7 @@ mod tests {
             &registry.snapshot(),
             &[ToolCall {
                 id: ToolCallId::new("call-write").expect("call id"),
-                name: ToolName::new("write_file").expect("tool name"),
+                name: ToolName::new(tool_name).expect("tool name"),
                 arguments: json!({"path": target}),
             }],
         );
@@ -1127,12 +1297,14 @@ mod tests {
 
     fn environment(root: &TempDir) -> SessionExecutionEnvironment {
         let workspace = root.path().join("workspace");
+        let additional_workspace = root.path().join("workspace-additional");
         let workspace_private = root.path().join("workspace-private");
         let attachments = root.path().join("attachments");
         let tool_images = root.path().join("tool-images");
         let session_private = root.path().join("session-private");
         for directory in [
             &workspace,
+            &additional_workspace,
             &workspace_private,
             &attachments,
             &tool_images,
@@ -1145,6 +1317,9 @@ mod tests {
                 assistant_protocol::WorkspaceId::new("w-test").expect("workspace id"),
             ),
             working_directory: workspace.to_string_lossy().into_owned(),
+            additional_workspace_directories: vec![
+                additional_workspace.to_string_lossy().into_owned(),
+            ],
             workspace_private_directory: Some(workspace_private.to_string_lossy().into_owned()),
             session_attachment_directory: attachments.to_string_lossy().into_owned(),
             session_tool_image_directory: tool_images.to_string_lossy().into_owned(),

@@ -82,6 +82,9 @@ pub(super) fn run_worker(
             } => {
                 let _ = reply.send(engine.register_workspace(registration));
             }
+            Command::UpdateWorkspace { update, reply } => {
+                let _ = reply.send(engine.update_workspace(update));
+            }
             Command::RemoveWorkspace { removal, reply } => {
                 let _ = reply.send(engine.remove_workspace(removal));
             }
@@ -90,6 +93,12 @@ pub(super) fn run_worker(
             }
             Command::CreateSession { session, reply } => {
                 let _ = reply.send(engine.create_session(session));
+            }
+            Command::MaterializeSession {
+                materialization,
+                reply,
+            } => {
+                let _ = reply.send(engine.materialize_session(*materialization));
             }
             Command::ForkSession { fork, reply } => {
                 let _ = reply.send(engine.fork_session(*fork));
@@ -217,6 +226,12 @@ pub(super) fn run_worker(
             }
             Command::RenameSession { change, reply } => {
                 let _ = reply.send(engine.rename_session(change));
+            }
+            Command::DisableAutomaticTitle { session_id, reply } => {
+                let _ = reply.send(engine.disable_automatic_title(&session_id));
+            }
+            Command::CommitSessionTitleGeneration { commit, reply } => {
+                let _ = reply.send(engine.commit_session_title_generation(commit));
             }
             Command::SetSessionPinned { change, reply } => {
                 let _ = reply.send(engine.set_session_pinned(change));

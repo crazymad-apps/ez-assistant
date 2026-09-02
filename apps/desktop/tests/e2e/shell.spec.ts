@@ -32,7 +32,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
           callback_id += 1;
           return callback_id;
         },
-        invoke(command: string) {
+        async invoke(command: string, args?: unknown) {
           if (command === "plugin:event|listen") {
             callback_id += 1;
             return Promise.resolve(callback_id);
@@ -65,6 +65,25 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
           if (command === "choose_workspace_directory") {
             return Promise.resolve(workspace_directory);
           }
+          if (command === "materialize_new_session") {
+            const request = args as { readonly manifest: object };
+            const runtime = JSON.parse(serialized_bootstrap) as {
+              readonly access_token: string;
+              readonly base_url: string;
+            };
+            const body = new FormData();
+            body.append("manifest", JSON.stringify(request.manifest));
+            const response = await fetch(`${runtime.base_url}/session-materializations`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${runtime.access_token}` },
+              body,
+            });
+            const payload = await response.json() as { readonly error?: { readonly message?: string } };
+            if (!response.ok) {
+              throw new Error(payload.error?.message ?? `materialization failed: ${response.status}`);
+            }
+            return payload;
+          }
           return Promise.reject(new Error(`Unexpected desktop command: ${command}`));
         },
       },
@@ -87,8 +106,13 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
 
   await navigation.getByRole("button", { name: "添加工作空间" }).click();
+  const create_workspace_dialog = page.getByRole("dialog", { name: "新建工作空间" });
+  await expect(create_workspace_dialog.getByRole("textbox", { name: /工作空间名称/ }))
+    .toHaveValue(basename(new_workspace));
+  await create_workspace_dialog.getByRole("button", { name: "保存" }).click();
+  await expect(create_workspace_dialog).toBeHidden();
   await expect(navigation.getByText(basename(new_workspace), { exact: true })).toBeVisible();
-  await expect(session_header.getByRole("button", { name: "New Session" })).toBeVisible();
+  await expect(session_header.getByRole("button", { name: "新对话" })).toBeVisible();
   await expectComposerAtBottom(page);
   await seeded_session.click();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
@@ -125,7 +149,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
 
   await navigation.getByRole("button", { name: "新对话", exact: true }).click();
   await page.getByRole("menu", { name: "选择新会话目录" }).getByRole("menuitem").first().click();
-  await expect(session_header.getByRole("button", { name: "New Session" })).toBeVisible();
+  await expect(session_header.getByRole("button", { name: "新对话" })).toBeVisible();
   await expectComposerAtBottom(page);
   const source_composer = page.getByRole("textbox", { name: "输入消息" });
   await source_composer.fill("SOURCE_CASE");
@@ -191,13 +215,14 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   const context_panel = page.getByRole("complementary", { name: "当前上下文" });
   await expect(context_panel.getByText("图片理解").locator("xpath=following-sibling::*[1]")).toContainText("当前不可用");
   const workspace_section = context_panel.getByRole("button", { name: "工作区", exact: true });
-  await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeVisible();
+  const open_workspace_directory = context_panel.getByRole("button", { name: /^打开 / }).first();
+  await expect(open_workspace_directory).toBeVisible();
   await workspace_section.click();
-  await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeHidden();
+  await expect(open_workspace_directory).toBeHidden();
   await workspace_section.click();
-  await expect(context_panel.getByRole("button", { name: "打开目录" })).toBeVisible();
+  await expect(open_workspace_directory).toBeVisible();
 
-  const attachment_section = context_panel.getByRole("button", { name: /会话附件 · 1/ });
+  const attachment_section = context_panel.getByRole("button", { name: "会话附件 · 1", exact: true });
   await expect(attachment_section).toBeVisible();
   await expect(context_panel.getByRole("button", { name: /e2e-attachment\.txt/ })).toBeVisible();
   await expect(context_panel.getByRole("button", { name: /e2e-context-file\.txt/ })).toHaveCount(0);
@@ -266,9 +291,13 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(navigation.getByRole("button", { name: new RegExp(forked_title) })).toHaveCount(0);
 
   const added_workspace_name = basename(new_workspace);
-  page.once("dialog", (dialog) => dialog.accept());
   await navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` }).click();
   await page.getByRole("menuitem", { name: "移除工作空间…" }).click();
+  const remove_workspace_dialog = page.getByRole("dialog", {
+    name: `移除工作空间“${added_workspace_name}”？`,
+  });
+  await expect(remove_workspace_dialog).toBeVisible();
+  await remove_workspace_dialog.getByRole("button", { name: "移除工作空间" }).click();
   await expect(navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` })).toHaveCount(0);
   await navigation.getByRole("button", { name: "新对话", exact: true }).click();
   await expect(
@@ -277,6 +306,9 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await page.keyboard.press("Escape");
 
   await navigation.getByRole("button", { name: "添加工作空间" }).click();
+  await expect(create_workspace_dialog).toBeVisible();
+  await create_workspace_dialog.getByRole("button", { name: "保存" }).click();
+  await expect(create_workspace_dialog).toBeHidden();
   await expect(navigation.getByRole("button", { name: `${added_workspace_name} 工作空间操作` })).toBeVisible();
   await navigation.getByRole("button", { name: "新对话", exact: true }).click();
   await expect(
@@ -308,8 +340,11 @@ async function expectModelCatalogForm(page: Page): Promise<void> {
   await model.click();
   await expect(page.getByRole("option", { name: "kimi-k3" })).toBeVisible();
 
-  page.once("dialog", (dialog) => dialog.accept());
   await settings.getByRole("button", { name: "取消" }).click();
+  const discard_dialog = page.getByRole("dialog", { name: "放弃未保存的模型修改？" });
+  await expect(discard_dialog).toBeVisible();
+  await discard_dialog.getByRole("button", { name: "放弃修改" }).click();
+  await expect(discard_dialog).toBeHidden();
   await settings.getByRole("button", { name: "关闭设置" }).click();
 }
 

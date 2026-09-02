@@ -3,7 +3,7 @@ use agent_types::{ConversationSnapshot, ToolImageReference};
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CompactSessionOutcome, IdempotencyKey,
     MessageFeedback, ModelKey, ReasoningEffortKey, SessionHistoryCleanupStatus, SessionId,
-    SessionTitleOrigin,
+    SessionTitleGenerationTriggerSnapshot, SessionTitleOrigin,
 };
 
 use crate::{
@@ -59,6 +59,10 @@ pub struct NewStoredSession {
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
     pub role: SessionRole,
+    /// 首次发送物化的进程外幂等身份；现有创建入口保持为空。
+    pub materialization_key: Option<IdempotencyKey>,
+    /// 是否仍具备自动标题资格；M0 的现有入口统一写入 false。
+    pub automatic_title_pending: bool,
     pub created_at_ms: i64,
 }
 
@@ -178,6 +182,8 @@ pub struct StoredSession {
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
     pub role: SessionRole,
+    pub materialization_key: Option<IdempotencyKey>,
+    pub automatic_title_pending: bool,
     pub proxy: Option<SessionProxyState>,
     pub pc_output_hosting: Option<PcOutputHosting>,
     pub body_generation: u64,
@@ -205,6 +211,11 @@ pub struct StoredSessionUsage {
     pub cached_request_count: u64,
     pub reasoning_tokens: u64,
     pub reasoning_request_count: u64,
+    /// 不进入主 Agent Turn 的 Session 旁路模型请求次数。
+    pub auxiliary_request_count: u64,
+    pub auxiliary_input_tokens: u64,
+    pub auxiliary_output_tokens: u64,
+    pub auxiliary_total_tokens: u64,
     pub latest: Option<agent_types::TokenUsage>,
 }
 
@@ -231,6 +242,30 @@ pub struct SessionTitleChange {
     pub session_id: SessionId,
     pub title: String,
     pub changed_at_ms: i64,
+}
+
+/// 标题旁路模型调用的可靠收敛事实。
+///
+/// `expected_title` 仅用于自动触发的 compare-and-set，避免覆盖调用期间发生的直接编辑；
+/// 手动触发允许替换任意现有标题。无有效候选时 `title` 为空，只结算 pending 与旁路用量。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTitleGenerationCommit {
+    pub session_id: SessionId,
+    pub trigger: SessionTitleGenerationTriggerSnapshot,
+    pub expected_title: Option<String>,
+    pub title: Option<String>,
+    pub request_attempted: bool,
+    pub usage: Option<agent_types::TokenUsage>,
+    pub completed_at_ms: i64,
+}
+
+/// Store 结算后供 Runtime 更新内存投影的权威结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTitleGenerationCommitResult {
+    pub applied: bool,
+    pub title: String,
+    pub title_origin: SessionTitleOrigin,
+    pub automatic_title_pending: bool,
 }
 
 /// 幂等设置 Session 固定状态。

@@ -18,6 +18,11 @@ fn candidate(name: &str, source: SkillSource, path: &str) -> SkillCandidate {
         name: SkillName::parse(name).expect("valid name"),
         description: format!("{name} description"),
         source,
+        workspace_root_order: matches!(
+            source,
+            SkillSource::WorkspaceEzAssistant | SkillSource::WorkspaceAgents
+        )
+        .then_some(0),
         source_path: path.to_owned(),
         definition_digest: format!("digest-{path}"),
         body: "instructions".to_owned(),

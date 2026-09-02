@@ -127,6 +127,7 @@ fn device_session_input(
             variant: assistant_protocol::AgentVariant::Build,
             mode: assistant_protocol::SubmitInputMode::Normal,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         },
@@ -867,6 +868,7 @@ async fn channel_dispatch_failure_does_not_rewrite_the_completed_conversation() 
             variant: assistant_protocol::AgentVariant::Build,
             mode: assistant_protocol::SubmitInputMode::Normal,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

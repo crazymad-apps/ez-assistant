@@ -55,8 +55,6 @@ export class RuntimeProjectionStore {
       beginLoadingPreviousChild: action,
       applyPreviousConversationPage: action,
       applyPreviousChildConversationPage: action,
-      applyLocatedConversationPage: action,
-      applyLocatedChildConversationPage: action,
       failLoadingPrevious: action,
       failLoadingPreviousChild: action,
       acceptEvent: action,
@@ -188,33 +186,6 @@ export class RuntimeProjectionStore {
       is_loading_previous: false,
       load_error: message,
     });
-  }
-
-  applyLocatedConversationPage(
-    session_id: SessionId,
-    snapshot: ObservedSnapshot<ConversationPage>,
-  ): boolean {
-    const page = snapshot.value;
-    if (!isMainOwner(page.owner, session_id)) {
-      return false;
-    }
-    this.conversation_histories.set(session_id, historyFromPage(page));
-    return true;
-  }
-
-  applyLocatedChildConversationPage(
-    child_task_id: ChildTaskId,
-    snapshot: ObservedSnapshot<ConversationPage>,
-  ): boolean {
-    const page = snapshot.value;
-    if (
-      page.owner.type !== "child_task"
-      || page.owner.child_task_id !== child_task_id
-    ) {
-      return false;
-    }
-    this.child_conversation_histories.set(child_task_id, historyFromPage(page));
-    return true;
   }
 
   acceptEvent(envelope: RuntimeEventEnvelope): "ignored" | "accepted" | "gap" {

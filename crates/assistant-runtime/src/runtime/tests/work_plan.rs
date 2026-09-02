@@ -79,6 +79,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             message: "make a plan".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -111,6 +112,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             message: "continue from the plan".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -320,6 +322,7 @@ async fn completing_every_todo_clears_the_current_work_plan_automatically() {
             message: "finish everything".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -469,6 +472,7 @@ async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
             message: "continue".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

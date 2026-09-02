@@ -13,11 +13,22 @@
   background: var(--ez-surface);
   box-shadow: var(--ez-shadow-popover);
   opacity: 0;
+  transition:
+    opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
 }
 
-.content[data-position-ready="true"] {
+.content[data-position-ready="true"][data-presence="entered"] {
   opacity: 1;
 }
+
+.content[data-side="below"][data-presence="entering"],
+.content[data-side="below"][data-presence="exiting"] { transform: translateY(-4px); }
+
+.content[data-side="above"][data-presence="entering"],
+.content[data-side="above"][data-presence="exiting"] { transform: translateY(4px); }
+
+.content[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
 
 .item {
   display: flex;

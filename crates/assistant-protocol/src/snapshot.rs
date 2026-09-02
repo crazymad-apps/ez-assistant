@@ -208,6 +208,23 @@ pub enum SessionTitleOrigin {
     User,
 }
 
+/// Session 标题模型调用的触发来源。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTitleGenerationTriggerSnapshot {
+    Automatic,
+    Manual,
+}
+
+/// 当前 Runtime 进程中一次正在进行的标题生成投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionTitleGenerationSnapshot {
+    pub trigger: SessionTitleGenerationTriggerSnapshot,
+    pub started_at_ms: i64,
+}
+
 /// Workspace 是否仍可供新 Session 选择。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -225,8 +242,14 @@ pub enum WorkspaceLifecycle {
 pub struct WorkspaceSummary {
     /// Runtime 分配的不透明 Workspace 标识。
     pub workspace_id: WorkspaceId,
+    /// 用户可编辑的 Workspace 展示名称。
+    #[serde(default)]
+    pub label: String,
     /// Host canonicalize 后保存的用户工作目录。
     pub user_directory: String,
+    /// 当前 Workspace 的有序附加目录；既有 Session 仍使用自己的冻结快照。
+    #[serde(default)]
+    pub additional_directories: Vec<String>,
     /// Runtime Home 中由 Host 管理的 Workspace 级 Agent 私有目录。
     pub agent_directory: String,
     /// Workspace 当前是否可供新 Session 选择。

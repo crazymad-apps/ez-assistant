@@ -4,9 +4,39 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ContextPanel } from "../../src/features/context-panel/ContextPanel";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("ContextPanel", () => {
+  it("stacks wide context sections in two independent vertical columns", () => {
+    vi.stubGlobal("ResizeObserver", class ResizeObserverMock {
+      readonly #callback: ResizeObserverCallback;
+
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+
+      observe(target: Element) {
+        this.#callback([{ contentRect: { width: 700 }, target } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+
+      disconnect() {}
+      unobserve() {}
+    });
+    const store = contextStore();
+    const { container } = renderPanel(store);
+
+    const columns = container.querySelectorAll<HTMLElement>("[data-context-column]");
+    expect(columns).toHaveLength(2);
+    expect(within(columns[0]!).getByRole("button", { name: "会话" })).toBeVisible();
+    expect(within(columns[0]!).getByRole("button", { name: "技能" })).toBeVisible();
+    expect(within(columns[0]!).getByRole("button", { name: "运行记录 · 1" })).toBeVisible();
+    expect(within(columns[1]!).getByRole("button", { name: "工作区" })).toBeVisible();
+    expect(within(columns[1]!).getByRole("button", { name: "会话附件 · 1" })).toBeVisible();
+  });
+
   it("collapses each section and locates a selected run through the product query", async () => {
     const store = contextStore();
     const locate = vi.spyOn(store, "locateConversationRun").mockResolvedValue(true);
@@ -18,6 +48,9 @@ describe("ContextPanel", () => {
     expect(screen.getByText("图片理解").nextElementSibling).toHaveTextContent("辅助视觉模型");
     fireEvent.click(session_section);
     expect(session_section).toHaveAttribute("aria-expanded", "false");
+    const exiting_session = screen.getByText("Fixture Model").closest<HTMLElement>('[aria-hidden="true"]');
+    expect(exiting_session).not.toBeNull();
+    if (exiting_session) fireEvent.transitionEnd(exiting_session);
     expect(screen.queryByText("Fixture Model")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /运行 #1/ }));
@@ -34,19 +67,32 @@ describe("ContextPanel", () => {
     expect(screen.queryByRole("button", { name: /report\.txt/ })).not.toBeInTheDocument();
   });
 
-  it("offers the immutable Workspace actions", () => {
+  it("shows the current Workspace label with frozen directories and opens the shared editor", () => {
     const store = contextStore();
-    const open = vi.spyOn(store, "openWorkspace").mockResolvedValue();
+    const open = vi.spyOn(store, "openSessionWorkspaceDirectory").mockResolvedValue();
     const copy = vi.spyOn(store, "copyWorkspacePath").mockResolvedValue();
     renderPanel(store);
 
-    fireEvent.click(screen.getByRole("button", { name: "打开目录" }));
-    fireEvent.click(screen.getByRole("button", { name: "复制路径" }));
+    expect(screen.getByText("当前项目")).toBeVisible();
+    const workspace_heading = screen.getByRole("button", { name: "工作区" });
+    const workspace_edit = screen.getByRole("button", { name: "编辑工作空间" });
+    const workspace_toggle = screen.getByRole("button", { name: "收起工作区" });
+    expect(workspace_heading.compareDocumentPosition(workspace_edit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(workspace_edit.compareDocumentPosition(workspace_toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("/workspace/old-project")).toBeVisible();
+    expect(screen.getByText("/workspace/old-docs")).toBeVisible();
+    expect(screen.getByLabelText("主目录")).toHaveAttribute("data-primary", "true");
+    expect(screen.queryByText("主要")).not.toBeInTheDocument();
+    expect(screen.getByText("本会话继续使用创建时的工作目录。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "打开 /workspace/old-docs" }));
+    fireEvent.click(screen.getByRole("button", { name: "复制 /workspace/old-project" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑工作空间" }));
 
-    expect(open).toHaveBeenCalledWith("workspace-1");
-    expect(copy).toHaveBeenCalledWith("/workspace/project");
-    expect(screen.queryByRole("button", { name: "重新选择" })).not.toBeInTheDocument();
-    expect(screen.getByText("工作区不是强沙盒。", { exact: false })).toBeVisible();
+    expect(open).toHaveBeenCalledWith("session-1", 1);
+    expect(copy).toHaveBeenCalledWith("/workspace/old-project");
+    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1" });
+    expect(screen.queryByText("本会话创建时使用")).not.toBeInTheDocument();
+    expect(screen.queryByText("工作区不是强沙盒。", { exact: false })).not.toBeInTheDocument();
   });
 
   it("shows latest and token-weighted session cache hit rates", () => {
@@ -175,7 +221,12 @@ function contextStore(): RootStore {
       runtime_lifecycle: "running",
       configuration: { state: "ready" },
       models: [{ model_key: "fixture", display_name: "Fixture Model" }],
-      workspaces: [{ workspace_id: "workspace-1", user_directory: "/workspace/project" }],
+      workspaces: [{
+        workspace_id: "workspace-1",
+        label: "当前项目",
+        user_directory: "/workspace/new-project",
+        additional_directories: ["/workspace/new-docs"],
+      }],
       active_sessions: [{
         session_id: "session-1",
         workspace_id: "workspace-1",
@@ -197,6 +248,13 @@ function contextStore(): RootStore {
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
+      },
+      workspace: {
+        workspace_id: "workspace-1",
+        label: "当前项目",
+        primary_directory: "/workspace/old-project",
+        additional_directories: ["/workspace/old-docs"],
+        directories_match_current: false,
       },
       composer_capabilities: {
         selected_model_key: "fixture",

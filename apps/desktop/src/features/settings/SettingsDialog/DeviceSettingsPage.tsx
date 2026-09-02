@@ -1,6 +1,7 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import type {
   DeviceCapabilitiesSnapshot,
   DeviceSummarySnapshot,
@@ -190,6 +191,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
       {gateway.error_message && <p className={styles.error_message} role="alert">{gateway.error_message}</p>}
       {gateway.notice_message && <p className={styles.notice_message} role="status">{gateway.notice_message}</p>}
 
+      <PresenceBoundary present={revoking_device !== null}>
       {revoking_device && (
         <SessionActionDialog
           confirm_label="解除配对"
@@ -203,6 +205,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
           <p>如果它是 PC 输出托管目标，托管会同时解除；已有 Conversation 不受影响。</p>
         </SessionActionDialog>
       )}
+      </PresenceBoundary>
     </SettingsPageContainer>
   );
 });

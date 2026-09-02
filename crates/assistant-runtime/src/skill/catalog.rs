@@ -25,7 +25,7 @@ pub struct SessionSkillDefinition {
     pub name: SkillName,
     pub description: String,
     pub source: SkillSource,
-    /// 四个共享 Root 中的源目录；只供 Runtime/工具按需读取，不进入模型目录或 revision。
+    /// 共享 Root 中的源目录；只供 Runtime/工具按需读取，不进入模型目录或 revision。
     pub source_path: String,
     pub definition_digest: String,
     /// 创建 Catalog 时读取到的正文；激活时从此冻结事实生成内部消息，不重新解释共享文件。
@@ -64,7 +64,7 @@ impl SessionSkillCatalog {
         Self::without_definitions(SkillCatalogStatus::Unavailable, diagnostics)
     }
 
-    /// 从确定性发现结果构造完整 Catalog；Skill 包仍由四个共享 Root 统一持有。
+    /// 从确定性发现结果构造完整 Catalog；Skill 包仍由共享 Root 持有。
     pub fn from_discovery(discovery: SkillDiscovery) -> Result<Self, SkillPackageSourceError> {
         let mut definitions = Vec::with_capacity(discovery.winners.len());
         for winner in discovery.winners {

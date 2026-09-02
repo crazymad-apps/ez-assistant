@@ -2,17 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SkillSummarySnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { useInputMethodGuard } from "../../../components/InputMethodGuard";
+import { usePresence } from "../../../components/Presence";
 import styles from "./index.module.scss";
 
 export function SkillPicker(props: Readonly<{
   skills: readonly SkillSummarySnapshot[];
   on_close: () => void;
+  open: boolean;
   on_select: (skill: SkillSummarySnapshot) => void;
 }>) {
   const [query, setQuery] = useState("");
   const [active_index, setActiveIndex] = useState(0);
   const input_ref = useRef<HTMLInputElement>(null);
   const input_method = useInputMethodGuard();
+  const presence = usePresence(props.open, 90);
   const results = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return props.skills.filter((skill) => !normalized
@@ -21,8 +24,8 @@ export function SkillPicker(props: Readonly<{
   }, [props.skills, query]);
 
   useEffect(() => {
-    input_ref.current?.focus();
-  }, []);
+    if (props.open) input_ref.current?.focus();
+  }, [props.open]);
   useEffect(() => setActiveIndex(0), [query]);
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
@@ -41,8 +44,17 @@ export function SkillPicker(props: Readonly<{
     }
   }
 
+  if (!presence.mounted) return null;
   return (
-    <div aria-label="选择技能" className={styles.skill_picker} role="dialog">
+    <div
+      aria-hidden={presence.state === "exiting" ? true : undefined}
+      aria-label="选择技能"
+      className={styles.skill_picker}
+      data-presence={presence.state}
+      inert={presence.state === "exiting" ? true : undefined}
+      onTransitionEnd={presence.onTransitionEnd}
+      role="dialog"
+    >
       <header>
         <Icon name="search" size={15} />
         <input

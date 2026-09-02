@@ -258,8 +258,57 @@ pub enum UserPart {
     Injected(TextPart),
     /// 结构化的 Runtime/上下文内部指令；正文进入模型，但不作为用户正文展示。
     InternalContext(InternalContextPart),
+    /// 用户从既有会话正文中选取并冻结的结构化引用。
+    QuotedText(QuotedTextPart),
     /// 用户可见的附件引用；不包含文件正文或应用层 Attachment ID。
     FileReferences(FileReferencesPart),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// 引用来源在规范会话中的角色；不包含可用于绕过授权的消息身份。
+pub enum QuotedTextSourceRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+/// 引用来源的应用内 Conversation owner；只用于宿主恢复来源，不进入 Provider wire。
+pub enum QuotedTextSourceOwner {
+    MainSession {
+        session_id: String,
+    },
+    ChildTask {
+        session_id: String,
+        child_task_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// 一段随 UserMessage 持久化的冻结会话引用。
+///
+/// `exact` 是用户实际选中的可见正文；`prefix`/`suffix` 只用于有限上下文和预览。
+/// 来源 locator 仅供宿主导航，不能作为授权凭据。
+pub struct QuotedTextPart {
+    /// 当前 UserMessage 内该引用的稳定 Part 身份；不会投影到 Provider wire。
+    pub quote_id: PartId,
+    pub exact: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub source_owner: QuotedTextSourceOwner,
+    pub source_generation: u64,
+    pub source_message_id: MessageId,
+    pub text_start_utf16: u32,
+    pub text_end_utf16: u32,
+    pub source_role: QuotedTextSourceRole,
+    pub source_label: String,
+    /// 旧来源缺少可靠时间时保持为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_created_at_ms: Option<i64>,
+    /// Runtime 在接受输入时核对来源 locator 后写入；失效不影响冻结正文。
+    #[serde(default)]
+    pub source_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -594,6 +643,33 @@ mod tests {
         value.to_owned().try_into().expect("valid id")
     }
 
+    #[test]
+    fn quoted_text_round_trips_without_losing_frozen_context() {
+        let part = UserPart::QuotedText(QuotedTextPart {
+            quote_id: id("quote-1"),
+            exact: "small selection".to_owned(),
+            prefix: "before <tag>".to_owned(),
+            suffix: "after & more".to_owned(),
+            source_owner: QuotedTextSourceOwner::ChildTask {
+                session_id: "session-1".to_owned(),
+                child_task_id: "child-1".to_owned(),
+            },
+            source_generation: 3,
+            source_message_id: id("message-1"),
+            text_start_utf16: 7,
+            text_end_utf16: 22,
+            source_role: QuotedTextSourceRole::Assistant,
+            source_label: "Session A".to_owned(),
+            source_created_at_ms: Some(123),
+            source_available: true,
+        });
+        let json = serde_json::to_string(&part).expect("quote should serialize");
+        assert_eq!(
+            serde_json::from_str::<UserPart>(&json).expect("quote should deserialize"),
+            part
+        );
+    }
+
     fn tool_call_message(message_id: &str, call_ids: &[&str]) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
             id: id(message_id),
@@ -821,6 +897,7 @@ mod tests {
                 UserPart::Text(text) => Some(text),
                 UserPart::Injected(_)
                 | UserPart::InternalContext(_)
+                | UserPart::QuotedText(_)
                 | UserPart::FileReferences(_) => None,
             })
             .collect();

@@ -5,6 +5,7 @@ mod auth;
 mod commands;
 mod error;
 mod events;
+mod materializations;
 mod resources;
 
 use std::{path::PathBuf, sync::Arc};
@@ -27,6 +28,7 @@ use self::{
     auth::authorize,
     commands::handle_command,
     events::stream_events,
+    materializations::materialize_session,
     resources::{
         export_session_markdown, preview_attachment, preview_child_tool_file, preview_tool_file,
         resolve_child_tool_file_native_path, resolve_tool_file_native_path, thumbnail_attachment,
@@ -109,8 +111,10 @@ impl HttpState {
 pub(crate) fn router(state: HttpState) -> Router {
     let command_route = post(handle_command).layer(DefaultBodyLimit::max(MAX_COMMAND_BYTES));
     let attachment_route = post(upload_attachment).layer(DefaultBodyLimit::disable());
+    let materialization_route = post(materialize_session).layer(DefaultBodyLimit::disable());
     let api = Router::new()
         .route("/commands", command_route)
+        .route("/session-materializations", materialization_route)
         .route("/sessions/{session_id}/attachments", attachment_route)
         .route(
             "/sessions/{session_id}/attachments/{attachment_id}/preview",
@@ -172,6 +176,7 @@ async fn capabilities() -> Json<RuntimeHostCapabilities> {
             RuntimeHostFeature::QueueControl,
             RuntimeHostFeature::ApprovalQueue,
             RuntimeHostFeature::SessionManagement,
+            RuntimeHostFeature::SessionMaterialization,
         ],
     })
 }

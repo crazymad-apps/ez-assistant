@@ -2,12 +2,15 @@
 
 use std::{collections::BTreeSet, fs};
 
-use assistant_protocol::{ChildTaskId, MessageFeedback, MessageId};
+use assistant_protocol::{
+    ChildTaskId, MessageFeedback, MessageId, SessionTitleGenerationTriggerSnapshot,
+    SessionTitleOrigin,
+};
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, MessageFeedbackChange, ModelChange,
     ReasoningEffortChange, RewriteResult, SessionPinnedChange, SessionProxyChange,
-    SessionTitleChange, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
-    VariantChange,
+    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
+    StoredInput, StoredInputState, StoredMessageFeedback, StoredRun, VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -127,7 +130,7 @@ impl StorageEngine {
             .connection
             .execute(
                 "UPDATE sessions
-             SET title = ?1, title_origin = 'user'
+             SET title = ?1, title_origin = 'user', automatic_title_pending = 0
              WHERE session_id = ?2 AND lifecycle = 'active'",
                 params![change.title, change.session_id.as_str()],
             )
@@ -136,6 +139,125 @@ impl StorageEngine {
             return Err(conflict("session title cannot be changed"));
         }
         Ok(())
+    }
+
+    pub(super) fn disable_automatic_title(
+        &mut self,
+        session_id: &assistant_protocol::SessionId,
+    ) -> StorageResult<()> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE sessions SET automatic_title_pending = 0
+                 WHERE session_id = ?1 AND lifecycle = 'active'",
+                [session_id.as_str()],
+            )
+            .map_err(|source| {
+                database_write_error("automatic title eligibility could not be disabled", source)
+            })?;
+        if changed != 1 {
+            return Err(conflict("session title generation cannot be started"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit_session_title_generation(
+        &mut self,
+        commit: SessionTitleGenerationCommit,
+    ) -> StorageResult<SessionTitleGenerationCommitResult> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("session title generation could not begin commit", source)
+            })?;
+        let current = transaction
+            .query_row(
+                "SELECT title, title_origin FROM sessions
+                 WHERE session_id = ?1 AND lifecycle = 'active'",
+                [commit.session_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|source| internal_error("session title could not be queried", source))?
+            .ok_or_else(|| conflict("session title generation cannot be committed"))?;
+        let current_origin = match current.1.as_str() {
+            "generated" => SessionTitleOrigin::Generated,
+            "user" => SessionTitleOrigin::User,
+            _ => return Err(invalid_data("session title origin is invalid")),
+        };
+        let may_apply = match commit.trigger {
+            SessionTitleGenerationTriggerSnapshot::Automatic => {
+                current_origin == SessionTitleOrigin::Generated
+                    && commit.expected_title.as_deref() == Some(current.0.as_str())
+            }
+            SessionTitleGenerationTriggerSnapshot::Manual => true,
+        };
+        let applied = may_apply && commit.title.is_some();
+        let (title, title_origin) = if applied {
+            (
+                commit.title.as_deref().unwrap_or(current.0.as_str()),
+                "generated",
+            )
+        } else {
+            (current.0.as_str(), current.1.as_str())
+        };
+        transaction
+            .execute(
+                "UPDATE sessions
+                 SET title = ?1, title_origin = ?2, automatic_title_pending = 0
+                 WHERE session_id = ?3",
+                params![title, title_origin, commit.session_id.as_str()],
+            )
+            .map_err(|source| {
+                database_write_error("session title generation could not be committed", source)
+            })?;
+        if commit.request_attempted {
+            let usage = commit.usage.as_ref();
+            transaction
+                .execute(
+                    "UPDATE session_usage SET
+                       auxiliary_request_count = auxiliary_request_count + 1,
+                       auxiliary_input_tokens_sum = auxiliary_input_tokens_sum + ?1,
+                       auxiliary_output_tokens_sum = auxiliary_output_tokens_sum + ?2,
+                       auxiliary_total_tokens_sum = auxiliary_total_tokens_sum + ?3,
+                       updated_at_ms = ?4
+                     WHERE session_id = ?5",
+                    params![
+                        to_i64(
+                            usage.map_or(0, |value| value.input_tokens),
+                            "auxiliary input tokens"
+                        )?,
+                        to_i64(
+                            usage.map_or(0, |value| value.output_tokens),
+                            "auxiliary output tokens"
+                        )?,
+                        to_i64(
+                            usage.map_or(0, |value| value.total_tokens),
+                            "auxiliary total tokens"
+                        )?,
+                        commit.completed_at_ms,
+                        commit.session_id.as_str(),
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("session auxiliary usage could not be recorded", source)
+                })?;
+        }
+        let result = SessionTitleGenerationCommitResult {
+            applied,
+            title: title.to_owned(),
+            title_origin: if title_origin == "generated" {
+                SessionTitleOrigin::Generated
+            } else {
+                SessionTitleOrigin::User
+            },
+            automatic_title_pending: false,
+        };
+        transaction.commit().map_err(|source| {
+            database_write_error("session title generation could not be committed", source)
+        })?;
+        Ok(result)
     }
 
     pub(super) fn set_session_pinned(&mut self, change: SessionPinnedChange) -> StorageResult<()> {

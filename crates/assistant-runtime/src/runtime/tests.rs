@@ -345,6 +345,10 @@ fn test_fork_environment(
         environment: SessionExecutionEnvironment {
             workspace_id: request.source_environment.workspace_id.clone(),
             working_directory: request.source_environment.working_directory.clone(),
+            additional_workspace_directories: request
+                .source_environment
+                .additional_workspace_directories
+                .clone(),
             workspace_private_directory: request
                 .source_environment
                 .workspace_private_directory
@@ -363,19 +367,26 @@ fn test_environment(
     let private = format!("/runtime/sessions/{}/private", request.session_id);
     let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
     let tool_images = format!("/runtime/sessions/{}/tool-images", request.session_id);
-    let (workspace_id, working_directory, workspace_private_directory) = match request.workspace {
+    let (
+        workspace_id,
+        working_directory,
+        additional_workspace_directories,
+        workspace_private_directory,
+    ) = match request.workspace {
         Some(workspace) => (
             Some(workspace.workspace_id.clone()),
             workspace.user_directory.to_owned(),
+            workspace.additional_directories.to_vec(),
             Some(workspace.agent_directory.to_owned()),
         ),
-        None => (None, private.clone(), None),
+        None => (None, private.clone(), Vec::new(), None),
     };
     PreparedSessionEnvironment {
         system_prompt,
         environment: SessionExecutionEnvironment {
             workspace_id,
             working_directory,
+            additional_workspace_directories,
             workspace_private_directory,
             session_attachment_directory: attachment,
             session_tool_image_directory: tool_images,
@@ -741,6 +752,23 @@ fn assistant_text(message_id: &str, text: &str) -> AssistantMessage {
     }
 }
 
+fn assistant_title_tool_call(message_id: &str, call_id: &str, title: &str) -> AssistantMessage {
+    AssistantMessage {
+        id: MessageId::new(message_id).expect("message id"),
+        model: ModelIdentity::new(
+            ProviderId::new("fixture").expect("provider id"),
+            "fixture-model",
+        ),
+        parts: vec![AssistantPart::ToolCall(ToolCall {
+            id: ToolCallId::new(call_id).expect("call id"),
+            name: ToolName::new("submit_session_title").expect("tool name"),
+            arguments: json!({"title": title}),
+        })],
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    }
+}
+
 fn assistant_tool_call(message_id: &str, tool_name: &str) -> AssistantMessage {
     AssistantMessage {
         id: MessageId::new(message_id).expect("message id"),
@@ -859,6 +887,7 @@ mod device;
 mod failures;
 mod goal_input;
 mod input;
+mod materialization;
 mod memory;
 mod permission;
 mod product;

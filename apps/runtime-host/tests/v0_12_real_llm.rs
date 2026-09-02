@@ -44,7 +44,14 @@ fn real_llm_completes_plan_then_approved_build_shell_in_the_formal_host() {
     let mut client = host.connect();
     let configuration = client.runtime("get_config_status", json!({}));
     assert_eq!(configuration["status"]["state"], "ready");
-    let registered = client.runtime("register_workspace", json!({ "path": workspace.path() }));
+    let registered = client.runtime(
+        "register_workspace",
+        json!({
+            "label": "approval-real-llm",
+            "primary_directory": workspace.path(),
+            "additional_directories": [],
+        }),
+    );
     let workspace_id = text(&registered["workspace"]["workspace_id"]);
     let created = client.runtime(
         "create_session",

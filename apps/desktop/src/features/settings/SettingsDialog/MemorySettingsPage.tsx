@@ -2,7 +2,9 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useState } from "react";
 import type { PinnedMemorySnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
@@ -21,6 +23,7 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
   const [persona_content, setPersonaContent] = useState("");
   const [persona_dirty, setPersonaDirty] = useState(false);
   const [memory_draft, setMemoryDraft] = useState<MemoryDraft | null>(null);
+  const [deleting_memory, setDeletingMemory] = useState<PinnedMemorySnapshot | null>(null);
   const [query, setQuery] = useState("");
   const collection = memory_store.collection;
   const persona = memory_store.persona;
@@ -64,9 +67,9 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
     if (saved) setMemoryDraft(null);
   }
 
-  async function deletePinnedMemory(memory: PinnedMemorySnapshot) {
-    if (!window.confirm(`删除“${memory.category}”中的这条 Pinned Memory？`)) return;
-    await memory_store.deletePinnedMemory(memory);
+  async function confirmDeletePinnedMemory() {
+    if (!deleting_memory) return;
+    if (await memory_store.deletePinnedMemory(deleting_memory)) setDeletingMemory(null);
   }
 
   const persona_bytes = new TextEncoder().encode(persona_content).length;
@@ -164,7 +167,7 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
                 <button aria-label="编辑 Pinned Memory" onClick={() => setMemoryDraft({ memory, category: memory.category, content: memory.content })} type="button">
                   <Icon name="edit" size={14} />
                 </button>
-                <button aria-label="删除 Pinned Memory" onClick={() => void deletePinnedMemory(memory)} type="button">
+                <button aria-label="删除 Pinned Memory" onClick={() => setDeletingMemory(memory)} type="button">
                   <Icon name="trash" size={14} />
                 </button>
               </div>
@@ -179,6 +182,20 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
       {memory_store.conflict_message && <p className={styles.memory_conflict}>{memory_store.conflict_message}</p>}
       {memory_store.error_message && <p className={styles.error_message}>{memory_store.error_message}</p>}
       {memory_store.notice_message && <p className={styles.notice_message}>{memory_store.notice_message}</p>}
+      <PresenceBoundary present={deleting_memory !== null}>
+        {deleting_memory && (
+          <SessionActionDialog
+            confirm_label="删除记忆"
+            is_danger
+            is_pending={memory_store.pending_action?.startsWith("pinned:") ?? false}
+            on_cancel={() => setDeletingMemory(null)}
+            on_confirm={() => void confirmDeletePinnedMemory()}
+            title={`删除“${deleting_memory.category}”中的这条记忆？`}
+          >
+            <p>删除后，这条 Pinned Memory 将不再注入后续会话。</p>
+          </SessionActionDialog>
+        )}
+      </PresenceBoundary>
     </SettingsPageContainer>
   );
 });

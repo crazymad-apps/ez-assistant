@@ -34,22 +34,22 @@ use assistant_runtime::{
     DeviceLifecycle, DeviceNameChange, DevicePublicKey, DeviceRevocation,
     ForkedAttachmentReference, GoalInputBinding, GoalStop, InputChannelSource, InputModality,
     InputOrigin, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewPairedDevice,
-    NewStoredChildTask, NewStoredInput, NewStoredSession, NewWorkspaceRegistration,
-    OutputPreference, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
-    PermissionDocument, PermissionEffect, PermissionFileOperation, PermissionFileRevision,
-    PermissionFileScope, PermissionFileStore, PersonaMutation, PinnedMemoryCreatedBy,
-    PinnedMemoryMutation, QueuePriorityChange, RuntimeStore, SessionDeletion,
-    SessionExecutionEnvironment, SessionFork, SessionHistoryClear,
+    NewStoredChildTask, NewStoredInput, NewStoredSession, NewStoredSessionMaterialization,
+    NewWorkspaceRegistration, OutputPreference, PcOutputHostingChange, PendingChildToolExchange,
+    PendingToolExchange, PermissionDocument, PermissionEffect, PermissionFileOperation,
+    PermissionFileRevision, PermissionFileScope, PermissionFileStore, PersonaMutation,
+    PinnedMemoryCreatedBy, PinnedMemoryMutation, QueuePriorityChange, RuntimeStore,
+    SessionDeletion, SessionExecutionEnvironment, SessionFork, SessionHistoryClear,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
     SessionPinnedChange, SessionProxyChange, SessionRole, SessionSkillCatalog, SessionTitleChange,
-    SkillCandidate, SkillDiscovery, SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameState,
-    SkillNameStateChange, SkillSource, StoreErrorKind, StoredAttachmentState,
-    StoredChildTaskSettlement, StoredConversationState, StoredGoal, StoredGoalBudget,
-    StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
+    SessionTitleGenerationCommit, SkillCandidate, SkillDiscovery, SkillDiscoveryStatus,
+    SkillMetadata, SkillName, SkillNameState, SkillNameStateChange, SkillSource, StoreErrorKind,
+    StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState, StoredGoal,
+    StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
     StoredGoalSettlementEffect, StoredGoalState, StoredRunSettlement, StoredSession,
     StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle,
     ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkspaceRemoval,
+    WorkspaceRemoval, WorkspaceUpdate,
 };
 use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
@@ -91,8 +91,10 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     let private_directory = session_directory.join("private");
     NewStoredSession {
         session_id: session_id(value),
+        materialization_key: None,
         title: format!("Session {value}"),
         title_origin: assistant_protocol::SessionTitleOrigin::Generated,
+        automatic_title_pending: false,
         model_key: ModelKey::new("fixture-model").expect("model key"),
         reasoning_effort: None,
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
@@ -100,6 +102,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         environment: SessionExecutionEnvironment {
             workspace_id: None,
             working_directory: private_directory.to_string_lossy().into_owned(),
+            additional_workspace_directories: Vec::new(),
             workspace_private_directory: None,
             session_attachment_directory: session_directory
                 .join("attachments")
@@ -210,6 +213,62 @@ fn assert_default_session_permissions(session: &StoredSession) {
             .count(),
         4
     );
+}
+
+#[test]
+fn title_generation_commit_uses_automatic_cas_and_records_auxiliary_usage() {
+    let temporary = TempDir::new().expect("tempdir");
+    let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
+    let mut session = new_session("s-title-generation", &engine.sessions_directory);
+    session.automatic_title_pending = true;
+    let stored = engine.create_session(session).expect("create session");
+    let result = engine
+        .commit_session_title_generation(SessionTitleGenerationCommit {
+            session_id: stored.session_id.clone(),
+            trigger: assistant_protocol::SessionTitleGenerationTriggerSnapshot::Automatic,
+            expected_title: Some(stored.title.clone()),
+            title: Some("生成标题".to_owned()),
+            request_attempted: true,
+            usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                total_tokens: 13,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            }),
+            completed_at_ms: 2_000,
+        })
+        .expect("commit generated title");
+    assert!(result.applied);
+    assert_eq!(result.title, "生成标题");
+    assert!(!result.automatic_title_pending);
+    let usage = engine
+        .get_session_usage(&stored.session_id)
+        .expect("read usage");
+    assert_eq!(usage.auxiliary_request_count, 1);
+    assert_eq!(usage.auxiliary_total_tokens, 13);
+
+    engine
+        .rename_session(SessionTitleChange {
+            session_id: stored.session_id.clone(),
+            title: "用户标题".to_owned(),
+            changed_at_ms: 3_000,
+        })
+        .expect("rename session");
+    let stale = engine
+        .commit_session_title_generation(SessionTitleGenerationCommit {
+            session_id: stored.session_id,
+            trigger: assistant_protocol::SessionTitleGenerationTriggerSnapshot::Automatic,
+            expected_title: Some("生成标题".to_owned()),
+            title: Some("迟到标题".to_owned()),
+            request_attempted: false,
+            usage: None,
+            completed_at_ms: 4_000,
+        })
+        .expect("settle stale title");
+    assert!(!stale.applied);
+    assert_eq!(stale.title, "用户标题");
+    assert_eq!(stale.title_origin, SessionTitleOrigin::User);
 }
 
 #[test]
@@ -818,6 +877,7 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
             name: SkillName::parse("review").expect("name"),
             description: "Review changes".to_owned(),
             source: SkillSource::WorkspaceAgents,
+            workspace_root_order: Some(0),
             source_path: shared_skill.to_string_lossy().into_owned(),
             definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
             body: "Review carefully.".to_owned(),
@@ -900,6 +960,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             name: SkillName::parse("review").expect("name"),
             description: "Review changes".to_owned(),
             source: SkillSource::WorkspaceAgents,
+            workspace_root_order: Some(0),
             source_path: "/fixture/review".to_owned(),
             definition_digest: format!("sha256-v1:{}", "2".repeat(64)),
             body: "Review carefully.".to_owned(),
@@ -1626,7 +1687,9 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
     let workspace = source
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id.clone(),
-            requested_directory: user_workspace.path().to_string_lossy().into_owned(),
+            label: "runtime-migrated".to_owned(),
+            requested_primary_directory: user_workspace.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 1_000,
         })
         .expect("register source workspace");
@@ -1662,7 +1725,10 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
         expected_agent.to_string_lossy()
     );
     assert_eq!(migrated_workspace.user_directory, expected_user_workspace);
-    assert!(expected_agent.join("permissions.json").is_file());
+    assert!(
+        !expected_agent.join("permissions.json").exists(),
+        "moving Runtime Home does not materialize implicit Workspace defaults"
+    );
 
     let migrated_session = recovered
         .sessions
@@ -4055,7 +4121,9 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
     let first = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-first"),
-            requested_directory: alias.to_string_lossy().into_owned(),
+            label: "first".to_owned(),
+            requested_primary_directory: alias.to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register workspace");
@@ -4066,39 +4134,19 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
             .to_string_lossy()
     );
     assert!(Path::new(&first.agent_directory).is_dir());
-    let default_permissions = PermissionDocument::parse(
-        &fs::read(Path::new(&first.agent_directory).join("permissions.json"))
-            .expect("default workspace permissions"),
-    )
-    .expect("valid default workspace permissions");
-    assert_eq!(default_permissions.rules.len(), 7);
     assert!(
-        default_permissions
-            .rules
-            .iter()
-            .all(|rule| rule.effect == PermissionEffect::Allow)
+        !Path::new(&first.agent_directory)
+            .join("permissions.json")
+            .exists(),
+        "Workspace defaults are derived by Runtime and do not create explicit rules"
     );
-    assert_eq!(
-        default_permissions
-            .rules
-            .iter()
-            .filter(|rule| rule.variants == [assistant_protocol::AgentVariant::Build])
-            .count(),
-        3
-    );
-    assert!(default_permissions.rules.iter().all(|rule| {
-        matches!(
-            &rule.matcher,
-            assistant_runtime::PermissionMatcher::File(matcher)
-                if matcher.path == first.user_directory
-                    && matcher.path_match == assistant_runtime::PathMatch::Recursive
-        )
-    }));
 
     let duplicate = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-unused"),
-            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            label: "duplicate".to_owned(),
+            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 200,
         })
         .expect("idempotent workspace");
@@ -4126,12 +4174,83 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
     let restored = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-other-unused"),
-            requested_directory: alias.to_string_lossy().into_owned(),
+            label: "restored".to_owned(),
+            requested_primary_directory: alias.to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 400,
         })
         .expect("restore workspace");
     assert_eq!(restored.workspace_id, first.workspace_id);
     assert_eq!(restored.lifecycle, StoredWorkspaceLifecycle::Active);
+}
+
+#[test]
+fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspace_identity() {
+    let root = TempDir::new().expect("runtime home");
+    let first_primary = TempDir::new().expect("first primary");
+    let second_primary = TempDir::new().expect("second primary");
+    let replacement_primary = TempDir::new().expect("replacement primary");
+    let additional = TempDir::new().expect("additional directory");
+    let replacement_alias = root.path().join("replacement-alias");
+    symlink(replacement_primary.path(), &replacement_alias).expect("replacement alias");
+    let mut engine = open_engine(&root);
+    let first = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-update-first"),
+            label: "first".to_owned(),
+            requested_primary_directory: first_primary.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 100,
+        })
+        .expect("register first workspace");
+    let second = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-update-second"),
+            label: "second".to_owned(),
+            requested_primary_directory: second_primary.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 100,
+        })
+        .expect("register second workspace");
+
+    let updated = engine
+        .update_workspace(WorkspaceUpdate {
+            workspace_id: first.workspace_id.clone(),
+            label: "renamed".to_owned(),
+            requested_primary_directory: replacement_alias.to_string_lossy().into_owned(),
+            requested_additional_directories: vec![
+                additional.path().to_string_lossy().into_owned(),
+            ],
+            changed_at_ms: 200,
+        })
+        .expect("update first workspace");
+    assert_eq!(updated.label, "renamed");
+    assert_eq!(
+        updated.user_directory,
+        fs::canonicalize(replacement_primary.path())
+            .expect("canonical replacement")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        updated.additional_directories,
+        vec![
+            fs::canonicalize(additional.path())
+                .expect("canonical additional")
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
+
+    let conflict = engine
+        .update_workspace(WorkspaceUpdate {
+            workspace_id: first.workspace_id,
+            label: "conflict".to_owned(),
+            requested_primary_directory: second.user_directory,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 300,
+        })
+        .expect_err("another workspace primary remains reserved");
+    assert_eq!(conflict.kind(), StoreErrorKind::Conflict);
 }
 
 #[test]
@@ -4142,7 +4261,9 @@ fn workspace_registration_preserves_an_existing_permission_file() {
     let workspace = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-custom-permissions"),
-            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            label: "custom-permissions".to_owned(),
+            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register workspace");
@@ -4154,7 +4275,9 @@ fn workspace_registration_preserves_an_existing_permission_file() {
     let restored = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-unused-custom"),
-            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            label: "restored-custom".to_owned(),
+            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 200,
         })
         .expect("register existing workspace");
@@ -4167,39 +4290,109 @@ fn workspace_registration_preserves_an_existing_permission_file() {
 }
 
 #[test]
-fn runtime_recovery_backfills_only_missing_workspace_permission_files() {
+fn runtime_recovery_removes_only_the_exact_legacy_workspace_rule_set() {
     let root = TempDir::new().expect("runtime home");
     let first_directory = TempDir::new().expect("first workspace");
     let second_directory = TempDir::new().expect("second workspace");
+    let third_directory = TempDir::new().expect("third workspace");
     let mut engine = open_engine(&root);
     let first = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-backfill-default"),
-            requested_directory: first_directory.path().to_string_lossy().into_owned(),
+            label: "backfill-default".to_owned(),
+            requested_primary_directory: first_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register first workspace");
     let second = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-backfill-custom"),
-            requested_directory: second_directory.path().to_string_lossy().into_owned(),
+            label: "backfill-custom".to_owned(),
+            requested_primary_directory: second_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register second workspace");
+    let third = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-missing-permissions"),
+            label: "missing-permissions".to_owned(),
+            requested_primary_directory: third_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 100,
+        })
+        .expect("register third workspace");
     let first_path = Path::new(&first.agent_directory).join("permissions.json");
     let second_path = Path::new(&second.agent_directory).join("permissions.json");
-    fs::remove_file(&first_path).expect("simulate legacy missing permissions");
-    let custom = br#"{"schema_version":1,"rules":[]}
-"#;
-    fs::write(&second_path, custom).expect("custom permissions");
+    let third_path = Path::new(&third.agent_directory).join("permissions.json");
+    let mut legacy_rules = [
+        ("read", vec!["plan", "build"]),
+        ("list", vec!["plan", "build"]),
+        ("find", vec!["plan", "build"]),
+        ("search", vec!["plan", "build"]),
+        ("write", vec!["build"]),
+        ("edit", vec!["build"]),
+        ("delete", vec!["build"]),
+    ]
+    .into_iter()
+    .map(|(operation, variants)| {
+        serde_json::json!({
+            "id": format!("default-workspace-{operation}"),
+            "effect": "allow",
+            "variants": variants,
+            "matcher": {
+                "type": "file",
+                "operation": operation,
+                "path": first.user_directory.clone(),
+                "path_match": "recursive"
+            }
+        })
+    })
+    .collect::<Vec<_>>();
+    let mut modified_rules = legacy_rules.clone();
+    modified_rules[0]["effect"] = serde_json::json!("ask");
+    let custom = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "rules": modified_rules
+    }))
+    .expect("modified permission document");
+    legacy_rules.push(serde_json::json!({
+        "id": "user-explicit-deny",
+        "effect": "deny",
+        "variants": ["build"],
+        "matcher": {
+            "type": "file",
+            "operation": "write",
+            "path": first.user_directory.clone(),
+            "path_match": "exact"
+        }
+    }));
+    fs::write(
+        &first_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "rules": legacy_rules
+        }))
+        .expect("legacy permission document"),
+    )
+    .expect("legacy permissions");
+    fs::set_permissions(&first_path, fs::Permissions::from_mode(0o600))
+        .expect("legacy permissions mode");
+    fs::write(&second_path, &custom).expect("custom permissions");
+    fs::set_permissions(&second_path, fs::Permissions::from_mode(0o600))
+        .expect("custom permissions mode");
 
     let recovered = engine.load_runtime().expect("recover runtime");
 
-    assert_eq!(recovered.workspaces.len(), 2);
-    assert!(
-        PermissionDocument::parse(&fs::read(first_path).expect("backfilled permissions")).is_ok()
-    );
+    assert_eq!(recovered.workspaces.len(), 3);
+    let migrated =
+        PermissionDocument::parse(&fs::read(first_path).expect("migrated explicit permissions"))
+            .expect("valid migrated permissions");
+    assert_eq!(migrated.rules.len(), 1);
+    assert_eq!(migrated.rules[0].id, "user-explicit-deny");
     assert_eq!(fs::read(second_path).expect("custom file remains"), custom);
+    assert!(!third_path.exists(), "missing Workspace file stays missing");
 }
 
 #[test]
@@ -4254,11 +4447,18 @@ fn runtime_recovery_backfills_only_missing_session_permission_files() {
 fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_prompt_rewrite() {
     let root = TempDir::new().expect("runtime home");
     let user_directory = TempDir::new().expect("user workspace");
+    let user_additional = TempDir::new().expect("user additional workspace");
+    let updated_directory = TempDir::new().expect("updated workspace");
+    let updated_additional = TempDir::new().expect("updated additional workspace");
     let mut engine = open_engine(&root);
     let workspace = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-bound"),
-            requested_directory: user_directory.path().to_string_lossy().into_owned(),
+            label: "bound".to_owned(),
+            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: vec![
+                user_additional.path().to_string_lossy().into_owned(),
+            ],
             changed_at_ms: 100,
         })
         .expect("register workspace");
@@ -4266,6 +4466,7 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
     let mut bound = new_session("s-bound", &engine.sessions_directory);
     bound.environment.workspace_id = Some(workspace.workspace_id.clone());
     bound.environment.working_directory = workspace.user_directory.clone();
+    bound.environment.additional_workspace_directories = workspace.additional_directories.clone();
     bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
     let created = engine.create_session(bound).expect("create bound session");
     assert_eq!(
@@ -4279,6 +4480,8 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
     let mut second_bound = new_session("s-bound-two", &engine.sessions_directory);
     second_bound.environment.workspace_id = Some(workspace.workspace_id.clone());
     second_bound.environment.working_directory = workspace.user_directory.clone();
+    second_bound.environment.additional_workspace_directories =
+        workspace.additional_directories.clone();
     second_bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
     let second_created = engine
         .create_session(second_bound)
@@ -4315,6 +4518,21 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
             |row| row.get(0),
         )
         .expect("read legacy prompt JSON");
+    let updated = engine
+        .update_workspace(WorkspaceUpdate {
+            workspace_id: workspace.workspace_id.clone(),
+            label: "renamed bound".to_owned(),
+            requested_primary_directory: updated_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: vec![
+                updated_additional.path().to_string_lossy().into_owned(),
+            ],
+            changed_at_ms: 200,
+        })
+        .expect("update workspace");
+    assert_ne!(
+        updated.user_directory,
+        created.environment.working_directory
+    );
     drop(engine);
 
     let mut reopened = open_engine(&root);
@@ -4327,6 +4545,14 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
     assert_eq!(
         recovered_bound.environment.workspace_id.as_ref(),
         Some(&workspace.workspace_id)
+    );
+    assert_eq!(
+        recovered_bound.environment.working_directory,
+        created.environment.working_directory
+    );
+    assert_eq!(
+        recovered_bound.environment.additional_workspace_directories,
+        created.environment.additional_workspace_directories
     );
     let repaired = recovered
         .sessions
@@ -4564,7 +4790,9 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
     let workspace = store
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-permission"),
-            requested_directory: user_directory.to_string_lossy().into_owned(),
+            label: "permission".to_owned(),
+            requested_primary_directory: user_directory.to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 1,
         })
         .await
@@ -4592,10 +4820,7 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
             .load_permission_file(scope)
             .await
             .expect("load current permission");
-        if matches!(
-            scope,
-            PermissionFileScope::Workspace(_) | PermissionFileScope::Session(_)
-        ) {
+        if matches!(scope, PermissionFileScope::Session(_)) {
             assert!(matches!(
                 current.revision,
                 PermissionFileRevision::Content(_)
@@ -6484,6 +6709,218 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
 }
 
 #[test]
+fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let key = IdempotencyKey::new("materialize-retry-key").expect("materialization key");
+    let bytes = b"materialized attachment";
+    let original_name = "materialized.txt";
+
+    let build = |engine: &StorageEngine,
+                 session_name: &str,
+                 input_name: &str,
+                 run_name: &str,
+                 attachment_name: &str,
+                 staging_name: &str,
+                 text: &str| {
+        let mut session = new_session(session_name, &engine.sessions_directory);
+        session.materialization_key = Some(key.clone());
+        session.title = text.to_owned();
+        session.automatic_title_pending = true;
+        let attachment_id = AttachmentId::new(attachment_name).expect("attachment id");
+        let readable_path = assistant_runtime::attachment_stable_view_path(
+            Path::new(&session.environment.session_attachment_directory),
+            &attachment_id,
+            original_name,
+        )
+        .to_string_lossy()
+        .into_owned();
+        let staging = engine.upload_staging_directory.join(staging_name);
+        fs::write(&staging, bytes).expect("write materialization staging");
+        let message = UserMessage {
+            origin: UserMessageOrigin::User,
+            transcript_visibility: TranscriptVisibility::Visible,
+            id: MessageId::new(format!("message-{input_name}")).expect("message id"),
+            parts: vec![
+                UserPart::Text(TextPart {
+                    id: PartId::new(format!("part-{input_name}")).expect("part id"),
+                    text: text.to_owned(),
+                }),
+                UserPart::FileReferences(FileReferencesPart {
+                    id: PartId::new(format!("files-{input_name}")).expect("part id"),
+                    files: vec![FileReference {
+                        original_name: original_name.to_owned(),
+                        readable_path,
+                    }],
+                }),
+            ],
+        };
+        NewStoredSessionMaterialization {
+            session,
+            attachments: vec![NewAttachmentUpload {
+                attachment_id,
+                session_id: session_id(session_name),
+                original_name: original_name.to_owned(),
+                staging_path: staging.to_string_lossy().into_owned(),
+                blob_hash: crate::attachment_hash::digest_bytes(original_name, bytes),
+                size_bytes: bytes.len() as u64,
+                media_type: Some("text/plain".to_owned()),
+                created_at_ms: 2_000,
+            }],
+            input: NewStoredInput {
+                input_id: InputId::new(input_name).expect("input id"),
+                run_id: run_id(run_name),
+                session_id: session_id(session_name),
+                idempotency_key: None,
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                origin: InputOrigin::User,
+                goal_binding: None,
+                cross_session: None,
+                channel_source: Some(desktop_channel_source()),
+                skill_activation: None,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
+                message,
+                new_goal: None,
+                resumed_goal: None,
+                generated_title: None,
+                accepted_at_ms: 2_000,
+            },
+        }
+    };
+
+    let first = engine
+        .materialize_session(build(
+            &engine,
+            "s-materialized-first",
+            "i-materialized-first",
+            "r-materialized-first",
+            "a-materialized-first",
+            "materialized-first.part",
+            "materialize this",
+        ))
+        .expect("materialize session");
+    assert!(!first.accepted.is_duplicate);
+    assert_eq!(first.attachments.len(), 1);
+    assert_eq!(engine.load_sessions().expect("sessions").len(), 1);
+    assert_eq!(engine.load_inputs().expect("inputs").len(), 1);
+    assert_eq!(engine.load_runs().expect("runs").len(), 1);
+    engine
+        .commit_user_message(UserMessageCommit {
+            operation_id: "commit-materialized-first".to_owned(),
+            input_id: first.accepted.input.input_id.clone(),
+            run_id: first.accepted.run.run_id.clone(),
+            session_id: first.session.session_id.clone(),
+            message: first.accepted.input.queued_message.clone(),
+            reasoning_effort: None,
+            created_at_ms: 2_001,
+        })
+        .expect("start materialized run before response-loss retry");
+
+    let retry_staging = engine
+        .upload_staging_directory
+        .join("materialized-retry.part");
+    let retry = engine
+        .materialize_session(build(
+            &engine,
+            "s-materialized-retry",
+            "i-materialized-retry",
+            "r-materialized-retry",
+            "a-materialized-retry",
+            "materialized-retry.part",
+            "materialize this",
+        ))
+        .expect("idempotent materialization retry");
+    assert!(retry.accepted.is_duplicate);
+    assert_eq!(retry.session.session_id, first.session.session_id);
+    assert_eq!(retry.accepted.input.input_id, first.accepted.input.input_id);
+    assert_eq!(retry.accepted.run.run_id, first.accepted.run.run_id);
+    assert_eq!(retry.accepted.run.status, RunStatus::Running);
+    assert!(!retry_staging.exists());
+    assert_eq!(
+        engine.load_sessions().expect("sessions after retry").len(),
+        1
+    );
+
+    let conflict = engine.materialize_session(build(
+        &engine,
+        "s-materialized-conflict",
+        "i-materialized-conflict",
+        "r-materialized-conflict",
+        "a-materialized-conflict",
+        "materialized-conflict.part",
+        "different content",
+    ));
+    assert!(matches!(
+        conflict,
+        Err(error) if error.kind() == StoreErrorKind::Conflict
+    ));
+    assert_eq!(
+        engine
+            .load_sessions()
+            .expect("sessions after conflict")
+            .len(),
+        1
+    );
+
+    engine
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER fail_materialization_run
+             BEFORE INSERT ON runs
+             BEGIN
+               SELECT RAISE(ABORT, 'injected materialization failure');
+             END;",
+        )
+        .expect("install materialization failure trigger");
+    let mut failed = build(
+        &engine,
+        "s-materialized-failed",
+        "i-materialized-failed",
+        "r-materialized-failed",
+        "a-materialized-failed",
+        "materialized-failed.part",
+        "failed materialization",
+    );
+    failed.session.materialization_key =
+        Some(IdempotencyKey::new("materialize-failure-key").expect("failure materialization key"));
+    let failed_directory = engine
+        .sessions_directory
+        .join(failed.session.session_id.as_str());
+    assert!(engine.materialize_session(failed).is_err());
+    assert!(!failed_directory.exists());
+    assert_eq!(
+        engine
+            .load_sessions()
+            .expect("sessions after precommit failure")
+            .len(),
+        1
+    );
+    engine
+        .connection
+        .execute_batch("DROP TRIGGER fail_materialization_run;")
+        .expect("remove materialization failure trigger");
+
+    let orphan_session = engine.sessions_directory.join("s-materialization-orphan");
+    fs::create_dir(&orphan_session).expect("create orphaned session directory");
+    fs::write(orphan_session.join("body-1.jsonl"), b"").expect("write orphaned body");
+    let orphan_blob = engine.blobs_directory.join("sha256/ff/orphaned-blob");
+    fs::create_dir_all(orphan_blob.parent().expect("orphan blob parent"))
+        .expect("create orphan blob bucket");
+    fs::write(&orphan_blob, b"orphan").expect("write orphan blob");
+    let orphan_staging = engine.upload_staging_directory.join("orphan.part");
+    fs::write(&orphan_staging, b"orphan").expect("write orphan staging");
+    drop(engine);
+    let reopened = open_engine(&root);
+    assert!(!orphan_session.exists());
+    assert!(!orphan_blob.exists());
+    assert!(!orphan_staging.exists());
+    assert_eq!(
+        reopened.load_sessions().expect("recovered sessions").len(),
+        1
+    );
+}
+
+#[test]
 fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
     let root = TempDir::new().expect("tempdir");
     let mut engine = open_engine(&root);
@@ -6715,7 +7152,9 @@ fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_co
     let workspace = engine
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-recall-scope"),
-            requested_directory: workspace_directory.path().to_string_lossy().into_owned(),
+            label: "recall-scope".to_owned(),
+            requested_primary_directory: workspace_directory.path().to_string_lossy().into_owned(),
+            requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register workspace");
@@ -7597,7 +8036,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         result.cleanup_status,
         SessionHistoryCleanupStatus::Completed
     );
-    assert_eq!(result.session.title, "New Session");
+    assert_eq!(result.session.title, "Session s-clear-target");
     assert_eq!(result.session.message_count, 0);
     assert_eq!(result.session.body_generation, 2);
     assert_eq!(result.session.proxy, None);

@@ -722,7 +722,7 @@ impl StorageEngine {
 }
 
 /// 校验新 Input 携带的技能激活是否属于本次创建的 Run。
-fn validate_new_input_activation(input: &NewStoredInput) -> StorageResult<()> {
+pub(super) fn validate_new_input_activation(input: &NewStoredInput) -> StorageResult<()> {
     validate_stored_input_activation(
         input.origin,
         &input.session_id,
@@ -786,7 +786,7 @@ fn validate_stored_input_activation(
     Ok(())
 }
 
-fn input_origin_value(origin: InputOrigin) -> &'static str {
+pub(super) fn input_origin_value(origin: InputOrigin) -> &'static str {
     match origin {
         InputOrigin::User => "user",
         InputOrigin::Runtime => "runtime",

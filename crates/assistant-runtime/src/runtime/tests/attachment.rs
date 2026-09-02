@@ -95,6 +95,57 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
 }
 
 #[tokio::test]
+async fn input_accepts_an_attachment_without_text() {
+    let runtime = runtime_with_tools(empty_model(), ToolSetSnapshot::default());
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    let attachment = runtime
+        .finalize_attachment_upload(StagedAttachmentUpload {
+            session_id: session.session_id.clone(),
+            original_name: "image.png".to_owned(),
+            staging_path: "/volatile/image.part".to_owned(),
+            blob_hash: "f".repeat(64),
+            size_bytes: 8,
+            media_type: Some("image/png".to_owned()),
+        })
+        .await
+        .expect("attachment")
+        .attachment;
+
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session_id.clone(),
+            message: String::new(),
+            attachment_ids: vec![attachment.attachment_id],
+            quotes: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("attachment-only input");
+    wait_for_terminal(&runtime, &session.session_id, &accepted.run.run_id).await;
+    let conversation = runtime
+        .conversation_snapshot(&session.session_id)
+        .await
+        .expect("conversation");
+    let user = conversation
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::User(user) => Some(user),
+            _ => None,
+        })
+        .expect("user message");
+    assert!(matches!(&user.parts[0], UserPart::Text(text) if text.text.is_empty()));
+    assert!(matches!(&user.parts[1], UserPart::FileReferences(files) if files.files.len() == 1));
+}
+
+#[tokio::test]
 async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relations() {
     let runtime = runtime_with_tools(empty_model(), ToolSetSnapshot::default());
     let first_session = runtime
@@ -152,6 +203,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "compare".to_owned(),
             attachment_ids: vec![second.attachment_id.clone(), first.attachment_id.clone()],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: Some(key.clone()),
         })
@@ -204,6 +256,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "reuse one file".to_owned(),
             attachment_ids: vec![first.attachment_id.clone()],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -224,7 +277,10 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
         .flatten()
         .filter_map(|part| match part {
             UserPart::FileReferences(files) => Some(&files.files),
-            UserPart::Text(_) | UserPart::Injected(_) | UserPart::InternalContext(_) => None,
+            UserPart::Text(_)
+            | UserPart::Injected(_)
+            | UserPart::InternalContext(_)
+            | UserPart::QuotedText(_) => None,
         })
         .flatten()
         .filter(|file| file.original_name == first.original_name)
@@ -245,6 +301,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             session_id: first_session.session_id.clone(),
             message: "ignored retry payload".to_owned(),
             attachment_ids: vec![foreign.attachment_id.clone()],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: Some(key),
         })
@@ -259,6 +316,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: first_session.session_id.clone(),
                 message: "duplicate ids".to_owned(),
                 attachment_ids: vec![first.attachment_id.clone(), first.attachment_id.clone()],
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -273,6 +331,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: second_session.session_id,
                 message: "cross session".to_owned(),
                 attachment_ids: vec![second.attachment_id],
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -294,6 +353,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 session_id: first_session.session_id,
                 message: "unavailable".to_owned(),
                 attachment_ids: vec![first.attachment_id],
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })

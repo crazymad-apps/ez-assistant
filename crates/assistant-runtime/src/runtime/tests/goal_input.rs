@@ -77,6 +77,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             message: "ship the complete release".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: vec![attachment.attachment_id],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: Some(key.clone()),
         })
@@ -89,6 +90,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             message: "this duplicate payload must be ignored".to_owned(),
             variant: assistant_protocol::AgentVariant::Plan,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: Some(key),
         })
@@ -241,6 +243,7 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
                 message: "unsupported Goal".to_owned(),
                 variant: assistant_protocol::AgentVariant::Build,
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -270,6 +273,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
             message: "keep running until stopped".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -417,6 +421,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             message: "ship release".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -440,6 +445,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             message: "Use the stable release channel".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -537,6 +543,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             message: "baseline turn".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -550,6 +557,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             message: "forkable Goal".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -643,6 +651,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
             message: "retry across Goal Runs".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -744,6 +753,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
             message: "resume without guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -828,6 +838,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             message: "wait for held guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -841,6 +852,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             message: "Use this exact held guidance".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -917,6 +929,7 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
             message: "bounded Goal".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { Tooltip } from "../../src/components/Tooltip";
@@ -15,8 +15,13 @@ describe("Tooltip", () => {
     );
 
     await user.tab();
-    expect(screen.getByRole("tooltip")).toHaveTextContent("添加附件");
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("添加附件");
     expect(screen.getByRole("button", { name: "附件" })).toHaveAttribute("aria-describedby");
+    await waitFor(() => {
+      expect(tooltip).toHaveAttribute("data-position-ready", "true");
+      expect(tooltip).toHaveAttribute("data-presence", "entered");
+    });
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();

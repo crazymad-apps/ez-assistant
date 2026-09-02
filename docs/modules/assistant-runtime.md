@@ -230,9 +230,10 @@ Runtime Host 进程
 - 每个 Run 冻结 Input 变体与当时的 Ask/Auto，但每次 Tool Call 都读取 Global、可选 Workspace、
   Session 三层 Permission Registry 最新快照。显式 Deny 优先于 Ask，Ask 优先于 Allow；未知
   typed facts 和无效权限快照一律 fail-closed。
-- Workspace 的产品默认信任通过 Host 生成的普通 Workspace 权限文档表达，不进入 Authorizer
-  硬编码：Plan/Build 可读取，Build 可变更 Workspace。Runtime 注册 Workspace scope 时加载 Store
-  中的实际文档；既有用户文档、无效文档和缺失文档的诊断语义不得被默认值静默覆盖。
+- Workspace 的产品缺省信任由 Authorizer 根据 Session 冻结的主目录与附加目录派生：Plan/Build
+  可执行结构化 Read/List/Find/Search，Build 可执行 Write/Edit/Delete。它只提供最低优先级 Allow，
+  三层权限文档中的显式 Deny/Ask 仍优先；Workspace 外访问和 Shell 不获得该缺省能力。Workspace
+  `permissions.json` 只承载用户显式规则，缺失文档等价于空作用域，无效文档仍 fail-closed。
 - Session 的产品默认信任使用同一装配策略：Host 在 Session 创建、Fork 和旧数据恢复时，仅在
   `private/permissions.json` 缺失时生成普通 Session 权限文档。Plan/Build 可读取 Session 私有目录
   与该 Session 的附件目录，Build 可变更 Session 私有目录；附件 mutation 继续由 Host 基础设施
@@ -596,3 +597,47 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
   AgentExecution；Core 不感知 Skill、Session 或 Run。
 - main Session 的活动技能投影只读取 main owner ledger；child activation 只进入对应 child conversation，
   父子及兄弟之间不共享 latch，也不把模型激活伪装成真实用户输入。
+
+## v0.22.0 M0 存储领域基线
+
+- Workspace 当前事实增加 label 与有序附加目录；Session execution environment 保存创建时冻结的
+  附加目录。M0 只贯通 Stored/Volatile 类型与投影，不改变既有 Workspace 或 Session 创建行为。
+- Session 增加可空 materialization key 与自动标题 pending，旧 Session 分别读取为 `None` 和
+  `false`；M0 的现有创建/Fork 路径仍写入相同安全默认值。
+- Session usage 增加旁路请求与 token 聚合字段；无旁路调用时继续投影为缺省，不把旁路任务伪装成
+  Run、Input 或普通模型请求。
+
+## v0.22.0 M1 Workspace 当前事实与冻结环境
+
+- Runtime 校验 Workspace 完整表单并维护当前 label、主目录和有序附加目录；label 允许重复，目录总数
+  最多 16。恢复同一主目录的已移除 Workspace 时复用原 ID，并以本次完整表单更新当前事实。
+- Session 创建时一次性冻结主目录与附加目录。Workspace 后续编辑只改变当前 Workspace 投影；既有
+  Session 的 `SessionExecutionEnvironment`、System Prompt、Skill Catalog 与权限上下文保持不变，
+  Clear 也只能用原冻结目录重建。
+- Workspace 缺省文件能力同样只读取这份冻结目录：Plan/Build 默认可读，Build 默认可变更；显式
+  Ask/Deny 优先。新增、删除、排序或切换 Workspace 目录不维护权限文件，新 Session 使用更新后的目录，
+  既有 Session 不变。
+- Session View/System Context 使用当前 label 与冻结目录组合投影，并显式给出目录差异；Controller
+  管理投影使用当前 label 与受管 Session 冻结的目录摘要。新 Session 的 Skill 发现按主目录、附加
+  目录顺序扫描，根序号优先于根内 `.ez-assistant`/`.agents` 来源优先级。
+
+## v0.22.0 M5 附件-only 输入边界
+
+- Desktop 普通 Session 输入的有效条件是文本非空或至少存在一个正式附件引用；两者都为空仍拒绝。
+  Device Channel 不承载附件，因此其空 transcript 行为不变。
+- 附件-only 输入仍创建规范 UserMessage：保留空 Text Part，并在其后按提交顺序保存 FileReference，
+  不增加附件专用 Input、Run 或 Conversation 分支。
+- 标题旁路构造最新 Conversation Snapshot 时可以使用附件原始文件名表达首轮意图，但不能读取附件
+  内容、Agent 路径或本地物理路径；标题 trigger、生命周期和提交规则保持不变。
+
+## v0.22.0 M6 会话文本引用边界
+
+- Runtime 不参与引用点击。普通提交在接受 Input 前校验数量、exact 字节/前后文 128 字符上限、唯一
+  quote ID，以及 `text_start_utf16 < text_end_utf16` 且 range 长度与 exact 的 UTF-16 长度一致；不得用
+  UTF-16 range 直接切 Rust UTF-8 字符串。
+- direct locator 属于目标 Session 且 owner/generation/message 仍能在可靠 Conversation 中定位时标记
+  available；跨 Session、clear/rewrite 后 stale 或消息不存在时只降级为 unavailable，不拒绝冻结正文。
+  新 Session 首次物化中的既有 locator 统一不可用。
+- 引用按提交顺序保存为 `UserPart::QuotedText`，不建立 Quote 表、不签发 HMAC、不拼接用户 Markdown，
+  也不增加引用专属 Recall 工具或 prepare/resolve command。现有 Conversation Recall 独立保留。
+- Runtime 不持有 Composer 引用草稿、详情弹窗、DOM range 或高亮状态。

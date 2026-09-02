@@ -24,6 +24,7 @@
 //! `agent-openai-compatible` 的 `examples/chat.rs`。
 
 mod capabilities;
+mod collect;
 mod context;
 mod error;
 mod event;
@@ -38,6 +39,7 @@ mod service;
 mod retry_tests;
 
 pub use capabilities::{ModelCapabilities, ToolChoiceCapabilities, ToolImageProjection};
+pub use collect::collect_model_turn;
 pub use context::{ModelCallContext, TraceContext};
 pub use error::{ModelError, ModelTransportErrorKind};
 pub use event::ModelEvent;

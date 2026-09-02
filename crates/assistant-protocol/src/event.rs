@@ -125,6 +125,17 @@ pub enum RuntimeEvent {
         compaction_id: String,
         outcome: SessionCompactionFinishedOutcome,
     },
+    /// 自动或手动标题旁路已经冻结最新 Conversation 并进入模型调用。
+    SessionTitleGenerationStarted {
+        session_id: SessionId,
+        generation: crate::SessionTitleGenerationSnapshot,
+    },
+    /// 标题旁路已经清除进程内 active 状态。
+    SessionTitleGenerationFinished {
+        session_id: SessionId,
+        trigger: crate::SessionTitleGenerationTriggerSnapshot,
+        outcome: SessionTitleGenerationFinishedOutcome,
+    },
     /// Session 输入队列已经变化；revision 用于拒绝基于旧顺序的 mutation。
     QueueChanged {
         session_id: SessionId,
@@ -367,6 +378,16 @@ pub enum RuntimeEvent {
         /// Run 失败时的脱敏错误。
         error: Option<RuntimeErrorInfo>,
     },
+}
+
+/// 一次标题旁路调用的观察终态；失败不会覆盖当前标题。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTitleGenerationFinishedOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
 }
 
 #[cfg(test)]

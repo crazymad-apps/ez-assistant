@@ -8,6 +8,7 @@ import {
   type ReactElement,
 } from "react";
 import { createPortal } from "react-dom";
+import { usePresence } from "../Presence";
 import styles from "./index.module.scss";
 
 type TooltipChildProps = {
@@ -37,9 +38,10 @@ export function Tooltip(props: Readonly<{
   const tooltip_ref = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
+  const presence = usePresence(open, 90);
 
   useEffect(() => {
-    if (!open) {
+    if (!presence.mounted) {
       return undefined;
     }
 
@@ -51,10 +53,10 @@ export function Tooltip(props: Readonly<{
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open]);
+  }, [presence.mounted]);
 
   useLayoutEffect(() => {
-    if (!open) {
+    if (!open || !presence.mounted) {
       return undefined;
     }
 
@@ -86,7 +88,7 @@ export function Tooltip(props: Readonly<{
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };
-  }, [open]);
+  }, [open, presence.mounted]);
 
   const described_by = [props.children.props["aria-describedby"], open ? tooltip_id : null]
     .filter(Boolean)
@@ -113,11 +115,14 @@ export function Tooltip(props: Readonly<{
       onPointerLeave={() => setOpen(false)}
     >
       {child}
-      {open && createPortal(
+      {presence.mounted && createPortal(
         <span
+          aria-hidden={presence.state === "exiting" ? true : undefined}
           className={styles.tooltip}
+          data-presence={presence.state}
           data-position-ready={position.ready}
           id={tooltip_id}
+          onTransitionEnd={presence.onTransitionEnd}
           ref={tooltip_ref}
           role="tooltip"
           style={{ left: position.left, top: position.top }}

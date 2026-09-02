@@ -230,8 +230,9 @@ impl StorageEngine {
                     "INSERT INTO sessions (
                         session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
-                        updated_at_ms, archived_at_ms, is_pinned, title_origin
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12)",
+                        updated_at_ms, archived_at_ms, is_pinned, title_origin,
+                        materialization_key, automatic_title_pending
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12, ?13, ?14)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
@@ -251,6 +252,11 @@ impl StorageEngine {
                             assistant_protocol::SessionTitleOrigin::Generated => "generated",
                             assistant_protocol::SessionTitleOrigin::User => "user",
                         },
+                        fork.session
+                            .materialization_key
+                            .as_ref()
+                            .map(|key| key.as_str()),
+                        i64::from(fork.session.automatic_title_pending),
                     ],
                 )
                 .map_err(|source| {
@@ -339,6 +345,8 @@ impl StorageEngine {
                 current_variant: fork.session.current_variant,
                 approval_mode: fork.session.approval_mode,
                 role: fork.session.role,
+                materialization_key: fork.session.materialization_key,
+                automatic_title_pending: fork.session.automatic_title_pending,
                 proxy: None,
                 pc_output_hosting: None,
                 body_generation: 1,

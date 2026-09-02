@@ -10,20 +10,22 @@ use assistant_runtime::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange, PendingChildToolExchange,
-    PendingToolExchange, PermissionFileLoad, PermissionFileRevision, PermissionFileScope,
-    PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
-    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, SessionDeletion,
-    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SkillNameState,
-    SkillNameStateChange, StoreError, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange,
+    PendingChildToolExchange, PendingToolExchange, PermissionFileLoad, PermissionFileRevision,
+    PermissionFileScope, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
+    SkillNameState, SkillNameStateChange, StoreError, StoredAttachment, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionMaterialization,
+    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -95,6 +97,10 @@ pub(super) enum Command {
         registration: NewWorkspaceRegistration,
         reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
     },
+    UpdateWorkspace {
+        update: WorkspaceUpdate,
+        reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
+    },
     RemoveWorkspace {
         removal: WorkspaceRemoval,
         reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
@@ -106,6 +112,10 @@ pub(super) enum Command {
     CreateSession {
         session: NewStoredSession,
         reply: oneshot::Sender<Result<StoredSession, StoreError>>,
+    },
+    MaterializeSession {
+        materialization: Box<NewStoredSessionMaterialization>,
+        reply: oneshot::Sender<Result<StoredSessionMaterialization, StoreError>>,
     },
     ForkSession {
         fork: Box<SessionFork>,
@@ -257,6 +267,14 @@ pub(super) enum Command {
     RenameSession {
         change: SessionTitleChange,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    DisableAutomaticTitle {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CommitSessionTitleGeneration {
+        commit: SessionTitleGenerationCommit,
+        reply: oneshot::Sender<Result<SessionTitleGenerationCommitResult, StoreError>>,
     },
     SetSessionPinned {
         change: SessionPinnedChange,

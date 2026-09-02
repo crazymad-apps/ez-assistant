@@ -7,7 +7,9 @@ use crate::{StoredWorkspace, StoredWorkspaceLifecycle};
 pub(crate) fn summary(stored: &StoredWorkspace) -> WorkspaceSummary {
     WorkspaceSummary {
         workspace_id: stored.workspace_id.clone(),
+        label: stored.label.clone(),
         user_directory: stored.user_directory.clone(),
+        additional_directories: stored.additional_directories.clone(),
         agent_directory: stored.agent_directory.clone(),
         lifecycle: match stored.lifecycle {
             StoredWorkspaceLifecycle::Active => WorkspaceLifecycle::Active,

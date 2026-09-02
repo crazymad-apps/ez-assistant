@@ -47,9 +47,9 @@ pub use session::{
     SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
     SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionProxyState, SessionRole, SessionTitleChange, StoredConversationState,
-    StoredMessageFeedback, StoredSession, StoredSessionFork, StoredSessionLifecycle,
-    StoredSessionUsage, VariantChange,
+    SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, StoredConversationState, StoredMessageFeedback,
+    StoredSession, StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, VariantChange,
 };
 pub(crate) use volatile::VolatileRuntimeStore;
 pub use work_plan::{
@@ -57,6 +57,7 @@ pub use work_plan::{
     WorkPlanMutationResult,
 };
 pub use workspace::{
-    NewAttachmentUpload, NewWorkspaceRegistration, StoredAttachment, StoredAttachmentState,
-    StoredWorkspace, StoredWorkspaceLifecycle, WorkspaceRemoval,
+    NewAttachmentUpload, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    StoredAttachment, StoredAttachmentState, StoredSessionMaterialization, StoredWorkspace,
+    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
 };

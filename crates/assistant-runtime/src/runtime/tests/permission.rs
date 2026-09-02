@@ -323,7 +323,9 @@ async fn reload_replaces_the_whole_session_cohort_and_publishes_one_fact() {
     let runtime = runtime_with_permission_store(source.clone()).await;
     let workspace = runtime
         .register_workspace(RegisterWorkspaceRequest {
-            path: "/workspace/permission-reload".to_owned(),
+            label: "permission-reload".to_owned(),
+            primary_directory: "/workspace/permission-reload".to_owned(),
+            additional_directories: Vec::new(),
         })
         .await
         .expect("register workspace")
@@ -581,6 +583,7 @@ async fn saving_an_exact_file_rule_drains_matching_approvals_from_the_queue_head
             message: "read twice".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -659,6 +662,7 @@ async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
             message: "read once".to_owned(),
             variant: AgentVariant::Build,
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })

@@ -4,6 +4,8 @@ mod commands;
 pub(crate) mod projection;
 mod submission;
 
+pub(in crate::runtime) use submission::automatic_session_title;
+
 use std::{
     collections::BTreeMap,
     panic::AssertUnwindSafe,
@@ -37,6 +39,7 @@ use crate::{
 #[derive(Clone)]
 struct QueueDriverContext {
     sessions: Arc<RwLock<BTreeMap<assistant_protocol::SessionId, Arc<SessionController>>>>,
+    workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
@@ -67,6 +70,7 @@ impl AssistantRuntime {
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
             sessions: self.sessions.clone(),
+            workspaces: self.workspaces.clone(),
             config_registry: self.config_registry.clone(),
             permission_coordinator: self.permission_coordinator.clone(),
             approval_registry: self.approval_registry.clone(),
@@ -85,6 +89,19 @@ impl AssistantRuntime {
     }
 }
 
+impl QueueDriverContext {
+    fn title_generation_context(&self) -> super::title::TitleGenerationContext {
+        super::title::TitleGenerationContext::new(
+            self.config_registry.clone(),
+            self.model_factory.clone(),
+            self.store.clone(),
+            self.events.clone(),
+            self.root_cancellation.clone(),
+            self.tasks.clone(),
+        )
+    }
+}
+
 fn controller_tool_coordinator_from(
     context: &QueueDriverContext,
 ) -> Arc<super::controller::ControllerToolCoordinator> {
@@ -92,6 +109,7 @@ fn controller_tool_coordinator_from(
     let tasks = context.tasks.clone();
     Arc::new(super::controller::ControllerToolCoordinator::new(
         context.sessions.clone(),
+        context.workspaces.clone(),
         context.config_registry.clone(),
         context.store.clone(),
         context.events.clone(),
@@ -712,9 +730,19 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
 
 fn publish_settlement_events(
     context: &QueueDriverContext,
-    session: &SessionController,
+    session: &Arc<SessionController>,
     settlement: crate::run::RunSettlementResult,
 ) {
+    let should_generate_title = settlement.run.status == RunStatus::Completed
+        && settlement.final_message_step.is_some()
+        && session.lock_state().is_ok_and(|state| {
+            state.automatic_title_pending
+                && state
+                    .runs
+                    .get(&settlement.run.run_id)
+                    .and_then(|run| state.inputs.get(run.input_id()))
+                    .is_some_and(|input| input.stored.origin == crate::InputOrigin::User)
+        });
     let final_message_step = settlement.final_message_step;
     if let Ok(state) = session.lock_state() {
         let generation = state.body_generation;
@@ -753,6 +781,9 @@ fn publish_settlement_events(
             },
             async {},
         );
+    }
+    if should_generate_title {
+        super::title::schedule_automatic_title(context.title_generation_context(), session.clone());
     }
 }
 

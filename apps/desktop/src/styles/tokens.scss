@@ -32,6 +32,16 @@
   --ez-shadow-input: 0 10px 26px rgb(31 42 73 / 8%);
   --ez-shadow-shell: 0 18px 56px rgb(30 38 61 / 16%);
   --ez-motion-fast: 110ms;
+  --ez-motion-menu-enter: 120ms;
+  --ez-motion-menu-exit: 90ms;
+  --ez-motion-dialog-backdrop-enter: 140ms;
+  --ez-motion-dialog-backdrop-exit: 110ms;
+  --ez-motion-dialog-enter: 160ms;
+  --ez-motion-dialog-exit: 120ms;
+  --ez-motion-collapse-enter: 150ms;
+  --ez-motion-collapse-exit: 120ms;
+  --ez-motion-sidebar-enter: 160ms;
+  --ez-motion-sidebar-exit: 140ms;
   --ez-ease-standard: ease-out;
   --ez-z-base: 0;
   --ez-z-sticky: 10;

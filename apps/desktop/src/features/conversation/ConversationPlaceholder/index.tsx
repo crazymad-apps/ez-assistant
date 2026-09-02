@@ -42,7 +42,7 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
             store.pending_session_action ||
             store.pending_workspace_action
           }
-          onClick={() => void store.createSession(first_active_workspace?.workspace_id)}
+          onClick={() => store.openNewSessionDraft(first_active_workspace?.workspace_id ?? null)}
           type="button"
         >
           新对话

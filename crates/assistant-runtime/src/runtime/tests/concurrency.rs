@@ -24,6 +24,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: first.session.session_id.clone(),
             message: "first".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -39,6 +40,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: second.session.session_id.clone(),
             message: "second".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -104,6 +106,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             session_id: first.session.session_id.clone(),
             message: "reuse first session".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -197,6 +200,7 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
                 session_id: session_id.clone(),
                 message: "hang".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -284,6 +288,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
             session_id: session.session.session_id.clone(),
             message: "never completes".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -379,6 +384,7 @@ async fn force_settlement_failure_still_shuts_down_store() {
             session_id: session.session.session_id,
             message: "never completes".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -425,6 +431,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
                 session_id,
                 message: "race".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })

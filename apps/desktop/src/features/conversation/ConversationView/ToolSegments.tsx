@@ -10,6 +10,7 @@ import type {
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { MarkdownContent } from "../../../components/MarkdownContent";
+import { Collapse } from "../../../components/Collapse";
 import type {
   LiveExecutionSegment,
   LiveRunProjection,
@@ -39,7 +40,14 @@ export function AssistantSegmentView(props: Readonly<{
     return <ReasoningBox is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
   }
   if (props.segment.type === "text") {
-    return <div className={styles.assistant_text}><MarkdownContent text={props.segment.text} /></div>;
+    return (
+      <div
+        className={styles.assistant_text}
+        data-quote-content="true"
+      >
+        <MarkdownContent text={props.segment.text} />
+      </div>
+    );
   }
   return (
     <ToolGroup
@@ -112,7 +120,7 @@ function ReasoningBox(props: Readonly<{ text: string; is_open: boolean; on_toggl
         <span>思考过程</span>
         <Icon name="chevron-down" size={15} />
       </button>
-      {props.is_open && <div className={styles.reasoning_content} id={content_id}>{props.text}</div>}
+      <Collapse class_name={styles.reasoning_content} id={content_id} open={props.is_open}>{props.text}</Collapse>
     </section>
   );
 }

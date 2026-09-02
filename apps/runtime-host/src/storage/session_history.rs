@@ -189,18 +189,16 @@ impl StorageEngine {
                 .map_err(|source| {
                     database_write_error("clear switch transaction could not begin", source)
                 })?;
-            let (title, title_origin, lifecycle, role, generation) = transaction
+            let (lifecycle, role, generation) = transaction
                 .query_row(
-                    "SELECT title, title_origin, lifecycle, role, body_generation
+                    "SELECT lifecycle, role, body_generation
                      FROM sessions WHERE session_id = ?1",
                     [clear.session_id.as_str()],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(2)?,
                         ))
                     },
                 )
@@ -214,26 +212,18 @@ impl StorageEngine {
                 return Err(conflict("clear session snapshot changed"));
             }
             ensure_session_history_idle(&transaction, &clear.session_id)?;
-            let reset_title = if title_origin == "generated" {
-                match clear.expected_role {
-                    SessionRole::Standard => "New Session".to_owned(),
-                    SessionRole::Controller => "主控会话".to_owned(),
-                }
-            } else {
-                title
-            };
             transaction
                 .execute(
                     "UPDATE sessions
-                     SET title = ?1, system_prompt_json = ?2, skill_catalog_json = ?3,
-                         body_generation = ?4, message_count = 0, updated_at_ms = ?5,
+                     SET system_prompt_json = ?1, skill_catalog_json = ?2,
+                         body_generation = ?3, message_count = 0, updated_at_ms = ?4,
+                         automatic_title_pending = 0,
                          proxy_controller_session_id = CASE WHEN role = 'standard' THEN NULL
                                                             ELSE proxy_controller_session_id END,
                          proxy_changed_at_ms = CASE WHEN role = 'standard' THEN NULL
                                                     ELSE proxy_changed_at_ms END
-                     WHERE session_id = ?6",
+                     WHERE session_id = ?5",
                     params![
-                        reset_title,
                         prompt_json,
                         skill_catalog_json,
                         result_generation_sql,

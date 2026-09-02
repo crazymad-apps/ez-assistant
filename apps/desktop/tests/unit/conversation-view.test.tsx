@@ -34,6 +34,7 @@ describe("ConversationView scroll anchoring", () => {
           input_id: null,
           text: "继续检查构建",
           attachment_ids: [],
+          quotes: [],
           source: { type: "controller_delivery", controller_session_id: "source-1", controller_run_id: "run-1" },
           created_at_ms: 1,
         }}
@@ -54,6 +55,7 @@ describe("ConversationView scroll anchoring", () => {
           input_id: null,
           text: "任务已完成",
           attachment_ids: [],
+          quotes: [],
           source: { type: "proxy_report", source_session_id: "source-1", source_run_id: "run-2", source_goal_id: "goal-1", source_run_status: "completed" },
           created_at_ms: 2,
         }}
@@ -73,6 +75,7 @@ describe("ConversationView scroll anchoring", () => {
           input_id: "input-1",
           text: "从终端发起的问题",
           attachment_ids: [],
+          quotes: [],
           source: {
             type: "device",
             device_id: "device-1",
@@ -114,6 +117,7 @@ describe("ConversationView scroll anchoring", () => {
           input_id: null,
           text: "较长的会话报告",
           attachment_ids: [],
+          quotes: [],
           source: {
             type: "proxy_report",
             source_session_id: "source-1",
@@ -174,6 +178,147 @@ describe("ConversationView scroll anchoring", () => {
     const attachment = screen.getByRole("button", { name: "参考图片.png" });
     const message = screen.getByText("请查看这张图片");
     expect(attachment.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("freezes context around the selected occurrence of repeated short text", async () => {
+    const fetch_spy = vi.fn();
+    vi.stubGlobal("fetch", fetch_spy);
+    const store = conversationStore();
+    store.projection.applySessionSnapshot({
+      observed_sequence: 1,
+      value: {
+        session: { session_id: "session-1" },
+        active_run: null,
+        attachments: [],
+        conversation: {
+          owner: { type: "main_session", session_id: "session-1" },
+          generation: 2,
+          items: [{
+            type: "user",
+            message_id: "message-repeated",
+            text: "同意，然后再同意",
+            attachment_ids: [],
+            quotes: [],
+            created_at_ms: 1,
+          }],
+          previous_cursor: null,
+          has_more: false,
+        },
+      },
+    } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+    const add_quote = vi.spyOn(store.composer_quotes, "add");
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+
+    const message = screen.getByText("同意，然后再同意");
+    const text = message.firstChild;
+    expect(text).not.toBeNull();
+    const range = document.createRange();
+    range.setStart(text!, 6);
+    range.setEnd(text!, 8);
+    range.getBoundingClientRect = () => new DOMRect(10, 20, 30, 12);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const message_list = screen.getByLabelText("消息列表");
+    const context_menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    expect(message_list.dispatchEvent(context_menu)).toBe(true);
+    expect(context_menu.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
+
+    fireEvent.mouseUp(message_list);
+    fireEvent.click(await screen.findByRole("button", { name: "引用" }));
+
+    expect(add_quote).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      source_generation: 2,
+      source_message_id: "message-repeated",
+      exact: "同意",
+      prefix: "同意，然后再",
+      suffix: "",
+    }));
+    expect(fetch_spy).not.toHaveBeenCalled();
+  });
+
+  it("centers a located quote range instead of the whole message", () => {
+    const store = conversationStore();
+    const original_range_rect = Range.prototype.getBoundingClientRect;
+    const original_scroll_into_view = Element.prototype.scrollIntoView;
+    const message_scroll = vi.fn();
+    let scroll_top = 100;
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(20, 600 - scroll_top, 80, 20),
+    });
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: message_scroll,
+    });
+    try {
+      render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+      const message_list = screen.getByLabelText("消息列表");
+      const scroll_to = vi.fn((options: ScrollToOptions) => {
+        scroll_top = Number(options.top ?? scroll_top);
+      });
+      Object.defineProperties(message_list, {
+        scrollHeight: { configurable: true, get: () => 1_000 },
+        clientHeight: { configurable: true, get: () => 200 },
+        scrollTop: {
+          configurable: true,
+          get: () => scroll_top,
+          set: (value: number) => { scroll_top = value; },
+        },
+        scrollTo: { configurable: true, value: scroll_to },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => new DOMRect(0, 100, 600, 200),
+        },
+      });
+
+      act(() => {
+        store.navigation.navigateTo({
+          session_id: "session-1",
+          child_task_id: null,
+          anchor_message_id: "message-1",
+          scroll_offset: null,
+        });
+        store.transient_focus.focus({
+          quote_id: "quote-1",
+          exact: "开始",
+          prefix: "",
+          suffix: "",
+          source_owner: { type: "main_session", session_id: "session-1" },
+          source_generation: 0,
+          source_message_id: "message-1",
+          text_start_utf16: 0,
+          text_end_utf16: 2,
+          source_role: "user",
+          source_label: "当前会话",
+          source_available: true,
+        });
+      });
+
+      expect(scroll_to).toHaveBeenCalledWith({ top: 410, behavior: "auto" });
+      expect(message_scroll).not.toHaveBeenCalled();
+      fireEvent.scroll(message_list);
+      expect(store.transient_focus.target?.message_id).toBe("message-1");
+    } finally {
+      if (original_range_rect) {
+        Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+          configurable: true,
+          value: original_range_rect,
+        });
+      } else {
+        delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+      }
+      if (original_scroll_into_view) {
+        Object.defineProperty(Element.prototype, "scrollIntoView", {
+          configurable: true,
+          value: original_scroll_into_view,
+        });
+      } else {
+        delete (Element.prototype as Partial<Element>).scrollIntoView;
+      }
+    }
   });
 
   it("loads image thumbnails from the native bridge and exposes the shared preview action", async () => {

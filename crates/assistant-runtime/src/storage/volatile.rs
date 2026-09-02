@@ -12,7 +12,8 @@ use agent_types::{
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner,
     IdempotencyKey, InputId, MessageFeedback, MessageId as ProtocolMessageId, RunId, RunStatus,
-    SessionHistoryCleanupStatus, SessionId, SessionTitleOrigin, WorkspaceId,
+    SessionHistoryCleanupStatus, SessionId, SessionTitleGenerationTriggerSnapshot,
+    SessionTitleOrigin, WorkspaceId,
 };
 
 use super::{
@@ -24,22 +25,24 @@ use super::{
     ConversationWindowRequest, CrossSessionInputBinding, GoalClear, GoalHeldInputResume,
     GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
     ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
-    NewStoredSession, NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange,
-    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore,
-    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
-    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
-    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
-    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredGoal,
-    StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState, StoredInput,
-    StoredInputState, StoredMessageFeedback, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionLifecycle, StoredSessionUsage, StoredTodoItemStatus,
-    StoredWorkPlan, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval, validate_input_message, validate_input_message_with_channel_source,
+    NewStoredSession, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    PendingChildToolExchange, PendingToolExchange, QueuePriorityChange, ReasoningEffortChange,
+    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
+    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredGoal, StoredGoalPauseReason, StoredGoalSettlementEffect,
+    StoredGoalState, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionMaterialization, StoredSessionUsage, StoredTodoItemStatus, StoredWorkPlan,
+    StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceUpdate, validate_input_message, validate_input_message_with_channel_source,
 };
 use crate::{
     DeviceLifecycle, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
@@ -525,19 +528,21 @@ impl RuntimeStore for VolatileRuntimeStore {
     ) -> StoreFuture<'_, StoredWorkspace> {
         Box::pin(async move {
             let mut state = self.lock()?;
-            if let Some(existing) = state
-                .workspaces
-                .values_mut()
-                .find(|workspace| workspace.user_directory == registration.requested_directory)
-            {
+            if let Some(existing) = state.workspaces.values_mut().find(|workspace| {
+                workspace.user_directory == registration.requested_primary_directory
+            }) {
                 existing.lifecycle = StoredWorkspaceLifecycle::Active;
+                existing.label = registration.label;
+                existing.additional_directories = registration.requested_additional_directories;
                 existing.updated_at_ms = registration.changed_at_ms;
                 existing.removed_at_ms = None;
                 return Ok(existing.clone());
             }
             let stored = StoredWorkspace {
                 workspace_id: registration.workspace_id.clone(),
-                user_directory: registration.requested_directory,
+                label: registration.label,
+                user_directory: registration.requested_primary_directory,
+                additional_directories: registration.requested_additional_directories,
                 agent_directory: format!(
                     "/volatile/workspaces/{}/agent",
                     registration.workspace_id
@@ -555,6 +560,33 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("workspace already exists in runtime storage"));
             }
             Ok(stored)
+        })
+    }
+
+    fn update_workspace(&self, update: WorkspaceUpdate) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if state.workspaces.values().any(|workspace| {
+                workspace.workspace_id != update.workspace_id
+                    && workspace.lifecycle == StoredWorkspaceLifecycle::Active
+                    && workspace.user_directory == update.requested_primary_directory
+            }) {
+                return Err(conflict(
+                    "workspace primary directory is already registered",
+                ));
+            }
+            let workspace = state
+                .workspaces
+                .get_mut(&update.workspace_id)
+                .ok_or_else(|| conflict("workspace does not exist in runtime storage"))?;
+            if workspace.lifecycle != StoredWorkspaceLifecycle::Active {
+                return Err(conflict("removed workspace cannot be updated"));
+            }
+            workspace.label = update.label;
+            workspace.user_directory = update.requested_primary_directory;
+            workspace.additional_directories = update.requested_additional_directories;
+            workspace.updated_at_ms = update.changed_at_ms;
+            Ok(workspace.clone())
         })
     }
 
@@ -1026,6 +1058,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 current_variant: session.current_variant,
                 approval_mode: session.approval_mode,
                 role: session.role,
+                materialization_key: session.materialization_key,
+                automatic_title_pending: session.automatic_title_pending,
                 proxy: None,
                 pc_output_hosting: None,
                 body_generation: 1,
@@ -1046,6 +1080,228 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .session_usage
                 .insert(stored.session_id.clone(), StoredSessionUsage::default());
             Ok(stored)
+        })
+    }
+
+    fn materialize_session(
+        &self,
+        materialization: NewStoredSessionMaterialization,
+    ) -> StoreFuture<'_, StoredSessionMaterialization> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let key = materialization
+                .session
+                .materialization_key
+                .as_ref()
+                .ok_or_else(|| conflict("materialization key is required"))?;
+            if let Some(existing) = state
+                .sessions
+                .values()
+                .find(|session| session.materialization_key.as_ref() == Some(key))
+                .cloned()
+            {
+                let input = state
+                    .inputs
+                    .values()
+                    .find(|input| input.session_id == existing.session_id)
+                    .cloned()
+                    .ok_or_else(|| conflict("materialized input is missing"))?;
+                let run = state
+                    .runs
+                    .values()
+                    .find(|run| run.input_id == input.input_id && run.attempt == 1)
+                    .cloned()
+                    .ok_or_else(|| conflict("materialized run is missing"))?;
+                let attachments = state
+                    .attachments
+                    .values()
+                    .filter(|attachment| attachment.session_id == existing.session_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let persisted_message = input.queued_message.clone().or_else(|| {
+                    state
+                        .conversations
+                        .get(&existing.session_id)
+                        .and_then(|conversation| {
+                            conversation
+                                .messages
+                                .iter()
+                                .find_map(|message| match message {
+                                    ConversationMessage::User(user)
+                                        if user.id == input.user_message_id =>
+                                    {
+                                        Some(user.clone())
+                                    }
+                                    _ => None,
+                                })
+                        })
+                });
+                if !materialization_semantically_matches(
+                    &existing,
+                    &attachments,
+                    &input,
+                    persisted_message.as_ref(),
+                    &materialization,
+                ) {
+                    return Err(conflict(
+                        "materialization key was reused with different content",
+                    ));
+                }
+                return Ok(StoredSessionMaterialization {
+                    goal: state.goals.get(&existing.session_id).cloned(),
+                    session: existing,
+                    attachments,
+                    accepted: AcceptedInput {
+                        input,
+                        run,
+                        is_duplicate: true,
+                    },
+                });
+            }
+            if state
+                .sessions
+                .contains_key(&materialization.session.session_id)
+                || state.inputs.contains_key(&materialization.input.input_id)
+                || state.runs.contains_key(&materialization.input.run_id)
+                || materialization.input.session_id != materialization.session.session_id
+            {
+                return Err(conflict("materialization identities conflict"));
+            }
+            validate_input_message_with_channel_source(
+                materialization.input.origin,
+                materialization.input.goal_binding.as_ref(),
+                materialization.input.cross_session.as_ref(),
+                materialization.input.channel_source.as_ref(),
+                &materialization.input.message,
+            )
+            .map_err(|_| conflict("materialized input message is invalid"))?;
+            validate_volatile_input_activation(&state, &materialization.input)?;
+            if materialization.input.resumed_goal.is_some() {
+                return Err(conflict("new session cannot resume a Goal"));
+            }
+            if materialization.input.goal_binding.is_some()
+                != materialization.input.new_goal.is_some()
+            {
+                return Err(conflict(
+                    "materialized Goal binding does not match Goal creation",
+                ));
+            }
+            if let Some(goal) = materialization.input.new_goal.as_ref() {
+                let binding = materialization
+                    .input
+                    .goal_binding
+                    .as_ref()
+                    .ok_or_else(|| conflict("materialized Goal has no binding"))?;
+                if goal.session_id != materialization.session.session_id
+                    || goal.goal_id != binding.goal_id
+                    || goal.generation != binding.generation
+                    || goal.turn != binding.turn
+                    || goal.objective.source_message_id != materialization.input.message.id
+                {
+                    return Err(conflict("materialized Goal is inconsistent"));
+                }
+            }
+            let session = stored_session(materialization.session);
+            let mut attachments = Vec::with_capacity(materialization.attachments.len());
+            for upload in materialization.attachments {
+                if upload.session_id != session.session_id
+                    || state.attachments.contains_key(&upload.attachment_id)
+                {
+                    return Err(conflict("materialized attachment is invalid"));
+                }
+                let agent_readable_path = super::attachment_stable_view_path(
+                    std::path::Path::new(&session.environment.session_attachment_directory),
+                    &upload.attachment_id,
+                    &upload.original_name,
+                )
+                .to_string_lossy()
+                .into_owned();
+                let stored = StoredAttachment {
+                    attachment_id: upload.attachment_id.clone(),
+                    session_id: upload.session_id,
+                    original_name: upload.original_name,
+                    blob_hash: upload.blob_hash,
+                    size_bytes: upload.size_bytes,
+                    media_type: upload.media_type,
+                    agent_readable_path,
+                    state: StoredAttachmentState::Ready,
+                    created_at_ms: upload.created_at_ms,
+                };
+                attachments.push(stored);
+            }
+            let input = materialization.input;
+            let queue_order = state.next_queue_order.saturating_add(1);
+            let stored_input = StoredInput {
+                queue_order,
+                input_id: input.input_id.clone(),
+                session_id: input.session_id.clone(),
+                idempotency_key: input.idempotency_key,
+                agent_variant: input.agent_variant,
+                origin: input.origin,
+                goal_binding: input.goal_binding,
+                cross_session: input.cross_session,
+                channel_source: input.channel_source,
+                skill_activation: input.skill_activation.clone(),
+                user_message_id: input.message.id.clone(),
+                state: StoredInputState::Queued,
+                queued_message: Some(input.message),
+                accepted_at_ms: input.accepted_at_ms,
+            };
+            let run = StoredRun {
+                run_id: input.run_id,
+                session_id: input.session_id,
+                input_id: input.input_id,
+                attempt: 1,
+                status: RunStatus::Accepted,
+                agent_variant: input.agent_variant,
+                approval_mode: input.approval_mode,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: std::collections::HashMap::new(),
+                created_at_ms: input.accepted_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            };
+            if let Some(goal) = input.new_goal {
+                state.goals.insert(goal.session_id.clone(), goal);
+            }
+            if let Some(activation) = input.skill_activation {
+                state
+                    .skill_activations
+                    .insert(activation.activation_id.clone(), activation);
+            }
+            state.next_queue_order = queue_order;
+            state.conversations.insert(
+                session.session_id.clone(),
+                ConversationSnapshot::new(Vec::new()),
+            );
+            state
+                .session_usage
+                .insert(session.session_id.clone(), StoredSessionUsage::default());
+            state
+                .sessions
+                .insert(session.session_id.clone(), session.clone());
+            for attachment in &attachments {
+                state
+                    .attachments
+                    .insert(attachment.attachment_id.clone(), attachment.clone());
+            }
+            state
+                .inputs
+                .insert(stored_input.input_id.clone(), stored_input.clone());
+            state.runs.insert(run.run_id.clone(), run.clone());
+            Ok(StoredSessionMaterialization {
+                goal: state.goals.get(&stored_input.session_id).cloned(),
+                session,
+                attachments,
+                accepted: AcceptedInput {
+                    input: stored_input,
+                    run,
+                    is_duplicate: false,
+                },
+            })
         })
     }
 
@@ -1174,6 +1430,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 current_variant: fork.session.current_variant,
                 approval_mode: fork.session.approval_mode,
                 role: fork.session.role,
+                materialization_key: fork.session.materialization_key,
+                automatic_title_pending: fork.session.automatic_title_pending,
                 proxy: None,
                 pc_output_hosting: None,
                 body_generation: 1,
@@ -1405,13 +1663,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             cleared.message_count = 0;
             cleared.updated_at_ms = clear.changed_at_ms;
             cleared.conversation_state = StoredConversationState::Available;
-            if cleared.title_origin == SessionTitleOrigin::Generated {
-                cleared.title = match cleared.role {
-                    SessionRole::Standard => "New Session",
-                    SessionRole::Controller => "主控会话",
-                }
-                .to_owned();
-            }
+            cleared.automatic_title_pending = false;
             if cleared.role == SessionRole::Standard {
                 cleared.proxy = None;
             }
@@ -2880,7 +3132,78 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             session.title = change.title;
             session.title_origin = SessionTitleOrigin::User;
+            session.automatic_title_pending = false;
             Ok(())
+        })
+    }
+
+    fn disable_automatic_title(&self, session_id: &SessionId) -> StoreFuture<'_, ()> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("session is archived"));
+            }
+            session.automatic_title_pending = false;
+            Ok(())
+        })
+    }
+
+    fn commit_session_title_generation(
+        &self,
+        commit: SessionTitleGenerationCommit,
+    ) -> StoreFuture<'_, SessionTitleGenerationCommitResult> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let session = state
+                .sessions
+                .get_mut(&commit.session_id)
+                .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active {
+                return Err(conflict("session is archived"));
+            }
+            let may_apply = match commit.trigger {
+                SessionTitleGenerationTriggerSnapshot::Automatic => {
+                    session.title_origin == SessionTitleOrigin::Generated
+                        && commit.expected_title.as_deref() == Some(session.title.as_str())
+                }
+                SessionTitleGenerationTriggerSnapshot::Manual => true,
+            };
+            let applied = may_apply && commit.title.is_some();
+            if let Some(title) = commit.title.filter(|_| applied) {
+                session.title = title;
+                session.title_origin = SessionTitleOrigin::Generated;
+            }
+            session.automatic_title_pending = false;
+            let title = session.title.clone();
+            let title_origin = session.title_origin;
+            let automatic_title_pending = session.automatic_title_pending;
+
+            if commit.request_attempted {
+                let usage = state.session_usage.entry(commit.session_id).or_default();
+                usage.auxiliary_request_count = usage.auxiliary_request_count.saturating_add(1);
+                if let Some(tokens) = commit.usage {
+                    usage.auxiliary_input_tokens = usage
+                        .auxiliary_input_tokens
+                        .saturating_add(tokens.input_tokens);
+                    usage.auxiliary_output_tokens = usage
+                        .auxiliary_output_tokens
+                        .saturating_add(tokens.output_tokens);
+                    usage.auxiliary_total_tokens = usage
+                        .auxiliary_total_tokens
+                        .saturating_add(tokens.total_tokens);
+                }
+            }
+            Ok(SessionTitleGenerationCommitResult {
+                applied,
+                title,
+                title_origin,
+                automatic_title_pending,
+            })
         })
     }
 
@@ -3695,6 +4018,7 @@ fn collect_volatile_hits(
                                 .iter()
                                 .map(|file| file.original_name.clone()),
                         ),
+                        UserPart::QuotedText(quoted) => parts.push(quoted.exact.clone()),
                         UserPart::Injected(_) | UserPart::InternalContext(_) => {}
                     }
                 }
@@ -3811,6 +4135,122 @@ fn validate_volatile_input_activation(
         return Err(conflict("input skill activation is inconsistent"));
     }
     Ok(())
+}
+
+fn stored_session(session: NewStoredSession) -> StoredSession {
+    StoredSession {
+        session_id: session.session_id,
+        title: session.title,
+        title_origin: session.title_origin,
+        model_key: session.model_key,
+        reasoning_effort: session.reasoning_effort,
+        system_prompt: session.system_prompt,
+        skill_catalog: session.skill_catalog,
+        environment: session.environment,
+        lifecycle: StoredSessionLifecycle::Active,
+        current_variant: session.current_variant,
+        approval_mode: session.approval_mode,
+        role: session.role,
+        materialization_key: session.materialization_key,
+        automatic_title_pending: session.automatic_title_pending,
+        proxy: None,
+        pc_output_hosting: None,
+        body_generation: 1,
+        message_count: 0,
+        created_at_ms: session.created_at_ms,
+        updated_at_ms: session.created_at_ms,
+        archived_at_ms: None,
+        is_pinned: false,
+        conversation_state: StoredConversationState::Available,
+    }
+}
+
+fn materialization_semantically_matches(
+    existing: &StoredSession,
+    attachments: &[StoredAttachment],
+    input: &StoredInput,
+    persisted_message: Option<&agent_types::UserMessage>,
+    candidate: &NewStoredSessionMaterialization,
+) -> bool {
+    let mut existing_files = attachments
+        .iter()
+        .map(|file| {
+            (
+                file.original_name.as_str(),
+                file.blob_hash.as_str(),
+                file.size_bytes,
+                file.media_type.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_files = candidate
+        .attachments
+        .iter()
+        .map(|file| {
+            (
+                file.original_name.as_str(),
+                file.blob_hash.as_str(),
+                file.size_bytes,
+                file.media_type.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    existing_files.sort_unstable();
+    candidate_files.sort_unstable();
+    existing.title == candidate.session.title
+        && existing.model_key == candidate.session.model_key
+        && existing.reasoning_effort == candidate.session.reasoning_effort
+        && existing.environment.workspace_id == candidate.session.environment.workspace_id
+        && (existing.environment.workspace_id.is_none()
+            || existing.environment.working_directory
+                == candidate.session.environment.working_directory)
+        && existing.environment.additional_workspace_directories
+            == candidate
+                .session
+                .environment
+                .additional_workspace_directories
+        && existing.current_variant == candidate.session.current_variant
+        && existing.approval_mode == candidate.session.approval_mode
+        && existing_files == candidate_files
+        && input.agent_variant == candidate.input.agent_variant
+        && input.goal_binding.is_some() == candidate.input.goal_binding.is_some()
+        && input.skill_activation.as_ref().map(|value| &value.name)
+            == candidate
+                .input
+                .skill_activation
+                .as_ref()
+                .map(|value| &value.name)
+        && normalized_message(persisted_message)
+            == normalized_message(Some(&candidate.input.message))
+}
+
+fn normalized_message(message: Option<&agent_types::UserMessage>) -> Option<serde_json::Value> {
+    let mut message = message?.clone();
+    message
+        .parts
+        .retain(|part| !matches!(part, UserPart::InternalContext(_)));
+    let mut value = serde_json::to_value(message).ok()?;
+    remove_generated_message_fields(&mut value);
+    Some(value)
+}
+
+fn remove_generated_message_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("id");
+            map.remove("quote_id");
+            map.remove("readable_path");
+            for value in map.values_mut() {
+                remove_generated_message_fields(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                remove_generated_message_fields(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn validate_model_activations(

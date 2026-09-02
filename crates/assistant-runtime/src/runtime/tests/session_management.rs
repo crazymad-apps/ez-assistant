@@ -3,12 +3,185 @@ use super::*;
 use crate::StagedAttachmentUpload;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, ArchiveSessionRequest, DeleteSessionRequest, ForkSessionRequest,
-    IdempotencyKey, ListAttachmentsRequest, ListConversationPageRequest, ListRunsRequest,
-    PrepareDeleteSessionRequest, ReenterFromUserMessageRequest, RenameSessionRequest,
-    RestoreSessionRequest, SessionLifecycle, SessionListFilter, SessionTitleOrigin,
-    SetSessionApprovalModeRequest, SetSessionModelRequest, SetSessionPinnedRequest,
-    SetSessionVariantRequest,
+    GenerateSessionTitleRequest, IdempotencyKey, ListAttachmentsRequest,
+    ListConversationPageRequest, ListRunsRequest, PrepareDeleteSessionRequest,
+    ReenterFromUserMessageRequest, RenameSessionRequest, RestoreSessionRequest, SessionLifecycle,
+    SessionListFilter, SessionTitleOrigin, SetSessionApprovalModeRequest, SetSessionModelRequest,
+    SetSessionPinnedRequest, SetSessionVariantRequest,
 };
+
+#[tokio::test]
+async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("answer-title", "answer"))),
+            ModelScript::Events(message_events(&assistant_title_tool_call(
+                "automatic-title",
+                "automatic-title-call",
+                "## “自动标题”",
+            ))),
+            ModelScript::Events(message_events(&assistant_title_tool_call(
+                "manual-title",
+                "manual-title-call",
+                "手动标题",
+            ))),
+        ],
+    ));
+    let runtime = runtime(model.clone());
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    runtime
+        .session(&session.session_id)
+        .expect("session controller")
+        .lock_state()
+        .expect("session state")
+        .automatic_title_pending = true;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "请实现标题旁路".to_owned(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("input");
+    wait_for_terminal(&runtime, &session.session_id, &submitted.run.run_id).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if runtime
+                .get_session(GetSessionRequest {
+                    session_id: session.session_id.clone(),
+                })
+                .expect("session")
+                .session
+                .title
+                == "自动标题"
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("automatic title completes");
+
+    runtime
+        .generate_session_title(GenerateSessionTitleRequest {
+            session_id: session.session_id.clone(),
+        })
+        .await
+        .expect("manual title accepted");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if runtime
+                .get_session(GetSessionRequest {
+                    session_id: session.session_id.clone(),
+                })
+                .expect("session")
+                .session
+                .title
+                == "手动标题"
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("manual title completes");
+    let usage = runtime
+        .store
+        .get_session_usage(&session.session_id)
+        .await
+        .expect("usage");
+    assert_eq!(usage.auxiliary_request_count, 2);
+    let requests = model.take_requests();
+    assert_eq!(requests[1].generation.max_output_tokens, Some(1_024));
+    assert_eq!(requests[2].generation.max_output_tokens, Some(1_024));
+    assert!(requests[1].reasoning.is_none());
+    assert_eq!(requests[1].tools.len(), 1);
+    assert_eq!(requests[1].tools[0].name.as_str(), "submit_session_title");
+    assert_eq!(
+        requests[1].tool_choice,
+        ToolChoice::Named(ToolName::new("submit_session_title").expect("tool name"))
+    );
+}
+
+#[tokio::test]
+async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("answer", "已完成调研"))),
+            ModelScript::Events(message_events(&assistant_text(
+                "title-continuation",
+                "调研完成，更新计划如下。",
+            ))),
+        ],
+    ));
+    let runtime = runtime(model);
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    let controller = runtime
+        .session(&session.session_id)
+        .expect("session controller");
+    controller
+        .lock_state()
+        .expect("session state")
+        .automatic_title_pending = true;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "分析 computer use 实现".to_owned(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("input");
+    wait_for_terminal(&runtime, &session.session_id, &submitted.run.run_id).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let settled = {
+                let state = controller.lock_state().expect("session state");
+                state.active_title_generation.is_none() && !state.automatic_title_pending
+            };
+            if settled {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("automatic title settles");
+
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session_id,
+            })
+            .expect("session")
+            .session
+            .title,
+        "分析 computer use 实现"
+    );
+}
 
 #[tokio::test]
 async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
@@ -34,6 +207,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
             session_id: source.session_id.clone(),
             message: "first turn".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
@@ -173,6 +347,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
             session_id: source.session_id.clone(),
             message: "persist a reliable turn".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
@@ -245,6 +420,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             session_id: generated.session_id.clone(),
             message: "\n  首行作为会话标题  \n后续正文".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
@@ -281,6 +457,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             session_id: renamed.session_id.clone(),
             message: "不应覆盖标题".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
@@ -443,6 +620,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
                 session_id: session_id.clone(),
                 message: "not allowed".to_owned(),
                 attachment_ids: Vec::new(),
+                quotes: Vec::new(),
                 skill_name: None,
                 idempotency_key: None,
             })
@@ -533,6 +711,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
             session_id: session_id.clone(),
             message: "active input".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -674,6 +853,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message: "first question".to_owned(),
             attachment_ids: vec![old_attachment.attachment_id.clone()],
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -687,6 +867,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             session_id: session_id.clone(),
             message: "second question".to_owned(),
             attachment_ids: Vec::new(),
+            quotes: Vec::new(),
             skill_name: None,
             idempotency_key: None,
         })
@@ -748,6 +929,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
                 UserPart::Text(text) => Some(text.text.as_str()),
                 UserPart::Injected(_)
                 | UserPart::InternalContext(_)
+                | UserPart::QuotedText(_)
                 | UserPart::FileReferences(_) => None,
             }),
             ConversationMessage::Assistant(assistant) => {
@@ -766,7 +948,10 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .find_map(|message| match message {
             ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
                 UserPart::FileReferences(files) => Some(&files.files),
-                UserPart::Text(_) | UserPart::Injected(_) | UserPart::InternalContext(_) => None,
+                UserPart::Text(_)
+                | UserPart::Injected(_)
+                | UserPart::InternalContext(_)
+                | UserPart::QuotedText(_) => None,
             }),
             _ => None,
         })

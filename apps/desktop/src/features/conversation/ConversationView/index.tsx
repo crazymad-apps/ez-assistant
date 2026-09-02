@@ -4,10 +4,13 @@ import type {
   AttachmentSummary,
   ConversationOwner,
   MessageId,
+  QuotedTextSnapshot,
   ToolCallId,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { MarkdownContent } from "../../../components/MarkdownContent";
+import { Collapse } from "../../../components/Collapse";
+import { PresenceBoundary, usePresence } from "../../../components/Presence";
 import type { LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ToolDetailDialog, type ToolDetailView } from "../ToolDetailDialog";
@@ -16,6 +19,7 @@ import { AttachmentPreviewDialog } from "../../context-panel/AttachmentPreviewDi
 import { mergeChildTaskItems } from "../childTaskPresentation";
 import { groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { AssistantTurn, EmptyConversation, LiveAssistantMessage, UserMessage } from "./MessageViews";
+import { createQuotedTextSnapshot, quoteSourceRange } from "../quoteSelection";
 import styles from "./index.module.scss";
 
 const BOTTOM_THRESHOLD = 72;
@@ -35,6 +39,7 @@ export const ConversationView = observer(function ConversationView() {
   const scroll_ref = useRef<HTMLDivElement>(null);
   const message_list_ref = useRef<HTMLDivElement>(null);
   const previous_scroll_height = useRef<number | null>(null);
+  const quote_scroll_top = useRef<number | null>(null);
   const is_pinned_to_bottom = useRef(true);
   const [show_scroll_bottom, setShowScrollBottom] = useState(false);
   const [detail_state, setDetailState] = useState<{
@@ -45,6 +50,14 @@ export const ConversationView = observer(function ConversationView() {
   const [fork_point, setForkPoint] = useState<MessageId | null>(null);
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
   const [summary_expanded, setSummaryExpanded] = useState(false);
+  const [selection_action, setSelectionAction] = useState<{
+    quote: QuotedTextSnapshot;
+    x: number;
+    y: number;
+  } | null>(null);
+  const selection_presence = usePresence(selection_action !== null, 90);
+  const retained_selection_action_ref = useRef(selection_action);
+  if (selection_action) retained_selection_action_ref.current = selection_action;
   const conversation_rows = useMemo(
     () => groupConversationTurns(history?.items ?? [], child_task_id !== null),
     [child_task_id, history?.items],
@@ -162,24 +175,161 @@ export const ConversationView = observer(function ConversationView() {
     }
     const target = node.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(message_id)}"]`);
     if (target) {
-      is_pinned_to_bottom.current = false;
-      target.scrollIntoView({ block: "center" });
-      store.navigation.updateCurrentScrollOffset(node.scrollTop);
+      const quote_target = store.transient_focus.target;
+      const quote_will_position_range = quote_target?.message_id === message_id
+        && quote_target.generation === history?.generation
+        && owner !== null
+        && sameConversationOwner(quote_target.owner, owner);
+      if (!quote_will_position_range) {
+        is_pinned_to_bottom.current = false;
+        target.scrollIntoView({ block: "center" });
+        store.navigation.updateCurrentScrollOffset(node.scrollTop);
+      }
       store.navigation.consumeConversationAnchor(message_id);
     }
-  }, [history?.items, store.navigation, store.navigation.conversation_anchor_message_id]);
+  }, [
+    history?.generation,
+    history?.items,
+    owner,
+    store.navigation,
+    store.navigation.conversation_anchor_message_id,
+    store.transient_focus.target,
+  ]);
 
   const handleScroll = useCallback(() => {
     const node = scroll_ref.current;
     if (!node) {
       return;
     }
-    if (node.scrollTop < 96) {
+    const expected_quote_scroll_top = quote_scroll_top.current;
+    quote_scroll_top.current = null;
+    const is_quote_positioning_scroll = (
+      expected_quote_scroll_top !== null
+      && Math.abs(node.scrollTop - expected_quote_scroll_top) < 1
+    );
+    if (!is_quote_positioning_scroll && node.scrollTop < 96) {
       void loadPrevious();
     }
     store.navigation.updateCurrentScrollOffset(node.scrollTop);
     updateScrollState(node);
+    if (is_quote_positioning_scroll) {
+      return;
+    }
+    setSelectionAction(null);
+    store.transient_focus.clear();
   }, [loadPrevious, store.navigation, updateScrollState]);
+
+  const captureSelection = useCallback(() => {
+    if (!session_id || !owner || !history) return;
+    const selection = window.getSelection();
+    const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+    if (!selection || selection.isCollapsed || !range) {
+      setSelectionAction(null);
+      return;
+    }
+    const start = quoteRootContainer(range.startContainer);
+    const end = quoteRootContainer(range.endContainer);
+    if (!start || start !== end || !scroll_ref.current?.contains(start)) {
+      setSelectionAction(null);
+      return;
+    }
+    const article = start.closest<HTMLElement>("[data-message-id]");
+    const message_id = article?.dataset.messageId;
+    const source_role = start.dataset.quoteRole;
+    if (!message_id || (source_role !== "user" && source_role !== "assistant")) {
+      setSelectionAction(null);
+      return;
+    }
+    const source_item = history.items.find((item) => item.message_id === message_id);
+    const quote = createQuotedTextSnapshot(start, range.cloneRange(), {
+      quote_id: createQuoteId(),
+      source_owner: owner,
+      source_generation: history.generation,
+      source_message_id: message_id,
+      source_role,
+      source_label: child_view?.task.task.title ?? session?.title ?? "当前会话",
+      source_created_at_ms: source_item?.type === "user"
+        ? source_item.created_at_ms
+        : source_item?.type === "assistant"
+          ? source_item.finished_at_ms ?? source_item.created_at_ms
+          : null,
+    });
+    if (!quote) {
+      setSelectionAction(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    setSelectionAction({
+      quote,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 8,
+    });
+  }, [child_view?.task.task.title, history, owner, session?.title, session_id]);
+
+  const submitSelectionQuote = useCallback(() => {
+    if (!selection_action) return;
+    const quote = selection_action.quote;
+    setSelectionAction(null);
+    window.getSelection()?.removeAllRanges();
+    store.composer_quotes.add(session_id!, quote);
+    store.transient_focus.clear();
+    if (store.navigation.selected_child_task_id) store.closeChildTask();
+  }, [selection_action, session_id, store]);
+
+  useEffect(() => {
+    if (store.composer_pending) {
+      setSelectionAction(null);
+      window.getSelection()?.removeAllRanges();
+    }
+  }, [store.composer_pending]);
+
+  useLayoutEffect(() => {
+    const target = store.transient_focus.target;
+    const node = scroll_ref.current;
+    if (!target || !node || !owner || !sameConversationOwner(target.owner, owner)) return;
+    if (target.generation !== history?.generation) {
+      store.transient_focus.clear();
+      return;
+    }
+    const escaped_message_id = CSS.escape(target.message_id);
+    const message = node.querySelector<HTMLElement>(`[data-message-id="${escaped_message_id}"]`);
+    if (!message) {
+      store.transient_focus.clear();
+      return;
+    }
+    const root = node.querySelector<HTMLElement>(
+      `[data-quote-root='true'][data-message-id="${escaped_message_id}"]`,
+    ) ?? (message.matches("[data-quote-root='true']")
+      ? message
+      : message.querySelector<HTMLElement>("[data-quote-root='true']"));
+    const range = root ? quoteSourceRange(root, target) : null;
+    if (!root || !range) {
+      message.scrollIntoView({ block: "center" });
+      store.transient_focus.clear();
+      return;
+    }
+    const target_scroll_top = centeredRangeScrollTop(node, range);
+    if (target_scroll_top === null) {
+      message.scrollIntoView({ block: "center" });
+    } else {
+      quote_scroll_top.current = target_scroll_top;
+      is_pinned_to_bottom.current = false;
+      node.scrollTo({ top: target_scroll_top, behavior: "auto" });
+      store.navigation.updateCurrentScrollOffset(node.scrollTop);
+      updateScrollState(node);
+    }
+    return applyTransientQuoteHighlight(root, range);
+  }, [
+    history?.generation,
+    history?.items,
+    owner,
+    store.navigation,
+    store.transient_focus,
+    store.transient_focus.target?.nonce,
+    updateScrollState,
+  ]);
+
+  useEffect(() => () => store.transient_focus.clear(), [store.transient_focus]);
 
   const scrollToBottom = useCallback(() => {
     const node = scroll_ref.current;
@@ -248,11 +398,13 @@ export const ConversationView = observer(function ConversationView() {
               {summary_expanded ? "收起上下文摘要" : "查看上下文摘要"}
             </button>
             <span className={styles.context_summary_line} />
-            {summary_expanded && (
-              <div className={styles.context_summary_text}>
-                <MarkdownContent text={row.message.text} />
-              </div>
-            )}
+            <div className={styles.context_summary_collapse}>
+              <Collapse open={summary_expanded}>
+                <div className={styles.context_summary_text}>
+                  <MarkdownContent text={row.message.text} />
+                </div>
+              </Collapse>
+            </div>
           </div>
         )
       : row.type === "user"
@@ -265,6 +417,9 @@ export const ConversationView = observer(function ConversationView() {
             key={row.message.message_id}
             message={row.message}
             on_attachment_click={setPreviewAttachment}
+            on_quote_locate={(quote) => session_id
+              ? store.locateTextQuoteSource(session_id, quote)
+              : Promise.resolve(false)}
             on_source_open={(source_session) => {
               store.navigation.setListMode(source_session.lifecycle === "archived" ? "archived" : "active");
               void store.selectSession(source_session.session_id);
@@ -295,6 +450,9 @@ export const ConversationView = observer(function ConversationView() {
   );
 
   if (!session_id) {
+    if (store.navigation.selected_draft_key) {
+      return <EmptyConversation title="开始新会话" detail="输入消息或使用 / 指令。" />;
+    }
     return <EmptyConversation title="选择一个会话" detail="从左侧工作空间中选择会话以查看消息。" />;
   }
   if (!history) {
@@ -310,6 +468,7 @@ export const ConversationView = observer(function ConversationView() {
               </div>
             </div>
           </div>
+          <PresenceBoundary present={detail_state !== null}>
           {detail_state && (
             <ToolDetailDialog
               detail={detail_state.detail}
@@ -322,6 +481,7 @@ export const ConversationView = observer(function ConversationView() {
               }}
             />
           )}
+          </PresenceBoundary>
         </>
       );
     }
@@ -335,7 +495,13 @@ export const ConversationView = observer(function ConversationView() {
 
   return (
     <div className={styles.viewport}>
-      <div aria-label="消息列表" className={styles.scroll} onScroll={handleScroll} ref={scroll_ref}>
+      <div
+        aria-label="消息列表"
+        className={styles.scroll}
+        onMouseUp={() => requestAnimationFrame(captureSelection)}
+        onScroll={handleScroll}
+        ref={scroll_ref}
+      >
         <div className={styles.message_list} ref={message_list_ref}>
           {child_view && history.items.length === 0 && !live_run && (
             <EmptyConversation title={child_view.task.task.title} detail="子智能体尚未产生可展示的消息。" />
@@ -362,6 +528,21 @@ export const ConversationView = observer(function ConversationView() {
             )}
         </div>
       </div>
+      {selection_presence.mounted && retained_selection_action_ref.current && (
+        <div
+          aria-hidden={selection_presence.state === "exiting" ? true : undefined}
+          className={styles.quote_bubble}
+          data-presence={selection_presence.state}
+          inert={selection_presence.state === "exiting" ? true : undefined}
+          onTransitionEnd={selection_presence.onTransitionEnd}
+          role="toolbar"
+          style={{ left: retained_selection_action_ref.current.x, top: retained_selection_action_ref.current.y }}
+        >
+          <button onClick={submitSelectionQuote} type="button">
+            <Icon name="quote" size={14} />引用
+          </button>
+        </div>
+      )}
       {show_scroll_bottom && (
         <button
           aria-label="回到底部"
@@ -372,6 +553,7 @@ export const ConversationView = observer(function ConversationView() {
           <Icon name="arrow-down" size={16} />
         </button>
       )}
+      <PresenceBoundary present={detail_state !== null}>
       {detail_state && (
         <ToolDetailDialog
           detail={detail_state.detail}
@@ -384,6 +566,8 @@ export const ConversationView = observer(function ConversationView() {
           }}
         />
       )}
+      </PresenceBoundary>
+      <PresenceBoundary present={fork_point !== null}>
       {fork_point && (
         <SessionActionDialog
           confirm_label="创建分支"
@@ -396,12 +580,15 @@ export const ConversationView = observer(function ConversationView() {
           <p>后续消息、运行记录和工作目录中的用户文件不会被复制或修改。</p>
         </SessionActionDialog>
       )}
+      </PresenceBoundary>
+      <PresenceBoundary present={preview_attachment !== null}>
       {preview_attachment && (
         <AttachmentPreviewDialog
           attachment={preview_attachment}
           on_close={() => setPreviewAttachment(null)}
         />
       )}
+      </PresenceBoundary>
     </div>
   );
 });
@@ -413,4 +600,59 @@ function sourceSessionId(
   if (source.type === "controller_delivery") return source.controller_session_id;
   if (source.type === "proxy_report") return source.source_session_id;
   return null;
+}
+
+function quoteRootContainer(node: Node): HTMLElement | null {
+  const element = node instanceof HTMLElement ? node : node.parentElement;
+  return element?.closest<HTMLElement>("[data-quote-root='true']") ?? null;
+}
+
+function createQuoteId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? `quote-${crypto.randomUUID()}`
+    : `quote-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function applyTransientQuoteHighlight(root: HTMLElement, range: Range): () => void {
+  const registry = (globalThis.CSS as unknown as {
+    highlights?: { set(name: string, highlight: unknown): void; delete(name: string): boolean };
+  } | undefined)?.highlights;
+  const HighlightConstructor = (globalThis as unknown as {
+    Highlight?: new (...ranges: Range[]) => unknown;
+  }).Highlight;
+  if (registry && HighlightConstructor) {
+    registry.delete("quote-source");
+    registry.set("quote-source", new HighlightConstructor(range));
+    return () => { registry.delete("quote-source"); };
+  }
+  root.dataset.transientFocus = "true";
+  return () => { delete root.dataset.transientFocus; };
+}
+
+function centeredRangeScrollTop(container: HTMLElement, range: Range): number | null {
+  const range_rect = range.getBoundingClientRect();
+  const container_rect = container.getBoundingClientRect();
+  if (
+    container.clientHeight <= 0
+    || range_rect.height <= 0
+    || !Number.isFinite(range_rect.top)
+    || !Number.isFinite(range_rect.height)
+    || !Number.isFinite(container_rect.top)
+  ) {
+    return null;
+  }
+  const range_center = range_rect.top + range_rect.height / 2;
+  const container_center = container_rect.top + container.clientHeight / 2;
+  const unclamped = container.scrollTop + range_center - container_center;
+  return Math.min(
+    Math.max(0, container.scrollHeight - container.clientHeight),
+    Math.max(0, unclamped),
+  );
+}
+
+function sameConversationOwner(left: ConversationOwner, right: ConversationOwner): boolean {
+  return left.type === right.type
+    && left.session_id === right.session_id
+    && (left.type !== "child_task"
+      || (right.type === "child_task" && left.child_task_id === right.child_task_id));
 }

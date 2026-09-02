@@ -16,10 +16,9 @@
 .panel_header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
 
   min-width: 0;
-  padding: 0 12px 0 17px;
+  padding: 0 17px;
 
   border-bottom: 1px solid var(--ez-border);
 
@@ -29,44 +28,47 @@
     font-size: var(--ez-font-large);
   }
 
-  button {
-    display: grid;
-
-    width: 30px;
-    height: 30px;
-
-    color: var(--ez-text-muted);
-    border: 0;
-    border-radius: var(--ez-radius-small);
-    background: transparent;
-
-    place-items: center;
-
-    &:hover { background: var(--ez-surface-muted); }
-  }
 }
 
 .panel_scroll {
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
 
   min-height: 0;
   padding: 12px;
+
+  gap: 10px;
+}
+
+.panel_scroll[data-layout="two-columns"] {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.panel_column {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .context_section {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 13px;
 
   border: 1px solid var(--ez-border);
   border-radius: var(--ez-radius-medium);
   background: var(--ez-surface);
-
-  & + & { margin-top: 10px; }
 }
 
 .section_heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
 
   width: 100%;
   min-height: 22px;
@@ -83,12 +85,15 @@
 
   gap: 8px;
 
-  svg {
-    flex: 0 0 auto;
-
-    color: var(--ez-text-muted);
-  }
 }
+
+.section_heading_row { display: flex; align-items: center; gap: 0; }
+.section_heading_row .section_heading { min-width: 0; flex: 1; }
+.section_header_action { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 6px; color: var(--ez-text-muted); background: transparent; }
+.section_header_action:hover:not(:disabled) { color: var(--ez-text); background: var(--ez-surface-muted); }
+.section_header_action:disabled { opacity: .5; }
+.section_toggle { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 6px; color: var(--ez-text-muted); background: transparent; }
+.section_toggle:hover { color: var(--ez-text); background: var(--ez-surface-muted); }
 
 .section_body {
   display: grid;
@@ -177,17 +182,21 @@
 .context_error { margin: 4px 0 0; color: var(--ez-danger); font-size: var(--ez-font-small); line-height: 1.45; }
 
 .path_row {
-  display: flex;
+  display: grid;
   align-items: center;
 
   min-width: 0;
 
   color: var(--ez-text-secondary);
 
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
-
-  span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--ez-font-base); }
 }
+
+.directory_icon { display: grid; width: 16px; height: 16px; color: var(--ez-text-muted); place-items: center; }
+.directory_icon[data-primary="true"] { color: var(--ez-primary-text); }
+.path_text { overflow: hidden; min-width: 0; white-space: nowrap; text-overflow: ellipsis; font-size: var(--ez-font-base); }
+.path_actions { display: flex; grid-column: 3; justify-self: end; gap: 0; }
 
 .workspace_actions {
   display: flex;
@@ -216,14 +225,13 @@
   }
 }
 
-.workspace_note {
-  margin: 0;
-
-  color: var(--ez-text-muted);
-
-  font-size: var(--ez-font-small);
-  line-height: 1.45;
-}
+.workspace_label { display: block; margin-bottom: 2px; color: var(--ez-text); }
+.workspace_directories { display: grid; gap: 6px; margin-top: 9px; }
+.workspace_directories .path_row { margin: 0; }
+.workspace_directories .path_row button { display: grid; width: 25px; height: 25px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 5px; color: var(--ez-text-muted); background: transparent; }
+.workspace_directories .path_row button:hover { background: var(--ez-surface-muted); }
+.more_directories { justify-self: start; padding: 2px 0; border: 0; color: var(--ez-primary-text); background: transparent; font-size: var(--ez-font-small); }
+.workspace_changed_note { margin: 9px 0 0; color: var(--ez-warning-text); font-size: var(--ez-font-small); }
 
 .empty_row {
   margin: 0;

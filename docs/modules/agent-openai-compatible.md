@@ -48,6 +48,10 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - User Message 的 `Text`、旧 `Injected`、新 `InternalContext` 和 `FileReferences` 按规范 Part 顺序编码为
   原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
   不伪造 Tool Call、Tool Result 或已读取文件的事实。
+- `QuotedText` 在 Chat Completions 与 Responses 中按相同稳定 XML 文本投影，保留一次冻结的纯文本
+  exact 和每侧最多 128 个 Unicode 字符的 prefix/suffix；所有文本字段必须转义。quote ID、owner、generation、来源
+  Message ID、UTF-16 range、availability 和展示标签都不得进入 Provider wire，也不提示模型调用引用
+  专属 Recall 工具。
 - Chat Completions 与 Responses 都不得把 `UserMessageOrigin`、`TranscriptVisibility` 编码到
   Provider wire；隐藏 Runtime User Message 仍按普通 user role 及原有 Part 顺序发送。
 - `ModelRequest.system` 继续按 `SystemPromptSnapshot::parts()` 保存冻结边界；Chat Completions

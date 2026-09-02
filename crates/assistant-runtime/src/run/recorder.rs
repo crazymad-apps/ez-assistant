@@ -318,8 +318,10 @@ mod tests {
         store
             .create_session(NewStoredSession {
                 session_id: session_id.clone(),
+                materialization_key: None,
                 title: "recorder fixture".to_owned(),
                 title_origin: assistant_protocol::SessionTitleOrigin::Generated,
+                automatic_title_pending: false,
                 model_key: ModelKey::new("fixture").expect("model key"),
                 reasoning_effort: None,
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
@@ -327,6 +329,7 @@ mod tests {
                 environment: SessionExecutionEnvironment {
                     workspace_id: None,
                     working_directory: "/volatile/session/private".to_owned(),
+                    additional_workspace_directories: Vec::new(),
                     workspace_private_directory: None,
                     session_attachment_directory: "/volatile/session/attachments".to_owned(),
                     session_tool_image_directory: "/volatile/session/tool-images".to_owned(),

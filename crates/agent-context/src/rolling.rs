@@ -1,15 +1,14 @@
 //! 同模型 Rolling Summary 的配置与策略实现。
 
 use agent_model::{
-    GenerationConfig, LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest,
-    ProviderOptions,
+    GenerationConfig, ModelCallContext, ModelError, ModelRequest, ProviderOptions,
+    collect_model_turn,
 };
 use agent_types::{
     AssistantMessage, AssistantPart, ContextInsertionPayload, ContextInsertionPlan,
     ContextSummaryMessage, ConversationMessage, ConversationSnapshot, InternalContextPart,
     MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
 };
-use futures_util::StreamExt;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -133,23 +132,13 @@ impl CompressionStrategy for RollingSummarySameModel {
                 reasoning: None,
                 provider_options: ProviderOptions::new(),
             };
-            let stream = model
-                .stream(request, ModelCallContext::new(cancellation.clone()))
-                .await
-                .map_err(map_model_error)?;
-            let mut stream = LifecycleValidator::new(stream);
-            let message = loop {
-                let Some(event) = stream.next().await else {
-                    return Err(CompactionError::InvalidResponse {
-                        message: "compression stream ended without a terminal event".to_owned(),
-                    });
-                };
-                match event {
-                    ModelEvent::TurnFinished { message } => break message,
-                    ModelEvent::TurnFailed { error } => return Err(map_model_error(error)),
-                    _ => {}
-                }
-            };
+            let message = collect_model_turn(
+                model.as_ref(),
+                request,
+                ModelCallContext::new(cancellation.clone()),
+            )
+            .await
+            .map_err(map_model_error)?;
             if cancellation.is_cancelled() {
                 return Err(CompactionError::Cancelled);
             }
@@ -341,7 +330,9 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use agent_model::{ModelCapabilities, ModelEventStream, ModelService, ModelStreamFuture};
+    use agent_model::{
+        ModelCapabilities, ModelEvent, ModelEventStream, ModelService, ModelStreamFuture,
+    };
     use agent_types::{
         AssistantPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
         ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,

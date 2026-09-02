@@ -3,8 +3,10 @@ import {
   useRef,
   type PropsWithChildren,
   type RefObject,
+  type TransitionEventHandler,
 } from "react";
 import { createPortal } from "react-dom";
+import { usePresence, usePresenceBoundary, type PresenceState } from "../Presence";
 
 type DialogProps = PropsWithChildren<Readonly<{
   aria_describedby?: string;
@@ -15,6 +17,9 @@ type DialogProps = PropsWithChildren<Readonly<{
   dismissible?: boolean;
   initial_focus_ref?: RefObject<HTMLElement | null>;
   on_close: () => void;
+  open?: boolean;
+  on_exit_transition_end?: TransitionEventHandler<HTMLDivElement>;
+  presence_state?: PresenceState;
 }>>;
 
 const modal_stack: symbol[] = [];
@@ -28,13 +33,22 @@ const focusable_selector = [
 ].join(",");
 
 export function Dialog(props: DialogProps) {
+  const open = props.open ?? true;
+  const local_presence = usePresence(open, 120);
+  const boundary_presence = usePresenceBoundary();
+  const mounted = props.presence_state || boundary_presence ? true : local_presence.mounted;
+  const presence_state = props.presence_state ?? boundary_presence?.state ?? local_presence.state;
+  const retained_children_ref = useRef(props.children);
+  if (open) retained_children_ref.current = props.children;
   const dialog_ref = useRef<HTMLElement>(null);
   const opener_ref = useRef<HTMLElement | null>(null);
   const instance_ref = useRef(Symbol("dialog"));
   const on_close_ref = useRef(props.on_close);
   const dismissible_ref = useRef(props.dismissible ?? true);
+  const interactive_ref = useRef(presence_state !== "exiting");
   on_close_ref.current = props.on_close;
-  dismissible_ref.current = props.dismissible ?? true;
+  interactive_ref.current = presence_state !== "exiting";
+  dismissible_ref.current = (props.dismissible ?? true) && interactive_ref.current;
 
   useEffect(() => {
     const instance = instance_ref.current;
@@ -53,6 +67,10 @@ export function Dialog(props: DialogProps) {
 
     function handleKeyDown(event: KeyboardEvent) {
       if (modal_stack.at(-1) !== instance) {
+        return;
+      }
+      if (!interactive_ref.current) {
+        if (event.key === "Tab") event.preventDefault();
         return;
       }
       if (event.key === "Escape" && dismissible_ref.current) {
@@ -96,29 +114,42 @@ export function Dialog(props: DialogProps) {
       }
       opener_ref.current = null;
     };
-  }, [props.initial_focus_ref]);
+  }, [mounted, props.initial_focus_ref]);
+
+  if (!mounted) return null;
 
   const overlay_root = document.querySelector<HTMLElement>("#overlay-root") ?? document.body;
   return createPortal(
     <div
       className={props.backdrop_class_name}
+      data-ez-dialog-backdrop
+      data-presence={presence_state}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && dismissible_ref.current) {
           on_close_ref.current();
         }
+      }}
+      onTransitionEnd={(event) => {
+        local_presence.onTransitionEnd(event);
+        boundary_presence?.onTransitionEnd(event);
+        props.on_exit_transition_end?.(event);
       }}
     >
       <section
         aria-describedby={props.aria_describedby}
         aria-label={props.aria_label}
         aria-labelledby={props.aria_labelledby}
-        aria-modal="true"
+        aria-hidden={presence_state === "exiting" ? true : undefined}
+        aria-modal={presence_state === "exiting" ? undefined : "true"}
         className={props.dialog_class_name}
+        data-ez-dialog-content
+        data-presence={presence_state}
+        inert={presence_state === "exiting" ? true : undefined}
         ref={dialog_ref}
         role="dialog"
         tabIndex={-1}
       >
-        {props.children}
+        {open ? props.children : retained_children_ref.current}
       </section>
     </div>,
     overlay_root,

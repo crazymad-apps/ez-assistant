@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { useState } from "react";
@@ -11,8 +11,8 @@ function DialogHarness() {
   return (
     <>
       <button onClick={() => setOpen(true)} type="button">打开弹窗</button>
-      {open && (
-        <Dialog
+      <Dialog
+          open={open}
           aria_label="测试弹窗"
           backdrop_class_name="backdrop"
           dialog_class_name="dialog"
@@ -21,13 +21,12 @@ function DialogHarness() {
           <button type="button">第一个操作</button>
           <button type="button">最后一个操作</button>
         </Dialog>
-      )}
     </>
   );
 }
 
 describe("Dialog", () => {
-  it("traps focus and restores it after Escape closes the dialog", async () => {
+  it("makes an exiting dialog inert and restores focus only after exit completes", async () => {
     const user = userEvent.setup();
     render(<DialogHarness />);
     const opener = screen.getByRole("button", { name: "打开弹窗" });
@@ -44,6 +43,12 @@ describe("Dialog", () => {
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "测试弹窗" })).not.toBeInTheDocument();
+    expect(opener).not.toHaveFocus();
+    const backdrop = document.querySelector<HTMLElement>(".backdrop");
+    expect(backdrop).toHaveAttribute("data-presence", "exiting");
+    expect(backdrop?.querySelector("section")).toHaveAttribute("inert");
+    if (backdrop) fireEvent.transitionEnd(backdrop);
+    await waitFor(() => expect(backdrop).not.toBeInTheDocument());
     expect(opener).toHaveFocus();
   });
 });

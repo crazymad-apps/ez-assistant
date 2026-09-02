@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { Icon } from "../../../components/Icon";
+import { Collapse } from "../../../components/Collapse";
+import { useId } from "react";
 import styles from "./index.module.scss";
 
 type ComposerSecondaryDrawerProps = Readonly<{
@@ -17,6 +19,7 @@ type ComposerSecondaryDrawerProps = Readonly<{
  * Goal 与 Queue 共享 header、展开间距和圆角接缝处理，业务组件只组合摘要、动作与正文。
  */
 export function ComposerSecondaryDrawer(props: ComposerSecondaryDrawerProps) {
+  const content_id = useId();
   return (
     <section
       aria-label={props.label}
@@ -26,6 +29,7 @@ export function ComposerSecondaryDrawer(props: ComposerSecondaryDrawerProps) {
     >
       <header className={styles.secondary_drawer_header}>
         <button
+          aria-controls={content_id}
           aria-expanded={props.open}
           className={styles.secondary_drawer_trigger}
           onClick={() => props.on_open_change(!props.open)}
@@ -36,7 +40,7 @@ export function ComposerSecondaryDrawer(props: ComposerSecondaryDrawerProps) {
         </button>
         {props.actions && <div className={styles.secondary_drawer_actions}>{props.actions}</div>}
       </header>
-      {props.open && props.children}
+      <Collapse id={content_id} open={props.open}>{props.children}</Collapse>
     </section>
   );
 }

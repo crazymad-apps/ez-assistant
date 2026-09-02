@@ -270,6 +270,9 @@ pub struct UserMessageSnapshot {
     pub input_id: Option<InputId>,
     pub text: String,
     pub attachment_ids: Vec<AttachmentId>,
+    /// 用户随本条消息提交的有序冻结引用。
+    #[serde(default)]
+    pub quotes: Vec<QuotedTextSnapshot>,
     #[serde(default)]
     pub source: ConversationInputSourceSnapshot,
     /// 用户接受输入时冻结的单个 Skill 标签。
@@ -277,6 +280,37 @@ pub struct UserMessageSnapshot {
     #[ts(optional)]
     pub skill: Option<crate::SkillActivationTagSnapshot>,
     pub created_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum QuotedTextSourceRoleSnapshot {
+    User,
+    Assistant,
+}
+
+/// Desktop 展示引用、提交和应用内来源定位所需的冻结内容。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct QuotedTextSnapshot {
+    pub quote_id: PartId,
+    pub exact: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub source_owner: ConversationOwner,
+    pub source_generation: u64,
+    pub source_message_id: MessageId,
+    pub text_start_utf16: u32,
+    pub text_end_utf16: u32,
+    pub source_role: QuotedTextSourceRoleSnapshot,
+    pub source_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_created_at_ms: Option<i64>,
+    /// Runtime 接受输入时核对 direct locator 后写入；false 不影响冻结内容。
+    #[serde(default)]
+    pub source_available: bool,
 }
 
 /// 用户对助手消息的反馈。
@@ -513,7 +547,20 @@ pub struct SessionUsageSnapshot {
     /// 主会话全部模型请求按 token 加权后的缓存命中率。
     #[serde(default)]
     pub overall_cache_hit_basis_points: Option<u16>,
+    /// 标题等不属于主 Agent Turn 的模型调用累计；尚无请求时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auxiliary: Option<AuxiliaryUsageSnapshot>,
     pub context: Option<ContextUsageSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct AuxiliaryUsageSnapshot {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 /// 一个子任务自身产生的用量；不与父会话或 sibling 聚合。
@@ -590,11 +637,33 @@ pub struct ApprovalQueueSnapshot {
     pub resolving_approval_id: Option<ApprovalId>,
 }
 
+/// 正式 Session 的 Workspace 当前名称与创建时冻结目录。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionWorkspaceSnapshot {
+    pub workspace_id: crate::WorkspaceId,
+    /// Workspace 当前名称；编辑后可立即更新。
+    pub label: String,
+    /// Session 创建时冻结的主目录。
+    pub primary_directory: String,
+    /// Session 创建时冻结的有序附加目录。
+    pub additional_directories: Vec<String>,
+    /// 当前 Workspace 目录是否仍与 Session 冻结目录一致。
+    pub directories_match_current: bool,
+}
+
 /// 主会话页面读取所需的组合投影。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SessionViewSnapshot {
     pub session: SessionSummary,
+    /// 当前进程中正在执行的标题旁路调用；重启后由 pending 事实按需重建。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title_generation: Option<crate::SessionTitleGenerationSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace: Option<SessionWorkspaceSnapshot>,
     /// 发起 clear/compact 时使用的当前权威 Conversation generation。
     pub conversation_generation: u64,
     pub composer_capabilities: ComposerCapabilitiesSnapshot,

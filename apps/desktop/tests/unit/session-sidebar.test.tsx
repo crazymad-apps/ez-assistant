@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApplicationSnapshot,
@@ -59,7 +59,7 @@ describe("SessionSidebar grouping", () => {
 
   it("lets the global new-session entry choose a workspace or an independent session", () => {
     const store = connectedStore();
-    const create_session = vi.spyOn(store, "createSession").mockResolvedValue();
+    const create_session = vi.spyOn(store, "openNewSessionDraft").mockImplementation(() => undefined);
 
     render(
       <RootStoreProvider store={store}>
@@ -72,8 +72,24 @@ describe("SessionSidebar grouping", () => {
     expect(create_session).toHaveBeenCalledWith("workspace-1");
 
     fireEvent.click(screen.getByRole("button", { name: "新对话" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "独立会话" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "未绑定工作空间" }));
     expect(create_session).toHaveBeenCalledWith(null);
+  });
+
+  it("shows a draft hint in menus without adding a Session row", () => {
+    const store = connectedStore();
+    store.openNewSessionDraft("workspace-1");
+    store.new_session_drafts.updateText("workspace:workspace-1", "尚未发送");
+
+    render(
+      <RootStoreProvider store={store}>
+        <SessionSidebar />
+      </RootStoreProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    expect(screen.getByRole("menuitem", { name: /project.*有草稿/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /尚未发送/ })).not.toBeInTheDocument();
   });
 
   it("keeps unbound sessions in a top-level disclosure independent from workspaces", () => {
@@ -115,7 +131,7 @@ describe("SessionSidebar grouping", () => {
 
   it("creates an unbound session from the top-level unbound section", () => {
     const store = connectedStore();
-    const create_session = vi.spyOn(store, "createSession").mockResolvedValue();
+    const create_session = vi.spyOn(store, "openNewSessionDraft").mockImplementation(() => undefined);
 
     render(
       <RootStoreProvider store={store}>
@@ -131,7 +147,6 @@ describe("SessionSidebar grouping", () => {
   it("confirms before removing a workspace without deleting its existing sessions", async () => {
     const store = connectedStore();
     const remove_workspace = vi.spyOn(store, "removeWorkspace").mockResolvedValue(true);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
 
     render(
       <RootStoreProvider store={store}>
@@ -141,15 +156,35 @@ describe("SessionSidebar grouping", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "project 工作空间操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "移除工作空间…" }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会删除本地目录或历史会话"));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("重新添加此目录后恢复显示"));
+    expect(screen.getByRole("dialog", { name: "移除工作空间“project”？" })).toBeVisible();
+    expect(screen.getByText("不会删除本地目录或历史会话。")).toBeVisible();
+    expect(screen.getByText(/重新添加此目录后恢复显示/)).toBeVisible();
     expect(remove_workspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     fireEvent.click(screen.getByRole("button", { name: "project 工作空间操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "移除工作空间…" }));
-    expect(remove_workspace).toHaveBeenCalledWith("workspace-1");
+    fireEvent.click(screen.getByRole("button", { name: "移除工作空间" }));
+    await waitFor(() => expect(remove_workspace).toHaveBeenCalledWith("workspace-1"));
+  });
 
-    confirm.mockRestore();
+  it("uses the Workspace label and opens the shared editor from its menu", () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    snapshot.workspaces[0] = { ...snapshot.workspaces[0], label: "团队知识库" };
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+
+    render(
+      <RootStoreProvider store={store}>
+        <SessionSidebar />
+      </RootStoreProvider>,
+    );
+
+    expect(screen.getByText("团队知识库")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "团队知识库 工作空间操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑工作空间…" }));
+
+    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1" });
   });
 
   it("hides a removed workspace and all of its sessions until it is restored", () => {
@@ -173,7 +208,7 @@ describe("SessionSidebar grouping", () => {
     expect(screen.queryByRole("button", { name: /^工作区会话/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "新对话" }));
     expect(screen.queryByRole("menuitem", { name: "project" })).not.toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "独立会话" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "未绑定工作空间" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "搜索会话" }));
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索会话名称" }), {
@@ -272,7 +307,9 @@ function applicationSnapshot(): ApplicationSnapshot {
     models: [],
     workspaces: [{
       workspace_id: "workspace-1",
+      label: "project",
       user_directory: "/workspace/project",
+      additional_directories: [],
       agent_directory: "/runtime/workspaces/1",
       lifecycle: "active",
       created_at_ms: 1,

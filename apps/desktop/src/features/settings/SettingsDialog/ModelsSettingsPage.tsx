@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from "../../../components/DropdownMenu";
 import { Icon } from "../../../components/Icon";
+import { PresenceBoundary } from "../../../components/Presence";
 import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";
 import type {
   ModelCatalogEntrySnapshot,
@@ -16,6 +17,7 @@ import type {
   SessionSummary,
 } from "../../../generated/assistant-protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { ConflictDialog, DeleteModelDialog } from "./ModelSettingsDialogs";
 import { SettingsMessages } from "./RuntimeSettingsPage";
 import { SettingsPageContainer } from "./SettingsPageContainer";
@@ -54,6 +56,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
   const [editing, setEditing] = useState<ModelConfiguration | "new" | null>(null);
   const [draft, setDraft] = useState<ModelDraft>(empty_draft);
   const [dirty, setDirty] = useState(false);
+  const [discard_open, setDiscardOpen] = useState(false);
   const [show_secret, setShowSecret] = useState(false);
   const [open_selector, setOpenSelector] = useState<"model" | "protocol" | "provider" | "vision" | null>(null);
   const [deleting, setDeleting] = useState<ModelConfiguration | null>(null);
@@ -93,7 +96,15 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
   }
 
   function cancelEdit() {
-    if (dirty && !window.confirm("放弃尚未保存的修改吗？")) return;
+    if (dirty) {
+      setDiscardOpen(true);
+      return;
+    }
+    discardEdit();
+  }
+
+  function discardEdit() {
+    setDiscardOpen(false);
     setEditing(null);
     setDraft(empty_draft);
     setDirty(false);
@@ -326,12 +337,28 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
           <button onClick={cancelEdit} type="button">取消</button>
           <button className={styles.primary_button} disabled={settings.pending_action !== null} onClick={() => void save()} type="button">保存</button>
         </footer>
+        <PresenceBoundary present={settings.configuration_conflict !== null}>
         {settings.configuration_conflict && (
           <ConflictDialog
             onCopy={() => void copyDraft()}
             onReload={() => void reloadAfterConflict()}
           />
         )}
+        </PresenceBoundary>
+        <PresenceBoundary present={discard_open}>
+          {discard_open && (
+            <SessionActionDialog
+              confirm_label="放弃修改"
+              is_danger
+              is_pending={false}
+              on_cancel={() => setDiscardOpen(false)}
+              on_confirm={discardEdit}
+              title="放弃未保存的模型修改？"
+            >
+              <p>当前表单尚未保存，继续后这些修改将丢失。</p>
+            </SessionActionDialog>
+          )}
+        </PresenceBoundary>
       </SettingsPageContainer>
     );
   }
@@ -405,6 +432,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
         {!settings.models.length && !settings.loading && <p className={styles.empty_models}>尚未配置模型。</p>}
       </div>
       <SettingsMessages />
+      <PresenceBoundary present={deleting !== null}>
       {deleting && (
         <DeleteModelDialog
           blockers={deletionBlockers(deleting, active_sessions)}
@@ -417,6 +445,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
           replacements={replacementCandidates(deleting)}
         />
       )}
+      </PresenceBoundary>
     </SettingsPageContainer>
   );
 });

@@ -225,6 +225,11 @@ impl RuntimeConversationRecall {
             .await
             .map_err(map_read_error)?
             .ok_or(MemoryRecallError::ReferenceStale)?;
+        if location.generation != payload.generation
+            || location.message_ordinal != payload.message_ordinal
+        {
+            return Err(MemoryRecallError::ReferenceStale);
+        }
         let ordinal = usize::try_from(location.message_ordinal)
             .map_err(|_| MemoryRecallError::ReferenceStale)?;
 
@@ -411,6 +416,7 @@ fn searchable_message(message: &ConversationMessage) -> Option<(&MessageId, &'st
                             .iter()
                             .map(|file| file.original_name.clone()),
                     ),
+                    UserPart::QuotedText(quoted) => parts.push(quoted.exact.clone()),
                     UserPart::Injected(_) | UserPart::InternalContext(_) => {}
                 }
             }

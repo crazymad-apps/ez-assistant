@@ -38,6 +38,92 @@ describe("NavigationStore", () => {
       "session-3",
     ]);
   });
+
+  it("selects a new-session draft without adding a fake conversation history entry", () => {
+    const store = new NavigationStore();
+    store.selectSession("session-1");
+    const before = [...store.conversation_history];
+
+    store.selectDraft("workspace:workspace-1");
+
+    expect(store.selected_session_id).toBeNull();
+    expect(store.selected_draft_key).toBe("workspace:workspace-1");
+    expect([...store.conversation_history]).toEqual(before);
+    store.selectSession("session-1");
+    expect(store.selected_draft_key).toBeNull();
+  });
+
+  it("keeps preferred sidebar state separate from narrow-window effective visibility", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(900);
+
+    expect(store.left_sidebar_open).toBe(true);
+    expect(store.right_sidebar_open).toBe(true);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(false);
+
+    store.toggleRightSidebar();
+    expect(store.left_sidebar_open).toBe(true);
+    expect(store.right_sidebar_open).toBe(true);
+    expect(store.effective_left_sidebar_open).toBe(false);
+    expect(store.effective_right_sidebar_open).toBe(true);
+
+    store.setViewportWidth(1400);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(true);
+  });
+
+  it("clamps resized widths without treating a closed sidebar as zero preference", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(2000);
+    store.setSidebarWidth("left", 999);
+    store.setSidebarWidth("right", 999);
+    expect(store.left_sidebar_width).toBe(420);
+    expect(store.right_sidebar_width).toBe(800);
+
+    store.toggleLeftSidebar();
+    expect(store.left_sidebar_width).toBe(420);
+    store.toggleLeftSidebar();
+    expect(store.effective_left_sidebar_width).toBe(420);
+
+    store.resetSidebarLayout();
+    expect(store.left_sidebar_width).toBe(286);
+    expect(store.right_sidebar_width).toBe(326);
+  });
+
+  it("keeps preferred sidebar widths fixed and hides the lower-priority sidebar when they no longer fit", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(2000);
+    store.setSidebarWidth("right", 760);
+
+    store.setViewportWidth(1000);
+
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(false);
+    expect(store.effective_left_sidebar_width).toBe(286);
+    expect(store.effective_right_sidebar_width).toBe(0);
+    expect(store.right_sidebar_width).toBe(760);
+
+    store.setViewportWidth(2000);
+    expect(store.effective_left_sidebar_width).toBe(286);
+    expect(store.effective_right_sidebar_width).toBe(760);
+  });
+
+  it("hides the right sidebar first and then the left at fixed-width thresholds", () => {
+    const store = new NavigationStore();
+
+    store.setViewportWidth(1_112);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(true);
+
+    store.setViewportWidth(1_111);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(false);
+
+    store.setViewportWidth(785);
+    expect(store.effective_left_sidebar_open).toBe(false);
+    expect(store.effective_right_sidebar_open).toBe(false);
+  });
 });
 
 describe("ConversationSearchStore", () => {

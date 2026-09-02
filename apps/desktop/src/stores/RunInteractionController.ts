@@ -9,6 +9,7 @@ import type {
   InputId,
   RunId,
   ReasoningEffortKey,
+  QuotedTextSnapshot,
   SessionId,
   SubmitInputMode,
 } from "../generated/assistant-protocol";
@@ -63,10 +64,16 @@ export class RunInteractionController {
     attachment_ids: readonly AttachmentId[] = [],
     mode: SubmitInputMode = "normal",
     skill_name: string | null = null,
+    quotes: readonly QuotedTextSnapshot[] = [],
   ): Promise<boolean> {
     const { connection, runtime, state } = this.dependencies;
     const client = runtime.client;
-    if (!client || connection.state !== "connected" || state.composer_pending || !message.trim()) {
+    if (
+      !client
+      || connection.state !== "connected"
+      || state.composer_pending
+      || (!message.trim() && attachment_ids.length === 0 && quotes.length === 0)
+    ) {
       return false;
     }
     state.composer_pending = true;
@@ -80,6 +87,7 @@ export class RunInteractionController {
           variant,
           mode,
           attachment_ids: [...attachment_ids],
+          quotes: [...quotes],
           skill_name: skill_name ?? undefined,
           idempotency_key: createIdempotencyKey(),
         },

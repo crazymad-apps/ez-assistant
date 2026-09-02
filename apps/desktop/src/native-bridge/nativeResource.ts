@@ -5,6 +5,8 @@ import type {
   MessageId,
   ResourceRefId,
   SessionId,
+  SessionMaterializationManifest,
+  SessionMaterializationResult,
   UploadAttachmentResult,
 } from "../generated/assistant-protocol";
 
@@ -12,6 +14,8 @@ export type AttachmentSelection = Readonly<{
   selection_id: string;
   original_name: string;
   size_bytes: number;
+  media_type?: string | null;
+  origin?: "file_picker" | "clipboard";
 }>;
 
 export type AttachmentPreview = Readonly<{
@@ -37,6 +41,17 @@ export async function chooseAttachmentFiles(): Promise<readonly AttachmentSelect
   return invoke<AttachmentSelection[]>("choose_attachment_files").catch(normalizeResourceFailure);
 }
 
+export async function stageClipboardImage(file: File): Promise<AttachmentSelection> {
+  ensureDesktopBridge();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return invoke<AttachmentSelection>("stage_clipboard_image", bytes, {
+    headers: {
+      "x-ez-media-type": file.type,
+      "x-ez-original-name": encodeURIComponent(file.name),
+    },
+  }).catch(normalizeResourceFailure);
+}
+
 export async function releaseAttachmentSelection(selection_id: string): Promise<void> {
   ensureDesktopBridge();
   await invoke("release_attachment_selection", { selectionId: selection_id }).catch(normalizeResourceFailure);
@@ -60,6 +75,17 @@ export async function uploadSelectedAttachment(
   }).catch(normalizeResourceFailure);
 }
 
+export async function materializeNewSession(
+  manifest: SessionMaterializationManifest,
+  operation_id: string,
+): Promise<SessionMaterializationResult> {
+  ensureDesktopBridge();
+  return invoke<SessionMaterializationResult>("materialize_new_session", {
+    manifest,
+    operationId: operation_id,
+  }).catch(normalizeResourceFailure);
+}
+
 export async function previewAttachment(
   session_id: SessionId,
   attachment_id: AttachmentId,
@@ -68,6 +94,13 @@ export async function previewAttachment(
   return invoke<AttachmentPreview>("preview_attachment", {
     sessionId: session_id,
     attachmentId: attachment_id,
+  }).catch(normalizeResourceFailure);
+}
+
+export async function previewAttachmentSelection(selection_id: string): Promise<AttachmentPreview> {
+  ensureDesktopBridge();
+  return invoke<AttachmentPreview>("preview_attachment_selection", {
+    selectionId: selection_id,
   }).catch(normalizeResourceFailure);
 }
 

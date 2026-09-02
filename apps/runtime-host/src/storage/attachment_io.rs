@@ -34,27 +34,6 @@ pub(super) fn validate_original_name(name: &str) -> StorageResult<()> {
     Ok(())
 }
 
-/// 只用于稳定视图的可读文件名；原始名称仍完整保存在数据库中。
-pub(super) fn safe_display_name(name: &str) -> String {
-    let mut result = String::new();
-    for character in name.chars() {
-        let character = if character.is_control() {
-            '_'
-        } else {
-            character
-        };
-        if result.len() + character.len_utf8() > 180 {
-            break;
-        }
-        result.push(character);
-    }
-    if result.is_empty() || result == "." || result == ".." {
-        "attachment".to_owned()
-    } else {
-        result
-    }
-}
-
 const MAX_BLOB_EXTENSION_BYTES: usize = 180;
 
 fn original_extension(original_name: &str) -> Option<&str> {
@@ -194,14 +173,30 @@ fn hash_blob_file(path: &Path, original_name: &str) -> StorageResult<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+pub(super) fn validate_staging_hash(
+    path: &Path,
+    original_name: &str,
+    expected_hash: &str,
+) -> StorageResult<()> {
+    if hash_blob_file(path, original_name)? != expected_hash {
+        return Err(StoreError::new(
+            StoreErrorKind::InvalidInput,
+            "attachment staging hash is invalid",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn stable_view_path(
     attachment_directory: &Path,
     attachment_id: &AttachmentId,
     original_name: &str,
 ) -> PathBuf {
-    attachment_directory
-        .join(attachment_id.as_str())
-        .join(safe_display_name(original_name))
+    assistant_runtime::attachment_stable_view_path(
+        attachment_directory,
+        attachment_id,
+        original_name,
+    )
 }
 
 pub(super) fn relative_blob_link(blob_hash: &str, original_name: &str) -> PathBuf {
