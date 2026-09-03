@@ -499,6 +499,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: Some("review".to_owned()),
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -506,7 +507,12 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
     let queue =
         crate::runtime::product::queue_snapshot(&controller, &Default::default()).expect("queue");
     assert_eq!(
-        queue.items[0].skill.as_ref().map(|tag| tag.name.as_str()),
+        queue.items[0]
+            .as_message()
+            .expect("message")
+            .skill
+            .as_ref()
+            .map(|tag| tag.name.as_str()),
         Some("review")
     );
     {
@@ -541,6 +547,8 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         crate::runtime::product::queue_snapshot(&controller, &Default::default())
             .expect("queue")
             .items[0]
+            .as_message()
+            .expect("message")
             .skill
             .as_ref()
             .map(|tag| tag.name.as_str()),
@@ -645,6 +653,7 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -733,6 +742,7 @@ async fn goal_and_skill_keep_objective_clean_and_internal_boundaries_ordered() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: Some("review".to_owned()),
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -832,6 +842,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

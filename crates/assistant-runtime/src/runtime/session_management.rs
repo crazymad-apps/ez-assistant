@@ -64,6 +64,8 @@ impl AssistantRuntime {
             work_plan,
             source_goal,
             source_skill_activations,
+            source_mcp_selections,
+            source_commands,
         ) = {
             let state = source.lock_state()?;
             (
@@ -87,6 +89,8 @@ impl AssistantRuntime {
                 }),
                 state.goal.clone(),
                 state.skill_activations.clone(),
+                state.mcp_selections.clone(),
+                state.commands.values().cloned().collect::<Vec<_>>(),
             )
         };
         if source_generation != request.expected_generation {
@@ -114,7 +118,7 @@ impl AssistantRuntime {
         ) {
             end += 1;
         }
-        let conversation = ConversationSnapshot::new(current.messages[..end].to_vec());
+        let mut conversation = ConversationSnapshot::new(current.messages[..end].to_vec());
         conversation
             .validate_tool_exchange_pairs()
             .map_err(|_| RuntimeError::InvalidRequest {
@@ -237,6 +241,58 @@ impl AssistantRuntime {
                 })
             })
             .collect::<RuntimeResult<Vec<_>>>()?;
+        let mcp_selections = source_mcp_selections
+            .into_iter()
+            .filter(|selection| fork_message_ids.contains(selection.message_id.as_str()))
+            .map(|selection| {
+                Ok(crate::StoredMcpSelection {
+                    selection_id: crate::id::generate("mcp-selection").map_err(|_| {
+                        RuntimeError::InternalStateUnavailable {
+                            component: "fork MCP selection id random source",
+                        }
+                    })?,
+                    session_id: session_id.clone(),
+                    input_id: None,
+                    message_id: selection.message_id,
+                    server_key: selection.server_key,
+                    display_name: selection.display_name,
+                    created_at_ms: selection.created_at_ms,
+                })
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
+        let mut session_commands = Vec::new();
+        for source_command in source_commands.into_iter().filter(|command| {
+            command.state == crate::StoredSessionCommandState::Committed
+                && fork_message_ids.contains(command.user_message_id.as_str())
+        }) {
+            let message_id = crate::run::allocate_message_id()?;
+            for message in &mut conversation.messages {
+                if let ConversationMessage::User(user) = message
+                    && user.id == source_command.user_message_id
+                {
+                    user.id = message_id.clone();
+                }
+            }
+            let input_id =
+                assistant_protocol::InputId::new(crate::id::generate("i").map_err(|_| {
+                    RuntimeError::InternalStateUnavailable {
+                        component: "fork session command id random source",
+                    }
+                })?)
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "fork session command id",
+                })?;
+            session_commands.push(crate::ForkedSessionCommand {
+                source_input_id: source_command.input_id.clone(),
+                command: crate::StoredSessionCommand {
+                    input_id,
+                    session_id: session_id.clone(),
+                    idempotency_key: None,
+                    user_message_id: message_id,
+                    ..source_command
+                },
+            });
+        }
         let forked_goal = source_goal
             .filter(|goal| {
                 conversation.messages.iter().any(|message| {
@@ -275,6 +331,8 @@ impl AssistantRuntime {
                 attachments,
                 tool_images,
                 skill_activations,
+                mcp_selections,
+                session_commands,
                 work_plan,
                 goal: forked_goal,
             })
@@ -301,6 +359,8 @@ impl AssistantRuntime {
             stored.session,
             Vec::new(),
             Vec::new(),
+            stored.session_commands,
+            stored.mcp_selections,
             work_plan,
             goal,
             stored.skill_activations,
@@ -1115,6 +1175,8 @@ impl AssistantRuntime {
                 recall_reference_codec: self.recall_reference_codec.clone(),
                 controller_tools: self.controller_tool_coordinator(),
                 output_dispatcher: self.output_dispatcher.clone(),
+                mcp_registry: self.mcp_service.registry.clone(),
+                mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             },
             RunAuthorizationInput {
                 permission_coordinator: self.permission_coordinator.clone(),
@@ -1167,6 +1229,7 @@ impl AssistantRuntime {
                     cross_session: None,
                     channel_source: Some(crate::InputChannelSource::desktop_text()),
                     skill_activation: None,
+                    mcp_selection: None,
                     approval_mode,
                     message: new_message.clone(),
                     new_goal: None,
@@ -1193,10 +1256,16 @@ impl AssistantRuntime {
             state
                 .skill_activations
                 .retain(|activation| !removed_user_ids.contains(&activation.message_id));
-            state.session_inputs.clear();
+            state
+                .mcp_selections
+                .retain(|selection| !removed_user_ids.contains(&selection.message_id));
+            state
+                .commands
+                .retain(|_, command| !removed_user_ids.contains(&command.user_message_id));
+            state.queue_item_ids.clear();
             state.goal_inputs.clear();
             state.goal = rewritten_goal.map(|(goal, _)| goal);
-            state.resume_required = state.goal.is_some() || !state.session_inputs.is_empty();
+            state.resume_required = state.goal.is_some() || !state.queue_item_ids.is_empty();
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
             state.message_count = replacement_message_count;
@@ -1206,7 +1275,7 @@ impl AssistantRuntime {
             state.current_variant = rewritten.input.agent_variant;
             state.runs.insert(rewritten.run.run_id.clone(), run);
             state
-                .session_inputs
+                .queue_item_ids
                 .push_back(rewritten.input.input_id.clone());
             state.inputs.insert(
                 rewritten.input.input_id.clone(),

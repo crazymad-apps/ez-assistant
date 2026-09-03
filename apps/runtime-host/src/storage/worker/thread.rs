@@ -157,6 +157,9 @@ pub(super) fn run_worker(
             Command::AcceptInput { input, reply } => {
                 let _ = reply.send(engine.accept_input(*input));
             }
+            Command::AcceptSessionControl { command, reply } => {
+                let _ = reply.send(engine.accept_session_command(*command));
+            }
             Command::CancelQueuedInput {
                 session_id,
                 input_id,
@@ -172,6 +175,9 @@ pub(super) fn run_worker(
             }
             Command::CommitUserMessage { commit, reply } => {
                 let _ = reply.send(engine.commit_user_message(commit));
+            }
+            Command::CommitSessionControl { commit, reply } => {
+                let _ = reply.send(engine.commit_session_command(*commit));
             }
             Command::BeginToolExchange { pending, reply } => {
                 let _ = reply.send(engine.begin_tool_exchange(pending));

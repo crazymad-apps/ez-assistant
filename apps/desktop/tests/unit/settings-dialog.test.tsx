@@ -1,5 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { runInAction } from "mobx";
 import { SettingsDialog } from "../../src/features/settings/SettingsDialog";
 import type {
   ApplicationSnapshot,
@@ -20,6 +22,196 @@ afterEach(() => {
 });
 
 describe("SettingsDialog model management", () => {
+  it("manages MCP configuration without session refresh actions", () => {
+    const store = mcpSettingsStore();
+    const enqueue = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    renderDialog(store);
+    expect(screen.getByRole("heading", { name: "MCP" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /^MCP$/ }).querySelector('[data-icon="plugin"]')).toBeInTheDocument();
+    expect(screen.queryByText("这里配置的服务可供所有会话使用")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加入刷新队列" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看队列" })).not.toBeInTheDocument();
+    expect(screen.queryByText("配置已保存，刷新后才会应用到会话。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取配置" }));
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("preserves redacted MCP fields and applies explicit secret changes", async () => {
+    const store = mcpSettingsStore();
+    const mutate = vi.spyOn(store.settings.mcp, "mutate").mockResolvedValue(true);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    expect(screen.getByRole("textbox", { name: "显示名称" })).toHaveFocus();
+    expect(screen.getByRole("textbox", { name: "启动命令" })).toHaveValue("");
+    expect(screen.getByLabelText("环境变量值 1")).toHaveValue("");
+    fireEvent.change(screen.getByRole("textbox", { name: "显示名称" }), { target: { value: "GitHub 新名称" } });
+    fireEvent.change(screen.getByLabelText("环境变量值 1"), { target: { value: "new-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("mcp-r1", expect.objectContaining({ type: "upsert", payload: { server: expect.objectContaining({
+      display_name: "GitHub 新名称", transport: { type: "stdio", payload: { command: { mode: "keep" }, args: { mode: "keep" }, cwd: { mode: "keep" }, environment: { TOKEN: { mode: "replace", value: "new-secret" } } } },
+    }) } })));
+    expect(screen.queryByDisplayValue("new-secret")).not.toBeInTheDocument();
+  });
+
+  it("shows long tool descriptions as non-blocking warnings in the list and connection test", () => {
+    const store = mcpSettingsStore();
+    const diagnostic = { server_key: "github", code: "tool_description_long" as const, field_path: "tools/batch_design/description", message: "Tool batch_design description is 14045 bytes; retained in full and available" };
+    store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, needs_refresh: false, diagnostics: [diagnostic], servers: store.settings.mcp.configuration!.servers.map(server => ({ ...server, needs_refresh: false, runtime_state: "connected", tool_count: 13 })) };
+    store.settings.mcp.test_result = { outcome: "success", stage: "complete", elapsed_ms: 42, tool_count: 13, diagnostic };
+    renderDialog(store);
+    expect(screen.getByRole("status")).toHaveTextContent("警告：github：Tool batch_design");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText(/已连接 · 13 个工具/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    expect(screen.getByText(/连接测试成功 · 42 ms · 13 个工具/)).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("警告：Tool batch_design");
+    expect(screen.getByRole("button", { name: /^保存$/ })).toBeEnabled();
+  });
+
+  it("uses shared MCP field selectors and submits explicit replace and remove modes", async () => {
+    const store = mcpSettingsStore();
+    const mutate = vi.spyOn(store.settings.mcp, "mutate").mockResolvedValue(true);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+
+    const command_mode = screen.getByRole("button", { name: "启动命令修改方式" });
+    expect(command_mode).toHaveTextContent("保持原值");
+    expect(command_mode).toHaveAttribute("aria-haspopup", "listbox");
+    fireEvent.click(command_mode);
+    const command_options = screen.getByRole("listbox", { name: "启动命令修改方式" });
+    expect(within(command_options).queryByRole("option", { name: "移除" })).not.toBeInTheDocument();
+    fireEvent.click(within(command_options).getByRole("option", { name: "替换" }));
+    expect(command_mode).toHaveFocus();
+    expect(screen.getByRole("textbox", { name: "启动命令" })).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "/local/mcp-server" } });
+
+    const cwd_mode = screen.getByRole("button", { name: "工作目录 cwd修改方式" });
+    fireEvent.click(cwd_mode);
+    fireEvent.click(within(screen.getByRole("listbox", { name: "工作目录 cwd修改方式" })).getByRole("option", { name: "移除" }));
+    expect(cwd_mode).toHaveTextContent("移除");
+    expect(screen.getByRole("textbox", { name: "工作目录 cwd" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("mcp-r1", expect.objectContaining({
+      type: "upsert", payload: { server: expect.objectContaining({ transport: { type: "stdio", payload: {
+        command: { mode: "replace", value: "/local/mcp-server" }, args: { mode: "keep" }, cwd: { mode: "remove" }, environment: { TOKEN: { mode: "keep" } },
+      } } }) },
+    })));
+  });
+
+  it("keeps HTTP URL redacted when its shared selector returns to keep", async () => {
+    const store = mcpSettingsStore();
+    store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, servers: store.settings.mcp.configuration!.servers.map(server => ({
+      ...server, transport: "streamable_http", target_summary: "https://mcp.example.test", environment_keys: [], header_keys: ["Authorization"],
+    })) };
+    const mutate = vi.spyOn(store.settings.mcp, "mutate").mockResolvedValue(true);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    const url_mode = screen.getByRole("button", { name: "服务 URL修改方式" });
+    fireEvent.click(url_mode);
+    const url_options = screen.getByRole("listbox", { name: "服务 URL修改方式" });
+    expect(within(url_options).queryByRole("option", { name: "移除" })).not.toBeInTheDocument();
+    fireEvent.click(within(url_options).getByRole("option", { name: "替换" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "服务 URL" }), { target: { value: "https://mcp.example.test/new" } });
+    fireEvent.click(url_mode);
+    fireEvent.click(within(screen.getByRole("listbox", { name: "服务 URL修改方式" })).getByRole("option", { name: "保持原值" }));
+    expect(screen.getByRole("textbox", { name: "服务 URL" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "服务 URL" })).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("mcp-r1", expect.objectContaining({
+      type: "upsert", payload: { server: expect.objectContaining({ transport: { type: "streamable_http", payload: {
+        url: { mode: "keep" }, headers: { Authorization: { mode: "keep" } },
+      } } }) },
+    })));
+  });
+
+  it("clears a previous connection result when credentials change", () => {
+    const store = mcpSettingsStore();
+    store.settings.mcp.test_result = { outcome: "success", stage: "complete", elapsed_ms: 42, tool_count: 0 };
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    expect(screen.getByText(/连接测试成功 · 42 ms · 0 个工具/)).toBeVisible();
+    fireEvent.change(screen.getByLabelText("环境变量值 1"), { target: { value: "changed-secret" } });
+    expect(screen.queryByText(/连接测试成功/)).not.toBeInTheDocument();
+  });
+
+  it("binds MCP deletion to the revision the user reviewed", async () => {
+    const user = userEvent.setup();
+    const store = mcpSettingsStore();
+    const mutate = vi.spyOn(store.settings.mcp, "mutate").mockResolvedValue(true);
+    renderDialog(store);
+    await user.click(screen.getByRole("button", { name: /GitHub github/ }));
+    expect(screen.queryByText("已有敏感字段不会回显；保存不会立即连接服务。")).not.toBeInTheDocument();
+    const heading = screen.getByRole("heading", { name: /^GitHub$/ });
+    const delete_button = screen.getByRole("button", { name: "删除服务…" });
+    expect(delete_button.closest("header")).toBe(heading.closest("header"));
+    await user.click(delete_button);
+    await user.click(within(screen.getByRole("dialog", { name: "删除 MCP 服务？" })).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(delete_button).toHaveFocus());
+    await user.click(delete_button);
+    runInAction(() => { store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, revision: "mcp-r2" }; });
+    fireEvent.click(screen.getByRole("button", { name: /^删除服务$/ }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("mcp-r1", { type: "remove", payload: { server_key: "github" } }));
+  });
+
+  it("hides MCP header deletion for new servers and disables it during editing operations", async () => {
+    const store = mcpSettingsStore();
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    expect(screen.queryByRole("button", { name: "删除服务…" })).not.toBeInTheDocument();
+    expect(screen.queryByText("已有敏感字段不会回显；保存不会立即连接服务。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回 MCP 列表" }));
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    const delete_button = screen.getByRole("button", { name: "删除服务…" });
+    runInAction(() => { store.settings.mcp.testing = true; });
+    await waitFor(() => expect(delete_button).toBeDisabled());
+    runInAction(() => { store.settings.mcp.testing = false; store.settings.pending_action = "mcp:save"; });
+    await waitFor(() => expect(delete_button).toBeDisabled());
+    runInAction(() => { store.settings.pending_action = null; });
+    await waitFor(() => expect(delete_button).toBeEnabled());
+  });
+
+  it("previews imports with same-name replacement unchecked by default", async () => {
+    const store = mcpSettingsStore();
+    vi.spyOn(store.settings.mcp, "previewImport").mockResolvedValue({ diagnostics: [], entries: [
+      { server_key: "github", display_name: "GitHub", transport: "stdio", conflicts_with_existing: true, warnings: [] },
+      { server_key: "other", display_name: "Other", transport: "streamable_http", conflicts_with_existing: false, warnings: ["extension"] },
+    ] });
+    const mutate = vi.spyOn(store.settings.mcp, "mutate").mockResolvedValue(true);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: "导入配置" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "MCP 配置 JSON" }), { target: { value: '{"mcpServers":{}}' } });
+    fireEvent.click(screen.getByRole("button", { name: "预览导入" }));
+    expect(await screen.findByRole("checkbox", { name: "替换 github" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "导入 1 个服务" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("mcp-r1", { type: "import", payload: { document: '{"mcpServers":{}}', replace_server_keys: [] } }));
+  });
+
+  it("keeps a stale MCP snapshot read-only and gates unsupported Runtime versions", () => {
+    const store = mcpSettingsStore();
+    store.settings.mcp.stale = true;
+    const { unmount } = renderDialog(store);
+    expect(screen.getByRole("button", { name: "添加服务" })).toBeDisabled();
+    expect(screen.getByText(/列表已过期/)).toBeVisible();
+    unmount();
+    store.projection.application!.capabilities.mcp_management = false;
+    renderDialog(store);
+    expect(screen.getByText(/当前运行时不支持 MCP 管理/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "添加服务" })).not.toBeInTheDocument();
+  });
+
+  it("asks before abandoning MCP changes and cancels connection tests on leave", async () => {
+    const store = mcpSettingsStore();
+    const cancel = vi.spyOn(store.settings.mcp, "cancelTest");
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: /GitHub github/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "显示名称" }), { target: { value: "Changed" } });
+    fireEvent.click(screen.getByRole("button", { name: "返回 MCP 列表" }));
+    expect(screen.getByRole("dialog", { name: "放弃未保存的修改？" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "MCP" })).toBeVisible());
+    expect(cancel).toHaveBeenCalled();
+  });
   it("keeps Runtime diagnostics and lifecycle controls compact", () => {
     const store = settingsStore();
     store.settings.page = "runtime";
@@ -150,8 +342,35 @@ describe("SettingsDialog model management", () => {
     expect(screen.queryByText("文件与启停变更仅对新会话生效。")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "技能工作区范围" })).toHaveTextContent("仅用户根目录");
     expect(screen.getByText("检查实现")).toBeVisible();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "启用 review" }));
     expect(toggle).toHaveBeenCalledWith("review", false);
+  });
+
+  it("keeps skill row actions separate and locks toggles while a change is pending", async () => {
+    const store = settingsStore();
+    store.settings.page = "skills";
+    store.settings.skill_management = {
+      available: true,
+      skills: [
+        { name: "review", description: "检查实现", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" },
+        { name: "disabled-skill", description: "", source: "user_agents", model_invocable: true, user_invocable: false, enabled: false, health: "disabled" },
+      ],
+      diagnostics: [],
+    };
+    const load_detail = vi.spyOn(store.settings, "loadSkillDetail").mockResolvedValue();
+    renderDialog(store);
+
+    const row = screen.getByRole("button", { name: /disabled-skill/ });
+    expect(within(row).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(row).getByText("暂无描述")).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "启用 disabled-skill" })).not.toBeChecked();
+    runInAction(() => { store.settings.pending_skill_name = "review"; });
+    await waitFor(() => {
+      for (const checkbox of screen.getAllByRole("checkbox")) expect(checkbox).toBeDisabled();
+    });
+    expect(row).toBeEnabled();
+    fireEvent.click(row);
+    expect(load_detail).toHaveBeenCalledWith("disabled-skill");
   });
 
   it("moves the summary into the description row and renders the skill body", () => {
@@ -324,6 +543,30 @@ describe("SettingsDialog model management", () => {
 });
 
 describe("SettingsDialog permission management", () => {
+  it.each(["tool", "server", "all"] as const)("edits and round-trips %s MCP permissions using shared controls", async (scope) => {
+    const store = settingsStore();
+    store.settings.page = "permissions";
+    const document = permissionDocument({ type: "session", payload: { session_id: "session-1" } }, true);
+    document.rules = [{ id: "existing-mcp", effect: "ask", variants: ["build", "plan"], matcher: { type: "mcp", payload: {
+      server: scope === "all" ? { type: "any" } : { type: "exact", payload: { server_key: "github" } },
+      tool: scope === "tool" ? { type: "exact", payload: { tool_name: "create_issue" } } : { type: "any" },
+    } } }];
+    store.settings.permission_documents = [document];
+    const save = vi.spyOn(store.settings, "replacePermissionDocument").mockResolvedValue(false);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole("button", { name: "编辑规则" }));
+    expect(screen.getByRole("button", { name: "选择匹配类型" })).toHaveTextContent("MCP 工具");
+    if (scope !== "all") expect(screen.getByRole("textbox", { name: "服务 key" })).toHaveValue("github");
+    if (scope === "tool") expect(screen.getByRole("textbox", { name: "原始工具名称" })).toHaveValue("create_issue");
+    fireEvent.click(screen.getByRole("button", { name: "保存规则" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(document.scope, document.revision, { schema_version: 1, rules: document.rules }));
+    expect(screen.getByRole("button", { name: "选择 MCP 匹配范围" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "选择 MCP 匹配范围" }));
+    fireEvent.click(screen.getByRole("option", { name: "全部 MCP 工具" }));
+    expect(screen.queryByRole("textbox", { name: "服务 key" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "原始工具名称" })).not.toBeInTheDocument();
+  });
+
   it("uses shared selection popovers and keeps scope tabs concise", () => {
     const store = settingsStore();
     store.settings.page = "permissions";
@@ -388,6 +631,21 @@ function settingsStore(): RootStore {
     issues: [],
   };
   store.settings.model_catalog = modelCatalog();
+  return store;
+}
+
+function mcpSettingsStore(): RootStore {
+  const store = settingsStore();
+  store.settings.page = "mcp";
+  const session = modelSession(null);
+  store.projection.application = applicationWithSession(session);
+  store.navigation.selectSession(session.session_id, false);
+  store.settings.mcp.configuration = { revision: "mcp-r1", needs_refresh: true, diagnostics: [], servers: [{
+    server_key: "github", display_name: "GitHub", description: "管理 Issue", transport: "stdio", enabled: true,
+    runtime_state: "unavailable", tool_count: 0, needs_refresh: true, target_summary: "server",
+    environment_keys: ["TOKEN"], header_keys: [], startup_timeout_ms: null, tool_timeout_ms: null,
+  }] };
+  vi.spyOn(store.settings.mcp, "load").mockResolvedValue();
   return store;
 }
 
@@ -456,7 +714,7 @@ function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
     capabilities: {
-      conversation_paging: true,
+      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
       tool_detail: true,
       queue_control: true,
       approval_queue: true,

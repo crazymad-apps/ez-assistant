@@ -3,7 +3,7 @@
 use std::{collections::HashSet, fs, path::Path};
 
 use agent_types::UserPart;
-use assistant_protocol::{ConversationOwner, SessionTitleOrigin};
+use assistant_protocol::{ConversationOwner, InputId, SessionTitleOrigin};
 use assistant_runtime::{
     AcceptedInput, NewStoredSession, NewStoredSessionMaterialization, StoreError, StoreErrorKind,
     StoredAttachment, StoredAttachmentState, StoredConversationState, StoredInput,
@@ -183,6 +183,10 @@ impl StorageEngine {
                 .into_iter()
                 .filter(|attachment| attachment.session_id == existing.session_id)
                 .collect::<Vec<_>>();
+            let existing_selection = self
+                .load_mcp_input_selections()?
+                .into_iter()
+                .find(|selection| selection.input_id.as_ref() == Some(&input.input_id));
             let persisted_message = input.queued_message.clone().or_else(|| {
                 self.load_conversation(&existing.session_id)
                     .ok()
@@ -201,13 +205,23 @@ impl StorageEngine {
                     })
             });
             cleanup_staging(&materialization);
-            if !materialization_semantically_matches(
-                &existing,
-                &attachments,
-                &input,
-                persisted_message.as_ref(),
-                &materialization,
-            ) {
+            let selection_matches = existing_selection
+                .as_ref()
+                .map(|selection| (&selection.server_key, selection.display_name.as_str()))
+                == materialization
+                    .input
+                    .mcp_selection
+                    .as_ref()
+                    .map(|selection| (&selection.server_key, selection.display_name.as_str()));
+            if !selection_matches
+                || !materialization_semantically_matches(
+                    &existing,
+                    &attachments,
+                    &input,
+                    persisted_message.as_ref(),
+                    &materialization,
+                )
+            {
                 return Err(super::conflict(
                     "materialization key was reused with different content",
                 ));
@@ -425,6 +439,30 @@ impl StorageEngine {
                     ],
                 )
                 .map_err(|source| database_write_error("input could not be accepted", source))?;
+            if let Some(selection) = materialization.input.mcp_selection.as_ref() {
+                transaction
+                    .execute(
+                        "INSERT INTO mcp_input_selections (
+                            selection_id, session_id, input_id, message_id,
+                            server_key, display_name, created_at_ms
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            selection.selection_id.as_str(),
+                            selection.session_id.as_str(),
+                            selection.input_id.as_ref().map(InputId::as_str),
+                            selection.message_id.as_str(),
+                            selection.server_key.as_str(),
+                            selection.display_name.as_str(),
+                            selection.created_at_ms,
+                        ],
+                    )
+                    .map_err(|source| {
+                        database_write_error(
+                            "materialized MCP selection could not be accepted",
+                            source,
+                        )
+                    })?;
+            }
             transaction
                 .execute(
                     "INSERT INTO runs (
@@ -507,6 +545,15 @@ fn validate_materialization(value: &NewStoredSessionMaterialization) -> StorageR
     )
     .map_err(|_| invalid_input("materialized input message is invalid"))?;
     validate_new_input_activation(&value.input)?;
+    if let Some(selection) = value.input.mcp_selection.as_ref()
+        && (selection.session_id != value.input.session_id
+            || selection.input_id.as_ref() != Some(&value.input.input_id)
+            || selection.message_id != value.input.message.id
+            || selection.display_name.trim().is_empty()
+            || selection.display_name.len() > 128)
+    {
+        return Err(invalid_input("materialized MCP selection is inconsistent"));
+    }
     if value.input.goal_binding.is_some() != value.input.new_goal.is_some() {
         return Err(invalid_input(
             "materialized Goal binding does not match Goal creation",

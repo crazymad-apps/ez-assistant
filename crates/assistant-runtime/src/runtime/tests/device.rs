@@ -129,6 +129,7 @@ fn device_session_input(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         },
         source: InputChannelSource::Device(source),
@@ -870,6 +871,7 @@ async fn channel_dispatch_failure_does_not_rewrite_the_completed_conversation() 
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

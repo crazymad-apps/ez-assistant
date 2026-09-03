@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,6 +18,9 @@ export default async function setupRuntimeHost(_config: FullConfig): Promise<() 
   const workspace = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-workspace-"));
   const additional_workspace = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-added-workspace-"));
   const provider = await startFakeProvider();
+  const mcp_secret = "e2e-mcp-secret-must-not-leak-9273";
+  const user_directory = join(runtime_home, "fixture-user-home");
+  await mkdir(user_directory);
   await writeFile(
     join(runtime_home, "config.toml"),
     `schema_version = 1
@@ -44,7 +47,17 @@ max_output_tokens = 4096
   );
 
   const executable = resolve(process.cwd(), "../../target/debug/ez-assistant-runtime");
+  // 只在隔离 Runtime Home 中启用安全 stdio fixture，不读取或变更用户 MCP 配置。
+  await writeFile(join(runtime_home, "mcp.json"), JSON.stringify({ mcpServers: {
+    local_fixture: {
+      command: "python3", args: ["-u", resolve(process.cwd(), "../runtime-host/tests/fixtures/mcp_stdio_server.py")],
+      displayName: "MCP fixture", description: "Two safe fixture tools",
+      env: { TOKEN: mcp_secret },
+    },
+  } }));
   const child = spawn(executable, ["serve", "--runtime-home", runtime_home], {
+    // Home 仅覆盖测试子进程，避免正式技能发现读取开发者个人目录。
+    env: { ...process.env, HOME: user_directory },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -78,6 +91,7 @@ max_output_tokens = 4096
       started_runtime: true,
     });
     process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE = additional_workspace;
+    process.env.EZ_ASSISTANT_E2E_MCP_SECRET = mcp_secret;
   } catch (error) {
     child.kill("SIGTERM");
     await provider.close();
@@ -103,6 +117,8 @@ max_output_tokens = 4096
     await removeTemporaryDirectories(runtime_home, workspace, additional_workspace);
     delete process.env.EZ_ASSISTANT_E2E_BOOTSTRAP;
     delete process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE;
+    delete process.env.EZ_ASSISTANT_E2E_MCP_SECRET;
+    if (stderr.includes(mcp_secret)) throw new Error("MCP credential leaked to Host stderr");
   };
 }
 
@@ -134,11 +150,18 @@ async function startFakeProvider(): Promise<FakeProvider> {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
     });
-    const frames = marker === "TOOL_CASE" && !has_tool_result
-      ? toolCallFrames(response_id)
-      : marker === "DELEGATE_CASE" && !has_tool_result
-        ? delegateTaskFrames(response_id)
-        : textFrames(response_id, marker === "TOOL_CASE" ? "工具执行完成。" : `离线回复：${marker}`);
+    let frames: readonly object[];
+    if (marker === "MCP_CASE") {
+      frames = has_tool_result
+        ? textFrames(response_id, JSON.stringify(body.messages?.filter((message) => message.role === "tool").at(-1)).includes("called:first_tool") ? "MCP 调用已回传。" : "MCP 调用已拒绝。")
+        : mcpToolCallFrames(response_id);
+    } else if (marker === "TOOL_CASE" && !has_tool_result) {
+      frames = toolCallFrames(response_id);
+    } else if (marker === "DELEGATE_CASE" && !has_tool_result) {
+      frames = delegateTaskFrames(response_id);
+    } else {
+      frames = textFrames(response_id, marker === "TOOL_CASE" ? "工具执行完成。" : `离线回复：${marker}`);
+    }
     for (const frame of frames) {
       response.write(`data: ${JSON.stringify(frame)}\n\n`);
       await delay(35);
@@ -176,7 +199,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE"];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE"];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);
@@ -225,6 +248,17 @@ function toolCallFrames(response_id: string): readonly object[] {
       }],
     },
     { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 40 } } },
+  ];
+}
+
+function mcpToolCallFrames(response_id: string): readonly object[] {
+  return [
+    { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {
+      role: "assistant", tool_calls: [{ index: 0, id: `call-mcp-${response_id}`, type: "function",
+        function: { name: "call_mcp_tool", arguments: JSON.stringify({ server: "local_fixture", tool: "first_tool", arguments: { value: "e2e" } }) },
+      }],
+    }, finish_reason: null }] },
+    { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
   ];
 }
 

@@ -50,6 +50,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -151,6 +152,7 @@ async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -209,6 +211,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -349,6 +352,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -422,6 +426,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -459,6 +464,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
             variant: AgentVariant::Build,
         })
@@ -622,6 +628,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -713,6 +720,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -855,6 +863,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             attachment_ids: vec![old_attachment.attachment_id.clone()],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -869,6 +878,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

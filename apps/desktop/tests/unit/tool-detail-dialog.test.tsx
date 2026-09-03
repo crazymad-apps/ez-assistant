@@ -18,6 +18,17 @@ afterEach(() => {
 });
 
 describe("ToolDetailDialog", () => {
+  it("renders remote MCP identity and full arguments without a gateway request payload", () => {
+    const arguments_json = JSON.stringify({ script: "完整参数".repeat(2000) });
+    render(<ToolDetailDialog detail={detailView({
+      tool_name: "call_mcp_tool", request_json: null,
+      input: { type: "mcp", identity: { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" }, arguments_json },
+    })} error={null} is_loading={false} on_close={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Blender (blender) / execute_code" })).toBeVisible();
+    expect(screen.getByText(arguments_json)).toHaveTextContent(arguments_json);
+    expect(screen.queryByRole("heading", { name: "call_mcp_tool" })).not.toBeInTheDocument();
+  });
+
   it("uses formatted code blocks for JSON request and result payloads", () => {
     render(<ToolDetailDialog
       detail={detailView({

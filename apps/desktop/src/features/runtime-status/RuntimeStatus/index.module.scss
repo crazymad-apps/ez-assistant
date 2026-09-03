@@ -63,7 +63,8 @@
 }
 
 .retry_button {
-  min-height: 24px;
+  --ez-control-default-height: var(--ez-control-height-small);
+  min-height: var(--ez-control-height);
   padding: 0 9px;
   border: 1px solid var(--ez-border);
   border-radius: var(--ez-radius-small);

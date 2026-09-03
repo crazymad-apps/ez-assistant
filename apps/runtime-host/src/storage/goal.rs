@@ -1,7 +1,7 @@
 //! Session Goal 的恢复暂停与持久快照解析。
 
 use agent_types::MessageId;
-use assistant_protocol::{GoalId, InputId, RunId, SessionId};
+use assistant_protocol::{GoalId, InputId, McpServerKey, RunId, SessionId};
 use assistant_runtime::{
     GoalClear, GoalStop, GoalStopResult, StoredGoal, StoredGoalBudget, StoredGoalObjective,
     StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalState,
@@ -70,7 +70,7 @@ impl StorageEngine {
             .connection
             .prepare(
                 "SELECT goal_id, session_id, objective_message_id, objective_payload_json,
-                        objective_hash, state, pause_reason_json, generation, turn, max_runs,
+                        objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs,
                         max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens,
                         usage_complete, consecutive_failures, created_at_ms, updated_at_ms,
                         completed_at_ms
@@ -85,9 +85,9 @@ impl StorageEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
@@ -98,7 +98,8 @@ impl StorageEngine {
                     row.get::<_, i64>(15)?,
                     row.get::<_, i64>(16)?,
                     row.get::<_, i64>(17)?,
-                    row.get::<_, Option<i64>>(18)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, Option<i64>>(19)?,
                 ))
             })
             .map_err(|source| internal_error("goals could not be read", source))?;
@@ -562,18 +563,19 @@ pub(super) fn insert_new_goal(
         .execute(
             "INSERT INTO session_goals (
                 goal_id, session_id, objective_message_id, objective_payload_json,
-                objective_hash, state, pause_reason_json, generation, turn, max_runs,
+                objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs,
                 max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens,
                 usage_complete, consecutive_failures, created_at_ms, updated_at_ms,
                 completed_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', NULL, ?6, ?7, ?8, ?9, ?10,
-                       ?11, ?12, ?13, ?14, ?15, ?16, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', NULL, ?7, ?8, ?9, ?10, ?11,
+                       ?12, ?13, ?14, ?15, ?16, ?17, NULL)",
             params![
                 goal.goal_id.as_str(),
                 goal.session_id.as_str(),
                 goal.objective.source_message_id.as_str(),
                 payload,
                 goal.objective.payload_hash,
+                goal.mcp_server_key.as_ref().map(McpServerKey::as_str),
                 i64::try_from(goal.generation).map_err(|source| internal_error(
                     "goal generation exceeds storage range",
                     source
@@ -621,18 +623,19 @@ pub(super) fn insert_forked_goal(
         .execute(
             "INSERT INTO session_goals (
                 goal_id, session_id, objective_message_id, objective_payload_json,
-                objective_hash, state, pause_reason_json, generation, turn, max_runs,
+                objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs,
                 max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens,
                 usage_complete, consecutive_failures, created_at_ms, updated_at_ms,
                 completed_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'paused', ?6, 1, ?7, ?8, ?9, ?10,
-                       ?11, ?12, ?13, ?14, ?15, ?15, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'paused', ?7, 1, ?8, ?9, ?10, ?11,
+                       ?12, ?13, ?14, ?15, ?16, ?16, NULL)",
             params![
                 goal.goal_id.as_str(),
                 goal.session_id.as_str(),
                 goal.objective.source_message_id.as_str(),
                 payload,
                 goal.objective.payload_hash,
+                goal.mcp_server_key.as_ref().map(McpServerKey::as_str),
                 pause_reason,
                 i64::from(goal.turn),
                 i64::from(goal.budget.max_runs),
@@ -663,6 +666,7 @@ fn parse_goal(
         String,
         String,
         String,
+        Option<String>,
         String,
         Option<String>,
         i64,
@@ -685,6 +689,7 @@ fn parse_goal(
         objective_message_id,
         objective_payload_json,
         objective_hash,
+        mcp_server_key,
         state,
         pause_reason_json,
         generation,
@@ -730,6 +735,12 @@ fn parse_goal(
             payload,
             payload_hash: objective_hash,
         },
+        mcp_server_key: mcp_server_key
+            .map(McpServerKey::new)
+            .transpose()
+            .map_err(|source| {
+                invalid_data_with_source("stored Goal MCP server key is invalid", source)
+            })?,
         state,
         pause_reason,
         generation: positive_u64(generation, "stored goal generation is invalid")?,

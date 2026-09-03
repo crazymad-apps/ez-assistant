@@ -73,9 +73,9 @@ impl IntoResponse for HttpError {
 
 pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
     match code {
-        RuntimeErrorCode::InvalidRequest | RuntimeErrorCode::SkillNameInvalid => {
-            StatusCode::BAD_REQUEST
-        }
+        RuntimeErrorCode::InvalidRequest
+        | RuntimeErrorCode::SkillNameInvalid
+        | RuntimeErrorCode::McpConfigInvalid => StatusCode::BAD_REQUEST,
         RuntimeErrorCode::SessionNotFound
         | RuntimeErrorCode::RunNotFound
         | RuntimeErrorCode::ChildTaskNotFound
@@ -106,6 +106,9 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::PermissionScopeUnavailable
         | RuntimeErrorCode::Conflict
         | RuntimeErrorCode::ConfigurationConflict
+        | RuntimeErrorCode::McpConfigConflict
+        | RuntimeErrorCode::McpImportConflict
+        | RuntimeErrorCode::McpServerUnavailable
         | RuntimeErrorCode::QueueConflict
         | RuntimeErrorCode::SnapshotStale
         | RuntimeErrorCode::SessionCompactionInProgress
@@ -136,6 +139,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         RuntimeErrorCode::ModelExecutionFailed => StatusCode::BAD_GATEWAY,
         RuntimeErrorCode::Timeout => StatusCode::REQUEST_TIMEOUT,
-        RuntimeErrorCode::Cancelled => StatusCode::CONFLICT,
+        RuntimeErrorCode::Cancelled | RuntimeErrorCode::McpTestCancelled => StatusCode::CONFLICT,
+        RuntimeErrorCode::McpTestFailed => StatusCode::BAD_GATEWAY,
     }
 }

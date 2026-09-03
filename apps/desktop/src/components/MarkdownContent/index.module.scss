@@ -91,9 +91,10 @@
   }
 
   :global([data-streamdown="code-block-copy-button"]) {
+    --ez-control-default-height: var(--ez-control-height-small);
     display: grid;
-    width: 26px;
-    height: 26px;
+    width: var(--ez-control-height);
+    height: var(--ez-control-height);
     padding: 0;
     place-items: center;
     border: 0;

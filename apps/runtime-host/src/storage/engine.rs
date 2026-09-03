@@ -146,6 +146,8 @@ impl StorageEngine {
             attachments: self.load_attachments()?,
             sessions: self.load_sessions()?,
             inputs: self.load_inputs()?,
+            session_commands: self.load_session_commands()?,
+            mcp_input_selections: self.load_mcp_input_selections()?,
             runs: self.load_runs()?,
             child_tasks: self.load_child_tasks()?,
             work_plans: self.load_all_work_plans()?,

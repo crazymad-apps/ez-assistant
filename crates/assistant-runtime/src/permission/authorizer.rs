@@ -21,6 +21,10 @@ use super::{
 use crate::{
     RuntimeError, RuntimeResult, SessionExecutionEnvironment,
     goal::{GoalRunSignalLatch, GoalSignalAuthorizationFacts, UPDATE_GOAL_TOOL_NAME},
+    mcp::{
+        McpAuthorizationFacts, McpDiscoveryAuthorizationFacts, McpRegistry,
+        failure_code as mcp_failure_code,
+    },
     runtime::{SpeakAuthorizationFacts, controller::ControllerAuthorizationFacts},
     skill::LoadSkillAuthorizationFacts,
     work_plan::WorkPlanAuthorizationFacts,
@@ -90,6 +94,7 @@ pub(crate) struct RuntimeToolAuthorizer {
     private_roots: Vec<AbsolutePath>,
     approval_resolver: Arc<dyn PermissionApprovalResolver>,
     goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
+    mcp_registry: Option<Arc<McpRegistry>>,
 }
 
 #[derive(Clone)]
@@ -129,11 +134,17 @@ impl RuntimeToolAuthorizer {
             private_roots,
             approval_resolver,
             goal_signal_latch: None,
+            mcp_registry: None,
         })
     }
 
     pub(crate) fn with_goal_signal_latch(mut self, latch: Option<Arc<GoalRunSignalLatch>>) -> Self {
         self.goal_signal_latch = latch;
+        self
+    }
+
+    pub(crate) fn with_mcp_registry(mut self, registry: Arc<McpRegistry>) -> Self {
+        self.mcp_registry = Some(registry);
         self
     }
 
@@ -207,6 +218,14 @@ impl RuntimeToolAuthorizer {
         if invocation.facts::<LoadSkillAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
         }
+        // 发现网关只读取本 Run 已披露 Server 的内存目录，并在返回前按当前权限删除
+        // 显式 Deny；它不调用远端工具，也不把发现动作本身变成 MCP 授权。
+        if invocation
+            .facts::<McpDiscoveryAuthorizationFacts>()
+            .is_some()
+        {
+            return ToolAuthorization::Allow;
+        }
         // 主控工具只由来源门禁通过的 Controller Run 装配，私有 facts 不进入文件权限规则。
         if invocation.facts::<ControllerAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
@@ -215,6 +234,17 @@ impl RuntimeToolAuthorizer {
         // JSON 猜测权限，否则新工具可能意外绕过现有策略。
         if fact_kind(invocation) == InvocationFactKind::Unknown {
             return deny("tool authorization facts are unsupported");
+        }
+
+        // Tool SPI 的 resolve 是同步且无 I/O；MCP compiled Schema 校验需要有界
+        // spawn_blocking，因此在任何权限规则或用户审批之前由 Runtime 授权器完成。
+        if let Some(facts) = invocation.facts::<McpAuthorizationFacts>() {
+            let Some(registry) = &self.mcp_registry else {
+                return deny("mcp_server_unavailable");
+            };
+            if let Err(failure) = registry.validate_invocation(&facts.invocation).await {
+                return deny(mcp_failure_code(failure.kind));
+            }
         }
 
         // Plan 的私有目录限制属于不可被规则放宽的产品硬边界，必须先于用户规则判断。
@@ -366,6 +396,14 @@ impl RuntimeToolAuthorizer {
         batch: &ResolvedToolBatch,
         recheck_ask_rules: bool,
     ) -> Option<ToolAuthorization> {
+        if let Some(facts) = invocation.facts::<McpAuthorizationFacts>() {
+            let Some(registry) = &self.mcp_registry else {
+                return Some(deny("mcp_server_unavailable"));
+            };
+            if let Err(failure) = registry.validate_invocation(&facts.invocation).await {
+                return Some(deny(mcp_failure_code(failure.kind)));
+            }
+        }
         if self.variant == AgentVariant::Plan
             && let Some(facts) = invocation.facts::<FileAuthorizationFacts>()
             && is_mutation(facts.operation)

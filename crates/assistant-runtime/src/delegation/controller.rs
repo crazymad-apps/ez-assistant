@@ -30,6 +30,7 @@ use crate::{
         consume_execution_budget,
     },
     id,
+    mcp::McpRegistry,
     observation::ObservationCoordinator,
     permission::{
         ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
@@ -59,6 +60,8 @@ pub(crate) struct ParentDelegationController {
     execution_permits: Arc<Semaphore>,
     created_tasks: Mutex<u32>,
     skill_catalog: SessionSkillCatalog,
+    mcp_registry: Arc<McpRegistry>,
+    disclosure_context: Option<agent_types::UserMessage>,
 }
 
 pub(crate) struct ParentDelegationResources {
@@ -77,6 +80,20 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
     pub(crate) skill_catalog: SessionSkillCatalog,
+    pub(crate) mcp_registry: Arc<McpRegistry>,
+    pub(crate) disclosure_context: Option<agent_types::UserMessage>,
+}
+
+fn with_disclosure_context(
+    mut conversation: ConversationSnapshot,
+    context: Option<&agent_types::UserMessage>,
+) -> ConversationSnapshot {
+    if let Some(context) = context {
+        conversation
+            .messages
+            .push(ConversationMessage::User(context.clone()));
+    }
+    conversation
 }
 
 impl ParentDelegationController {
@@ -103,6 +120,8 @@ impl ParentDelegationController {
             execution_permits,
             created_tasks: Mutex::new(0),
             skill_catalog: resources.skill_catalog,
+            mcp_registry: resources.mcp_registry,
+            disclosure_context: resources.disclosure_context,
         }
     }
 
@@ -318,6 +337,7 @@ impl ParentDelegationController {
                     events: self.events.clone(),
                 }),
             )
+            .map(|authorizer| authorizer.with_mcp_registry(self.mcp_registry.clone()))
             .and_then(|authorizer| authorizer.with_additional_private_root(workspace.path()))
             .map_err(internal_tool_error)?,
         );
@@ -336,6 +356,7 @@ impl ParentDelegationController {
             .as_ref()
             .ok_or_else(|| ToolError::execution("child task journal is unavailable"))?
             .snapshot();
+        let conversation = with_disclosure_context(conversation, self.disclosure_context.as_ref());
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
         let child_agent = self
@@ -406,13 +427,17 @@ impl ParentDelegationController {
                 .expect("a non-zero step plus consumption stays non-zero");
             let Some(reason) = compaction_reason else {
                 input = ExecutionInput {
-                    conversation: task
-                        .lock_state()
-                        .map_err(|_| ToolError::execution("child task journal is unavailable"))?
-                        .journal
-                        .as_ref()
-                        .ok_or_else(|| ToolError::execution("child task journal is unavailable"))?
-                        .snapshot(),
+                    conversation: with_disclosure_context(
+                        task.lock_state()
+                            .map_err(|_| ToolError::execution("child task journal is unavailable"))?
+                            .journal
+                            .as_ref()
+                            .ok_or_else(|| {
+                                ToolError::execution("child task journal is unavailable")
+                            })?
+                            .snapshot(),
+                        self.disclosure_context.as_ref(),
+                    ),
                 };
                 continue;
             };
@@ -444,7 +469,10 @@ impl ParentDelegationController {
                         .upsert(stored.clone())
                         .map_err(internal_tool_error)?;
                     input = ExecutionInput {
-                        conversation: replacement,
+                        conversation: with_disclosure_context(
+                            replacement,
+                            self.disclosure_context.as_ref(),
+                        ),
                     };
                 }
                 Err(error) if error.is_cancelled() || child_token.is_cancelled() => {

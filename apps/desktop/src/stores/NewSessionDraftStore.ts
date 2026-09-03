@@ -4,6 +4,7 @@ import type {
   ApprovalMode,
   AttachmentId,
   ModelKey,
+  McpSelectionTagSnapshot,
   QuotedTextSnapshot,
   ReasoningEffortKey,
   SessionMaterializationManifest,
@@ -37,6 +38,7 @@ export type NewSessionDraft = Readonly<{
   approval_mode: ApprovalMode;
   goal_armed: boolean;
   selected_skill_name: string | null;
+  selected_mcp: McpSelectionTagSnapshot | null;
   skill_options: readonly SkillSummarySnapshot[];
   skill_status: "idle" | "loading" | "ready" | "failed";
   materialization_attempt: SessionMaterializationManifest | null;
@@ -69,6 +71,7 @@ export class NewSessionDraftStore {
       updateApprovalMode: action,
       updateGoalArmed: action,
       updateSelectedSkill: action,
+      updateSelectedMcp: action,
       beginSkillLoad: action,
       applySkillOptions: action,
       failSkillLoad: action,
@@ -114,7 +117,8 @@ export class NewSessionDraftStore {
   }
 
   updateVariant(key: NewSessionDraftKey, variant: AgentVariant): void {
-    this.#patch(key, { variant });
+    const draft = this.drafts.get(key);
+    if (draft?.variant !== variant) this.#patch(key, { variant, selected_mcp: null });
   }
 
   updateApprovalMode(key: NewSessionDraftKey, approval_mode: ApprovalMode): void {
@@ -127,6 +131,10 @@ export class NewSessionDraftStore {
 
   updateSelectedSkill(key: NewSessionDraftKey, selected_skill_name: string | null): void {
     this.#patch(key, { selected_skill_name });
+  }
+
+  updateSelectedMcp(key: NewSessionDraftKey, selected_mcp: McpSelectionTagSnapshot | null): void {
+    this.#patch(key, { selected_mcp });
   }
 
   beginSkillLoad(key: NewSessionDraftKey): boolean {
@@ -206,7 +214,8 @@ export function isDraftMeaningful(draft: NewSessionDraft): boolean {
     || draft.attachments.length
     || draft.quotes.length
     || draft.goal_armed
-    || draft.selected_skill_name,
+    || draft.selected_skill_name
+    || draft.selected_mcp,
   );
 }
 
@@ -231,6 +240,7 @@ function createDraft(key: NewSessionDraftKey, default_model_key: ModelKey | null
     approval_mode: "ask",
     goal_armed: false,
     selected_skill_name: null,
+    selected_mcp: null,
     skill_options: [],
     skill_status: "idle",
     materialization_attempt: null,

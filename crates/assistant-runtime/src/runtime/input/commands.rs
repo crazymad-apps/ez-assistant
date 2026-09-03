@@ -29,8 +29,11 @@ impl AssistantRuntime {
             if state.queue_revision != request.expected_revision {
                 return Err(RuntimeError::QueueConflict);
             }
+            if state.executing_command.is_some() {
+                return Err(RuntimeError::QueueConflict);
+            }
             let position = state
-                .session_inputs
+                .queue_item_ids
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or_else(|| RuntimeError::InputNotFound {
@@ -49,26 +52,17 @@ impl AssistantRuntime {
                 .map_err(|source| RuntimeError::from_store("prioritize queued input", source))?;
             let mut state = session.lock_state()?;
             let position = state
-                .session_inputs
+                .queue_item_ids
                 .iter()
                 .position(|input_id| input_id == &request.input_id)
                 .ok_or(RuntimeError::QueueConflict)?;
-            let input_id = state.session_inputs.remove(position).ok_or(
+            let input_id = state.queue_item_ids.remove(position).ok_or(
                 RuntimeError::InternalStateUnavailable {
                     component: "queued input priority",
                 },
             )?;
-            state.session_inputs.push_front(input_id);
-            let ordered_ids = state.session_inputs.iter().cloned().collect::<Vec<_>>();
-            for (queue_order, input_id) in ordered_ids.into_iter().enumerate() {
-                if let Some(input) = state.inputs.get_mut(&input_id) {
-                    input.stored.queue_order = u64::try_from(queue_order).map_err(|_| {
-                        RuntimeError::InternalStateUnavailable {
-                            component: "queued input priority",
-                        }
-                    })?;
-                }
-            }
+            state.queue_item_ids.push_front(input_id);
+            renumber_queue_items(&mut state)?;
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
         let queue = super::super::product::queue_snapshot(&session, &self.device_names()?)?;
@@ -97,12 +91,15 @@ impl AssistantRuntime {
             if state.queue_revision != request.expected_revision {
                 return Err(RuntimeError::QueueConflict);
             }
+            if state.executing_command.is_some() {
+                return Err(RuntimeError::QueueConflict);
+            }
             request
                 .input_id
                 .as_ref()
                 .map(|input_id| {
                     state
-                        .session_inputs
+                        .queue_item_ids
                         .iter()
                         .position(|candidate| candidate == input_id)
                         .ok_or_else(|| RuntimeError::InputNotFound {
@@ -128,16 +125,17 @@ impl AssistantRuntime {
             if should_move {
                 let target = request.input_id.as_ref().expect("move requires target");
                 let position = state
-                    .session_inputs
+                    .queue_item_ids
                     .iter()
                     .position(|candidate| candidate == target)
                     .ok_or(RuntimeError::QueueConflict)?;
-                let input_id = state.session_inputs.remove(position).ok_or(
+                let input_id = state.queue_item_ids.remove(position).ok_or(
                     RuntimeError::InternalStateUnavailable {
                         component: "queued input resume",
                     },
                 )?;
-                state.session_inputs.push_front(input_id);
+                state.queue_item_ids.push_front(input_id);
+                renumber_queue_items(&mut state)?;
             }
             state.resume_required = false;
             state.queue_paused_by_user = false;
@@ -194,7 +192,7 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("cancel queued input", source))?;
         let mut state = session.lock_state()?;
-        state.session_inputs.retain(|id| id != &request.input_id);
+        state.queue_item_ids.retain(|id| id != &request.input_id);
         state
             .runs
             .retain(|_, run| run.input_id() != &request.input_id);
@@ -203,11 +201,7 @@ impl AssistantRuntime {
             .skill_activations
             .retain(|activation| activation.input_id.as_ref() != Some(&request.input_id));
         state.queue_revision = state.queue_revision.saturating_add(1);
-        if state
-            .inputs
-            .values()
-            .all(|input| input.stored.state != StoredInputState::Queued)
-        {
+        if state.queue_item_ids.is_empty() {
             state.resume_required = false;
             state.queue_paused_by_user = false;
             state.queue_revision = state.queue_revision.saturating_add(1);
@@ -335,16 +329,21 @@ impl AssistantRuntime {
                 .expect("checked input")
                 .latest_run_id = stored.run_id.clone();
             let position = state
-                .session_inputs
+                .queue_item_ids
                 .iter()
                 .position(|id| {
-                    state
-                        .inputs
-                        .get(id)
-                        .is_some_and(|input| input.stored.queue_order > queue_order)
+                    state.inputs.get(id).map_or_else(
+                        || {
+                            state
+                                .commands
+                                .get(id)
+                                .is_some_and(|command| command.queue_order > queue_order)
+                        },
+                        |input| input.stored.queue_order > queue_order,
+                    )
                 })
-                .unwrap_or(state.session_inputs.len());
-            state.session_inputs.insert(position, input_id.clone());
+                .unwrap_or(state.queue_item_ids.len());
+            state.queue_item_ids.insert(position, input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
             snapshot
         };
@@ -374,7 +373,7 @@ impl AssistantRuntime {
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "input id generator",
             })?;
-            if !state.inputs.contains_key(&id) {
+            if !state.inputs.contains_key(&id) && !state.commands.contains_key(&id) {
                 return Ok(id);
             }
         }
@@ -382,4 +381,24 @@ impl AssistantRuntime {
             component: "input id collision",
         })
     }
+}
+
+fn renumber_queue_items(state: &mut crate::session::SessionState) -> RuntimeResult<()> {
+    let ordered_ids = state.queue_item_ids.iter().cloned().collect::<Vec<_>>();
+    for (queue_order, input_id) in ordered_ids.into_iter().enumerate() {
+        let queue_order =
+            u64::try_from(queue_order).map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "queued item priority",
+            })?;
+        if let Some(input) = state.inputs.get_mut(&input_id) {
+            input.stored.queue_order = queue_order;
+        } else if let Some(command) = state.commands.get_mut(&input_id) {
+            command.queue_order = queue_order;
+        } else {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "queued item priority projection",
+            });
+        }
+    }
+    Ok(())
 }

@@ -28,7 +28,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionEffect,
+    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, McpPermissionMatcher,
+    McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionEffect,
     PermissionFileOperation, PermissionMatcher, PermissionProcessMode, PermissionRule,
     ShellPermissionMatcher,
     authorizer::{ApprovalFuture, PermissionApprovalResolver},
@@ -37,6 +38,7 @@ use crate::{
     RuntimeError, RuntimeResult,
     delegation::{DELEGATE_TASK_TOOL_NAME, DelegationAuthorizationFacts},
     id,
+    mcp::McpAuthorizationFacts,
     observation::ObservationCoordinator,
 };
 
@@ -50,6 +52,7 @@ struct PendingApproval {
 enum ApprovalSignal {
     User(ApprovalDecision),
     Rule,
+    McpCatalogChanged,
 }
 
 struct ApprovalContext {
@@ -120,19 +123,29 @@ impl ApprovalRegistry {
             created_at_ms: crate::runtime::now_ms()?,
         };
         let (sender, receiver) = oneshot::channel();
-        self.entries
-            .lock()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "approval registry",
-            })?
-            .insert(
-                approval_id,
-                PendingApproval {
-                    snapshot: snapshot.clone(),
-                    invocation: invocation.clone(),
-                    sender: Some(sender),
-                },
-            );
+        let mut entries =
+            self.entries
+                .lock()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "approval registry",
+                })?;
+        // 与刷新失效共用 entries 锁：刷新前登记的旧审批会被移除，刷新后迟到登记直接拒绝。
+        // 这里只读冻结连接的原子退役标记，不反向获取 MCP Registry 锁。
+        if invocation
+            .facts::<McpAuthorizationFacts>()
+            .is_some_and(|facts| facts.invocation.is_retired())
+        {
+            return Err(RuntimeError::McpServerUnavailable);
+        }
+        entries.insert(
+            approval_id,
+            PendingApproval {
+                snapshot: snapshot.clone(),
+                invocation: invocation.clone(),
+                sender: Some(sender),
+            },
+        );
+        drop(entries);
         self.bump_revision(&snapshot.session_id);
         Ok((snapshot, receiver))
     }
@@ -419,6 +432,51 @@ impl ApprovalRegistry {
             .unwrap_or(&0))
     }
 
+    /// 成功替换或删除某个 Server 后，只失效仍未取得用户决策的该 Server MCP 审批。
+    /// Resolving 表示客户端已经取得决策权，不在这里与权限文件 CAS 竞态。
+    pub(crate) fn invalidate_pending_mcp_server(
+        &self,
+        server_key: &assistant_protocol::McpServerKey,
+    ) -> RuntimeResult<Vec<ApprovalSnapshot>> {
+        let mut entries =
+            self.entries
+                .lock()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "approval registry",
+                })?;
+        let ids = entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let matches = entry.snapshot.status == ApprovalStatus::Pending
+                    && entry
+                        .invocation
+                        .facts::<McpAuthorizationFacts>()
+                        .is_some_and(|facts| facts.invocation.is_retired())
+                    && matches!(
+                        &entry.snapshot.subject,
+                        ToolApprovalSubject::Mcp { identity, .. }
+                            if &identity.server_key == server_key
+                    );
+                matches.then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut removed = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(mut entry) = entries.remove(&id) else {
+                continue;
+            };
+            if let Some(sender) = entry.sender.take() {
+                let _ = sender.send(ApprovalSignal::McpCatalogChanged);
+            }
+            removed.push(entry.snapshot);
+        }
+        drop(entries);
+        for snapshot in &removed {
+            self.bump_revision(&snapshot.session_id);
+        }
+        Ok(removed)
+    }
+
     fn bump_revision(&self, session_id: &SessionId) {
         let Ok(mut revisions) = self.revisions.lock() else {
             return;
@@ -510,6 +568,12 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
                     Ok(ApprovalSignal::Rule) => {
                         super::authorizer::ApprovalResolution::allowed_by_rule(approval_id)
                     }
+                    Ok(ApprovalSignal::McpCatalogChanged) => {
+                        super::authorizer::ApprovalResolution::cancelled(
+                            approval_id,
+                            "mcp_catalog_changed",
+                        )
+                    }
                     Err(_) => super::authorizer::ApprovalResolution::cancelled(
                         approval_id,
                         "approval expired before a decision was applied",
@@ -574,6 +638,16 @@ pub(crate) fn rules_for_approval(
                 PermissionProcessMode::Detached
             },
         })],
+        ToolApprovalSubject::Mcp { identity, .. } => {
+            vec![PermissionMatcher::Mcp(McpPermissionMatcher {
+                server: McpPermissionServerMatch::Exact {
+                    value: identity.server_key.clone(),
+                },
+                tool: McpPermissionToolMatch::Exact {
+                    value: identity.tool_name.clone(),
+                },
+            })]
+        }
     };
     matchers
         .into_iter()
@@ -629,6 +703,18 @@ fn subject(invocation: &ResolvedToolInvocation) -> Option<ToolApprovalSubject> {
             task_summary: facts.task_summary.clone(),
         });
     }
+    if let Some(facts) = invocation.facts::<McpAuthorizationFacts>() {
+        return Some(ToolApprovalSubject::Mcp {
+            identity: facts.identity(),
+            arguments_json: serde_json::to_string(&facts.invocation.arguments)
+                .unwrap_or_else(|_| "{}".to_owned()),
+            untrusted_annotations_json: facts
+                .invocation
+                .untrusted_annotations
+                .as_ref()
+                .and_then(|annotations| serde_json::to_string(annotations).ok()),
+        });
+    }
     invocation
         .facts::<GeneralAuthorizationFacts>()
         .map(|facts| ToolApprovalSubject::General {
@@ -640,6 +726,15 @@ fn exact_rule_subject(subject: &ToolApprovalSubject) -> ToolApprovalSubject {
     match subject {
         ToolApprovalSubject::Delegation { tool_name, .. } => ToolApprovalSubject::General {
             tool_name: tool_name.clone(),
+        },
+        ToolApprovalSubject::Mcp {
+            identity,
+            arguments_json,
+            ..
+        } => ToolApprovalSubject::Mcp {
+            identity: identity.clone(),
+            arguments_json: arguments_json.clone(),
+            untrusted_annotations_json: None,
         },
         other => other.clone(),
     }

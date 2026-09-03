@@ -41,6 +41,17 @@ impl AssistantRuntime {
             self.force_settle_with_timeout().await
         };
 
+        // Run 已停止或完成强制结算后才 retire MCP；这样已取得的调用 lease 有机会先归零，
+        // Registry 关闭也不会与 Store shutdown 争抢工具可靠事实。
+        let mcp_result = tokio::time::timeout(
+            self.config.shutdown_timeout,
+            self.mcp_service.registry.shutdown(),
+        )
+        .await
+        .unwrap_or(Err(RuntimeError::InternalStateUnavailable {
+            component: "MCP shutdown timed out",
+        }));
+
         // 即使强制结算失败，也必须尝试 flush/join Store；非终态 Run 会在下次启动时
         // 按持久事实恢复，不能因为前一步错误把 worker 永久留给当前 Runtime。
         let store_result = self.shutdown_store_with_timeout().await;
@@ -48,6 +59,7 @@ impl AssistantRuntime {
             self.set_stopped()?;
         }
         store_result?;
+        mcp_result?;
         settlement_result?;
         Ok(ShutdownRuntimeResult {
             lifecycle: RuntimeLifecycle::Stopped,

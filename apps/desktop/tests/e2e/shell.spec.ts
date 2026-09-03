@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { basename } from "node:path";
+import { expectMcpAcceptance } from "./mcp-acceptance";
 
 test("loads real workspaces and sessions from the temporary Runtime Host", async ({ page }) => {
   test.setTimeout(60_000);
@@ -152,11 +153,14 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(session_header.getByRole("button", { name: "新对话" })).toBeVisible();
   await expectComposerAtBottom(page);
   const source_composer = page.getByRole("textbox", { name: "输入消息" });
+  await selectMcpFixture(page);
   await source_composer.fill("SOURCE_CASE");
   await source_composer.press("Enter");
   await expect(source_composer).toHaveValue("");
   await expect(page.getByTitle("SOURCE_CASE")).toBeVisible();
   await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
+  await expect(page.getByText("MCP · MCP fixture", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "移除 MCP MCP fixture" })).toBeHidden();
   await seeded_session.click();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
   await expectComposerAtBottom(page);
@@ -192,10 +196,19 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await composer.type("第二行");
   await expect(composer).toHaveValue("第一行\n第二行");
   await composer.fill("FIRST_CASE");
+  await composer.fill("/mcp");
+  await page.getByRole("button", { name: "发送消息" }).click();
+  const mcp_search = page.getByRole("combobox", { name: "搜索MCP 服务" });
+  await expect(mcp_search).toBeFocused();
+  await mcp_search.fill("local_fixture");
+  await expect(page.getByRole("option", { name: /MCP fixture \(local_fixture\)/ })).toBeVisible();
+  await mcp_search.press("Enter");
+  await composer.fill("FIRST_CASE");
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
   await expect(page.getByText("FIRST_CASE", { exact: true })).toBeVisible();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
+  await expect(page.getByText("MCP · MCP fixture", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "模型设置" })).toBeEnabled();
 
   await navigation.getByRole("button", { name: "搜索会话" }).click();
@@ -314,6 +327,8 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(
     page.getByRole("menu", { name: "选择新会话目录" }).getByRole("menuitem", { name: added_workspace_name }),
   ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expectMcpAcceptance(page);
 });
 
 async function expectModelCatalogForm(page: Page): Promise<void> {
@@ -381,6 +396,15 @@ async function expectComposerAtBottom(page: Page): Promise<void> {
   expect(box).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(box!.y).toBeGreaterThan(viewport!.height - 150);
+}
+
+async function selectMcpFixture(page: Page): Promise<void> {
+  const composer = page.getByRole("textbox", { name: "输入消息" });
+  await composer.fill("/mcp");
+  await composer.press("Enter");
+  await page.getByRole("option", { name: /MCP fixture \(local_fixture\)/ }).click();
+  await expect(page.getByRole("button", { name: "移除 MCP MCP fixture" })).toBeVisible();
+  await expect(composer).toBeFocused();
 }
 
 async function expectResponsiveLayouts(page: Page): Promise<void> {

@@ -3,7 +3,8 @@
 use assistant_protocol as protocol;
 
 use super::{
-    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
+    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, McpPermissionMatcher,
+    McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionDocument,
     PermissionEffect, PermissionFileOperation, PermissionFileRevision, PermissionFileScope,
     PermissionMatcher, PermissionProcessMode, PermissionRule, ShellPermissionMatcher,
     registry::CompiledPermissionLoad,
@@ -153,6 +154,22 @@ fn rule_from_protocol(rule: protocol::PermissionRuleDefinition) -> PermissionRul
                     },
                 })
             }
+            protocol::PermissionRuleMatcher::Mcp(matcher) => {
+                PermissionMatcher::Mcp(McpPermissionMatcher {
+                    server: match matcher.server {
+                        protocol::PermissionMcpServerMatch::Any => McpPermissionServerMatch::Any,
+                        protocol::PermissionMcpServerMatch::Exact { server_key } => {
+                            McpPermissionServerMatch::Exact { value: server_key }
+                        }
+                    },
+                    tool: match matcher.tool {
+                        protocol::PermissionMcpToolMatch::Any => McpPermissionToolMatch::Any,
+                        protocol::PermissionMcpToolMatch::Exact { tool_name } => {
+                            McpPermissionToolMatch::Exact { value: tool_name }
+                        }
+                    },
+                })
+            }
         },
     }
 }
@@ -218,6 +235,26 @@ fn rule_to_protocol(rule: &PermissionRule) -> protocol::PermissionRuleDefinition
                         }
                         PermissionProcessMode::Detached => {
                             protocol::PermissionProcessModeDefinition::Detached
+                        }
+                    },
+                })
+            }
+            PermissionMatcher::Mcp(matcher) => {
+                protocol::PermissionRuleMatcher::Mcp(protocol::PermissionMcpMatcher {
+                    server: match &matcher.server {
+                        McpPermissionServerMatch::Any => protocol::PermissionMcpServerMatch::Any,
+                        McpPermissionServerMatch::Exact { value } => {
+                            protocol::PermissionMcpServerMatch::Exact {
+                                server_key: value.clone(),
+                            }
+                        }
+                    },
+                    tool: match &matcher.tool {
+                        McpPermissionToolMatch::Any => protocol::PermissionMcpToolMatch::Any,
+                        McpPermissionToolMatch::Exact { value } => {
+                            protocol::PermissionMcpToolMatch::Exact {
+                                tool_name: value.clone(),
+                            }
                         }
                     },
                 })

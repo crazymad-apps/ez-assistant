@@ -19,6 +19,18 @@ afterEach(() => {
 });
 
 describe("ConversationView scroll anchoring", () => {
+  it("renders frozen MCP labels in history and inherited fork messages without parsing text", () => {
+    render(<UserMessage
+      attachments={[]}
+      message={{ message_id: "inherited-message", input_id: null, text: "正常正文", attachment_ids: [], created_at_ms: 1,
+        quotes: [], source: { type: "user" },
+        mcp_selection: { server_key: "github", display_name: "提交时的名字" } }}
+      on_attachment_click={vi.fn()} on_source_open={vi.fn()}
+    />);
+    expect(screen.getByText("MCP · 提交时的名字")).toHaveAttribute("title", "github");
+    expect(screen.getByText("正常正文")).toBeVisible();
+  });
+
   it("renders structured controller delivery and proxy report metadata", () => {
     const source_session = {
       session_id: "source-1",

@@ -701,6 +701,10 @@ pub struct SubmitInputRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub skill_name: Option<String>,
+    /// 用户为本条 Input 手选的单个 MCP Server；Runtime 必须按当前权限重新校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_server_key: Option<crate::McpServerKey>,
     /// 可选的不透明请求身份；重复 key 直接返回首次结果。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<IdempotencyKey>,
@@ -1267,6 +1271,19 @@ pub enum RuntimeCommand {
     ResumeQueuedInput(ResumeQueuedInputRequest),
     /// 拒绝队首审批并停止其所属 Run。
     RejectApprovalAndStopRun(RejectApprovalAndStopRunRequest),
+    /// 查询脱敏 MCP 配置管理快照。
+    GetMcpConfiguration(crate::GetMcpConfigurationRequest),
+    /// 只解析并预览 MCP 导入，不持久化。
+    PreviewMcpImport(crate::PreviewMcpImportRequest),
+    /// 使用 revision CAS 修改 MCP 配置。
+    MutateMcpConfiguration(crate::MutateMcpConfigurationRequest),
+    /// 使用未保存草稿建立并关闭一次临时候选连接。
+    TestMcpServer(crate::TestMcpServerRequest),
+    CancelMcpServerTest(crate::CancelMcpServerTestRequest),
+    /// 查询指定会话范围下可手选的 MCP Server。
+    ListMcpServerOptions(crate::ListMcpServerOptionsRequest),
+    /// 向 Session 可靠队列提交结构化控制指令。
+    SubmitSessionCommand(crate::SubmitSessionCommandRequest),
     /// 查询配置总体状态。
     GetConfigStatus(GetConfigStatusRequest),
     /// 列出全部模型脱敏投影。
@@ -1413,6 +1430,13 @@ pub enum RuntimeCommandResult {
     InterruptRun(InterruptRunResult),
     ResumeQueuedInput(ResumeQueuedInputResult),
     RejectApprovalAndStopRun(RejectApprovalAndStopRunResult),
+    GetMcpConfiguration(crate::GetMcpConfigurationResult),
+    PreviewMcpImport(crate::PreviewMcpImportResult),
+    MutateMcpConfiguration(crate::MutateMcpConfigurationResult),
+    TestMcpServer(crate::TestMcpServerResult),
+    CancelMcpServerTest(crate::CancelMcpServerTestResult),
+    ListMcpServerOptions(crate::ListMcpServerOptionsResult),
+    SubmitSessionCommand(crate::SubmitSessionCommandResult),
     /// 配置总体状态已返回。
     GetConfigStatus(GetConfigStatusResult),
     /// 模型列表已返回。
@@ -1586,6 +1610,7 @@ mod tests {
             objective_message_id: MessageId::new("message-1").expect("message id"),
             objective_preview: "ship the release".to_owned(),
             attachment_count: 1,
+            mcp_server_key: None,
             state: crate::GoalStateSnapshot::Paused,
             pause_reason: Some(crate::GoalPauseReasonSnapshot::UserStopped),
             generation: 2,
@@ -1703,6 +1728,7 @@ mod tests {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         });
         let value = serde_json::to_value(&command).expect("serialize command");
@@ -1740,6 +1766,7 @@ mod tests {
         .expect("minimal input request");
         assert!(minimal.attachment_ids.is_empty());
         assert!(minimal.skill_name.is_none());
+        assert!(minimal.mcp_server_key.is_none());
         assert_eq!(minimal.mode, SubmitInputMode::Normal);
 
         let request = SubmitInputRequest {
@@ -1753,6 +1780,7 @@ mod tests {
             ],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         };
         assert_eq!(
@@ -1767,6 +1795,7 @@ mod tests {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         };
         assert_eq!(
@@ -1975,6 +2004,7 @@ mod tests {
                     attachment_ids: Vec::new(),
                     quotes: Vec::new(),
                     skill_name: None,
+                    mcp_server_key: None,
                     idempotency_key: None,
                 }),
                 "submit_input",

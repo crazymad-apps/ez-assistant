@@ -30,6 +30,8 @@ type SelectionPopoverProps<T extends string> = Readonly<{
   options: readonly SelectionOption<T>[];
   placeholder?: string;
   selected: T;
+  /** 单行触发器的总高度，默认 32px；选项行仍按内容自适应。 */
+  size?: "small" | "default" | "large";
   title?: string;
   trigger_content?: ReactNode;
   trigger_class_name?: string;
@@ -160,6 +162,8 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
       {props.editable ? (
         <div
           className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(" ")}
+          data-control="field"
+          data-size={props.size ?? "default"}
           data-variant={props.trigger_variant ?? "field"}
           ref={(node) => { trigger_ref.current = node; }}
         >
@@ -214,6 +218,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
           aria-haspopup="listbox"
           aria-label={props.aria_label}
           className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(" ")}
+          data-size={props.size ?? "default"}
           data-variant={props.trigger_variant ?? "unstyled"}
           disabled={props.disabled}
           onClick={() => props.on_open_change(!props.open)}
@@ -230,7 +235,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
           }}
           type="button"
         >
-          {props.trigger_content ?? visible_options[selected_index]?.label ?? props.selected}
+          {props.trigger_content ?? <span className={styles.trigger_label}>{visible_options[selected_index]?.label ?? props.selected}</span>}
           <Icon name="chevron-down" size={14} />
         </button>
       )}
@@ -344,6 +349,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
             aria-selected={option.value === props.selected}
             className={styles.option}
             data-active={props.active_index === index}
+            data-has-description={Boolean(option.description)}
             data-has-icon={Boolean(option.icon)}
             data-option-index={index}
             id={`${props.id}-option-${index}`}

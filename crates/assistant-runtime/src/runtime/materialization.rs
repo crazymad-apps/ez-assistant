@@ -21,7 +21,8 @@ use crate::{
     InputChannelSource, InputOrigin, NewAttachmentUpload, NewStoredInput, NewStoredSession,
     NewStoredSessionMaterialization, RuntimeError, RuntimeResult, SessionEnvironmentFactoryRequest,
     SkillActivationOwner, SkillActivationResolveError, SkillActivationTrigger, SkillName,
-    StoredSkillActivation, WorkspaceEnvironmentSource, attachment_stable_view_path, id,
+    StoredMcpSelection, StoredSkillActivation, WorkspaceEnvironmentSource,
+    attachment_stable_view_path, id,
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
@@ -75,6 +76,38 @@ impl AssistantRuntime {
             .workspace_id
             .as_ref()
             .map(|workspace_id| self.workspace_for_new_session(workspace_id))
+            .transpose()?;
+        let mut permission_scopes = vec![crate::PermissionFileScope::Global];
+        if let Some(workspace_id) = workspace
+            .as_ref()
+            .map(|workspace| workspace.workspace_id.clone())
+        {
+            permission_scopes.push(crate::PermissionFileScope::Workspace(workspace_id));
+        }
+        let selected_mcp = manifest
+            .mcp_server_key
+            .as_ref()
+            .map(|server_key| {
+                let server = self
+                    .mcp_service
+                    .registry
+                    .catalog_server(server_key)?
+                    .ok_or(RuntimeError::McpServerUnavailable)?;
+                let visible = server.tools.iter().any(|tool| {
+                    self.permission_coordinator
+                        .mcp_tool_is_explicitly_denied(
+                            &permission_scopes,
+                            manifest.variant,
+                            server_key,
+                            &tool.name,
+                        )
+                        .is_ok_and(|denied| !denied)
+                });
+                if !visible {
+                    return Err(RuntimeError::McpServerUnavailable);
+                }
+                Ok((server_key.clone(), server.display_name))
+            })
             .transpose()?;
         let memory_context = self
             .store
@@ -163,7 +196,29 @@ impl AssistantRuntime {
         let quotes = deactivate_quote_sources(&manifest.quotes)?;
         let mut message = create_user_message(manifest.message, file_references, manifest.variant)?;
         insert_quotes(&mut message, &quotes)?;
-        let prepared_goal = goal_submission.prepare(&mut message, created_at_ms)?;
+        let mut prepared_goal = goal_submission.prepare(&mut message, created_at_ms)?;
+        if let Some(goal) = prepared_goal.as_mut()
+            && let Some((server_key, _)) = selected_mcp.as_ref()
+        {
+            goal.control.mcp_server_key = Some(server_key.clone());
+        }
+        let mcp_selection = selected_mcp
+            .map(|(server_key, display_name)| {
+                Ok(StoredMcpSelection {
+                    selection_id: id::generate("mcp-selection").map_err(|_| {
+                        RuntimeError::InternalStateUnavailable {
+                            component: "MCP selection id random source",
+                        }
+                    })?,
+                    session_id: session_id.clone(),
+                    input_id: Some(input_id.clone()),
+                    message_id: message.id.clone(),
+                    server_key,
+                    display_name,
+                    created_at_ms,
+                })
+            })
+            .transpose()?;
         let selected_skill = manifest
             .skill_name
             .map(|name| SkillName::parse(name).map_err(|_| RuntimeError::SkillNameInvalid))
@@ -233,6 +288,7 @@ impl AssistantRuntime {
             cross_session: None,
             channel_source: Some(InputChannelSource::desktop_text()),
             skill_activation,
+            mcp_selection: mcp_selection.clone(),
             approval_mode: manifest.approval_mode,
             message,
             new_goal,
@@ -292,7 +348,7 @@ impl AssistantRuntime {
         let projection = {
             let mut state = controller.lock_state()?;
             state.goal = goal_snapshot.clone();
-            project_accepted_input(&mut state, accepted)
+            project_accepted_input(&mut state, accepted, mcp_selection)
         };
         {
             let mut attachments =

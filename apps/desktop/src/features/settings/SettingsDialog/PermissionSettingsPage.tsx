@@ -21,8 +21,14 @@ import { SettingsPageContainer } from "./SettingsPageContainer";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import styles from "./index.module.scss";
 
-type MatcherType = "general" | "file" | "shell";
-type RulePicker = "effect" | "matcher_type" | "file_operation" | "path_match" | "command_match" | "process_mode";
+type MatcherType = "general" | "file" | "shell" | "mcp";
+type RulePicker = "effect" | "matcher_type" | "file_operation" | "path_match" | "command_match" | "process_mode" | "mcp_scope";
+type McpScope = "tool" | "server" | "all";
+const MCP_SCOPE_OPTIONS: readonly SelectionOption<McpScope>[] = [
+  { value: "tool", label: "指定服务的单个工具" },
+  { value: "server", label: "指定服务的全部工具" },
+  { value: "all", label: "全部 MCP 工具" },
+];
 
 const EFFECT_OPTIONS: readonly SelectionOption<PermissionRuleEffect>[] = [
   { value: "allow", label: "允许" },
@@ -33,6 +39,7 @@ const MATCHER_OPTIONS: readonly SelectionOption<MatcherType>[] = [
   { value: "file", label: "文件操作" },
   { value: "shell", label: "命令行" },
   { value: "general", label: "通用工具" },
+  { value: "mcp", label: "MCP 工具" },
 ];
 const FILE_OPERATION_OPTIONS: readonly SelectionOption<PermissionFileOperationDefinition>[] = [
   { value: "read", label: "读取文件" },
@@ -62,6 +69,8 @@ type RuleForm = {
   variants: AgentVariant[];
   matcher_type: MatcherType;
   tool_name: string;
+  mcp_scope: McpScope;
+  server_key: string;
   file_operation: PermissionFileOperationDefinition;
   path: string;
   path_match: PermissionPathMatch;
@@ -318,6 +327,20 @@ function RuleEditor(props: Readonly<{
         {props.form.matcher_type === "general" && (
           <label className={styles.full_field}>工具名称<input onChange={(event) => update("tool_name", event.currentTarget.value)} placeholder="例如 delegate_task" value={props.form.tool_name} /></label>
         )}
+        {props.form.matcher_type === "mcp" && <>
+          <PermissionSelect
+            aria_label="选择 MCP 匹配范围"
+            label="MCP 范围"
+            on_open_change={(open) => setOpenPicker(open ? "mcp_scope" : null)}
+            on_select={(value) => update("mcp_scope", value)}
+            open={open_picker === "mcp_scope"}
+            options={MCP_SCOPE_OPTIONS}
+            selected={props.form.mcp_scope}
+          />
+          {props.form.mcp_scope !== "all" && <label className={styles.full_field}>服务 key<input onChange={(event) => update("server_key", event.currentTarget.value)} placeholder="例如 github，不使用展示名称" value={props.form.server_key} /></label>}
+          {props.form.mcp_scope === "tool" && <label className={styles.full_field}>原始工具名称<input onChange={(event) => update("tool_name", event.currentTarget.value)} placeholder="例如 create_issue，不使用网关名称" value={props.form.tool_name} /></label>}
+          <p className={styles.full_field}>MCP 权限独立于文件和 Shell；工具注解不参与授权判断。</p>
+        </>}
         {props.form.matcher_type === "file" && (
           <>
             <PermissionSelect
@@ -413,6 +436,8 @@ function emptyRuleForm(): RuleForm {
     variants: ["build"],
     matcher_type: "file",
     tool_name: "",
+    mcp_scope: "tool",
+    server_key: "",
     file_operation: "read",
     path: "",
     path_match: "recursive",
@@ -429,6 +454,12 @@ function formFromRule(rule: PermissionRuleDefinition): RuleForm {
   form.effect = rule.effect;
   form.variants = [...rule.variants];
   form.matcher_type = rule.matcher.type;
+  if (rule.matcher.type === "mcp") {
+    const { server, tool } = rule.matcher.payload;
+    form.mcp_scope = server.type === "any" ? "all" : "server";
+    if (tool.type === "exact") { form.mcp_scope = "tool"; form.tool_name = tool.payload.tool_name; }
+    if (server.type === "exact") form.server_key = server.payload.server_key;
+  }
   if (rule.matcher.type === "general") form.tool_name = rule.matcher.payload.tool_name;
   if (rule.matcher.type === "file") Object.assign(form, {
     file_operation: rule.matcher.payload.operation,
@@ -441,6 +472,14 @@ function formFromRule(rule: PermissionRuleDefinition): RuleForm {
 
 function buildRule(form: RuleForm): PermissionRuleDefinition | null {
   if (form.variants.length === 0) return null;
+  if (form.matcher_type === "mcp") {
+    if (form.mcp_scope !== "all" && !form.server_key.trim()) return null;
+    if (form.mcp_scope === "tool" && !form.tool_name.trim()) return null;
+    return { id: form.id, effect: form.effect, variants: form.variants, matcher: { type: "mcp", payload: {
+      server: form.mcp_scope === "all" ? { type: "any" } : { type: "exact", payload: { server_key: form.server_key.trim() } },
+      tool: form.mcp_scope === "tool" ? { type: "exact", payload: { tool_name: form.tool_name.trim() } } : { type: "any" },
+    } } };
+  }
   if (form.matcher_type === "general") {
     if (!form.tool_name.trim()) return null;
     return { id: form.id, effect: form.effect, variants: form.variants, matcher: { type: "general", payload: { tool_name: form.tool_name.trim() } } };
@@ -463,11 +502,16 @@ function statusLabel(status: PermissionDocumentSnapshot["status"]): string {
 function effectLabel(effect: PermissionRuleEffect): string { return ({ allow: "允许", ask: "询问", deny: "拒绝" })[effect]; }
 function variantLabel(variant: AgentVariant): string { return variant === "build" ? "构建" : "规划"; }
 function matcherTitle(rule: PermissionRuleDefinition): string {
+  if (rule.matcher.type === "mcp") {
+    const { server, tool } = rule.matcher.payload;
+    return `${server.type === "any" ? "全部服务" : server.payload.server_key} / ${tool.type === "any" ? "全部工具" : tool.payload.tool_name}`;
+  }
   if (rule.matcher.type === "general") return rule.matcher.payload.tool_name;
   if (rule.matcher.type === "file") return `${rule.matcher.payload.operation} · ${rule.matcher.payload.path}`;
   return rule.matcher.payload.command;
 }
 function matcherDescription(rule: PermissionRuleDefinition): string {
+  if (rule.matcher.type === "mcp") return "MCP 工具";
   if (rule.matcher.type === "general") return "通用工具";
   if (rule.matcher.type === "file") return rule.matcher.payload.path_match === "recursive" ? "包含子目录" : "仅当前路径";
   return `${rule.matcher.payload.command_match === "prefix" ? "前缀" : "完整"} · ${rule.matcher.payload.working_directory}`;

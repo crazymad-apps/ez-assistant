@@ -25,6 +25,14 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         "---\nname: review\ndescription: Review changes carefully\nuser-invocable: true\n---\nUse the frozen review instructions.\n",
     )
     .expect("write Skill definition");
+    // 目标 Skill 不保证排第一；用显式邻居而非开发者本机 Skill 稳定覆盖该条件。
+    let neighbor = workspace.path().join(".ez-assistant/skills/aaa-neighbor");
+    fs::create_dir_all(&neighbor).expect("create neighboring skill");
+    fs::write(
+        neighbor.join("SKILL.md"),
+        "---\nname: aaa-neighbor\ndescription: Unrelated fixture skill\n---\nDo not activate implicitly.\n",
+    )
+    .expect("write neighboring skill");
 
     let first_host = HostProcess::start(runtime_home.path());
     let mut client = first_host.connect();
@@ -78,7 +86,13 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         "completed"
     );
     let view = session_view(&mut client, &session_id);
-    assert_eq!(view["skill_catalog"]["skills"][0]["name"], "review");
+    let catalog = view["skill_catalog"]["skills"].as_array().expect("catalog");
+    assert_eq!(
+        catalog.len(),
+        2,
+        "only isolated fixture skills are discovered"
+    );
+    assert!(catalog.iter().any(|entry| entry["name"] == "review"));
     assert_eq!(view["active_skills"][0]["tag"]["name"], "review");
     assert_eq!(view["conversation"]["items"][0]["skill"]["name"], "review");
 

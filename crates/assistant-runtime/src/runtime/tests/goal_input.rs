@@ -79,6 +79,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             attachment_ids: vec![attachment.attachment_id],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -92,6 +93,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(key),
         })
         .await
@@ -169,7 +171,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
             1
         );
         assert!(state.goal_inputs.is_empty(), "first Goal input was claimed");
-        assert!(state.session_inputs.is_empty());
+        assert!(state.queue_item_ids.is_empty());
     }
 
     let requests = model.take_requests();
@@ -245,6 +247,7 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -275,6 +278,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -423,6 +427,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -447,6 +452,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -545,6 +551,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -559,6 +566,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -653,6 +661,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -755,6 +764,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -840,6 +850,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -854,6 +865,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -882,7 +894,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
     let controller = runtime.session(&session_id).expect("session");
     let state = controller.lock_state().expect("state");
     assert_eq!(state.inputs.len(), 2, "held Input is reused, not copied");
-    assert!(state.session_inputs.is_empty());
+    assert!(state.queue_item_ids.is_empty());
     assert!(state.goal.is_none());
 }
 
@@ -931,6 +943,7 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

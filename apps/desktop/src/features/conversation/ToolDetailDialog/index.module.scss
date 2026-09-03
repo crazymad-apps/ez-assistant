@@ -37,8 +37,8 @@
 
   > button {
     display: grid;
-    width: 30px;
-    height: 30px;
+    width: var(--ez-control-height);
+    height: var(--ez-control-height);
     flex: 0 0 auto;
     place-items: center;
     border: 0;
@@ -56,7 +56,8 @@
   align-items: center;
   gap: 10px;
 
-  h2 { margin: 0; font-size: var(--ez-font-large); line-height: 1.35; }
+  > div { min-width: 0; }
+  h2 { margin: 0; font-size: var(--ez-font-large); line-height: 1.35; overflow-wrap: anywhere; }
   span { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
 }
 
@@ -140,7 +141,7 @@
     width: fit-content;
     align-items: center;
     gap: 4px;
-    padding: 2px 0;
+    padding: 0 0;
     border: 0;
     color: var(--ez-accent);
     background: transparent;
@@ -185,6 +186,7 @@
   list-style: none;
   li { min-width: 0; }
   button {
+    height: auto;
     display: flex;
     width: 100%;
     min-width: 0;
@@ -215,7 +217,7 @@
 
   > div { display: flex; gap: 6px; }
   button {
-    padding: 5px 8px;
+    padding: 0 8px;
     border: 1px solid var(--ez-border);
     border-radius: var(--ez-radius-small);
     color: var(--ez-text-secondary);

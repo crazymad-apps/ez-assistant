@@ -131,6 +131,56 @@ pub struct RuntimeModelTransportConfig {
     pub(super) request_timeout: Duration,
 }
 
+/// 已校验的 MCP 进程级运行参数，包含调用缺省时限及连接、目录、关闭和并发上限。
+///
+/// 这里只保存连接和调用策略，不包含任何 Server 配置、目录或 credential。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct McpRuntimeConfig {
+    pub(super) connect_timeout: Duration,
+    pub(super) catalog_timeout: Duration,
+    pub(super) request_timeout: Duration,
+    pub(super) close_timeout: Duration,
+    pub(super) max_concurrent_calls_per_server: std::num::NonZeroU32,
+}
+
+impl McpRuntimeConfig {
+    /// 毫秒值需能通过 Desktop 的 JSON number 无损往返；这是数值边界，不是业务耗时上限。
+    pub(crate) const MAX_TOOL_TIMEOUT_INTEGER_MS: u64 = (1_u64 << 53) - 1;
+
+    pub fn connect_timeout(self) -> Duration {
+        self.connect_timeout
+    }
+
+    pub fn catalog_timeout(self) -> Duration {
+        self.catalog_timeout
+    }
+
+    /// 未配置 Server `toolTimeoutMs` 时使用；不是 Server 调用时限的上限。
+    pub fn request_timeout(self) -> Duration {
+        self.request_timeout
+    }
+
+    pub fn close_timeout(self) -> Duration {
+        self.close_timeout
+    }
+
+    pub fn max_concurrent_calls_per_server(self) -> std::num::NonZeroU32 {
+        self.max_concurrent_calls_per_server
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(1),
+            catalog_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(1),
+            close_timeout: Duration::from_secs(1),
+            max_concurrent_calls_per_server: std::num::NonZeroU32::new(2)
+                .expect("test MCP concurrency is non-zero"),
+        }
+    }
+}
+
 /// 已校验的单层子任务委派上限；所有字段都显式大于零。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DelegationConfig {
@@ -292,6 +342,7 @@ pub struct ResolvedConfig {
     pub(super) budget: ExecutionBudget,
     pub(super) guardrails: GuardrailConfig,
     pub(super) delegation: DelegationConfig,
+    pub(super) mcp: McpRuntimeConfig,
     pub(super) vision: Option<VisionConfig>,
     pub(super) models: BTreeMap<ModelKey, ResolvedModelConfig>,
 }
@@ -337,6 +388,11 @@ impl ResolvedConfig {
     /// 单层子任务委派的模型无关调度与执行上限。
     pub fn delegation(&self) -> DelegationConfig {
         self.delegation
+    }
+
+    /// MCP 进程级运行参数。实际 MCP 能力尚未装配时该配置也可以安全存在。
+    pub fn mcp(&self) -> McpRuntimeConfig {
+        self.mcp
     }
 
     pub fn vision(&self) -> Option<&VisionConfig> {

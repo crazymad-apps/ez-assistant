@@ -1,3 +1,4 @@
+import { McpSettingsStore } from "../features/settings";
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
 import type {
   ConfigurationStatus,
@@ -18,7 +19,7 @@ import type {
 } from "../generated/assistant-protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
-export type SettingsPage = "runtime" | "models" | "permissions" | "memory" | "skills" | "devices";
+export type SettingsPage = "runtime" | "models" | "permissions" | "memory" | "skills" | "devices" | "mcp";
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;
@@ -33,6 +34,7 @@ export class SettingsStore {
   #skill_scope_initialized_for_open = false;
   #skill_detail_request = 0;
   #skill_request = 0;
+  readonly mcp: McpSettingsStore;
   is_open = false;
   page: SettingsPage = "runtime";
   loading = false;
@@ -53,6 +55,7 @@ export class SettingsStore {
   pending_skill_name: string | null = null;
 
   constructor(private readonly dependencies: SettingsDependencies) {
+    this.mcp = new McpSettingsStore(dependencies.get_client);
     makeObservable(this, {
       is_open: observable,
       page: observable,
@@ -113,6 +116,7 @@ export class SettingsStore {
   }
 
   close(): void {
+    this.mcp.deactivate();
     this.is_open = false;
     this.error_message = null;
     this.notice_message = null;
@@ -123,6 +127,7 @@ export class SettingsStore {
   }
 
   selectPage(page: SettingsPage): void {
+    if (page !== "mcp") this.mcp.deactivate();
     this.page = page;
     this.clearMessages();
     if (page !== "skills") this.clearSkillDetail();

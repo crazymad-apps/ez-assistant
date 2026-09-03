@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApprovalDecision,
   GoalStateSnapshot,
+  McpSelectionTagSnapshot,
   QuotedTextSnapshot,
   SessionId,
   SessionViewSnapshot,
@@ -29,8 +30,10 @@ import { ModelSettingsPopover } from "./ModelSettingsPopover";
 import { OutputHostingMenu } from "./OutputHostingMenu";
 import { QueueDrawer } from "./QueueDrawer";
 import { queuePresentation } from "./queuePresentation";
+import { parseMcpRefreshCommand } from "./sessionCommand";
 import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
-import { SkillPicker } from "./SkillPicker";
+import { InputContextPicker } from "./InputContextPicker";
+import { McpServerPicker } from "./McpServerPicker";
 import { TodoSummary } from "./TodoSummary";
 import { type ComposerAttachment, useComposerAttachments } from "./useComposerAttachments";
 import styles from "./index.module.scss";
@@ -58,6 +61,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   const [goal_armed, setGoalArmed] = useState(false);
   const [selected_skill, setSelectedSkill] = useState<SkillSummarySnapshot | null>(null);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
+  const [selected_mcp, setSelectedMcp] = useState<McpSelectionTagSnapshot | null>(null);
+  const [mcp_picker_open, setMcpPickerOpen] = useState(false);
   const [active_overlay, setActiveOverlay] = useState<"todo" | "execution" | "model" | null>(null);
   const [initial_settings_category, setInitialSettingsCategory] = useState<"variant" | "approval" | "model" | "effort" | null>(null);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
@@ -70,6 +75,11 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   const input_method = useInputMethodGuard();
   const previous_approval_count = useRef(0);
   const previous_approval_session_id = useRef<string | null>(null);
+  const input_owner = useRef({ session_id, variant: session?.current_variant });
+  // 上传与提交可能跨越导航；旧输入不能清除新页面刚选中的标签。
+  if (input_owner.current.session_id !== session_id || input_owner.current.variant !== session?.current_variant) {
+    input_owner.current = { session_id, variant: session?.current_variant };
+  }
   const attachment_flow = useComposerAttachments({
     disabled: store.composer_pending || store.pending_compaction_session_id === session_id,
     on_error: (message) => store.showInteractionError(message),
@@ -88,7 +98,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   const slash_query = draft.startsWith("/") && !draft.includes("\n") ? draft.toLocaleLowerCase() : null;
   const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
     .filter((item) => item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)))
-    .map((item) => ({ ...item, disabled_reason: slashDisabledReason(item.name, session_view) }));
+    .map((item) => ({ ...item, disabled_reason: slashDisabledReason(item.name, session_view, application?.capabilities.session_commands ?? false) }));
 
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
@@ -103,6 +113,11 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     setActiveOverlay(null);
     setShowHelp(false);
   }, [session_id]);
+
+  useEffect(() => {
+    setSelectedMcp(null);
+    setMcpPickerOpen(false);
+  }, [session_id, session?.current_variant]);
 
   useEffect(() => {
     const count = session_view?.approvals.items.length ?? 0;
@@ -158,8 +173,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       return;
     }
     setDraft("");
-    if (attachment_flow.attachments.length > 0 || quotes.length > 0 || goal_armed || selected_skill) {
-      store.showInteractionError("/compact 必须单独使用，请先移除附件、引用、目标和技能标记。");
+    if (attachment_flow.attachments.length > 0 || quotes.length > 0 || goal_armed || selected_skill || selected_mcp) {
+      store.showInteractionError("/compact 必须单独使用，请先移除附件、引用和标签。");
       return;
     }
     if (
@@ -181,7 +196,21 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   }
 
   async function submitDraft() {
+    const owner = input_owner.current;
     const value = draft;
+    const control = parseMcpRefreshCommand(value);
+    if (control.type === "invalid") {
+      store.showInteractionError(control.message);
+      return;
+    }
+    if (control.type === "command") {
+      if (attachment_flow.attachments.length > 0 || quotes.length > 0 || selected_skill || goal_armed || selected_mcp) {
+        store.showInteractionError("刷新指令不能同时携带附件、引用或标签，请先移除这些内容");
+        return;
+      }
+      if (await store.submitSessionCommand(session!.session_id, control.command)) setDraft("");
+      return;
+    }
     if (value.trim() === "/compact") {
       await submitCompaction();
       return;
@@ -202,56 +231,36 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       }
     }
     const attachment_ids = await attachment_flow.uploadAll(session!.session_id);
-    if (!attachment_ids) {
+    if (!attachment_ids || owner !== input_owner.current) {
       return;
     }
     const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
-    const submitted = selected_skill
-      ? quotes.length > 0
-        ? await store.submitInput(
-          session!.session_id,
-          value,
-          session!.current_variant,
-          attachment_ids,
-          mode,
-          selected_skill.name,
-          quotes,
-        )
-        : await store.submitInput(
-          session!.session_id,
-          value,
-          session!.current_variant,
-          attachment_ids,
-          mode,
-          selected_skill.name,
-        )
-      : quotes.length > 0
-        ? await store.submitInput(
-          session!.session_id,
-          value,
-          session!.current_variant,
-          attachment_ids,
-          mode,
-          null,
-          quotes,
-        )
-        : await store.submitInput(
-          session!.session_id,
-          value,
-          session!.current_variant,
-          attachment_ids,
-          mode,
-        );
-    if (submitted) {
+    const submitted = await store.submitInput(
+      session!.session_id, value, session!.current_variant, attachment_ids, mode,
+      selected_skill?.name ?? null, quotes, selected_mcp?.server_key ?? null,
+    );
+    if (submitted && owner === input_owner.current) {
       setDraft("");
       setGoalArmed(false);
       setSelectedSkill(null);
+      setSelectedMcp(null);
       attachment_flow.clear();
       store.composer_quotes.clear(session!.session_id);
     }
   }
 
   function handleSlashCommand(command: SlashCommandItem) {
+    if (command.name === "/mcp refresh") {
+      if (command.disabled_reason) {
+        store.showInteractionError(command.disabled_reason);
+      } else if (draft.trim() === command.name) {
+        void submitDraft();
+      } else {
+        setDraft(command.name);
+        requestAnimationFrame(() => textarea_ref.current?.focus());
+      }
+      return;
+    }
     if (command.name === "/compact") {
       if (draft.trim() === "/compact") {
         void submitCompaction();
@@ -289,6 +298,12 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     if (command.name === "/skill") {
       setDraft("");
       setSkillPickerOpen(true);
+      return;
+    }
+    if (command.name === "/mcp") {
+      setDraft("");
+      setSkillPickerOpen(false);
+      setMcpPickerOpen(true);
       return;
     }
     if (command.picker) {
@@ -329,7 +344,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
         (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
       );
       const exact = exact_command
-        ? { ...exact_command, disabled_reason: slashDisabledReason(exact_command.name, session_view) }
+        ? { ...exact_command, disabled_reason: slashDisabledReason(exact_command.name, session_view, application?.capabilities.session_commands ?? false) }
         : undefined;
       if (exact) {
         handleSlashCommand(exact);
@@ -471,7 +486,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
           )}
           <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
           <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
-            <SkillPicker
+            <InputContextPicker
+              label="技能"
               on_close={() => {
                 setSkillPickerOpen(false);
                 requestAnimationFrame(() => textarea_ref.current?.focus());
@@ -482,20 +498,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
                 requestAnimationFrame(() => textarea_ref.current?.focus());
               }}
               open={skill_picker_open}
-              skills={availableUserSkills(session_view.skill_catalog.skills)}
+              options={availableUserSkills(session_view.skill_catalog.skills)}
             />
-          {(goal_armed || selected_skill) && (
-            <div className={styles.draft_tags}>
-              {goal_armed && <span>
-                目标
-                <button aria-label="取消目标标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
-              </span>}
-              {selected_skill && <span title={selected_skill.name}>
-                {selected_skill.name}
-                <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => setSelectedSkill(null)} type="button"><Icon name="x" size={12} /></button>
-              </span>}
-            </div>
-          )}
+          {mcp_picker_open && <McpServerPicker
+            key={`${session.session_id}:${session.current_variant}`}
+            on_close={() => { setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
+            on_select={(server) => { setSelectedMcp(server); setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
+            request={{ context: { type: "session", payload: { session_id: session.session_id } }, variant: session.current_variant }}
+          />}
           <ComposerAttachmentContext
             attachments={attachment_flow.attachments}
             on_quote_locate={(quote) => store.locateTextQuoteSource(session.session_id, quote)}
@@ -506,6 +516,22 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
             quotes={quotes}
             session_id={session.session_id}
           />
+          {(goal_armed || selected_skill || selected_mcp) && (
+            <div className={styles.draft_tags}>
+              {goal_armed && <span>
+                目标
+                <button aria-label="取消目标标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
+              </span>}
+              {selected_skill && <span title={selected_skill.name}>
+                {selected_skill.name}
+                <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => setSelectedSkill(null)} type="button"><Icon name="x" size={12} /></button>
+              </span>}
+              {selected_mcp && <span title={selected_mcp.server_key}>
+                MCP · {selected_mcp.display_name}
+                <button aria-label={`移除 MCP ${selected_mcp.display_name}`} onClick={() => setSelectedMcp(null)} type="button"><Icon name="x" size={12} /></button>
+              </span>}
+            </div>
+          )}
           <textarea
             aria-label="输入消息"
             disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
@@ -615,6 +641,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   const application = store.projection.application;
   const draft = store.new_session_drafts.get(draft_key);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
+  const [mcp_picker_open, setMcpPickerOpen] = useState(false);
   const [active_overlay, setActiveOverlay] = useState<"execution" | "model" | null>(null);
   const [show_help, setShowHelp] = useState(false);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
@@ -652,6 +679,14 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
     setActiveOverlay(null);
     setShowHelp(false);
   }, [draft_key]);
+  useEffect(() => {
+    setMcpPickerOpen(false);
+  }, [draft_key, draft?.variant]);
+  useEffect(() => () => {
+    // 未提交草稿离开 owner 时清理 MCP；结果未知的物化请求必须保留原幂等键和冻结载荷。
+    const leaving = store.new_session_drafts.get(draft_key);
+    if (leaving?.selected_mcp && !leaving.materialization_attempt) store.new_session_drafts.updateSelectedMcp(draft_key, null);
+  }, [draft_key, store]);
   useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
 
   if (!draft) return null;
@@ -674,6 +709,11 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
       store.new_session_drafts.updateGoalArmed(draft_key, true);
     } else if (command.name === "/skill") {
       setSkillPickerOpen(true);
+      return;
+    } else if (command.name === "/mcp") {
+      setSkillPickerOpen(false);
+      setMcpPickerOpen(true);
+      return;
     } else if (command.name === "/model") {
       setActiveOverlay("model");
     } else if (command.name === "/mode" || command.name === "/approval") {
@@ -710,8 +750,18 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
         ? { ...exact_command, disabled_reason: draftSlashDisabledReason(exact_command.name, draft) }
         : slash_query === null ? undefined : slash_items[slash_active_index];
       if (command) handleSlashCommand(command);
-      else void store.materializeNewSessionDraft(draft_key);
+      else submitNewDraft();
     }
+  }
+
+  function submitNewDraft() {
+    const command = slash_items.find((item) => item.name === current_draft.text.trim().toLocaleLowerCase());
+    if (command) { handleSlashCommand(command); return; }
+    if (parseMcpRefreshCommand(current_draft.text).type !== "not_command") {
+      store.showInteractionError("发送第一条消息后，可在会话中使用 MCP 刷新指令");
+      return;
+    }
+    void store.materializeNewSessionDraft(draft_key);
   }
 
   return (
@@ -725,17 +775,31 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
       <section className={styles.composer}>
         <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
         <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
-          <SkillPicker
-            on_close={() => setSkillPickerOpen(false)}
+          <InputContextPicker
+            label="技能"
+            on_close={() => { setSkillPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
             on_select={(skill) => {
               store.new_session_drafts.updateSelectedSkill(draft_key, skill.name);
               setSkillPickerOpen(false);
               requestAnimationFrame(() => textarea_ref.current?.focus());
             }}
             open={skill_picker_open}
-            skills={availableUserSkills(draft.skill_options)}
+            options={availableUserSkills(draft.skill_options)}
           />
-        {(draft.goal_armed || selected_skill) && (
+        {mcp_picker_open && <McpServerPicker
+          key={`${draft_key}:${draft.variant}`}
+          on_close={() => { setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
+          on_select={(server) => { store.new_session_drafts.updateSelectedMcp(draft_key, server); setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
+          request={{ context: { type: "new_session", payload: { workspace_id: draft.workspace_id ?? undefined } }, variant: draft.variant }}
+        />}
+        <ComposerAttachmentContext
+          attachments={attachment_flow.attachments}
+          on_remove={attachment_flow.remove}
+          owner_key={draft_key}
+          paste_pending={attachment_flow.paste_pending}
+          session_id={null}
+        />
+        {(draft.goal_armed || selected_skill || draft.selected_mcp) && (
           <div className={styles.draft_tags}>
             {draft.goal_armed && <span>
               目标
@@ -745,15 +809,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
               {selected_skill.name}
               <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => store.new_session_drafts.updateSelectedSkill(draft_key, null)} type="button"><Icon name="x" size={12} /></button>
             </span>}
+            {draft.selected_mcp && <span title={draft.selected_mcp.server_key}>
+              MCP · {draft.selected_mcp.display_name}
+              <button aria-label={`移除 MCP ${draft.selected_mcp.display_name}`} onClick={() => store.new_session_drafts.updateSelectedMcp(draft_key, null)} type="button"><Icon name="x" size={12} /></button>
+            </span>}
           </div>
         )}
-          <ComposerAttachmentContext
-            attachments={attachment_flow.attachments}
-            on_remove={attachment_flow.remove}
-            owner_key={draft_key}
-            paste_pending={attachment_flow.paste_pending}
-            session_id={null}
-        />
         <textarea
           aria-label="输入消息"
           disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
@@ -822,7 +883,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
             className={styles.send_button}
             data-action="send"
             disabled={!can_send || model_required || store.composer_pending || attachment_flow.pending}
-            onClick={() => void store.materializeNewSessionDraft(draft_key)}
+            onClick={submitNewDraft}
             type="button"
           >
             <Icon name="arrow-down" size={16} />
@@ -1034,7 +1095,13 @@ function formatBytes(value: number): string {
 function slashDisabledReason(
   command_name: string,
   view: SessionViewSnapshot | undefined,
+  session_commands_available: boolean,
 ): string | null {
+  if (command_name === "/mcp refresh") {
+    if (!session_commands_available) return "当前 Runtime 不支持 MCP 刷新指令";
+    if (view?.session.role === "controller") return "请在普通会话中刷新 MCP";
+    return null;
+  }
   if (command_name === "/skill") {
     if (!view || view.skill_catalog.status === "unavailable" || view.skill_catalog.status === "legacy_unavailable") {
       return "当前会话的技能信息不可用";
@@ -1049,7 +1116,7 @@ function slashDisabledReason(
 }
 
 function draftSlashDisabledReason(command_name: string, draft: NewSessionDraft | null): string | null {
-  if (command_name === "/compact" || command_name === "/title") return "发送第一条消息后可用";
+  if (command_name === "/compact" || command_name === "/title" || command_name === "/mcp refresh") return "发送第一条消息后可用";
   if (command_name === "/skill") {
     if (!draft || draft.skill_status === "failed") return "当前工作空间的技能信息不可用";
     if (draft.skill_status !== "ready") return "正在读取当前工作空间的技能";

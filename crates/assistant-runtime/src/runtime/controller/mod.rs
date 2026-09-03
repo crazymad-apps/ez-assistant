@@ -351,6 +351,7 @@ impl ControllerToolCoordinator {
                 cross_session: Some(envelope),
                 channel_source: None,
                 skill_activation: None,
+                mcp_selection: None,
                 approval_mode,
                 message,
                 new_goal,
@@ -376,7 +377,7 @@ impl ControllerToolCoordinator {
                 if let Some(goal) = prepared_goal {
                     state.goal = Some(goal.control);
                 }
-                project_accepted_input(&mut state, accepted)
+                project_accepted_input(&mut state, accepted, None)
             };
             self.publish_and_wake_projected_input(&target, projection, goal_snapshot)?;
         }
@@ -426,7 +427,7 @@ impl ControllerToolCoordinator {
             if state.inputs.contains_key(&accepted.input.input_id) {
                 return Ok(());
             }
-            project_accepted_input(&mut state, accepted)
+            project_accepted_input(&mut state, accepted, None)
         };
         // 观察事件和 Queue 唤醒不属于内存投影临界区；先释放主控 gate，也让后续 driver 能取得它。
         drop(_mutation);
@@ -543,6 +544,7 @@ pub(crate) fn build_proxy_report_input(
         }),
         channel_source: None,
         skill_activation: None,
+        mcp_selection: None,
         approval_mode,
         message,
         new_goal: None,

@@ -1,5 +1,6 @@
 import type {
   ModelFailureKind,
+  McpToolIdentity,
   RuntimeErrorCode,
   RunStatus,
   SessionId,
@@ -25,6 +26,7 @@ export type LiveTextSegment = Readonly<{
 export type LiveToolSnapshot = Readonly<{
   call_id: ToolCallId;
   tool_name: string;
+  mcp_identity?: McpToolIdentity;
   status: ToolActivityStatus;
   stdout: string;
   stderr: string;

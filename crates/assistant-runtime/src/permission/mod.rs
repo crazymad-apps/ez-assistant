@@ -19,7 +19,8 @@ use crate::StoreError;
 pub(crate) use approval::{ApprovalRegistry, RuntimeApprovalResolver, rules_for_approval};
 pub(crate) use authorizer::{RunAuthorizationScope, RuntimeToolAuthorizer};
 pub use document::{
-    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
+    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, McpPermissionMatcher,
+    McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionDocument,
     PermissionDocumentError, PermissionEffect, PermissionFileOperation, PermissionMatcher,
     PermissionProcessMode, PermissionRule, ShellPermissionMatcher,
 };

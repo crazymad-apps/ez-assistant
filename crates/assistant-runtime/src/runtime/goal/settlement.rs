@@ -254,7 +254,7 @@ fn transition(
         expected_goal_id: current.id.clone(),
         expected_generation: current.generation,
         goal: goal.to_stored(session_id.clone()),
-        resume_required: !session.session_inputs.is_empty(),
+        resume_required: !session.queue_item_ids.is_empty(),
     }))
 }
 

@@ -86,6 +86,10 @@ function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: bool
       </article>
     );
   }
+  if (props.item.type === "control_result") {
+    const outcome = { success: "刷新完成", partial: "部分刷新完成", failure: "刷新失败" }[props.item.result.outcome];
+    return <article className={styles.message} data-anchor={props.is_anchor} data-role="user"><small>MCP 刷新结果</small><p>{outcome} · {props.item.result.servers.length} 个服务</p></article>;
+  }
   const text = props.item.segments
     .filter((segment) => segment.type === "text")
     .map((segment) => segment.text)

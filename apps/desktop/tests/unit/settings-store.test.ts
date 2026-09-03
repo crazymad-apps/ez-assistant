@@ -5,6 +5,42 @@ import type {
 } from "../../src/generated/assistant-protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { SettingsStore } from "../../src/stores/SettingsStore";
+import { serverDraft } from "../../src/features/settings/SettingsDialog/McpSettingsPage/draft";
+
+describe("SettingsStore MCP management", () => {
+  it("cancels a pending test by its own ID and ignores late results", async () => {
+    const commands: RuntimeCommand[] = [];
+    let resolve_test: (value: unknown) => void = () => undefined;
+    const client = { command: async (command: RuntimeCommand) => {
+      commands.push(command);
+      if (command.type === "test_mcp_server") return new Promise((resolve) => { resolve_test = resolve; });
+      if (command.type === "cancel_mcp_server_test") return { type: command.type, payload: {} };
+      throw new Error("unexpected command");
+    } } as unknown as RuntimeClient;
+    const store = permissionStore(client).mcp;
+    const testing = store.test(serverDraft(null));
+    expect(store.testing).toBe(true);
+    store.cancelTest();
+    expect(commands[1]).toMatchObject({ type: "cancel_mcp_server_test", payload: { test_id: commands[0]!.type === "test_mcp_server" ? commands[0]!.payload.test_id : "missing" } });
+    resolve_test({ type: "test_mcp_server", payload: { outcome: "success", stage: "complete", elapsed_ms: 5, tool_count: 1 } });
+    await testing;
+    expect(store.testing).toBe(false);
+    expect(store.test_result).toBeNull();
+  });
+
+  it("keeps stale configuration on read failure and never displays raw errors", async () => {
+    const client = { command: async () => { throw Object.assign(new Error("sensitive-url-token"), { code: "mcp_config_conflict" }); } } as unknown as RuntimeClient;
+    const store = permissionStore(client).mcp;
+    store.configuration = { revision: "old", needs_refresh: false, servers: [], diagnostics: [] };
+    expect(await store.mutate("old", { type: "remove", payload: { server_key: "example" } })).toBe(false);
+    expect(store.configuration_conflict).toBe(true);
+    expect(store.error_message).not.toContain("sensitive-url-token");
+    await store.load();
+    expect(store.stale).toBe(true);
+    expect(store.configuration?.revision).toBe("old");
+    expect(store.error_message).not.toContain("sensitive-url-token");
+  });
+});
 
 describe("SettingsStore connection validation", () => {
   it("presents a failed validation as a persistent error", async () => {

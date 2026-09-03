@@ -26,7 +26,7 @@ const application: ApplicationSnapshot = {
   controller_availability: { status: "unavailable" },
   additional_controller_count: 0,
   capabilities: {
-    conversation_paging: true,
+    conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
     tool_detail: true,
     queue_control: true,
     approval_queue: true,

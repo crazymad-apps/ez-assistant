@@ -81,6 +81,105 @@ fn host_speech_table_is_tolerated_but_not_compiled_into_runtime_config() {
 }
 
 #[test]
+fn legacy_schema_one_uses_stable_mcp_runtime_defaults() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"fixture\"\n{}",
+        model_table("fixture", "fixture", 4096)
+    );
+    let compilation = compile_runtime_config(&document);
+    let active = compilation.active().expect("active configuration");
+    let mcp = active.mcp();
+    assert_eq!(mcp.connect_timeout(), Duration::from_secs(15));
+    assert_eq!(mcp.catalog_timeout(), Duration::from_secs(30));
+    assert_eq!(mcp.request_timeout(), Duration::from_secs(120));
+    assert_eq!(mcp.close_timeout(), Duration::from_secs(5));
+    assert_eq!(mcp.max_concurrent_calls_per_server().get(), 8);
+}
+
+#[test]
+fn schema_one_accepts_valid_mcp_runtime_overrides() {
+    let document = format!(
+        "schema_version = 1\ndefault_model = \"fixture\"\n\
+         [mcp]\nconnect_timeout_ms = 1000\ncatalog_timeout_ms = 120000\n\
+         request_timeout_ms = 600000\nclose_timeout_ms = 30000\n\
+         max_concurrent_calls_per_server = 16\n{}",
+        model_table("fixture", "fixture", 4096)
+    );
+    let compilation = compile_runtime_config(&document);
+    let active = compilation.active().expect("active configuration");
+    let mcp = active.mcp();
+    assert_eq!(mcp.connect_timeout(), Duration::from_secs(1));
+    assert_eq!(mcp.catalog_timeout(), Duration::from_secs(120));
+    assert_eq!(mcp.request_timeout(), Duration::from_secs(600));
+    assert_eq!(mcp.close_timeout(), Duration::from_secs(30));
+    assert_eq!(mcp.max_concurrent_calls_per_server().get(), 16);
+}
+
+#[test]
+fn invalid_or_unknown_mcp_runtime_fields_fail_closed() {
+    for invalid_fields in [
+        "connect_timeout_ms = 999",
+        "catalog_timeout_ms = 120001",
+        "request_timeout_ms = 0",
+        "request_timeout_ms = 9007199254740992",
+        "close_timeout_ms = 0",
+        "max_concurrent_calls_per_server = 17",
+    ] {
+        let document = format!(
+            "schema_version = 1\ndefault_model = \"fixture\"\n[mcp]\n{invalid_fields}\n{}",
+            model_table("fixture", "fixture", 4096)
+        );
+        let compilation = compile_runtime_config(&document);
+        assert_eq!(
+            compilation.state(),
+            ConfigState::Invalid,
+            "{invalid_fields}"
+        );
+        assert!(compilation.active().is_none(), "{invalid_fields}");
+        assert!(
+            compilation
+                .projection()
+                .issues
+                .iter()
+                .any(|issue| issue.code() == ConfigIssueCode::InvalidLimit)
+        );
+    }
+
+    let unknown = format!(
+        "schema_version = 1\ndefault_model = \"fixture\"\n[mcp]\nunknown = true\n{}",
+        model_table("fixture", "fixture", 4096)
+    );
+    let compilation = compile_runtime_config(&unknown);
+    assert_eq!(compilation.state(), ConfigState::Invalid);
+    assert!(
+        compilation
+            .projection()
+            .issues
+            .iter()
+            .any(|issue| issue.code() == ConfigIssueCode::UnknownField)
+    );
+}
+
+#[test]
+fn mcp_default_tool_timeout_accepts_long_durations_without_a_business_ceiling() {
+    for milliseconds in [1, 120_000, 1_800_000, (1_u64 << 53) - 1] {
+        let document = format!(
+            "schema_version = 1\ndefault_model = \"fixture\"\n[mcp]\nrequest_timeout_ms = {milliseconds}\n{}",
+            model_table("fixture", "fixture", 4096)
+        );
+        let compilation = compile_runtime_config(&document);
+        assert_eq!(
+            compilation
+                .active()
+                .expect("valid default")
+                .mcp()
+                .request_timeout(),
+            Duration::from_millis(milliseconds)
+        );
+    }
+}
+
+#[test]
 fn catalog_match_and_complete_reasoning_override_follow_precedence() {
     let document = format!(
         "schema_version = 1\ndefault_model = \"reasoner\"\n{}",

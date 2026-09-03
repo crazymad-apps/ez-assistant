@@ -49,6 +49,47 @@ function EditableSelection() {
 }
 
 describe("SelectionPopover", () => {
+  it.each(["small", "default", "large"] as const)("uses the same %s size contract for button and editable triggers", (size) => {
+    const shared = { size, open: false, on_open_change: vi.fn(), on_select: vi.fn(), selected: "keep", options: [{ value: "keep", label: "保持原值" }] };
+    render(<><SelectionPopover {...shared} aria_label="尺寸选择" trigger_variant="field" />
+      <SelectionPopover {...shared} aria_label="可编辑尺寸选择" editable trigger_variant="field" /></>);
+    expect(screen.getByRole("button", { name: "尺寸选择" })).toHaveAttribute("data-size", size);
+    const frame = screen.getByRole("combobox", { name: "可编辑尺寸选择" }).parentElement;
+    expect(frame).toHaveAttribute("data-size", size);
+    expect(frame).toHaveAttribute("data-control", "field");
+  });
+
+  it("defaults the trigger size without coupling it to its visual variant", () => {
+    render(<ExampleSelection />);
+    expect(screen.getByRole("button", { name: "选择示例" })).toHaveAttribute("data-size", "default");
+  });
+
+  it("derives option layout from its content without page-specific sizing props", () => {
+    render(<SelectionPopover aria_label="选项内容布局" open on_open_change={() => {}} on_select={() => {}}
+      selected="plain" options={[
+        { value: "plain", label: "保持原值" },
+        { value: "description", label: "带说明", description: "辅助说明" },
+        { value: "icon", label: "带图标", icon: <span aria-hidden="true">★</span> },
+      ]} />);
+    const plain = screen.getByRole("option", { name: "保持原值" });
+    expect(plain).toHaveAttribute("data-has-description", "false");
+    expect(plain).toHaveAttribute("data-has-icon", "false");
+    expect(plain).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: /带说明\s*辅助说明/ })).toHaveAttribute("data-has-description", "true");
+    expect(screen.getByRole("option", { name: "带图标" })).toHaveAttribute("data-has-icon", "true");
+  });
+
+  it("keeps native selects out of business views so they reuse the shared selection UI", () => {
+    const view_sources = import.meta.glob<string>(["../../src/**/*.tsx", "!../../src/components/**"], {
+      query: "?raw", import: "default", eager: true,
+    });
+    const native_select_views = Object.entries(view_sources)
+      .filter(([, source]) => /<select(?:\s|\/?>)/.test(source))
+      .map(([path]) => path);
+    expect(Object.keys(view_sources).length).toBeGreaterThan(0);
+    expect(native_select_views, "业务选择框必须复用 SelectionPopover，不能直接渲染原生 select").toEqual([]);
+  });
+
   it("opens from the keyboard and moves through options", async () => {
     const user = userEvent.setup();
     render(<ExampleSelection />);

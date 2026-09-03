@@ -20,6 +20,9 @@ pub(crate) enum InternalBoundarySource {
     AgentVariant,
     ChannelInput,
     SkillActivation,
+    McpServerDirectory,
+    McpServerSelection,
+    McpRefreshResult,
     GoalStart,
     GoalResume,
     GoalContinuation,
@@ -39,6 +42,9 @@ impl InternalBoundarySource {
             Self::AgentVariant => "agent_variant",
             Self::ChannelInput => "channel_input",
             Self::SkillActivation => "skill_activation",
+            Self::McpServerDirectory => "mcp_server_directory",
+            Self::McpServerSelection => "mcp_server_selection",
+            Self::McpRefreshResult => "mcp_refresh_result",
             Self::GoalStart => "goal_start",
             Self::GoalResume => "goal_resume",
             Self::GoalContinuation => "goal_continuation",
@@ -158,6 +164,18 @@ impl InternalBoundaryCoordinator {
             },
             identity,
         ))
+    }
+
+    /// 创建只含一段内部上下文的可见 Runtime UserMessage。
+    ///
+    /// 仅用于本身就是产品历史项、且下一次模型调用也应自然读到的 Runtime 控制结果；
+    /// 产品投影仍根据对应结构化关系展示专用卡片，不把内部封装文本直接暴露给用户。
+    pub(crate) fn visible_message(
+        request: InternalBoundaryRequest,
+    ) -> RuntimeResult<(UserMessage, InternalBoundaryIdentity)> {
+        let (mut message, identity) = Self::hidden_message(request)?;
+        message.transcript_visibility = TranscriptVisibility::Visible;
+        Ok((message, identity))
     }
 }
 

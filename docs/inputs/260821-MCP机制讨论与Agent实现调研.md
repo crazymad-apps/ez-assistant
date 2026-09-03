@@ -1,10 +1,16 @@
 # MCP 机制讨论与 Agent 实现调研
 
 - 记录日期：260821
-- 状态：待评估（后续版本候选，尚未启动正式版本设计）
+- 状态：已纳入 `v0.23.0`
 - 来源：与用户的逐点讨论；对本地 OpenCode、Hermes Agent、Kimi Code、DeepSeek Harness
   的只读实现调研；MCP 协议机制
-- 目标版本：待定
+- 目标版本：`v0.23.0`
+
+> 2026-09-02 后续讨论已将首版收敛为：按 MCP Server 业务范围分级发现、固定
+> `discover_mcp_tools` / `call_mcp_tool` 两个网关、完整定义使用普通 Tool Result、
+> `/mcp refresh` 手动刷新，以及 stdio 与 Streamable HTTP 同版交付。本文第四节及后续保留早期
+> 调研和候选推演，不再代表当前设计结论；正式范围以
+> [`v0.23.0 功能设计`](../design/v0.23.0-功能设计.md)为准。
 
 ## 一、原始目标
 

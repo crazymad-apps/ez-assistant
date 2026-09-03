@@ -26,6 +26,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -42,6 +43,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -108,6 +110,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -202,6 +205,7 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await
@@ -290,6 +294,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -386,6 +391,7 @@ async fn force_settlement_failure_still_shuts_down_store() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -433,6 +439,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await

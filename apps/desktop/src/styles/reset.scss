@@ -1,4 +1,8 @@
-* {
+@use "fields";
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   scrollbar-width: none;
 }
@@ -27,10 +31,32 @@ input,
 textarea,
 select { font: inherit; }
 
+// 原生按钮/单行字段共用尺寸契约；复合字段只让外框占高度，内部元素填满内容区。
+// checkbox/radio/range、开关和多行输入不属于单行字段，保留各自语义尺寸。
+:where(button:not([role="switch"]), input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="file"]):not([type="color"]), select, [data-control="field"]) {
+  --ez-control-default-height: var(--ez-control-height-default);
+  --ez-control-height: var(--ez-control-default-height);
+  height: var(--ez-control-height);
+  min-height: var(--ez-control-height);
+  padding-block: 0;
+  line-height: 1.25;
+  vertical-align: middle;
+
+  &[data-size="small"] { --ez-control-height: var(--ez-control-height-small); }
+  &[data-size="default"] { --ez-control-height: var(--ez-control-height-default); }
+  &[data-size="large"] { --ez-control-height: var(--ez-control-height-large); }
+}
+
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 :focus-visible {
   outline: 2px solid rgb(73 108 242 / 38%);
   outline-offset: 2px;
+}
+
+// 文本输入不使用通用控件的外圈。页面若有更具体的边框选择器，也复用同一 mixin。
+input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="file"]):not([type="color"])):focus,
+textarea:focus {
+  @include fields.focus-border;
 }

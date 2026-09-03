@@ -32,6 +32,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -54,7 +55,9 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
         .iter()
         .find_map(|item| match item {
             ConversationItem::User(message) => Some(message.message_id.clone()),
-            ConversationItem::Assistant(_) | ConversationItem::ContextSummary { .. } => None,
+            ConversationItem::Assistant(_)
+            | ConversationItem::ControlResult { .. }
+            | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("source user message");
     let quote = QuotedTextSnapshot {
@@ -89,6 +92,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
             attachment_ids: Vec::new(),
             quotes: vec![quote],
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -141,6 +145,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -154,6 +159,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: Some("INVALID-SKILL-NAME".to_owned()),
+            mcp_server_key: None,
             idempotency_key: Some(key),
         })
         .await
@@ -219,6 +225,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -235,6 +242,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -294,7 +302,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
 }
 
 #[tokio::test]
-async fn same_session_inputs_execute_in_acceptance_order() {
+async fn same_queue_item_ids_execute_in_acceptance_order() {
     let entered = Arc::new(Notify::new());
     let cleanup = Arc::new(Notify::new());
     let runtime = hanging_runtime(
@@ -317,6 +325,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -333,6 +342,7 @@ async fn same_session_inputs_execute_in_acceptance_order() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -428,6 +438,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

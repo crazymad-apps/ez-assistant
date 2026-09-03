@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -664,7 +665,7 @@ async fn authenticated_loop(
                                 drop(aggregation_guard);
                                 if let Some((ordinal, cancellation, logical_client_input_id)) = recognition {
                                     spawn_segment_recognition(
-                                        shared.speech.clone(),
+                                        shared,
                                         device_id.clone(),
                                         utterance,
                                         ordinal,
@@ -1352,7 +1353,7 @@ async fn recognize_segment(
 }
 
 fn spawn_segment_recognition(
-    speech: crate::speech::SpeechServiceHandle,
+    shared: &GatewayShared,
     device_id: DeviceId,
     utterance: UplinkUtterance,
     ordinal: usize,
@@ -1360,15 +1361,60 @@ fn spawn_segment_recognition(
     voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
     logical_client_input_id: String,
 ) {
-    tokio::spawn(async move {
-        let outcome = recognize_segment(speech, device_id, utterance, ordinal, cancellation).await;
-        let mut aggregation = voice_turn.lock().await;
-        if let Some(active) = aggregation.as_mut()
-            && logical_client_input_id == active.logical_client_input_id
-        {
-            active.complete_segment(outcome);
-        }
+    let failed_outcome = RecognitionOutcome {
+        ordinal,
+        stream_id: utterance.stream_id,
+        client_input_id: utterance.client_input_id.clone(),
+        result: Err(SpeechServiceError::Unavailable),
+    };
+    let recognition = recognize_segment(
+        shared.speech.clone(),
+        device_id,
+        utterance,
+        ordinal,
+        cancellation,
+    );
+    spawn_owned_recognition(
+        &shared.recognition_tasks,
+        recognition,
+        failed_outcome,
+        voice_turn,
+        logical_client_input_id,
+    );
+}
+
+/// 将一段识别登记到 Gateway 任务树，并把所有退出路径收敛成聚合 outcome。
+///
+/// 外层 wrapper 由 Gateway `TaskTracker` 拥有；内层 `JoinHandle` 只隔离单次识别的 panic。
+/// 无论识别成功、返回错误还是异常退出，只要原 logical turn 仍然有效就精确减少一次 pending；
+/// 本函数不提交 Runtime Input，也不改变跨连接聚合的 commit deadline。
+fn spawn_owned_recognition(
+    tasks: &tokio_util::task::TaskTracker,
+    recognition: impl Future<Output = RecognitionOutcome> + Send + 'static,
+    failed_outcome: RecognitionOutcome,
+    voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    logical_client_input_id: String,
+) {
+    tasks.spawn(async move {
+        let outcome = match tokio::spawn(recognition).await {
+            Ok(outcome) => outcome,
+            Err(_) => failed_outcome,
+        };
+        settle_recognition_outcome(&voice_turn, &logical_client_input_id, outcome).await;
     });
+}
+
+async fn settle_recognition_outcome(
+    voice_turn: &Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    logical_client_input_id: &str,
+    outcome: RecognitionOutcome,
+) {
+    let mut aggregation = voice_turn.lock().await;
+    if let Some(active) = aggregation.as_mut()
+        && logical_client_input_id == active.logical_client_input_id
+    {
+        active.complete_segment(outcome);
+    }
 }
 
 async fn cancel_active_controller_run(
@@ -1405,6 +1451,7 @@ async fn submit_speech_input(
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             },
             source: InputChannelSource::Device(DeviceInputSource {
@@ -1513,6 +1560,7 @@ async fn submit_text_input(
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             },
             source: InputChannelSource::Device(DeviceInputSource {
@@ -1920,6 +1968,81 @@ mod tests {
                 .and_then(|aggregation| aggregation.commit_deadline)
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn recognition_task_owner_settles_cancelled_and_panicked_segments() {
+        let mut aggregation =
+            VoiceTurnAggregation::new("logical-input".to_owned(), OutputPreferenceSnapshot::Text);
+        let Some(SegmentAdmission::New {
+            cancellation: cancelled_segment,
+            ..
+        }) = aggregation.admit_segment("cancelled".to_owned(), [10; 32], 10)
+        else {
+            panic!("cancelled segment must be admitted");
+        };
+        assert!(matches!(
+            aggregation.admit_segment("panicked".to_owned(), [11; 32], 11),
+            Some(SegmentAdmission::New { .. })
+        ));
+        let voice_turn = Arc::new(tokio::sync::Mutex::new(Some(aggregation)));
+        let tasks = tokio_util::task::TaskTracker::new();
+        let cancellation_wait = cancelled_segment.clone();
+
+        spawn_owned_recognition(
+            &tasks,
+            async move {
+                cancellation_wait.cancelled().await;
+                RecognitionOutcome {
+                    ordinal: 0,
+                    stream_id: 10,
+                    client_input_id: "cancelled".to_owned(),
+                    result: Err(SpeechServiceError::Cancelled),
+                }
+            },
+            RecognitionOutcome {
+                ordinal: 0,
+                stream_id: 10,
+                client_input_id: "cancelled".to_owned(),
+                result: Err(SpeechServiceError::Unavailable),
+            },
+            voice_turn.clone(),
+            "logical-input".to_owned(),
+        );
+        spawn_owned_recognition(
+            &tasks,
+            async { panic!("injected recognition panic") },
+            RecognitionOutcome {
+                ordinal: 1,
+                stream_id: 11,
+                client_input_id: "panicked".to_owned(),
+                result: Err(SpeechServiceError::Unavailable),
+            },
+            voice_turn.clone(),
+            "logical-input".to_owned(),
+        );
+
+        voice_turn
+            .lock()
+            .await
+            .as_mut()
+            .expect("active voice turn")
+            .cancel();
+        tasks.close();
+        tasks.wait().await;
+        assert!(tasks.is_closed());
+        assert!(tasks.is_empty());
+        let aggregation = voice_turn.lock().await;
+        let aggregation = aggregation.as_ref().expect("active voice turn");
+        assert_eq!(aggregation.pending_recognitions, 0);
+        assert!(aggregation.recognition_cancellations.is_empty());
+        assert_eq!(aggregation.completed_recognitions.len(), 2);
+        assert!(aggregation.completed_recognitions.iter().any(|outcome| {
+            outcome.stream_id == 10 && outcome.result == Err(SpeechServiceError::Cancelled)
+        }));
+        assert!(aggregation.completed_recognitions.iter().any(|outcome| {
+            outcome.stream_id == 11 && outcome.result == Err(SpeechServiceError::Unavailable)
+        }));
     }
 
     #[test]

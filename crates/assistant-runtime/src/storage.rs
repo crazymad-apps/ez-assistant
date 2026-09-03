@@ -29,11 +29,13 @@ pub use conversation::{
 };
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
-    AcceptedInput, CompletedToolExchange, CrossSessionInputBinding, CrossSessionInputEnvelope,
-    GoalInputBinding, InputMessageValidationError, InputOrigin, NewStoredInput,
-    NewStoredRunAttempt, PendingToolExchange, QueuePriorityChange, StoredGoalSettlementEffect,
-    StoredInput, StoredInputState, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, StoredRunSettlementResult, ToolExecutionStart, UserMessageCommit,
+    AcceptedInput, AcceptedStoredSessionCommand, CompletedToolExchange, CrossSessionInputBinding,
+    CrossSessionInputEnvelope, GoalInputBinding, InputMessageValidationError, InputOrigin,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSessionCommand, PendingToolExchange,
+    QueuePriorityChange, SessionCommandCommit, StoredGoalSettlementEffect, StoredInput,
+    StoredInputState, StoredMcpSelection, StoredQueueItem, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult,
+    StoredSessionCommand, StoredSessionCommandState, ToolExecutionStart, UserMessageCommit,
     validate_input_message, validate_input_message_with_channel_source,
 };
 pub use goal::{
@@ -42,9 +44,9 @@ pub use goal::{
     StoredGoalPauseReason, StoredGoalState,
 };
 pub use session::{
-    ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, MessageFeedbackChange,
-    ModelChange, NewStoredSession, ReasoningEffortChange, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, ForkedSessionCommand,
+    MessageFeedbackChange, ModelChange, NewStoredSession, ReasoningEffortChange, SessionDeletion,
+    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
     SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
     SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,

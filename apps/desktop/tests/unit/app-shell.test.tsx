@@ -124,6 +124,28 @@ describe("AppShell session header", () => {
     expect(archive).toHaveBeenCalledWith("session-1");
   });
 
+  it("separates session actions with a standalone non-focusable line", () => {
+    renderShell(storeWithSessions());
+
+    fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
+    const menu = screen.getByRole("menu", { name: "会话操作" });
+    const separator = within(menu).getByRole("separator");
+    const export_action = within(menu).getByRole("menuitem", { name: "导出 Markdown" });
+    const clear_action = within(menu).getByRole("menuitem", { name: "清空会话历史…" });
+
+    expect(separator).toHaveAttribute("aria-orientation", "horizontal");
+    expect(separator.tabIndex).toBe(-1);
+    expect(separator.previousElementSibling).toBe(export_action);
+    expect(separator.nextElementSibling).toBe(clear_action);
+    expect(clear_action).toBeDisabled();
+    export_action.focus();
+    fireEvent.keyDown(export_action, { key: "ArrowDown" });
+    const next_action = within(menu).getByRole("menuitem", { name: "固定会话" });
+    expect(next_action).toHaveFocus();
+    fireEvent.keyDown(next_action, { key: "ArrowUp" });
+    expect(export_action).toHaveFocus();
+  });
+
   it("keeps the context toggle beside the session more button while the sidebar opens and closes", () => {
     vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
     const store = storeWithSessions();
@@ -290,7 +312,7 @@ function applicationSnapshot(): ApplicationSnapshot {
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
     capabilities: {
-      conversation_paging: true,
+      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
       tool_detail: true,
       queue_control: true,
       approval_queue: true,

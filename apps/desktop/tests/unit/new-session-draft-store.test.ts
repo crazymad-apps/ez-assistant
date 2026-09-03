@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { materializeNewSession } from "../../src/native-bridge/nativeResource";
+vi.mock("../../src/native-bridge/nativeResource", async (original) => ({
+  ...await original<typeof import("../../src/native-bridge/nativeResource")>(),
+  materializeNewSession: vi.fn(),
+}));
 import {
   draftKeyForWorkspace,
   NewSessionDraftStore,
@@ -6,6 +11,27 @@ import {
 import { RootStore } from "../../src/stores/RootStore";
 
 describe("NewSessionDraftStore", () => {
+  it("passes a stable MCP key in first materialization and preserves it on rejection", async () => {
+    const store = new RootStore();
+    store.connection.markConnected("instance-1", {
+      protocol_version: 1, runtime_version: "test", max_command_bytes: 65536,
+      max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["session_materialization"],
+    });
+    store.openNewSessionDraft(null);
+    store.new_session_drafts.updateText("unbound", "创建 issue");
+    store.new_session_drafts.updateGoalArmed("unbound", true);
+    store.new_session_drafts.updateSelectedSkill("unbound", "review");
+    store.new_session_drafts.updateSelectedMcp("unbound", { server_key: "github", display_name: "旧展示名" });
+    vi.mocked(materializeNewSession).mockRejectedValueOnce(new Error("MCP 服务已不可用，请重新选择"));
+    expect(await store.materializeNewSessionDraft("unbound")).toBe(false);
+    expect(materializeNewSession).toHaveBeenCalledWith(expect.objectContaining({ mcp_server_key: "github", skill_name: "review", mode: "start_goal", message: "创建 issue" }), expect.any(String));
+    expect(store.new_session_drafts.get("unbound")).toMatchObject({ selected_mcp: { server_key: "github" }, goal_armed: true, selected_skill_name: "review" });
+    expect(store.interaction_error).toContain("重新选择");
+    store.new_session_drafts.updateVariant("unbound", "plan");
+    expect(store.new_session_drafts.get("unbound")).toMatchObject({ selected_mcp: null, selected_skill_name: "review", goal_armed: true });
+    store.dispose();
+  });
+
   it("keeps one isolated in-memory draft per workspace and no Session identity", () => {
     const drafts = new NewSessionDraftStore();
     const first = draftKeyForWorkspace("workspace-1");

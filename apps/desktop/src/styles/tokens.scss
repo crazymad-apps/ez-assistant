@@ -2,6 +2,10 @@
   --ez-font-small: 12px;
   --ez-font-base: 14px;
   --ez-font-large: 16px;
+  // 单行控件的 border-box 总高度；padding 与 border 不得额外撑高。
+  --ez-control-height-small: 24px;
+  --ez-control-height-default: 32px;
+  --ez-control-height-large: 40px;
   --ez-primary: #496cf2;
   --ez-primary-hover: #3f61e5;
   --ez-primary-text: #3551b7;

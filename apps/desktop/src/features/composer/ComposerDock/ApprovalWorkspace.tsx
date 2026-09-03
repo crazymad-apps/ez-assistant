@@ -76,10 +76,19 @@ function ApprovalSubject({ subject }: Readonly<{ subject: ToolApprovalSubject }>
   if (subject.type === "delegation") {
     return <p>{subject.title} · {subject.task_summary}</p>;
   }
+  if (subject.type === "mcp") {
+    return <div className={styles.mcp_approval}>
+      <p>{subject.identity.server_display_name} ({subject.identity.server_key}) / <code>{subject.identity.tool_name}</code></p>
+      <pre>{subject.arguments_json}</pre>
+      {subject.untrusted_annotations_json && <details><summary>服务自报的工具注解（未经验证）</summary><pre>{subject.untrusted_annotations_json}</pre></details>}
+      <p>工具注解由 MCP 服务提供，不能作为安全或只读保证。外部工具可能产生副作用，请核对参数后授权。</p>
+    </div>;
+  }
   return <p>{subject.tool_name}</p>;
 }
 
 function approvalQuestion(subject: ToolApprovalSubject): string {
+  if (subject.type === "mcp") return `允许调用 ${subject.identity.server_key} / ${subject.identity.tool_name}？`;
   return subject.type === "shell" ? "允许执行命令行指令？" : `允许执行 ${subject.tool_name}？`;
 }
 

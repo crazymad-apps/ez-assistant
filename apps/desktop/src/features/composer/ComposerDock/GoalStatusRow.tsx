@@ -86,6 +86,7 @@ export function GoalStatusRow(props: GoalStatusRowProps) {
             <div><dt>令牌预算</dt><dd>{formatCompact(props.goal.budget.used_total_tokens)} / {formatCompact(props.goal.budget.max_total_tokens)}</dd></div>
             <div><dt>连续失败</dt><dd>{props.goal.budget.consecutive_failures} / {props.goal.budget.max_consecutive_failures}</dd></div>
             <div><dt>附件</dt><dd>{props.goal.attachment_count}</dd></div>
+            {props.goal.mcp_server_key && <div><dt>MCP 服务</dt><dd>{props.goal.mcp_server_key}</dd></div>}
           </dl>
           {props.goal.pause_reason && (
             <p className={styles.goal_pause_reason}>{pauseReasonLabel(props.goal.pause_reason)}</p>

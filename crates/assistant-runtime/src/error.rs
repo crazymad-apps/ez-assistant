@@ -149,6 +149,18 @@ pub enum RuntimeError {
     /// Runtime 无法持久化已通过编译的配置 candidate。
     #[error("runtime configuration could not be persisted")]
     ConfigurationPersistenceFailed,
+    /// MCP 配置或候选文档无法完整接受。
+    #[error("MCP configuration is invalid")]
+    McpConfigInvalid,
+    /// `mcp.json` revision 已被其他写入者更新。
+    #[error("MCP configuration changed before the operation was applied")]
+    McpConfigConflict,
+    /// 导入包含未由用户确认替换的同名 Server。
+    #[error("MCP import contains an unconfirmed server replacement")]
+    McpImportConflict,
+    /// 用户手选的 MCP Server 已失效或没有可披露工具。
+    #[error("selected MCP server is unavailable")]
+    McpServerUnavailable,
     /// 独立命令中的模型调用已经开始，但 Provider Turn 最终失败。
     #[error("model execution failed")]
     ModelExecutionFailed {
@@ -370,6 +382,22 @@ impl RuntimeError {
             Self::ConfigurationPersistenceFailed => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
                 "configuration could not be persisted",
+            ),
+            Self::McpConfigInvalid => RuntimeErrorInfo::new(
+                RuntimeErrorCode::McpConfigInvalid,
+                "MCP configuration is invalid",
+            ),
+            Self::McpConfigConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::McpConfigConflict,
+                "MCP configuration changed; reload and review the latest values",
+            ),
+            Self::McpImportConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::McpImportConflict,
+                "MCP import contains an unconfirmed server replacement",
+            ),
+            Self::McpServerUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::McpServerUnavailable,
+                "selected MCP server is unavailable",
             ),
             Self::ModelExecutionFailed { source } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ModelExecutionFailed,

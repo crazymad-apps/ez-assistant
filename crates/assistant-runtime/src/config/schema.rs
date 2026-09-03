@@ -26,6 +26,9 @@ pub(super) struct RawConfig {
     /// Agent 维度配置；整表缺失时不注入 generation 或执行上限。
     #[serde(default)]
     pub(super) agent: RawAgentConfig,
+    /// MCP 进程级运行参数；逐 Server 配置存放在独立的 `mcp.json` 中。
+    #[serde(default)]
+    pub(super) mcp: RawMcpConfig,
     /// 按用户 key 保存的模型原始表；每个 value 后续独立编译。
     #[serde(default)]
     pub(super) models: BTreeMap<String, toml::Value>,
@@ -42,6 +45,29 @@ pub(super) struct RawRuntimeConfig {
     #[serde(default)]
     pub(super) model_transport: RawModelTransportConfig,
     pub(super) model_retry: Option<RawModelRetryConfig>,
+}
+
+/// MCP 调用缺省时限，以及连接、目录、关闭和并发的进程级上限。
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct RawMcpConfig {
+    pub(super) connect_timeout_ms: u64,
+    pub(super) catalog_timeout_ms: u64,
+    pub(super) request_timeout_ms: u64,
+    pub(super) close_timeout_ms: u64,
+    pub(super) max_concurrent_calls_per_server: u32,
+}
+
+impl Default for RawMcpConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: 15_000,
+            catalog_timeout_ms: 30_000,
+            request_timeout_ms: 120_000,
+            close_timeout_ms: 5_000,
+            max_concurrent_calls_per_server: 8,
+        }
+    }
 }
 
 /// 模型 HTTP 建连、响应建立和流空闲的超时输入，单位统一为毫秒。

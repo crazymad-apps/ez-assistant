@@ -18,6 +18,7 @@ import type {
 export type ConversationRow =
   | { type: "user"; message: UserMessageSnapshot }
   | { type: "context_summary"; message: Extract<ConversationItem, { type: "context_summary" }> }
+  | { type: "control_result"; message: Extract<ConversationItem, { type: "control_result" }> }
   | { type: "assistant_turn"; key: string; run_id: string | null; messages: AssistantMessageSnapshot[] };
 
 export function groupConversationTurns(
@@ -26,6 +27,10 @@ export function groupConversationTurns(
 ): ConversationRow[] {
   const rows: ConversationRow[] = [];
   for (const item of items) {
+    if (item.type === "control_result") {
+      rows.push({ type: "control_result", message: item });
+      continue;
+    }
     if (item.type === "context_summary") {
       rows.push({ type: "context_summary", message: item });
       continue;
@@ -113,6 +118,8 @@ export function toolInputLabel(input: ToolInputSnapshot): string | null {
     }
     case "shell":
       return input.command;
+    case "mcp":
+      return `${input.identity.server_display_name} / ${input.identity.tool_name}`;
     case "general":
       return input.summary;
     case "image_inspection":

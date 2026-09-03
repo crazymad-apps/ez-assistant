@@ -24,8 +24,8 @@ pub use catalog::{
 pub use compile::{compile_runtime_config, compile_runtime_config_with_catalog};
 pub use domain::{
     ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
-    DelegationConfig, ModelConfigProjection, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
-    RuntimeModelTransportConfig,
+    DelegationConfig, McpRuntimeConfig, ModelConfigProjection, ModelProtocol, ResolvedConfig,
+    ResolvedModelConfig, RuntimeModelTransportConfig,
 };
 pub use source::{
     ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,

@@ -16,6 +16,7 @@ import { useRootStore } from "../../../stores/RootStoreContext";
 import { SettingsMessages } from "./RuntimeSettingsPage";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./SkillSettingsPage.module.scss";
+import shared from "./index.module.scss";
 
 export const SkillSettingsPage = observer(function SkillSettingsPage() {
   const store = useRootStore();
@@ -129,16 +130,17 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
                   setSelectedName(skill.name);
                   void settings.loadSkillDetail(skill.name);
                 }} type="button">
-                  <i data-health={skill.health} />
+                  <i data-health={skill.health} title={healthLabel(skill.health)} />
                   <span>
                     <strong title={skill.name}>{skill.name}</strong>
-                    <em>{skill.description || "暂无描述"}</em>
+                    <em title={skill.description || "暂无描述"}>{skill.description || "暂无描述"}</em>
                     <small>{sourceLabel(skill.source)} · {qualificationLabel(skill)}</small>
                   </span>
                   <Icon name="chevron-right" size={15} />
                 </button>
-                <label className={styles.switch} title={skill.enabled ? "已启用" : "已禁用"}>
+                <label className={shared.switch} title={skill.enabled ? "已启用" : "已禁用"}>
                   <input
+                    aria-label={`启用 ${skill.name}`}
                     checked={skill.enabled}
                     disabled={settings.pending_skill_name !== null}
                     onChange={(event) => void settings.setSkillEnabled(skill.name, event.target.checked)}

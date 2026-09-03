@@ -26,6 +26,7 @@ pub(crate) async fn observe_run_execution(
     completion: CompletionFuture,
     event_sender: ObservationCoordinator,
     model_diagnostics: Arc<RunModelDiagnostics>,
+    mcp_registry: Arc<crate::mcp::McpRegistry>,
 ) -> ExecutionObservation {
     let completion = AssertUnwindSafe(completion).catch_unwind();
     tokio::pin!(completion);
@@ -41,6 +42,7 @@ pub(crate) async fn observe_run_execution(
                             &run_id,
                             event,
                             model_diagnostics.as_ref(),
+                            mcp_registry.as_ref(),
                         ) {
                             let _ = event_sender.send(event);
                         }
@@ -65,6 +67,7 @@ fn project_agent_event(
     run_id: &RunId,
     event: AgentEvent,
     model_diagnostics: &RunModelDiagnostics,
+    mcp_registry: &crate::mcp::McpRegistry,
 ) -> RuntimeResult<Option<RuntimeEvent>> {
     if event.is_terminal() {
         return Ok(None);
@@ -133,6 +136,7 @@ fn project_agent_event(
                 }
             })?;
             let tool_name = call.name.as_str().to_owned();
+            let mcp_identity = project_mcp_identity(&call, mcp_registry);
             with_active_record(session, run_id, |record| {
                 record.start_step(step);
                 if !record
@@ -144,6 +148,7 @@ fn project_agent_event(
                         step: Some(step),
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),
+                        mcp_identity: mcp_identity.clone(),
                         status: ToolActivityStatus::Proposed,
                         stdout: String::new(),
                         stderr: String::new(),
@@ -294,6 +299,19 @@ fn project_agent_event(
         | AgentEvent::ExecutionCompactionRequired { .. }
         | AgentEvent::ExecutionContinuationRequired { .. } => Ok(None),
     }
+}
+
+fn project_mcp_identity(
+    call: &agent_types::ToolCall,
+    registry: &crate::mcp::McpRegistry,
+) -> Option<assistant_protocol::McpToolIdentity> {
+    if call.name.as_str() != "call_mcp_tool" {
+        return None;
+    }
+    let server = call.arguments.get("server")?.as_str()?;
+    let tool = call.arguments.get("tool")?.as_str()?;
+    let server_key = assistant_protocol::McpServerKey::new(server).ok()?;
+    registry.tool_identity(&server_key, tool).ok().flatten()
 }
 
 fn with_active_record<Output>(

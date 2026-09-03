@@ -117,9 +117,10 @@ export function UserMessage(props: Readonly<{
           <span>{source.device_name}</span>
         </button>
       )}
-      {props.message.skill && (
+      {(props.message.skill || props.message.mcp_selection) && (
         <div className={styles.user_skill}>
-          <span title={props.message.skill.name}>{props.message.skill.name}</span>
+          {props.message.skill && <span title={props.message.skill.name}>{props.message.skill.name}</span>}
+          {props.message.mcp_selection && <span title={props.message.mcp_selection.server_key}>MCP · {props.message.mcp_selection.display_name}</span>}
         </div>
       )}
       <time>{formatTime(props.message.created_at_ms)}</time>

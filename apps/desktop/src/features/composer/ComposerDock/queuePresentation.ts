@@ -1,7 +1,7 @@
-import type { QueueSnapshot, QueuedInputSnapshot, RunId } from "../../../generated/assistant-protocol";
+import type { QueueSnapshot, QueuedSessionItemSnapshot, RunId } from "../../../generated/assistant-protocol";
 
 export type QueuePresentation = Readonly<{
-  items: readonly QueuedInputSnapshot[];
+  items: readonly QueuedSessionItemSnapshot[];
   count: number;
   visible: boolean;
 }>;
@@ -17,7 +17,8 @@ export function queuePresentation(
 ): QueuePresentation {
   const head_is_dispatching = queue.state === "automatic"
     && active_run_id === null
-    && queue.items[0]?.held_by_goal === false;
+    && queue.items[0]?.type === "message"
+    && queue.items[0].payload.held_by_goal === false;
   const items = head_is_dispatching ? queue.items.slice(1) : queue.items;
   return { items, count: items.length, visible: items.length > 0 };
 }

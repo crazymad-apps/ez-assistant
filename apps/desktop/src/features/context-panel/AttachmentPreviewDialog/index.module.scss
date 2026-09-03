@@ -34,7 +34,7 @@
     section { min-width: 0; }
     h2 { margin: 0; overflow: hidden; font-size: var(--ez-font-large); text-overflow: ellipsis; white-space: nowrap; }
     small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
-    > button { display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 7px; color: var(--ez-text-muted); background: transparent; }
+    > button { display: grid; width: var(--ez-control-height); height: var(--ez-control-height); place-items: center; border: 0; border-radius: 7px; color: var(--ez-text-muted); background: transparent; }
   }
 
   > main {
@@ -53,7 +53,7 @@
     gap: 7px;
     padding: 0 13px 13px;
 
-    button { min-height: 30px; padding: 0 11px; border: 1px solid var(--ez-border-strong); border-radius: 7px; color: var(--ez-text-secondary); background: var(--ez-surface); }
+    button { min-height: var(--ez-control-height); padding: 0 11px; border: 1px solid var(--ez-border-strong); border-radius: 7px; color: var(--ez-text-secondary); background: var(--ez-surface); }
   }
 }
 

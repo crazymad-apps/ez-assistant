@@ -1,0 +1,62 @@
+@use "../../../../styles/fields";
+@use "../capability-list";
+
+.page, .editor, .import_dialog {
+  color: var(--ez-text);
+  font-size: var(--ez-font-base);
+
+  button { min-height: var(--ez-control-height); padding: 0 9px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text-secondary); background: var(--ez-surface); }
+  button:hover:not(:disabled) { background: var(--ez-surface-subtle); }
+  button:disabled { opacity: .5; }
+  input:where(:not([type="checkbox"]):not([type="radio"])), textarea { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text); background: var(--ez-surface); font: inherit; }
+  input:where(:not([type="checkbox"]):not([type="radio"])) { padding-block: 0; }
+  textarea { resize: vertical; }
+  input:disabled { color: var(--ez-text-muted); background: var(--ez-surface-subtle); }
+  :is(button, input[type="checkbox"], input[type="radio"], summary):focus-visible { outline: 2px solid var(--ez-primary-border); outline-offset: 2px; }
+  input:where(:not([type="checkbox"]):not([type="radio"])):focus,
+  textarea:focus { @include fields.focus-border; }
+  p { line-height: 1.7; }
+  code { font-size: var(--ez-font-small); font-weight: 400; color: var(--ez-text-muted); }
+}
+.search, .inline_row, .actions { display: flex; align-items: center; gap: 8px; }
+.search { margin-bottom: 12px; }
+.search input { flex: 1; height: var(--ez-control-height); }
+.search button { display: grid; place-items: center; flex: 0 0 var(--ez-control-height); width: var(--ez-control-height); height: var(--ez-control-height); padding: 0; }
+.search svg { display: block; }
+.warning, .error { padding: 8px 10px; margin: 10px 0; border-radius: var(--ez-radius-small); overflow-wrap: anywhere; }
+.warning { color: var(--ez-warning); background: var(--ez-warning-soft); }
+.error { color: var(--ez-danger); background: var(--ez-danger-soft); }
+.warning p { margin: 0 0 6px; }
+.warning button + button { margin-left: 8px; }
+.empty { padding: 24px 0; text-align: center; color: var(--ez-text-muted); }
+.server_list article { @include capability-list.row; }
+.server_list .server_body { @include capability-list.body; }
+.server_body i[data-state="connected"] { background: var(--ez-success); }
+.server_body i[data-state="pending"] { background: var(--ez-warning); }
+.editor fieldset { display: grid; gap: 10px; border: 0; padding: 0; margin: 0 0 20px; min-width: 0; }
+.editor legend { margin-bottom: 10px; font-weight: 600; }
+.editor label { display: grid; gap: 6px; font-size: var(--ez-font-small); }
+.editor p { margin: 0; font-size: var(--ez-font-small); color: var(--ez-text-secondary); }
+.editor .warning { color: var(--ez-warning); }
+.editor .checkbox { display: flex; align-items: center; gap: 6px; }
+.editor .connection_field { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 10px; align-items: end; }
+.connection_field input { height: var(--ez-control-height); }
+.inline_row { flex-wrap: wrap; }
+.inline_row input { flex: 1; }
+.secret_row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto; gap: 8px; }
+.timeout_fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+.actions { margin: 18px 0; flex-wrap: wrap; }
+.actions span { flex: 1; }
+.test_result { margin: 12px 0; }
+.test_result [data-outcome="failure"] { color: var(--ez-danger); }
+.test_result [data-outcome="success"] { color: var(--ez-success); }
+.import_dialog { width: min(760px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: auto; }
+.import_dialog textarea { font-family: SFMono-Regular, Consolas, monospace; }
+.preview { display: grid; gap: 10px; margin: 12px 0; }
+.preview article { display: grid; gap: 6px; border-bottom: 1px solid var(--ez-border); padding: 8px 0; }
+.preview small { color: var(--ez-text-muted); }
+@media (max-width: 720px) {
+  .secret_row { grid-template-columns: minmax(0, 1fr) auto; }
+  .secret_row input:first-child { grid-column: 1 / -1; }
+  .timeout_fields { grid-template-columns: 1fr; }
+}

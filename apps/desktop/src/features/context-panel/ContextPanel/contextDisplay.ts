@@ -1,4 +1,21 @@
-import type { RunStatus } from "../../../generated/assistant-protocol";
+import type { RunStatus, SessionViewSnapshot } from "../../../generated/assistant-protocol";
+
+/** 只组合会话冻结目录与激活投影；可用不等于已加载，不触发扫描或修改激活状态。 */
+export function sessionSkillRows(view: SessionViewSnapshot | undefined) {
+  const active = (view?.active_skills ?? []).map((skill) => ({
+    name: skill.tag.name,
+    status_label: skill.trigger === "user" ? "用户激活" : "智能体激活",
+  }));
+  const active_names = new Set(active.map((skill) => skill.name));
+  const catalog = view?.skill_catalog;
+  const available = catalog?.status === "ready" ? catalog.skills : [];
+  return [
+    ...active,
+    ...available
+      .filter((skill) => skill.enabled && skill.health === "ready" && !active_names.has(skill.name))
+      .map((skill) => ({ name: skill.name, status_label: "可用" })),
+  ];
+}
 
 export function formatNullableTokens(value: number | null): string {
   return value === null ? "未提供" : formatTokens(value);

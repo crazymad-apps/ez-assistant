@@ -278,6 +278,13 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.accept_input(input)
     }
 
+    fn accept_session_command(
+        &self,
+        command: crate::NewStoredSessionCommand,
+    ) -> StoreFuture<'_, crate::AcceptedStoredSessionCommand> {
+        self.inner.accept_session_command(command)
+    }
+
     fn cancel_queued_input(
         &self,
         session_id: &SessionId,
@@ -296,6 +303,13 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn commit_user_message(&self, commit: UserMessageCommit) -> StoreFuture<'_, ()> {
         self.inner.commit_user_message(commit)
+    }
+
+    fn commit_session_command(
+        &self,
+        commit: crate::SessionCommandCommit,
+    ) -> StoreFuture<'_, crate::StoredSessionCommand> {
+        self.inner.commit_session_command(commit)
     }
 
     fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()> {

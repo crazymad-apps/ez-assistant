@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     PcOutputHosting, RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
     SessionProxyState, SessionRole, SessionSkillCatalog, StoredConversationState, StoredInput,
-    StoredInputState, StoredRun, StoredSession,
+    StoredInputState, StoredRun, StoredSession, StoredSessionCommand, StoredSessionCommandState,
     goal::{GoalControl, GoalState},
     id,
     journal::InMemoryJournal,
@@ -62,14 +62,20 @@ pub(crate) struct SessionState {
     pub(crate) is_conversation_available: bool,
     pub(crate) runs: BTreeMap<RunId, RunRecord>,
     pub(crate) inputs: BTreeMap<InputId, InputRecord>,
-    /// 所有无 Goal binding 的 Session 输入，包括用户输入与跨会话 Runtime 输入。
-    pub(crate) session_inputs: VecDeque<InputId>,
+    /// 不创建 Run 的结构化控制指令；执行中只由 `executing_command` 表达进程内状态。
+    pub(crate) commands: BTreeMap<InputId, StoredSessionCommand>,
+    /// Input 级 MCP 手选事实；只保存稳定 Server 标签，不复制动态目录。
+    pub(crate) mcp_selections: Vec<crate::StoredMcpSelection>,
+    /// 所有无 Goal binding 的 Session 队列项，包括消息与结构化控制指令。
+    pub(crate) queue_item_ids: VecDeque<InputId>,
     /// 当前 Goal 专用输入；可靠状态下最多一条。
     pub(crate) goal_inputs: VecDeque<InputId>,
     pub(crate) queue_revision: u64,
     pub(crate) queue_paused_by_user: bool,
     pub(crate) resume_required: bool,
     pub(crate) is_queue_driver_running: bool,
+    /// 当前进程内正执行的 Command；崩溃恢复仍视为 Queued。
+    pub(crate) executing_command: Option<InputId>,
     pub(crate) active_run: Option<ActiveRun>,
     /// 当前进程内的逻辑输出周期；重启后不恢复也不补播。
     pub(crate) output_cycle: Option<crate::OutputCycleState>,
@@ -123,7 +129,7 @@ impl SessionState {
                 if self.queue_paused_by_user || self.resume_required {
                     None
                 } else {
-                    self.session_inputs.front().cloned()
+                    self.queue_item_ids.front().cloned()
                 }
             }
             Some(goal) if matches!(goal.state, GoalState::Running) => self
@@ -148,8 +154,8 @@ impl SessionState {
             self.goal_inputs.pop_front();
             return Some(false);
         }
-        if self.session_inputs.front() == Some(input_id) {
-            self.session_inputs.pop_front();
+        if self.queue_item_ids.front() == Some(input_id) {
+            self.queue_item_ids.pop_front();
             return Some(true);
         }
         None
@@ -204,12 +210,15 @@ impl SessionController {
                 is_conversation_available: true,
                 runs: BTreeMap::new(),
                 inputs: BTreeMap::new(),
-                session_inputs: VecDeque::new(),
+                commands: BTreeMap::new(),
+                mcp_selections: Vec::new(),
+                queue_item_ids: VecDeque::new(),
                 goal_inputs: VecDeque::new(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required: false,
                 is_queue_driver_running: false,
+                executing_command: None,
                 active_run: None,
                 output_cycle: None,
                 active_compaction: None,
@@ -225,10 +234,17 @@ impl SessionController {
         }
     }
 
+    // 启动与 Fork 共用的恢复装配入口；各字段已有权威持久化类型，不再引入一层恢复实体。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "汇总已有持久化事实的恢复装配入口"
+    )]
     pub(crate) fn recovered(
         stored: StoredSession,
         runs: Vec<StoredRun>,
         inputs: Vec<StoredInput>,
+        commands: Vec<StoredSessionCommand>,
+        mcp_selections: Vec<crate::StoredMcpSelection>,
         work_plan: Option<WorkPlan>,
         goal: Option<GoalControl>,
         skill_activations: Vec<crate::StoredSkillActivation>,
@@ -240,7 +256,7 @@ impl SessionController {
             .map(|run| (run.run_id.clone(), RunRecord::recovered(run)))
             .collect::<BTreeMap<_, _>>();
         let mut input_records = BTreeMap::new();
-        let mut session_inputs = Vec::new();
+        let mut queue_item_ids = Vec::new();
         let mut goal_inputs = Vec::new();
         for input in inputs {
             let mut owned_runs = run_records
@@ -255,7 +271,7 @@ impl SessionController {
                     if input.goal_binding.is_some() {
                         goal_inputs.push((input.queue_order, input.input_id.clone()));
                     } else {
-                        session_inputs.push((input.queue_order, input.input_id.clone()));
+                        queue_item_ids.push((input.queue_order, input.input_id.clone()));
                     }
                 }
                 input_records.insert(
@@ -268,9 +284,18 @@ impl SessionController {
                 );
             }
         }
-        session_inputs.sort_by_key(|(order, _)| *order);
+        let command_records = commands
+            .into_iter()
+            .map(|command| {
+                if command.state == StoredSessionCommandState::Queued {
+                    queue_item_ids.push((command.queue_order, command.input_id.clone()));
+                }
+                (command.input_id.clone(), command)
+            })
+            .collect::<BTreeMap<_, _>>();
+        queue_item_ids.sort_by_key(|(order, _)| *order);
         goal_inputs.sort_by_key(|(order, _)| *order);
-        let resume_required = !session_inputs.is_empty();
+        let resume_required = !queue_item_ids.is_empty();
         Self {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
@@ -297,12 +322,15 @@ impl SessionController {
                 is_conversation_available,
                 runs: run_records,
                 inputs: input_records,
-                session_inputs: session_inputs.into_iter().map(|(_, id)| id).collect(),
+                commands: command_records,
+                mcp_selections,
+                queue_item_ids: queue_item_ids.into_iter().map(|(_, id)| id).collect(),
                 goal_inputs: goal_inputs.into_iter().map(|(_, id)| id).collect(),
                 queue_revision: 0,
                 queue_paused_by_user: false,
                 resume_required,
                 is_queue_driver_running: false,
+                executing_command: None,
                 active_run: None,
                 output_cycle: None,
                 active_compaction: None,
@@ -462,13 +490,18 @@ impl SessionController {
         }
         let has_nonterminal_run = state.runs.values().any(|run| !run.status().is_terminal());
         if state.active_run.is_some()
-            || !state.session_inputs.is_empty()
+            || !state.queue_item_ids.is_empty()
             || !state.goal_inputs.is_empty()
+            || state.executing_command.is_some()
             || has_nonterminal_run
             || state
                 .inputs
                 .values()
                 .any(|input| input.stored.state == StoredInputState::Queued)
+            || state
+                .commands
+                .values()
+                .any(|command| command.state == StoredSessionCommandState::Queued)
         {
             return Err(RuntimeError::SessionNotIdle {
                 session_id: self.id.clone(),
@@ -491,6 +524,7 @@ impl SessionController {
         let mut state = self.lock_state()?;
         state.is_faulted = true;
         state.is_queue_driver_running = false;
+        state.executing_command = None;
         Ok(())
     }
 

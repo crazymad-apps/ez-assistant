@@ -23,6 +23,7 @@ async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             }).await,
             Err(RuntimeError::RuntimeNotRunning { lifecycle: actual }) if actual == lifecycle
@@ -67,6 +68,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -142,6 +144,7 @@ async fn completed_model_usage_is_projected_as_a_runtime_event_and_persisted_in_
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -215,6 +218,7 @@ async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -272,6 +276,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -410,6 +415,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -435,6 +441,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

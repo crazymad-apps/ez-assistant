@@ -10,6 +10,7 @@ mod event;
 mod host;
 mod id;
 mod materialization;
+mod mcp;
 mod memory;
 mod permission;
 mod product;
@@ -81,11 +82,27 @@ pub use host::{
 };
 pub use id::{
     ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, DeviceId, GoalId,
-    IdempotencyKey, IdentifierError, InputId, MessageId, ModelKey, ModelKeyError, PartId,
-    ResourceRefId, RunId, SessionId, TodoItemId, ToolCallId, WorkspaceId,
+    IdempotencyKey, IdentifierError, InputId, McpServerKey, McpServerKeyError, MessageId, ModelKey,
+    ModelKeyError, PartId, ResourceRefId, RunId, SessionId, TodoItemId, ToolCallId, WorkspaceId,
 };
 pub use materialization::{
     SessionMaterializationAttachment, SessionMaterializationManifest, SessionMaterializationResult,
+};
+pub use mcp::{
+    AcceptedSessionCommand, CancelMcpServerTestRequest, CancelMcpServerTestResult,
+    GetMcpConfigurationRequest, GetMcpConfigurationResult, ListMcpServerOptionsRequest,
+    ListMcpServerOptionsResult, McpConfigurationMutation, McpConfigurationSnapshot,
+    McpConnectionTestOutcome, McpConnectionTestStage, McpDiagnosticCode, McpDiagnosticSnapshot,
+    McpFieldChange, McpImportPreviewEntry, McpRefreshControlResultSnapshot, McpRefreshOutcome,
+    McpSecretChange, McpSelectionTagSnapshot, McpServerDraft, McpServerOptionSnapshot,
+    McpServerOptionsContext, McpServerRefreshOutcome, McpServerRefreshResultSnapshot,
+    McpServerRuntimeState, McpServerSnapshot, McpServerTransportDraft, McpToolIdentity,
+    McpTransportKind, MutateMcpConfigurationRequest, MutateMcpConfigurationResult,
+    PermissionMcpMatcher, PermissionMcpServerMatch, PermissionMcpToolMatch,
+    PreviewMcpImportRequest, PreviewMcpImportResult, QueuedSessionCommandSnapshot,
+    QueuedSessionItemSnapshot, SessionCommand, SessionCommandQueueState,
+    SubmitSessionCommandRequest, SubmitSessionCommandResult, TestMcpServerRequest,
+    TestMcpServerResult,
 };
 pub use memory::{
     MemoryAttributeValue, MemoryCapabilities, PersonaSnapshot, PinnedMemoryCollectionSnapshot,

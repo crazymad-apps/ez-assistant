@@ -1,7 +1,7 @@
 //! Goal 控制器的持久化边界 DTO。
 
 use agent_types::{FileReferencesPart, MessageId, TextPart, UserMessage};
-use assistant_protocol::{GoalId, InputId, RunId, SessionId};
+use assistant_protocol::{GoalId, InputId, McpServerKey, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +53,9 @@ pub struct StoredGoal {
     pub goal_id: GoalId,
     pub session_id: SessionId,
     pub objective: StoredGoalObjective,
+    /// Goal 自动续跑继承的用户 MCP 选择；不包含目录、权限或连接状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_key: Option<McpServerKey>,
     pub state: StoredGoalState,
     pub pause_reason: Option<StoredGoalPauseReason>,
     pub generation: u64,

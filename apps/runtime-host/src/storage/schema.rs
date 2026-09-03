@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS session_goals (
     objective_message_id       TEXT NOT NULL,
     objective_payload_json     TEXT NOT NULL,
     objective_hash             TEXT NOT NULL,
+    mcp_server_key             TEXT,
     state                      TEXT NOT NULL CHECK (state IN ('running', 'paused', 'completed')),
     pause_reason_json          TEXT,
     generation                 INTEGER NOT NULL CHECK (generation > 0),
@@ -216,6 +217,10 @@ CREATE TABLE IF NOT EXISTS inputs (
     idempotency_key     TEXT,
     user_message_id     TEXT NOT NULL UNIQUE,
     state               TEXT NOT NULL CHECK (state IN ('queued', 'committed')),
+    input_kind          TEXT NOT NULL DEFAULT 'message'
+                            CHECK (input_kind IN ('message', 'command')),
+    command_json        TEXT,
+    command_result_json TEXT,
     queued_message_json TEXT,
     accepted_at_ms      INTEGER NOT NULL,
     agent_variant       TEXT NOT NULL DEFAULT 'build'
@@ -231,8 +236,39 @@ CREATE TABLE IF NOT EXISTS inputs (
     channel_source_json TEXT,
     CHECK ((goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL)
         OR (goal_id IS NOT NULL AND goal_generation IS NOT NULL AND goal_turn IS NOT NULL)),
+    CHECK (
+        (input_kind = 'message' AND command_json IS NULL AND command_result_json IS NULL)
+        OR
+        (input_kind = 'command'
+            AND queued_message_json IS NULL
+            AND command_json IS NOT NULL
+            AND origin = 'runtime'
+            AND goal_id IS NULL
+            AND goal_generation IS NULL
+            AND goal_turn IS NULL
+            AND goal_reply_route_json IS NULL
+            AND skill_activation_json IS NULL
+            AND cross_session_json IS NULL
+            AND channel_source_json IS NULL
+            AND ((state = 'queued' AND command_result_json IS NULL)
+                OR (state = 'committed' AND command_result_json IS NOT NULL)))
+    ),
     UNIQUE (session_id, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS mcp_input_selections (
+    selection_id       TEXT PRIMARY KEY,
+    session_id         TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    input_id           TEXT REFERENCES inputs(input_id) ON DELETE CASCADE,
+    message_id         TEXT NOT NULL,
+    server_key         TEXT NOT NULL,
+    display_name       TEXT NOT NULL,
+    created_at_ms      INTEGER NOT NULL,
+    UNIQUE (session_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS mcp_input_selections_session_order
+    ON mcp_input_selections(session_id, created_at_ms, selection_id);
 
 CREATE TABLE IF NOT EXISTS skill_activations (
     activation_id       TEXT PRIMARY KEY,
@@ -480,12 +516,13 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
     "SELECT session_id, revision, objective, items_json, last_operation_id, updated_at_ms FROM session_work_plans LIMIT 0",
     "SELECT session_id, operation_id, revision, objective, items_json, updated_at_ms FROM work_plan_completion_receipts LIMIT 0",
-    "SELECT goal_id, session_id, objective_message_id, objective_payload_json, objective_hash, state, pause_reason_json, generation, turn, max_runs, max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens, usage_complete, consecutive_failures, created_at_ms, updated_at_ms, completed_at_ms FROM session_goals LIMIT 0",
+    "SELECT goal_id, session_id, objective_message_id, objective_payload_json, objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs, max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens, usage_complete, consecutive_failures, created_at_ms, updated_at_ms, completed_at_ms FROM session_goals LIMIT 0",
     "SELECT workspace_id, label, user_directory, additional_directories_json, agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms FROM workspaces LIMIT 0",
     "SELECT session_id, workspace_id, working_directory, additional_workspace_directories_json, attachment_directory, private_directory, created_at_ms FROM session_resources LIMIT 0",
     "SELECT blob_hash, size_bytes, relative_path, media_type, created_at_ms FROM attachment_blobs LIMIT 0",
     "SELECT attachment_id, session_id, blob_hash, original_name, agent_readable_path, state, created_at_ms FROM attachments LIMIT 0",
-    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs LIMIT 0",
+    "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, input_kind, command_json, command_result_json, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs LIMIT 0",
+    "SELECT selection_id, session_id, input_id, message_id, server_key, display_name, created_at_ms FROM mcp_input_selections LIMIT 0",
     "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
     "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
     "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
@@ -766,6 +803,31 @@ pub(super) fn initialize(connection: &mut Connection) -> StorageResult<()> {
     )?;
     ensure_column(
         &transaction,
+        "inputs",
+        "input_kind",
+        "ALTER TABLE inputs ADD COLUMN input_kind TEXT NOT NULL DEFAULT 'message' CHECK (input_kind IN ('message', 'command'))",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "command_json",
+        "ALTER TABLE inputs ADD COLUMN command_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "inputs",
+        "command_result_json",
+        "ALTER TABLE inputs ADD COLUMN command_result_json TEXT",
+    )?;
+    ensure_column(
+        &transaction,
+        "session_goals",
+        "mcp_server_key",
+        "ALTER TABLE session_goals ADD COLUMN mcp_server_key TEXT",
+    )?;
+    validate_queue_payloads(&transaction)?;
+    ensure_column(
+        &transaction,
         "sessions",
         "pc_output_device_id",
         "ALTER TABLE sessions ADD COLUMN pc_output_device_id TEXT REFERENCES devices(device_id) ON DELETE SET NULL",
@@ -876,6 +938,77 @@ fn ensure_column(
     transaction
         .execute_batch(migration)
         .map_err(|source| internal_error("runtime database schema could not be migrated", source))
+}
+
+/// ALTER TABLE 无法为既有 `inputs` 补整表 CHECK，因此每次启动都在同一迁移事务内
+/// fail closed。M0 尚不消费 Command；这项核验只保证旧 message 不被误解释为 Command，
+/// 也阻止半写入的 Command 在后续恢复阶段伪装成普通 Input/Run。
+fn validate_queue_payloads(transaction: &rusqlite::Transaction<'_>) -> StorageResult<()> {
+    let invalid = transaction
+        .query_row(
+            "SELECT 1 FROM inputs
+             WHERE NOT (
+                 (input_kind = 'message'
+                    AND command_json IS NULL
+                    AND command_result_json IS NULL)
+                 OR
+                 (input_kind = 'command'
+                    AND queued_message_json IS NULL
+                    AND command_json IS NOT NULL
+                    AND origin = 'runtime'
+                    AND goal_id IS NULL
+                    AND goal_generation IS NULL
+                    AND goal_turn IS NULL
+                    AND goal_reply_route_json IS NULL
+                    AND skill_activation_json IS NULL
+                    AND cross_session_json IS NULL
+                    AND channel_source_json IS NULL
+                    AND ((state = 'queued' AND command_result_json IS NULL)
+                        OR (state = 'committed' AND command_result_json IS NOT NULL)))
+             )
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| {
+            internal_error("runtime queue payloads could not be validated", source)
+        })?;
+    if invalid.is_some() {
+        return Err(internal_error(
+            "runtime queue payloads are incompatible",
+            rusqlite::Error::InvalidQuery,
+        ));
+    }
+    let invalid_selection = transaction
+        .query_row(
+            "SELECT 1 FROM mcp_input_selections AS selections
+             WHERE selections.input_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM inputs
+                   WHERE inputs.input_id = selections.input_id
+                     AND inputs.session_id = selections.session_id
+                     AND inputs.user_message_id = selections.message_id
+                     AND inputs.input_kind = 'message'
+               )
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| {
+            internal_error(
+                "MCP input selection relations could not be validated",
+                source,
+            )
+        })?;
+    if invalid_selection.is_some() {
+        return Err(internal_error(
+            "MCP input selection relations are incompatible",
+            rusqlite::Error::InvalidQuery,
+        ));
+    }
+    Ok(())
 }
 
 /// 旧 Workspace 没有独立标签；迁移只从已经持久化的主目录确定性补齐，不访问目录内容。
@@ -1064,7 +1197,8 @@ mod tests {
                 "SELECT sessions.current_variant, sessions.approval_mode,
                         inputs.agent_variant, runs.approval_mode, inputs.priority_order,
                         sessions.role, sessions.proxy_controller_session_id,
-                        sessions.proxy_changed_at_ms
+                        sessions.proxy_changed_at_ms, inputs.input_kind,
+                        inputs.command_json, inputs.command_result_json
                  FROM sessions JOIN inputs ON inputs.session_id = sessions.session_id
                  JOIN runs ON runs.input_id = inputs.input_id",
                 [],
@@ -1081,6 +1215,9 @@ mod tests {
                             row.get::<_, String>(5)?,
                             row.get::<_, Option<String>>(6)?,
                             row.get::<_, Option<i64>>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
                         ),
                     ))
                 },
@@ -1090,8 +1227,27 @@ mod tests {
             values,
             (
                 ("build".into(), "ask".into(), "build".into(), "ask".into(),),
-                (None, "standard".into(), None, None),
+                (
+                    None,
+                    "standard".into(),
+                    None,
+                    None,
+                    "message".into(),
+                    None,
+                    None,
+                ),
             )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'mcp_input_selections'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("MCP selection table"),
+            1
         );
         let persona: (i64, String, i64, i64) = connection
             .query_row(
@@ -1175,6 +1331,103 @@ mod tests {
                 )
                 .expect("migrated workspace defaults"),
             ("legacy-project".to_owned(), "[]".to_owned())
+        );
+    }
+
+    #[test]
+    fn current_schema_enforces_message_and_command_payload_exclusion() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database");
+        initialize(&mut connection).expect("initialize schema");
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    session_id, title, model_key, system_prompt_json, skill_catalog_json,
+                    lifecycle, body_generation, message_count, created_at_ms, updated_at_ms
+                 ) VALUES ('s-mcp', 'MCP', 'fixture', '{}', '{}', 'active', 1, 0, 1, 1)",
+                [],
+            )
+            .expect("session");
+        connection
+            .execute(
+                "INSERT INTO inputs (
+                    input_id, session_id, user_message_id, state, input_kind, command_json,
+                    accepted_at_ms, origin
+                 ) VALUES (
+                    'command-queued', 's-mcp', 'message-command-queued', 'queued', 'command',
+                    '{\"type\":\"mcp_refresh\",\"payload\":{}}', 2, 'runtime'
+                 )",
+                [],
+            )
+            .expect("valid queued command");
+        connection
+            .execute(
+                "INSERT INTO inputs (
+                    input_id, session_id, user_message_id, state, input_kind, command_json,
+                    command_result_json, accepted_at_ms, origin
+                 ) VALUES (
+                    'command-committed', 's-mcp', 'message-command-committed', 'committed',
+                    'command', '{\"type\":\"mcp_refresh\",\"payload\":{}}',
+                    '{\"outcome\":\"success\",\"servers\":[]}', 3, 'runtime'
+                 )",
+                [],
+            )
+            .expect("valid committed command");
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO inputs (
+                        input_id, session_id, user_message_id, state, input_kind, command_json,
+                        accepted_at_ms, origin
+                     ) VALUES (
+                        'bad-message', 's-mcp', 'message-bad', 'queued', 'message', '{}', 4,
+                        'user'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "message rows cannot contain command payloads"
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO inputs (
+                        input_id, session_id, user_message_id, state, input_kind, command_json,
+                        queued_message_json, accepted_at_ms, origin
+                     ) VALUES (
+                        'bad-command', 's-mcp', 'message-bad-command', 'queued', 'command', '{}',
+                        '{}', 5, 'runtime'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "command rows cannot contain queued messages"
+        );
+    }
+
+    #[test]
+    fn startup_rejects_a_half_written_command_even_without_table_check() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database");
+        initialize(&mut connection).expect("initialize schema");
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 INSERT INTO sessions (
+                    session_id, title, model_key, system_prompt_json, skill_catalog_json,
+                    lifecycle, body_generation, message_count, created_at_ms, updated_at_ms
+                 ) VALUES ('s-invalid', 'Invalid', 'fixture', '{}', '{}', 'active', 1, 0, 1, 1);
+                 INSERT INTO inputs (
+                    input_id, session_id, user_message_id, state, input_kind, accepted_at_ms,
+                    origin
+                 ) VALUES (
+                    'command-invalid', 's-invalid', 'message-invalid', 'queued', 'command', 2,
+                    'runtime'
+                 );
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .expect("inject incompatible row");
+        assert!(
+            initialize(&mut connection).is_err(),
+            "startup must fail closed instead of treating the command as a message"
         );
     }
 }

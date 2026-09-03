@@ -282,6 +282,14 @@ pub trait Tool: Send + Sync + 'static {
             .map_err(|error| error.to_string())
     }
 
+    /// 把已经完成 `execute` 的业务结果映射为规范工具状态。
+    ///
+    /// 普通工具只在 Rust `Err` 时失败，因此默认保持 Success。协议网关可以在远端
+    /// 明确返回业务错误、但仍需保留原始多段内容时覆盖本方法。
+    fn output_status(_output: &Self::Output) -> ToolResultStatus {
+        ToolResultStatus::Success
+    }
+
     /// 提取不进入模型上下文、但需要随可靠结果保存的执行观测信息。
     fn execution_metadata(_output: &Self::Output) -> Option<agent_types::ToolExecutionMetadata> {
         None
@@ -374,10 +382,11 @@ impl<T: Tool> ErasedResolvedExecution for TypedResolvedExecution<T> {
             match tool.execute(input, context).await {
                 Ok(output) => {
                     let metadata = T::execution_metadata(&output);
+                    let status = T::output_status(&output);
                     match T::encode_output(output) {
                         Ok(content) => ToolResult {
                             call_id,
-                            status: ToolResultStatus::Success,
+                            status,
                             content,
                             metadata: metadata.map(Box::new),
                         },

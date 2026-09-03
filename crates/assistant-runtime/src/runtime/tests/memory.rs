@@ -199,6 +199,7 @@ async fn agent_pinned_memory_tool_uses_approval_reliable_exchange_and_runtime_st
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

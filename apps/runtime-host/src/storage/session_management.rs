@@ -8,9 +8,10 @@ use assistant_protocol::{
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ConversationRewrite, MessageFeedbackChange, ModelChange,
-    ReasoningEffortChange, RewriteResult, SessionPinnedChange, SessionProxyChange,
-    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
-    StoredInput, StoredInputState, StoredMessageFeedback, StoredRun, VariantChange,
+    ReasoningEffortChange, RewriteResult, SessionCommandCommit, SessionPinnedChange,
+    SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, StoredInput, StoredInputState, StoredMessageFeedback,
+    StoredRun, StoredSessionCommand, StoredSessionCommandState, VariantChange,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -18,13 +19,166 @@ use super::{
     StorageEngine, StorageResult, body_path, child_task_directory, child_tasks_directory, conflict,
     conversation, database_write_error,
     goal::apply_goal_rewrite_pause,
-    internal_error, invalid_data,
+    internal_error, invalid_data, invalid_data_with_source,
     mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     recovery::ReplacementPlan,
     sync_directory, to_i64,
 };
 
 impl StorageEngine {
+    pub(super) fn commit_session_command(
+        &mut self,
+        commit: SessionCommandCommit,
+    ) -> StorageResult<StoredSessionCommand> {
+        if commit.operation_id.trim().is_empty()
+            || commit.message.origin != agent_types::UserMessageOrigin::Runtime
+            || commit.message.transcript_visibility != agent_types::TranscriptVisibility::Visible
+        {
+            return Err(invalid_data("session command result message is invalid"));
+        }
+        let existing = self
+            .load_session_commands()?
+            .into_iter()
+            .find(|command| command.input_id == commit.input_id)
+            .ok_or_else(|| conflict("session command does not exist"))?;
+        if existing.session_id != commit.session_id || existing.user_message_id != commit.message.id
+        {
+            return Err(conflict("session command identity is inconsistent"));
+        }
+        let current = self.load_conversation(&commit.session_id)?;
+        if existing.state == StoredSessionCommandState::Committed {
+            if existing.result.as_ref() == Some(&commit.result)
+                && current
+                    .messages
+                    .iter()
+                    .any(|message| matches!(message, agent_types::ConversationMessage::User(user) if user == &commit.message))
+            {
+                return Ok(existing);
+            }
+            return Err(conflict(
+                "session command was already committed differently",
+            ));
+        }
+        let mut replacement = current;
+        replacement
+            .messages
+            .push(agent_types::ConversationMessage::User(commit.message));
+        replacement
+            .validate_tool_exchange_pairs()
+            .map_err(|source| {
+                assistant_runtime::StoreError::with_source(
+                    assistant_runtime::StoreErrorKind::InvalidInput,
+                    "session command result breaks conversation structure",
+                    source,
+                )
+            })?;
+        let (source_generation, role) = self
+            .connection
+            .query_row(
+                "SELECT body_generation, role FROM sessions
+                 WHERE session_id = ?1 AND lifecycle = 'active'
+                   AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?1 AND status IN ('running', 'cancelling'))
+                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM child_tasks WHERE session_id = ?1 AND status IN ('accepted', 'running'))
+                   AND NOT EXISTS (SELECT 1 FROM child_pending_tool_exchanges WHERE session_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM session_goals WHERE session_id = ?1)",
+                [commit.session_id.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|source| {
+                internal_error("session command generation could not be queried", source)
+            })?
+            .ok_or_else(|| conflict("session command target is not active"))?;
+        if role != "standard" {
+            return Err(conflict("session command target is not standard"));
+        }
+        let source_generation = u64::try_from(source_generation)
+            .map_err(|source| invalid_data_with_source("session generation is invalid", source))?;
+        let result_generation = source_generation
+            .checked_add(1)
+            .ok_or_else(|| conflict("session generation is exhausted"))?;
+        let payload = conversation::encode_messages(&replacement.messages)?;
+        let session_directory = self.session_directory(&commit.session_id)?;
+        let new_body = body_path(&session_directory, result_generation);
+        conversation::write_replacement(&new_body, &payload)?;
+        sync_directory(&session_directory)?;
+        let result_json = serde_json::to_string(&commit.result).map_err(|source| {
+            internal_error("session command result could not be encoded", source)
+        })?;
+        let message_count = u64::try_from(replacement.messages.len()).map_err(|source| {
+            assistant_runtime::StoreError::with_source(
+                assistant_runtime::StoreErrorKind::InvalidInput,
+                "session command conversation is too large",
+                source,
+            )
+        })?;
+        let committed = (|| -> StorageResult<()> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|source| {
+                    database_write_error("session command commit could not begin", source)
+                })?;
+            let changed = transaction
+                .execute(
+                    "UPDATE inputs SET state = 'committed', command_result_json = ?1
+                     WHERE input_id = ?2 AND session_id = ?3 AND input_kind = 'command'
+                       AND state = 'queued' AND command_result_json IS NULL",
+                    params![
+                        result_json,
+                        commit.input_id.as_str(),
+                        commit.session_id.as_str(),
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("session command result could not be stored", source)
+                })?;
+            if changed != 1 {
+                return Err(conflict("session command is not queued"));
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE sessions
+                     SET body_generation = ?1, message_count = ?2, updated_at_ms = ?3
+                     WHERE session_id = ?4 AND body_generation = ?5 AND lifecycle = 'active'",
+                    params![
+                        to_i64(result_generation, "session generation exceeds range")?,
+                        to_i64(message_count, "session message count exceeds range")?,
+                        commit.committed_at_ms,
+                        commit.session_id.as_str(),
+                        to_i64(source_generation, "session generation exceeds range")?,
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("session command generation could not switch", source)
+                })?;
+            if changed != 1 {
+                return Err(conflict("session command generation changed"));
+            }
+            transaction.commit().map_err(|source| {
+                database_write_error("session command commit could not finish", source)
+            })
+        })();
+        if let Err(error) = committed {
+            let _ = fs::remove_file(&new_body);
+            return Err(error);
+        }
+        let _ = fs::remove_file(body_path(&session_directory, source_generation));
+        let _ = sync_directory(&session_directory);
+        self.mark_recall_owner_dirty_now(
+            &assistant_protocol::ConversationOwner::MainSession {
+                session_id: commit.session_id.clone(),
+            },
+            result_generation,
+        );
+        Ok(StoredSessionCommand {
+            result: Some(commit.result),
+            state: StoredSessionCommandState::Committed,
+            ..existing
+        })
+    }
+
     pub(super) fn set_session_archive(&mut self, change: ArchiveChange) -> StorageResult<()> {
         let (from, to, archived_at) = if change.archived {
             ("active", "archived", Some(change.changed_at_ms))
@@ -578,9 +732,84 @@ impl StorageEngine {
                     database_write_error("replaced skill activation could not be removed", source)
                 })?;
         }
+        let removed_selection_ids = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT selection_id, message_id FROM mcp_input_selections
+                     WHERE session_id = ?1",
+                )
+                .map_err(|source| {
+                    internal_error("replaced MCP selections could not be queried", source)
+                })?;
+            let rows = statement
+                .query_map([rewrite.session_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| {
+                    internal_error("replaced MCP selections could not be queried", source)
+                })?;
+            rows.filter_map(|row| match row {
+                Ok((selection_id, message_id))
+                    if !retained_message_ids.contains(message_id.as_str()) =>
+                {
+                    Some(Ok(selection_id))
+                }
+                Ok(_) => None,
+                Err(source) => Some(Err(internal_error(
+                    "replaced MCP selection could not be read",
+                    source,
+                ))),
+            })
+            .collect::<StorageResult<Vec<_>>>()?
+        };
+        for selection_id in removed_selection_ids {
+            transaction
+                .execute(
+                    "DELETE FROM mcp_input_selections WHERE selection_id = ?1",
+                    [selection_id],
+                )
+                .map_err(|source| {
+                    database_write_error("replaced MCP selection could not be removed", source)
+                })?;
+        }
+        let removed_command_ids = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT input_id, user_message_id FROM inputs
+                     WHERE session_id = ?1 AND input_kind = 'command'",
+                )
+                .map_err(|source| {
+                    internal_error("replaced commands could not be queried", source)
+                })?;
+            let rows = statement
+                .query_map([rewrite.session_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| internal_error("replaced commands could not be read", source))?;
+            rows.filter_map(|row| match row {
+                Ok((input_id, message_id))
+                    if !retained_message_ids.contains(message_id.as_str()) =>
+                {
+                    Some(Ok(input_id))
+                }
+                Ok(_) => None,
+                Err(source) => Some(Err(internal_error(
+                    "replaced command row is invalid",
+                    source,
+                ))),
+            })
+            .collect::<StorageResult<Vec<_>>>()?
+        };
+        for input_id in removed_command_ids {
+            transaction
+                .execute("DELETE FROM inputs WHERE input_id = ?1", [input_id])
+                .map_err(|source| {
+                    database_write_error("replaced command could not be removed", source)
+                })?;
+        }
         transaction
             .execute(
-                "DELETE FROM inputs WHERE session_id = ?1 AND queue_order >= ?2",
+                "DELETE FROM inputs WHERE session_id = ?1 AND queue_order >= ?2 AND input_kind = 'message'",
                 params![rewrite.session_id.as_str(), target_order],
             )
             .map_err(|source| {

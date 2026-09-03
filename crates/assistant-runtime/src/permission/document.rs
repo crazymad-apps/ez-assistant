@@ -3,11 +3,12 @@
 use std::collections::BTreeSet;
 
 use agent_tools::AbsolutePath;
-use assistant_protocol::{AgentVariant, PermissionDiagnosticCode};
+use assistant_protocol::{AgentVariant, McpServerKey, PermissionDiagnosticCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 1;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
+const MCP_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -19,7 +20,7 @@ pub struct PermissionDocument {
 impl PermissionDocument {
     pub fn empty() -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
+            schema_version: LEGACY_SCHEMA_VERSION,
             rules: Vec::new(),
         }
     }
@@ -36,7 +37,10 @@ impl PermissionDocument {
     }
 
     pub fn validate(&self) -> Result<(), PermissionDocumentError> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            LEGACY_SCHEMA_VERSION | MCP_SCHEMA_VERSION
+        ) {
             return Err(PermissionDocumentError::new(
                 PermissionDiagnosticCode::UnsupportedSchema,
                 "permission schema version is not supported",
@@ -44,6 +48,13 @@ impl PermissionDocument {
         }
         let mut ids = BTreeSet::new();
         for rule in &self.rules {
+            if self.schema_version == LEGACY_SCHEMA_VERSION
+                && matches!(&rule.matcher, PermissionMatcher::Mcp(_))
+            {
+                return Err(invalid_rule(
+                    "MCP matchers require permission schema version 2",
+                ));
+            }
             rule.validate()?;
             if !ids.insert(rule.id.as_str()) {
                 return Err(PermissionDocumentError::new(
@@ -59,6 +70,9 @@ impl PermissionDocument {
     pub fn append_rule(&mut self, rule: PermissionRule) -> Result<String, PermissionDocumentError> {
         self.validate()?;
         rule.validate()?;
+        if matches!(&rule.matcher, PermissionMatcher::Mcp(_)) {
+            self.schema_version = MCP_SCHEMA_VERSION;
+        }
         if let Some(existing) = self.rules.iter().find(|existing| {
             existing.effect == rule.effect
                 && same_variants(&existing.variants, &rule.variants)
@@ -135,6 +149,7 @@ pub enum PermissionMatcher {
     General(GeneralPermissionMatcher),
     File(FilePermissionMatcher),
     Shell(ShellPermissionMatcher),
+    Mcp(McpPermissionMatcher),
 }
 
 impl PermissionMatcher {
@@ -143,8 +158,48 @@ impl PermissionMatcher {
             Self::General(matcher) => matcher.validate(),
             Self::File(matcher) => matcher.validate(),
             Self::Shell(matcher) => matcher.validate(),
+            Self::Mcp(matcher) => matcher.validate(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpPermissionMatcher {
+    pub server: McpPermissionServerMatch,
+    pub tool: McpPermissionToolMatch,
+}
+
+impl McpPermissionMatcher {
+    fn validate(&self) -> Result<(), PermissionDocumentError> {
+        if matches!(self.server, McpPermissionServerMatch::Any)
+            && matches!(self.tool, McpPermissionToolMatch::Exact { .. })
+        {
+            return Err(invalid_rule(
+                "an exact MCP tool requires an exact MCP server",
+            ));
+        }
+        if let McpPermissionToolMatch::Exact { value } = &self.tool
+            && (value.is_empty() || value.len() > 128)
+        {
+            return Err(invalid_rule("MCP tool matcher value is invalid"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "match", rename_all = "snake_case")]
+pub enum McpPermissionServerMatch {
+    Any,
+    Exact { value: McpServerKey },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "match", rename_all = "snake_case")]
+pub enum McpPermissionToolMatch {
+    Any,
+    Exact { value: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -362,5 +417,67 @@ mod tests {
             "first"
         );
         assert_eq!(document.rules.len(), 1);
+    }
+
+    fn mcp_rule(server: McpPermissionServerMatch, tool: McpPermissionToolMatch) -> PermissionRule {
+        PermissionRule {
+            id: "mcp-rule".to_owned(),
+            effect: PermissionEffect::Allow,
+            variants: vec![AgentVariant::Plan, AgentVariant::Build],
+            matcher: PermissionMatcher::Mcp(McpPermissionMatcher { server, tool }),
+        }
+    }
+
+    #[test]
+    fn schema_one_remains_readable_and_first_mcp_append_upgrades_to_two() {
+        let mut document = PermissionDocument::empty();
+        document
+            .append_rule(mcp_rule(
+                McpPermissionServerMatch::Exact {
+                    value: McpServerKey::new("github").expect("server"),
+                },
+                McpPermissionToolMatch::Exact {
+                    value: "create_issue".to_owned(),
+                },
+            ))
+            .expect("append MCP rule");
+
+        assert_eq!(document.schema_version, 2);
+        let encoded = document.render().expect("render schema two");
+        let text = String::from_utf8(encoded.clone()).expect("utf8");
+        assert!(text.contains(r#""match": "exact""#));
+        assert_eq!(
+            PermissionDocument::parse(&encoded).expect("parse schema two"),
+            document
+        );
+    }
+
+    #[test]
+    fn mcp_matcher_rejects_schema_one_and_cross_server_exact_tool() {
+        let rule = mcp_rule(
+            McpPermissionServerMatch::Any,
+            McpPermissionToolMatch::Exact {
+                value: "create_issue".to_owned(),
+            },
+        );
+        let schema_one = PermissionDocument {
+            schema_version: 1,
+            rules: vec![rule.clone()],
+        };
+        assert_eq!(
+            schema_one.validate().expect_err("schema one MCP").code(),
+            PermissionDiagnosticCode::InvalidRule
+        );
+        let schema_two = PermissionDocument {
+            schema_version: 2,
+            rules: vec![rule],
+        };
+        assert_eq!(
+            schema_two
+                .validate()
+                .expect_err("cross-server exact tool")
+                .code(),
+            PermissionDiagnosticCode::InvalidRule
+        );
     }
 }

@@ -1,4 +1,5 @@
 import { observer } from "mobx-react-lite";
+import { McpControlResult } from "../McpControlResult";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AttachmentSummary,
@@ -363,6 +364,7 @@ export const ConversationView = observer(function ConversationView() {
       detail: {
         source: "live",
         tool_name: tool.tool_name,
+        mcp_identity: tool.mcp_identity,
         status: tool.status,
         input: { type: "unavailable" },
         request_json: null,
@@ -386,7 +388,11 @@ export const ConversationView = observer(function ConversationView() {
   }, [history?.generation, session_id]);
 
   const renderConversationRows = (rows: readonly ConversationRow[]) => (
-    rows.map((row) => row.type === "context_summary"
+    rows.map((row) => {
+      if (row.type === "control_result") {
+        return <McpControlResult key={row.message.message_id} message={row.message} />;
+      }
+      return row.type === "context_summary"
       ? (
           <div className={styles.context_summary_boundary} key={row.message.message_id}>
             <span className={styles.context_summary_line} />
@@ -446,7 +452,7 @@ export const ConversationView = observer(function ConversationView() {
               onToolClick={openToolDetail}
             />
           </div>
-        ))
+        ); })
   );
 
   if (!session_id) {

@@ -7,10 +7,11 @@ use assistant_protocol::{
 };
 
 use crate::{
-    PcOutputHosting, SessionExecutionEnvironment, SessionSkillCatalog, StoredSkillActivation,
+    PcOutputHosting, SessionExecutionEnvironment, SessionSkillCatalog, StoredMcpSelection,
+    StoredSkillActivation,
 };
 
-use super::{StoredAttachment, StoredGoal, StoredWorkPlan};
+use super::{StoredAttachment, StoredGoal, StoredSessionCommand, StoredWorkPlan};
 
 /// Session 的持久化生命周期。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +85,10 @@ pub struct SessionFork {
     pub tool_images: Vec<ToolImageReference>,
     /// 位于 Fork Conversation 前缀内、已改绑到目标 Session 的 Activation ledger。
     pub skill_activations: Vec<StoredSkillActivation>,
+    /// 位于 Fork Conversation 前缀内、已改绑到目标 Session 的 MCP Selection ledger。
+    pub mcp_selections: Vec<StoredMcpSelection>,
+    /// 历史控制结果沿 Fork 复制；目标 Input/Message 重新分配身份，不复制排队指令。
+    pub session_commands: Vec<ForkedSessionCommand>,
     /// Fork 时冻结的源 WorkPlan；Store 在同一事务中为目标 Session 创建 revision 1。
     pub work_plan: Option<StoredWorkPlan>,
     /// 仅当 objective source 位于前缀时提供的新 Goal；状态固定为 Paused(Forked)。
@@ -97,8 +102,17 @@ pub struct StoredSessionFork {
     pub conversation: ConversationSnapshot,
     pub attachments: Vec<StoredAttachment>,
     pub skill_activations: Vec<StoredSkillActivation>,
+    pub mcp_selections: Vec<StoredMcpSelection>,
+    pub session_commands: Vec<StoredSessionCommand>,
     pub work_plan: Option<StoredWorkPlan>,
     pub goal: Option<StoredGoal>,
+}
+
+/// Fork 控制结果的可核验来源与重新绑定后的目标事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkedSessionCommand {
+    pub source_input_id: assistant_protocol::InputId,
+    pub command: StoredSessionCommand,
 }
 
 /// 带预检影响摘要的永久删除业务原语。

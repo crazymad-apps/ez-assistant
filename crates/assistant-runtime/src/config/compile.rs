@@ -18,12 +18,12 @@ use super::{
     catalog::ModelCatalog,
     domain::{
         ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
-        ResolvedConfig, RuntimeModelTransportConfig,
+        McpRuntimeConfig, ResolvedConfig, RuntimeModelTransportConfig,
     },
     model::compile_model,
     schema::{
         RawConfig, RawDelegationConfig, RawExecutionLimits, RawGenerationConfig, RawGuardrailCheck,
-        RawGuardrailConfig, RawGuardrailMode, RawModelRetryConfig, RawRuntimeConfig,
+        RawGuardrailConfig, RawGuardrailMode, RawMcpConfig, RawModelRetryConfig, RawRuntimeConfig,
     },
 };
 
@@ -87,6 +87,7 @@ pub fn compile_runtime_config_with_catalog(
         &raw.agent.defaults.guardrails,
         &raw.agent.defaults.delegation,
         raw.agent.vision.as_ref(),
+        &raw.mcp,
     ) {
         Ok(global) => global,
         Err(issues) => {
@@ -179,6 +180,7 @@ pub fn compile_runtime_config_with_catalog(
         budget: global.budget,
         guardrails: global.guardrails,
         delegation: global.delegation,
+        mcp: global.mcp,
         vision,
         models: valid_models,
     };
@@ -213,6 +215,8 @@ struct CompiledGlobalConfig {
     guardrails: GuardrailConfig,
     /// 单层子任务委派的显式产品上限。
     delegation: super::domain::DelegationConfig,
+    /// MCP 进程级运行参数，不包含逐 Server 配置；调用时限仅作 Server 缺省值。
+    mcp: McpRuntimeConfig,
     vision: Option<super::domain::VisionConfig>,
 }
 
@@ -227,6 +231,7 @@ fn compile_global(
     guardrails: &RawGuardrailConfig,
     delegation: &RawDelegationConfig,
     vision: Option<&super::schema::RawVisionConfig>,
+    mcp: &RawMcpConfig,
 ) -> Result<CompiledGlobalConfig, Vec<ConfigIssue>> {
     let mut issues = Vec::new();
     // request timeout 同时约束等待响应建立；必须覆盖 connect timeout，避免连接阶段
@@ -286,6 +291,18 @@ fn compile_global(
         issues.push(global_issue(
             ConfigIssueCode::InvalidLimit,
             "agent delegation limits are invalid",
+        ));
+    }
+
+    if !(1_000..=60_000).contains(&mcp.connect_timeout_ms)
+        || !(1_000..=120_000).contains(&mcp.catalog_timeout_ms)
+        || !(1..=McpRuntimeConfig::MAX_TOOL_TIMEOUT_INTEGER_MS).contains(&mcp.request_timeout_ms)
+        || !(1_000..=30_000).contains(&mcp.close_timeout_ms)
+        || !(1..=16).contains(&mcp.max_concurrent_calls_per_server)
+    {
+        issues.push(global_issue(
+            ConfigIssueCode::InvalidLimit,
+            "MCP runtime limits are invalid",
         ));
     }
 
@@ -352,6 +369,14 @@ fn compile_global(
                 .expect("delegation tool limit was validated"),
             max_output_tokens: NonZeroU32::new(delegation.max_output_tokens)
                 .expect("delegation output limit was validated"),
+        },
+        mcp: McpRuntimeConfig {
+            connect_timeout: Duration::from_millis(mcp.connect_timeout_ms),
+            catalog_timeout: Duration::from_millis(mcp.catalog_timeout_ms),
+            request_timeout: Duration::from_millis(mcp.request_timeout_ms),
+            close_timeout: Duration::from_millis(mcp.close_timeout_ms),
+            max_concurrent_calls_per_server: NonZeroU32::new(mcp.max_concurrent_calls_per_server)
+                .expect("MCP concurrency was validated"),
         },
         vision,
     })

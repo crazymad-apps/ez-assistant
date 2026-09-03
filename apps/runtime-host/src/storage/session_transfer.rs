@@ -109,6 +109,59 @@ impl StorageEngine {
                 return Err(conflict("fork skill activation is invalid"));
             }
         }
+        let stored_selections = self.load_mcp_input_selections()?;
+        let mut selection_ids = BTreeSet::new();
+        for selection in &fork.mcp_selections {
+            let source_selection = stored_selections.iter().find(|candidate| {
+                candidate.session_id == fork.source_session_id
+                    && candidate.message_id == selection.message_id
+            });
+            if !selection_ids.insert(selection.selection_id.clone())
+                || stored_selections
+                    .iter()
+                    .any(|candidate| candidate.selection_id == selection.selection_id)
+                || selection.session_id != fork.session.session_id
+                || selection.input_id.is_some()
+                || !message_ids.contains(selection.message_id.as_str())
+                || !source_selection.is_some_and(|source| {
+                    source.server_key == selection.server_key
+                        && source.display_name == selection.display_name
+                        && source.created_at_ms == selection.created_at_ms
+                })
+            {
+                return Err(conflict("fork MCP selection is invalid"));
+            }
+        }
+        let stored_commands = self.load_session_commands()?;
+        let mut command_ids = BTreeSet::new();
+        let mut command_message_ids = BTreeSet::new();
+        for copied in &fork.session_commands {
+            let command = &copied.command;
+            let source = stored_commands
+                .iter()
+                .find(|source| source.input_id == copied.source_input_id);
+            if !command_ids.insert(command.input_id.clone())
+                || !command_message_ids.insert(command.user_message_id.clone())
+                || stored_commands
+                    .iter()
+                    .any(|source| source.input_id == command.input_id)
+                || command.session_id != fork.session.session_id
+                || command.idempotency_key.is_some()
+                || command.state != assistant_runtime::StoredSessionCommandState::Committed
+                || !message_ids.contains(command.user_message_id.as_str())
+                || !source.is_some_and(|source| {
+                    source.session_id == fork.source_session_id
+                        && source.state == assistant_runtime::StoredSessionCommandState::Committed
+                        && source.user_message_id != command.user_message_id
+                        && source.command == command.command
+                        && source.result == command.result
+                        && source.agent_variant == command.agent_variant
+                        && source.accepted_at_ms == command.accepted_at_ms
+                })
+            {
+                return Err(conflict("fork session command is invalid"));
+            }
+        }
         let work_plan = fork.work_plan.as_ref().map(|source| StoredWorkPlan {
             session_id: fork.session.session_id.clone(),
             revision: 1,
@@ -297,6 +350,54 @@ impl StorageEngine {
             for activation in &fork.skill_activations {
                 insert_skill_activation(&transaction, activation)?;
             }
+            for selection in &fork.mcp_selections {
+                transaction
+                    .execute(
+                        "INSERT INTO mcp_input_selections (
+                            selection_id, session_id, input_id, message_id, server_key,
+                            display_name, created_at_ms
+                         ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6)",
+                        params![
+                            selection.selection_id,
+                            selection.session_id.as_str(),
+                            selection.message_id.as_str(),
+                            selection.server_key.as_str(),
+                            selection.display_name,
+                            selection.created_at_ms,
+                        ],
+                    )
+                    .map_err(|source| {
+                        database_write_error("fork MCP selection could not be created", source)
+                    })?;
+            }
+            for copied in &fork.session_commands {
+                let command = &copied.command;
+                let command_json = serde_json::to_string(&command.command).map_err(|source| {
+                    internal_error("fork session command could not be encoded", source)
+                })?;
+                let result_json = serde_json::to_string(&command.result).map_err(|source| {
+                    internal_error("fork command result could not be encoded", source)
+                })?;
+                transaction
+                    .execute(
+                        "INSERT INTO inputs (
+                            priority_order, input_id, session_id, user_message_id,
+                            state, accepted_at_ms, agent_variant, origin, input_kind,
+                            command_json, command_result_json
+                         ) VALUES (?1, ?2, ?3, ?4, 'committed', ?5, ?6, 'runtime', 'command', ?7, ?8)",
+                        params![
+                            to_i64(command.queue_order, "fork command order exceeds range")?,
+                            command.input_id.as_str(),
+                            command.session_id.as_str(),
+                            command.user_message_id.as_str(),
+                            command.accepted_at_ms,
+                            agent_variant_value(command.agent_variant),
+                            command_json,
+                            result_json,
+                        ],
+                    )
+                    .map_err(|source| database_write_error("fork session command could not be created", source))?;
+            }
             for attachment in &attachments {
                 transaction
                     .execute(
@@ -361,6 +462,12 @@ impl StorageEngine {
             conversation: forked_conversation,
             attachments,
             skill_activations: fork.skill_activations,
+            mcp_selections: fork.mcp_selections,
+            session_commands: fork
+                .session_commands
+                .into_iter()
+                .map(|copied| copied.command)
+                .collect(),
             work_plan,
             goal: fork.goal,
         };

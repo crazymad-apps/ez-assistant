@@ -2,30 +2,30 @@
 
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
-    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
+    ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
     ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
     ConversationWindowRequest, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewStoredSessionMaterialization, NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange,
-    PendingChildToolExchange, PendingToolExchange, PermissionFileLoad, PermissionFileRevision,
-    PermissionFileScope, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
-    PinnedMemoryMutationResult, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
-    RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
-    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
-    SkillNameState, SkillNameStateChange, StoreError, StoredAttachment, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionMaterialization,
-    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
-    WorkspaceUpdate,
+    NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    PairedDevice, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
+    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PersonaMutation,
+    PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
+    ReasoningEffortChange, RecoveredRuntime, RewriteResult, SessionCommandCommit, SessionDeletion,
+    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
+    StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
+    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -183,6 +183,10 @@ pub(super) enum Command {
         input: Box<NewStoredInput>,
         reply: oneshot::Sender<Result<AcceptedInput, StoreError>>,
     },
+    AcceptSessionControl {
+        command: Box<NewStoredSessionCommand>,
+        reply: oneshot::Sender<Result<AcceptedStoredSessionCommand, StoreError>>,
+    },
     CancelQueuedInput {
         session_id: SessionId,
         input_id: InputId,
@@ -199,6 +203,10 @@ pub(super) enum Command {
     CommitUserMessage {
         commit: UserMessageCommit,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CommitSessionControl {
+        commit: Box<SessionCommandCommit>,
+        reply: oneshot::Sender<Result<StoredSessionCommand, StoreError>>,
     },
     BeginToolExchange {
         pending: PendingToolExchange,

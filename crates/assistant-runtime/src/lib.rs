@@ -17,6 +17,7 @@ mod goal;
 mod id;
 mod internal_boundary;
 mod journal;
+mod mcp;
 mod memory;
 mod observation;
 mod permission;
@@ -62,13 +63,21 @@ pub use factory::{
     ModelServiceFactoryRequest, RunToolBundle, RunToolFactory, RunToolFactoryError,
     RunToolFactoryErrorKind, RunToolFactoryRequest,
 };
+pub use mcp::{
+    McpConfigSource, McpConnection, McpConnectionError, McpConnectionFactory,
+    McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
+    McpImageMaterializationFailure, McpImageMaterializationFuture, McpImageMaterializer,
+    McpRawCallResult, McpRawContent, McpSecret, McpServerConfig, McpServerTransportConfig,
+    McpToolDefinition, McpToolPage,
+};
 pub use memory::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryCreatedBy,
     PinnedMemoryMutation, PinnedMemoryMutationResult, RuntimePinnedMemoryStore, StoredPinnedMemory,
     pinned_memory_limits,
 };
 pub use permission::{
-    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
+    CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, McpPermissionMatcher,
+    McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionDocument,
     PermissionDocumentError, PermissionEffect, PermissionFileLoad, PermissionFileOperation,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionMatcher,
     PermissionProcessMode, PermissionRule, PermissionSourceDiagnostic, PermissionStoreFuture,
@@ -87,18 +96,19 @@ pub use skill::{
     explicit_skill_states, sort_diagnostics,
 };
 pub use storage::{
-    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
+    ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementResult, ContextReplacementTarget, ConversationMessageLocationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
     ConversationWindowRequest, CrossSessionInputBinding, CrossSessionInputEnvelope,
-    ForkedAttachmentReference, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult,
-    GoalInputBinding, GoalStop, GoalStopResult, InputMessageValidationError, InputOrigin,
-    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
-    NewStoredRunAttempt, NewStoredSession, NewStoredSessionMaterialization,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    ReasoningEffortChange, RecoveredRuntime, RewriteGoalEffect, RewriteResult, RuntimeStore,
+    ForkedAttachmentReference, ForkedSessionCommand, GoalClear, GoalHeldInputResume,
+    GoalHeldInputResumeResult, GoalInputBinding, GoalStop, GoalStopResult,
+    InputMessageValidationError, InputOrigin, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    PendingChildToolExchange, PendingToolExchange, QueuePriorityChange, ReasoningEffortChange,
+    RecoveredRuntime, RewriteGoalEffect, RewriteResult, RuntimeStore, SessionCommandCommit,
     SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
     SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
@@ -108,13 +118,14 @@ pub use storage::{
     StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
     StoredConversationState, StoredConversationWindow, StoredGoal, StoredGoalBudget,
     StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionFork,
-    StoredSessionLifecycle, StoredSessionMaterialization, StoredSessionUsage, StoredTodoItemStatus,
-    StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
+    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState, StoredMcpSelection,
+    StoredMessageFeedback, StoredQueueItem, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionCommand, StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionMaterialization, StoredSessionUsage, StoredTodoItemStatus, StoredWorkPlan,
+    StoredWorkPlanItem, StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
     execution_context_from_product_history, merge_context_replacement_with_product_history,
     validate_input_message, validate_input_message_with_channel_source,
 };

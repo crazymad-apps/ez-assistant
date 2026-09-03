@@ -29,6 +29,7 @@ use crate::{
         ChildTaskRegistry, DelegateTaskTool, ParentDelegationController, ParentDelegationResources,
     },
     goal::{GoalRunBinding, GoalRunSignalLatch, GoalState, UpdateGoalTool},
+    mcp::{CallMcpTool, DiscoverMcpTools, McpImageMaterializer, McpRegistry, McpRunDisclosure},
     observation::ObservationCoordinator,
     permission::{
         ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
@@ -363,6 +364,7 @@ pub(super) struct CompiledRunAgent {
     goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
     skill_activation_latch: Arc<SkillActivationLatch>,
     can_speak: bool,
+    disclosure_context: Option<agent_types::UserMessage>,
 }
 
 pub(super) struct CompiledRunParts {
@@ -373,6 +375,7 @@ pub(super) struct CompiledRunParts {
     pub(super) goal_signal_latch: Option<Arc<GoalRunSignalLatch>>,
     pub(super) skill_activation_latch: Arc<SkillActivationLatch>,
     pub(super) can_speak: bool,
+    pub(super) disclosure_context: Option<agent_types::UserMessage>,
 }
 
 impl CompiledRunAgent {
@@ -385,6 +388,7 @@ impl CompiledRunAgent {
             goal_signal_latch: self.goal_signal_latch,
             skill_activation_latch: self.skill_activation_latch,
             can_speak: self.can_speak,
+            disclosure_context: self.disclosure_context,
         }
     }
 }
@@ -413,6 +417,8 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     pub(super) controller_tools: Arc<super::controller::ControllerToolCoordinator>,
     pub(super) output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
+    pub(super) mcp_registry: Arc<McpRegistry>,
+    pub(super) mcp_image_materializer: Arc<dyn McpImageMaterializer>,
 }
 
 impl AssistantRuntime {
@@ -584,13 +590,70 @@ pub(super) fn compile_run_agent(
     };
     let session_id = session.id().clone();
     let run_id = authorization.run_id.clone();
+    let permission_scopes = session.permission_scopes();
+    let (input_selection, goal_selection) = {
+        let state = session.lock_state()?;
+        let input_id = state
+            .runs
+            .get(&authorization.run_id)
+            .map(|run| run.input_id().clone());
+        let input_selection = input_id.as_ref().and_then(|input_id| {
+            state
+                .mcp_selections
+                .iter()
+                .find(|selection| selection.input_id.as_ref() == Some(input_id))
+                .cloned()
+        });
+        let goal_selection = authorization.goal_binding.as_ref().and_then(|_| {
+            state.goal.as_ref().and_then(|goal| {
+                goal.mcp_server_key.as_ref().map(|server_key| {
+                    (
+                        server_key.clone(),
+                        goal.objective.source_message_id.clone(),
+                        goal.created_at_ms,
+                    )
+                })
+            })
+        });
+        (input_selection, goal_selection)
+    };
+    let mcp_selection = match (input_selection, goal_selection) {
+        (Some(selection), _) => Some(selection),
+        (None, Some((server_key, message_id, created_at_ms))) => {
+            let display_name = resources
+                .mcp_registry
+                .catalog_server(&server_key)?
+                .map_or_else(
+                    || server_key.as_str().to_owned(),
+                    |server| server.display_name,
+                );
+            Some(crate::StoredMcpSelection {
+                selection_id: "goal-mcp-selection".to_owned(),
+                session_id: session.id().clone(),
+                input_id: None,
+                message_id,
+                server_key,
+                display_name,
+                created_at_ms,
+            })
+        }
+        (None, None) => None,
+    };
+    let mcp_disclosure = McpRunDisclosure::compile(
+        resources.mcp_registry.as_ref(),
+        authorization.permission_coordinator.as_ref(),
+        &permission_scopes,
+        authorization.variant,
+        mcp_selection.as_ref(),
+    )?;
+    let mcp_scope = mcp_disclosure.scope.clone();
     let authorizer = Arc::new(
         RuntimeToolAuthorizer::new(
             RunAuthorizationScope {
                 variant: authorization.variant,
                 approval_mode: authorization.approval_mode,
             },
-            session.permission_scopes(),
+            permission_scopes.clone(),
             authorization.permission_coordinator.clone(),
             infrastructure_policies.clone(),
             session.environment(),
@@ -606,7 +669,8 @@ pub(super) fn compile_run_agent(
                 events: authorization.events.clone(),
             }),
         )?
-        .with_goal_signal_latch(goal_signal_latch.clone()),
+        .with_goal_signal_latch(goal_signal_latch.clone())
+        .with_mcp_registry(resources.mcp_registry.clone()),
     );
 
     let model_request = agent_core::ModelRequestConfig {
@@ -622,7 +686,49 @@ pub(super) fn compile_run_agent(
         && session.role()? == crate::SessionRole::Controller;
     let mut tool_assembly = RunToolAssembly::default();
     tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
+    let mut child_base_tools = base_tools.clone();
     if compiled.model.capabilities().tool_calls {
+        if !mcp_scope.is_empty() {
+            let image_directory = (compiled.capabilities.tool_image_projection
+                != agent_model::ToolImageProjection::Unsupported)
+                .then(|| session.environment().session_tool_image_directory.clone());
+            let mut mcp_tools = RunToolAssembly::default();
+            mcp_tools.contribute(
+                RunToolContribution::tool(DiscoverMcpTools::new(
+                    resources.mcp_registry.clone(),
+                    mcp_scope.clone(),
+                    authorization.permission_coordinator.clone(),
+                    permission_scopes.clone(),
+                    authorization.variant,
+                ))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "MCP discovery tool definition",
+                })?,
+            );
+            mcp_tools.contribute(
+                RunToolContribution::tool(CallMcpTool::new(
+                    resources.mcp_registry.clone(),
+                    mcp_scope.clone(),
+                    image_directory,
+                    resources.mcp_image_materializer.clone(),
+                ))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "MCP call tool definition",
+                })?,
+            );
+            let mcp_tools =
+                mcp_tools
+                    .freeze()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "MCP gateway tool assembly",
+                    })?;
+            child_base_tools = child_base_tools.try_merge(mcp_tools.clone()).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "child MCP tool assembly",
+                }
+            })?;
+            tool_assembly.contribute(RunToolContribution::frozen(mcp_tools));
+        }
         if session.role()? == crate::SessionRole::Controller {
             tool_assembly.contribute(
                 RunToolContribution::tool(SpeakTool::new(
@@ -714,7 +820,7 @@ pub(super) fn compile_run_agent(
             child_prompt,
             resources.context_window.clone(),
         )
-        .tools(base_tools.clone())
+        .tools(child_base_tools)
         .model_request(agent_core::ModelRequestConfig {
             tool_choice: ToolChoice::Auto,
             generation: child_generation,
@@ -749,6 +855,8 @@ pub(super) fn compile_run_agent(
                 events: authorization.events,
                 limits: delegation,
                 skill_catalog: session.skill_catalog().clone(),
+                mcp_registry: resources.mcp_registry.clone(),
+                disclosure_context: mcp_disclosure.context.clone(),
             }));
         tool_assembly.contribute(
             RunToolContribution::tool(DelegateTaskTool::new(delegation_controller)).map_err(
@@ -792,6 +900,7 @@ pub(super) fn compile_run_agent(
         goal_signal_latch,
         skill_activation_latch,
         can_speak,
+        disclosure_context: mcp_disclosure.context,
     })
 }
 

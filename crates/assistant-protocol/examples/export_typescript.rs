@@ -8,12 +8,13 @@ use assistant_protocol::{
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalId, InterruptRunRequest, InterruptRunResult,
-    ListConversationPageRequest, ListConversationPageResult, PrioritizeQueuedInputRequest,
-    PrioritizeQueuedInputResult, QuotedTextSnapshot, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
-    RuntimeCommand, RuntimeCommandResult, RuntimeEventEnvelope, RuntimeHostCapabilities,
-    RuntimeHostHealth, SessionMaterializationManifest, SessionMaterializationResult,
-    SessionTitleGenerationSnapshot, SubmitInputMode, TodoItemId, UploadAttachmentResult,
+    ListConversationPageRequest, ListConversationPageResult, PermissionMcpMatcher,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueuedSessionItemSnapshot,
+    QuotedTextSnapshot, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
+    ResumeQueuedInputRequest, ResumeQueuedInputResult, RuntimeCommand, RuntimeCommandResult,
+    RuntimeEventEnvelope, RuntimeHostCapabilities, RuntimeHostHealth,
+    SessionMaterializationManifest, SessionMaterializationResult, SessionTitleGenerationSnapshot,
+    SubmitInputMode, TodoItemId, UploadAttachmentResult,
 };
 use ts_rs::{Config, TS};
 
@@ -45,6 +46,8 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         UploadAttachmentResult,
         RuntimeCommand,
         RuntimeCommandResult,
+        PermissionMcpMatcher,
+        QueuedSessionItemSnapshot,
         DeviceGatewayCommand,
         DeviceGatewayCommandResult,
         DeviceGatewayEvent,

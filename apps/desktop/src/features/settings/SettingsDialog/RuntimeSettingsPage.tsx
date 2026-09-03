@@ -122,8 +122,9 @@ export const RuntimeSettingsPage = observer(function RuntimeSettingsPage() {
   );
 });
 
-export const SettingsMessages = observer(function SettingsMessages() {
-  const settings = useRootStore().settings;
+export const SettingsMessages = observer(function SettingsMessages(props: Readonly<{ messages?: Readonly<{ error_message: string | null; notice_message: string | null }> }>) {
+  const fallback = useRootStore().settings;
+  const settings = props.messages ?? fallback;
   return (
     <>
       {settings.error_message && <p className={styles.error_message} role="alert">{settings.error_message}</p>}

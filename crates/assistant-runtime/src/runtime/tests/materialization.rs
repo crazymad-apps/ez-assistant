@@ -43,6 +43,7 @@ fn manifest(message: &str) -> assistant_protocol::SessionMaterializationManifest
             source_available: true,
         }],
         skill_name: Some("review".to_owned()),
+        mcp_server_key: None,
     }
 }
 

@@ -43,7 +43,8 @@
   background: var(--ez-surface-muted);
 
   button {
-    min-height: 26px;
+    --ez-control-default-height: var(--ez-control-height-small);
+    min-height: var(--ez-control-height);
     padding: 0 10px;
     border: 0;
     border-radius: 5px;
@@ -60,8 +61,8 @@
 
 .close_button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   flex: 0 0 auto;
   place-items: center;
   border: 0;

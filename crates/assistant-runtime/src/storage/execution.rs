@@ -4,8 +4,9 @@ use agent_types::{
     UserMessage, UserMessageOrigin, UserPart,
 };
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, GoalId, IdempotencyKey, InputId, ReasoningEffortKey, RunId,
-    RunStatus, RuntimeErrorInfo, SessionId, ToolCallId,
+    AgentVariant, ApprovalMode, GoalId, IdempotencyKey, InputId, McpRefreshControlResultSnapshot,
+    McpServerKey, ReasoningEffortKey, RunId, RunStatus, RuntimeErrorInfo, SessionCommand,
+    SessionId, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -149,6 +150,87 @@ pub struct StoredInput {
     pub accepted_at_ms: i64,
 }
 
+/// MCP Selection 的可靠小型关系事实；不允许复制动态 Tool Catalog 或连接状态。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredMcpSelection {
+    pub selection_id: String,
+    pub session_id: SessionId,
+    pub input_id: Option<InputId>,
+    pub message_id: MessageId,
+    pub server_key: McpServerKey,
+    pub display_name: String,
+    pub created_at_ms: i64,
+}
+
+impl StoredMcpSelection {
+    pub(crate) fn tag(&self) -> assistant_protocol::McpSelectionTagSnapshot {
+        assistant_protocol::McpSelectionTagSnapshot {
+            server_key: self.server_key.clone(),
+            display_name: self.display_name.clone(),
+        }
+    }
+}
+
+/// Session Command 的持久状态。执行中不落单独状态，崩溃后仍从 Queued 恢复。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredSessionCommandState {
+    Queued,
+    Committed,
+}
+
+/// Runtime Store 恢复出的结构化 Session Command；它没有对应 Run。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredSessionCommand {
+    pub queue_order: u64,
+    pub input_id: InputId,
+    pub session_id: SessionId,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub user_message_id: MessageId,
+    pub agent_variant: AgentVariant,
+    pub command: SessionCommand,
+    pub result: Option<McpRefreshControlResultSnapshot>,
+    pub state: StoredSessionCommandState,
+    pub accepted_at_ms: i64,
+}
+
+/// 同一可靠队列中的互斥载荷；Message 有首次 Run，Command 永远没有 Run。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredQueueItem {
+    Message(Box<StoredInput>),
+    Command(StoredSessionCommand),
+}
+
+/// 后续 `accept_session_command` 所需的完整事实；M0 只固定 Store 边界类型。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NewStoredSessionCommand {
+    pub input_id: InputId,
+    pub session_id: SessionId,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub user_message_id: MessageId,
+    pub agent_variant: AgentVariant,
+    pub command: SessionCommand,
+    pub accepted_at_ms: i64,
+}
+
+/// Store 原子接纳 Session Command 后返回的可靠行与幂等命中状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedStoredSessionCommand {
+    pub command: StoredSessionCommand,
+    pub is_duplicate: bool,
+}
+
+/// 后续 `commit_session_command` 的原子结算事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCommandCommit {
+    pub operation_id: String,
+    pub input_id: InputId,
+    pub session_id: SessionId,
+    pub result: McpRefreshControlResultSnapshot,
+    pub message: UserMessage,
+    pub committed_at_ms: i64,
+}
+
 /// 原子接受 Input 及其首次 Run 所需的完整事实。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewStoredInput {
@@ -164,6 +246,9 @@ pub struct NewStoredInput {
     pub channel_source: Option<InputChannelSource>,
     /// 与 Input、首次 Run 和 queued message 同事务写入的用户 Skill Activation。
     pub skill_activation: Option<StoredSkillActivation>,
+    /// 与 Input、首次 Run 同事务写入的单 Server 手选事实。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_selection: Option<StoredMcpSelection>,
     pub approval_mode: ApprovalMode,
     pub message: UserMessage,
     /// 仅首次 start_goal 提供；Store 必须与 Input/Run 在同一事务中创建。
@@ -399,4 +484,62 @@ pub struct StoredRun {
     pub created_at_ms: i64,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assistant_protocol::{McpRefreshOutcome, McpServerRefreshOutcome};
+
+    #[test]
+    fn stored_session_command_round_trips_without_a_run_identity() {
+        let command = StoredSessionCommand {
+            queue_order: 7,
+            input_id: InputId::new("command-1").expect("input"),
+            session_id: SessionId::new("session-1").expect("session"),
+            idempotency_key: Some(IdempotencyKey::new("request-1").expect("key")),
+            user_message_id: MessageId::new("message-1").expect("message"),
+            agent_variant: AgentVariant::Build,
+            command: SessionCommand::McpRefresh {
+                server: Some(McpServerKey::new("github").expect("server")),
+            },
+            result: Some(McpRefreshControlResultSnapshot {
+                outcome: McpRefreshOutcome::Success,
+                servers: vec![assistant_protocol::McpServerRefreshResultSnapshot {
+                    server_key: McpServerKey::new("github").expect("server"),
+                    outcome: McpServerRefreshOutcome::Refreshed,
+                    tool_count: 12,
+                    diagnostic: None,
+                }],
+            }),
+            state: StoredSessionCommandState::Committed,
+            accepted_at_ms: 10,
+        };
+        let json = serde_json::to_string(&command).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<StoredSessionCommand>(&json).expect("deserialize"),
+            command
+        );
+        assert!(!json.contains("run_id"));
+    }
+
+    #[test]
+    fn stored_mcp_selection_contains_only_stable_label_facts() {
+        let selection = StoredMcpSelection {
+            selection_id: "selection-1".to_owned(),
+            session_id: SessionId::new("session-1").expect("session"),
+            input_id: Some(InputId::new("input-1").expect("input")),
+            message_id: MessageId::new("message-1").expect("message"),
+            server_key: McpServerKey::new("github").expect("server"),
+            display_name: "GitHub".to_owned(),
+            created_at_ms: 10,
+        };
+        let json = serde_json::to_string(&selection).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<StoredMcpSelection>(&json).expect("deserialize"),
+            selection
+        );
+        assert!(!json.contains("tools"));
+        assert!(!json.contains("catalog"));
+    }
 }

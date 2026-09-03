@@ -9,25 +9,27 @@ use crate::{
 };
 
 use super::{
-    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
+    ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
     ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
     ConversationWindowRequest, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
     GoalStopResult, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionMaterialization,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    ReasoningEffortChange, RewriteResult, SessionDeletion, SessionFork, SessionHistoryClear,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RewriteResult,
+    SessionCommandCommit, SessionDeletion, SessionFork, SessionHistoryClear,
     SessionHistoryClearResult, SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
     SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
     StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredGoal, StoredInput, StoredMessageFeedback, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage, StoredWorkPlan,
-    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    StoredGoal, StoredInput, StoredMcpSelection, StoredMessageFeedback, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionMaterialization,
+    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceUpdate,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -38,6 +40,8 @@ pub struct RecoveredRuntime {
     pub attachments: Vec<StoredAttachment>,
     pub sessions: Vec<StoredSession>,
     pub inputs: Vec<StoredInput>,
+    pub session_commands: Vec<super::StoredSessionCommand>,
+    pub mcp_input_selections: Vec<StoredMcpSelection>,
     pub runs: Vec<StoredRun>,
     pub child_tasks: Vec<StoredChildTask>,
     pub work_plans: Vec<StoredWorkPlan>,
@@ -201,6 +205,12 @@ pub trait RuntimeStore: Send + Sync {
     /// 原子创建 Input 与首次 Accepted Run，或返回同 Session 幂等 key 的首次结果。
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
 
+    /// 原子接受一个不创建 Run 的结构化 Session Command。
+    fn accept_session_command(
+        &self,
+        command: NewStoredSessionCommand,
+    ) -> StoreFuture<'_, AcceptedStoredSessionCommand>;
+
     /// 删除尚未进入规范 Conversation 的排队 Input 及其 Run。
     fn cancel_queued_input(
         &self,
@@ -216,6 +226,12 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 可靠写入 User Message，并将对应 Run 从 accepted 转为 running。
     fn commit_user_message(&self, commit: UserMessageCommit) -> StoreFuture<'_, ()>;
+
+    /// 原子提交 Command 结果及其 Runtime user-role Conversation 消息。
+    fn commit_session_command(
+        &self,
+        commit: SessionCommandCommit,
+    ) -> StoreFuture<'_, super::StoredSessionCommand>;
 
     /// 在任何工具副作用前保存完整 Tool Call 批次并返回确认。
     fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()>;

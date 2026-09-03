@@ -49,6 +49,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -84,6 +85,7 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await
@@ -181,6 +183,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -208,6 +211,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -241,6 +245,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -569,6 +574,7 @@ async fn deleting_an_idle_session_model_preserves_history_and_requires_reselecti
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -654,6 +660,7 @@ async fn deleting_a_model_used_by_a_running_run_is_rejected() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

@@ -11,6 +11,7 @@ mod device;
 pub(crate) mod goal;
 mod input;
 mod materialization;
+mod mcp;
 mod memory;
 mod model;
 mod permission;
@@ -119,6 +120,7 @@ pub struct AssistantRuntime {
     output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     context_window: Arc<ContextWindowEvaluator>,
+    mcp_service: crate::mcp::McpService,
     event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
     tasks: Arc<RuntimeTasks>,
@@ -291,6 +293,7 @@ impl AssistantRuntime {
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
                     .expect("static context window threshold is valid"),
             ),
+            mcp_service: crate::mcp::McpService::unavailable(),
             event_sender,
             root_cancellation: CancellationToken::new(),
             tasks: Arc::new(RuntimeTasks::new()),
@@ -329,6 +332,18 @@ impl AssistantRuntime {
         dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     ) -> Self {
         self.output_dispatcher = dispatcher;
+        self
+    }
+
+    /// 在 Host 开放入口前安装用户级 MCP 配置来源和具体连接 Adapter。
+    pub fn with_mcp_services(
+        mut self,
+        source: Arc<dyn crate::McpConfigSource>,
+        connection_factory: Arc<dyn crate::McpConnectionFactory>,
+        image_materializer: Arc<dyn crate::McpImageMaterializer>,
+    ) -> Self {
+        self.mcp_service =
+            crate::mcp::McpService::available(source, connection_factory, image_materializer);
         self
     }
 

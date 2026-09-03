@@ -27,7 +27,7 @@ use tokio::{
     task::JoinHandle,
     time::{MissedTickBehavior, interval},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::identity::{IdentityError, InstallationIdentity};
 use super::{
@@ -65,7 +65,8 @@ pub(crate) struct DeviceGatewayService {
 /// 所有设备连接共享的 Host 资源。
 ///
 /// `state` 是在线连接和配对候选的唯一 owner；`voice_turns` 按设备而非 WSS 连接保存，
-/// 使一次语音轮次可以跨连接续传而不复制到 Runtime。
+/// 使一次语音轮次可以跨连接续传而不复制到 Runtime。`recognition_tasks` 属于 Gateway
+/// 生命周期，确保跨连接 ASR 子任务在关闭时可取消、等待且不会静默丢失 panic。
 pub(super) struct GatewayShared {
     pub(super) runtime: Arc<AssistantRuntime>,
     pub(super) speech: SpeechServiceHandle,
@@ -76,6 +77,7 @@ pub(super) struct GatewayShared {
             Arc<Mutex<Option<super::connection::VoiceTurnAggregation>>>,
         >,
     >,
+    pub(super) recognition_tasks: TaskTracker,
     events: broadcast::Sender<DeviceGatewayEvent>,
 }
 
@@ -185,6 +187,7 @@ impl DeviceGatewayService {
             speech,
             events: event_tx,
             voice_turns: Mutex::new(HashMap::new()),
+            recognition_tasks: TaskTracker::new(),
             state: Mutex::new(GatewayState {
                 enabled: false,
                 available: false,
@@ -292,6 +295,7 @@ impl DeviceGatewayService {
     }
 
     async fn start_gateway(&self) -> Result<ActiveGateway, DeviceGatewayError> {
+        self.shared.recognition_tasks.reopen();
         let runtime_home = self.runtime_home.clone();
         let identity = tokio::task::spawn_blocking(move || {
             InstallationIdentity::load_or_create(&runtime_home)
@@ -357,12 +361,14 @@ impl DeviceGatewayService {
             .server_handle
             .graceful_shutdown(Some(Duration::from_secs(5)));
         let _ = active.server_task.await;
+        self.stop_recognition_tasks().await;
     }
 
     async fn cleanup_stopped_gateway(&self, active: ActiveGateway) {
         self.disconnect_all().await;
         let _ = active.mdns.unregister(&active.service_fullname);
         let _ = active.mdns.shutdown();
+        self.stop_recognition_tasks().await;
     }
 
     async fn refresh_discovery(
@@ -437,6 +443,25 @@ impl DeviceGatewayService {
         for connection in connections {
             let _ = connection.try_send(ConnectionCommand::GatewayDisabled);
         }
+    }
+
+    /// 在 listener 已停止接受新连接后，取消并等待 Gateway 拥有的全部 ASR 子任务。
+    ///
+    /// 先从按设备聚合表移除所有易失轮次，再发出每段取消信号；任务完成结果只能写入各自仍持有的
+    /// 旧聚合 `Arc`，不会重新进入新的 Gateway 周期。`TaskTracker` 关闭后等待全部 wrapper 终态，
+    /// 不提交 Runtime Input，也不触碰 SpeechService 自己拥有的 Provider 任务集合。
+    async fn stop_recognition_tasks(&self) {
+        let voice_turns = {
+            let mut voice_turns = self.shared.voice_turns.lock().await;
+            std::mem::take(&mut *voice_turns)
+        };
+        for voice_turn in voice_turns.into_values() {
+            if let Some(aggregation) = voice_turn.lock().await.as_mut() {
+                aggregation.cancel();
+            }
+        }
+        self.shared.recognition_tasks.close();
+        self.shared.recognition_tasks.wait().await;
     }
 
     async fn mark_disabled(&self) {

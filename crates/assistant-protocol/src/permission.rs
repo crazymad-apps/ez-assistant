@@ -69,6 +69,7 @@ pub enum PermissionRuleMatcher {
     General(PermissionGeneralMatcher),
     File(PermissionFileMatcher),
     Shell(PermissionShellMatcher),
+    Mcp(crate::PermissionMcpMatcher),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

@@ -470,6 +470,15 @@ pub enum ToolApprovalSubject {
         timeout_ms: u64,
         process_mode: String,
     },
+    /// 已解析到实际 Server 与原始 Tool 的 MCP 调用；网关名不作为授权身份。
+    Mcp {
+        identity: crate::McpToolIdentity,
+        arguments_json: String,
+        /// MCP Server 自报且未经客户端验证的 Tool annotations，仅用于审批展示。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        untrusted_annotations_json: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -591,6 +600,10 @@ pub struct ToolActivitySnapshot {
     pub call_id: ToolCallId,
     /// 模型可见的工具名称。
     pub tool_name: String,
+    /// 固定 MCP 网关解析出的实际远端身份；普通工具和旧快照为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_identity: Option<crate::McpToolIdentity>,
     /// 当前工具活动状态。
     pub status: ToolActivityStatus,
     /// 截至快照时观察到的标准输出；事件丢失时可能不完整。
@@ -785,6 +798,7 @@ mod tests {
                 step: Some(1),
                 call_id: ToolCallId::new("call-1").expect("call id"),
                 tool_name: "echo_text".to_owned(),
+                mcp_identity: None,
                 status: ToolActivityStatus::Completed,
                 stdout: "hello".to_owned(),
                 stderr: String::new(),

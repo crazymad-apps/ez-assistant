@@ -124,6 +124,7 @@ async fn input_accepts_an_attachment_without_text() {
             attachment_ids: vec![attachment.attachment_id],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -205,6 +206,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             attachment_ids: vec![second.attachment_id.clone(), first.attachment_id.clone()],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(key.clone()),
         })
         .await
@@ -258,6 +260,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             attachment_ids: vec![first.attachment_id.clone()],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -303,6 +306,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
             attachment_ids: vec![foreign.attachment_id.clone()],
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(key),
         })
         .await
@@ -318,6 +322,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 attachment_ids: vec![first.attachment_id.clone(), first.attachment_id.clone()],
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -333,6 +338,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 attachment_ids: vec![second.attachment_id],
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -355,6 +361,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
                 attachment_ids: vec![first.attachment_id],
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,

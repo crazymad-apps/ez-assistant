@@ -8,13 +8,16 @@
 //! 避免检查通过后权威状态已经发生变化。
 
 use agent_types::MessageId;
-use assistant_protocol::{GoalId, IdempotencyKey, InputId, RunStatus, SessionId};
+use assistant_protocol::{
+    GoalId, IdempotencyKey, InputId, McpServerKey, RunStatus, SessionCommand, SessionId,
+};
 use assistant_runtime::{
-    AcceptedInput, CrossSessionInputBinding, CrossSessionInputEnvelope, GoalHeldInputResume,
-    GoalHeldInputResumeResult, GoalInputBinding, InputChannelSource, InputOrigin, NewStoredInput,
-    ReplyRoute, SkillActivationOwner, SkillActivationTrigger, StoredInput, StoredInputState,
-    StoredRun, StoredSkillActivation, validate_input_message,
-    validate_input_message_with_channel_source,
+    AcceptedInput, AcceptedStoredSessionCommand, CrossSessionInputBinding,
+    CrossSessionInputEnvelope, GoalHeldInputResume, GoalHeldInputResumeResult, GoalInputBinding,
+    InputChannelSource, InputOrigin, NewStoredInput, NewStoredSessionCommand, ReplyRoute,
+    SkillActivationOwner, SkillActivationTrigger, StoredInput, StoredInputState,
+    StoredMcpSelection, StoredRun, StoredSessionCommand, StoredSessionCommandState,
+    StoredSkillActivation, validate_input_message, validate_input_message_with_channel_source,
 };
 use rusqlite::Transaction;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -128,8 +131,9 @@ impl StorageEngine {
             .execute(
                 "UPDATE inputs
                  SET priority_order = COALESCE(priority_order, queue_order) + 1
-                 WHERE session_id = ?1 AND state = 'queued'
-                   AND origin = 'user' AND goal_id IS NULL",
+                 WHERE session_id = ?1 AND state = 'queued' AND goal_id IS NULL
+                   AND ((input_kind = 'message' AND origin = 'user')
+                        OR input_kind = 'command')",
                 [change.session_id.as_str()],
             )
             .map_err(|source| {
@@ -138,8 +142,9 @@ impl StorageEngine {
         let changed = transaction
             .execute(
                 "UPDATE inputs SET priority_order = ?1
-                 WHERE session_id = ?2 AND input_id = ?3 AND state = 'queued'
-                   AND origin = 'user' AND goal_id IS NULL",
+                 WHERE session_id = ?2 AND input_id = ?3 AND state = 'queued' AND goal_id IS NULL
+                   AND ((input_kind = 'message' AND origin = 'user')
+                        OR input_kind = 'command')",
                 params![0_i64, change.session_id.as_str(), change.input_id.as_str()],
             )
             .map_err(|source| {
@@ -185,6 +190,7 @@ impl StorageEngine {
         )
         .map_err(|_| invalid_data("input message origin or Goal binding is invalid"))?;
         validate_new_input_activation(&input)?;
+        validate_new_input_mcp_selection(&input)?;
         if input.new_goal.is_some() && input.resumed_goal.is_some() {
             return Err(invalid_data(
                 "input cannot start and resume a Goal together",
@@ -439,6 +445,27 @@ impl StorageEngine {
             apply_goal_resume(&transaction, goal)?;
         }
         transaction.execute("INSERT INTO inputs (priority_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)", params![priority_order, input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant), input_origin_value(input.origin), input.goal_binding.as_ref().map(|binding| binding.goal_id.as_str()), input.goal_binding.as_ref().map(|binding| i64::try_from(binding.generation)).transpose().map_err(|source| internal_error("Goal input generation exceeds storage range", source))?, input.goal_binding.as_ref().map(|binding| i64::from(binding.turn)), goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json]).map_err(|source| database_write_error("input could not be accepted", source))?;
+        if let Some(selection) = input.mcp_selection.as_ref() {
+            transaction
+                .execute(
+                    "INSERT INTO mcp_input_selections (
+                         selection_id, session_id, input_id, message_id,
+                         server_key, display_name, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        selection.selection_id.as_str(),
+                        selection.session_id.as_str(),
+                        selection.input_id.as_ref().map(InputId::as_str),
+                        selection.message_id.as_str(),
+                        selection.server_key.as_str(),
+                        selection.display_name.as_str(),
+                        selection.created_at_ms,
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("MCP input selection could not be accepted", source)
+                })?;
+        }
         let queue_order = u64::try_from(priority_order)
             .map_err(|source| internal_error("queue order exceeds storage range", source))?;
         transaction.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, 1, 'accepted', 0, ?4, NULL, NULL, ?5, NULL, NULL)", params![input.run_id.as_str(), input.session_id.as_str(), input.input_id.as_str(), approval_mode_value(input.approval_mode), input.accepted_at_ms]).map_err(|source| database_write_error("run could not be accepted", source))?;
@@ -522,7 +549,7 @@ impl StorageEngine {
             .execute(
                 "DELETE FROM inputs
                  WHERE input_id = ?1 AND session_id = ?2 AND state = 'queued'
-                   AND goal_id IS NULL
+                   AND input_kind = 'message' AND goal_id IS NULL
                    AND (origin = 'user' OR (
                        origin = 'runtime'
                        AND cross_session_json IS NULL
@@ -539,9 +566,261 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub(super) fn accept_session_command(
+        &mut self,
+        command: NewStoredSessionCommand,
+    ) -> StorageResult<AcceptedStoredSessionCommand> {
+        if let Some(key) = command.idempotency_key.as_ref() {
+            // 单条在线请求按既有唯一键读取，不复用启动时的全量恢复扫描。
+            let existing_kind: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT input_kind FROM inputs WHERE session_id = ?1 AND idempotency_key = ?2",
+                    params![command.session_id.as_str(), key.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|source| {
+                    internal_error("input idempotency key could not be queried", source)
+                })?;
+            if existing_kind.as_deref() == Some("message") {
+                return Err(conflict(
+                    "session command idempotency key belongs to a message input",
+                ));
+            }
+            if existing_kind
+                .as_deref()
+                .is_some_and(|kind| kind != "command")
+            {
+                return Err(invalid_data("stored input kind is invalid"));
+            }
+            if let Some(existing) = self
+                .query_session_commands(Some((&command.session_id, key)))?
+                .into_iter()
+                .next()
+            {
+                if existing.command != command.command {
+                    return Err(conflict(
+                        "session command idempotency key was reused with different content",
+                    ));
+                }
+                return Ok(AcceptedStoredSessionCommand {
+                    command: existing,
+                    is_duplicate: true,
+                });
+            }
+        }
+        let command_json = serde_json::to_string(&command.command)
+            .map_err(|source| internal_error("session command could not be encoded", source))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                internal_error("session command acceptance could not begin", source)
+            })?;
+        let target_valid = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions
+                 WHERE session_id = ?1 AND lifecycle = 'active' AND role = 'standard')",
+                [command.session_id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| {
+                internal_error("session command target could not be queried", source)
+            })?;
+        if !target_valid {
+            return Err(conflict("session command target is not active"));
+        }
+        let priority_order = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(COALESCE(priority_order, queue_order)), -1) + 1
+                 FROM inputs WHERE session_id = ?1",
+                [command.session_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|source| internal_error("next command priority could not be read", source))?;
+        transaction
+            .execute(
+                "INSERT INTO inputs (
+                    priority_order, input_id, session_id, idempotency_key, user_message_id,
+                    state, accepted_at_ms, agent_variant, origin, input_kind, command_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, 'runtime', 'command', ?8)",
+                params![
+                    priority_order,
+                    command.input_id.as_str(),
+                    command.session_id.as_str(),
+                    command.idempotency_key.as_ref().map(IdempotencyKey::as_str),
+                    command.user_message_id.as_str(),
+                    command.accepted_at_ms,
+                    agent_variant_value(command.agent_variant),
+                    command_json,
+                ],
+            )
+            .map_err(|source| {
+                database_write_error("session command could not be accepted", source)
+            })?;
+        transaction
+            .execute(
+                "UPDATE sessions SET updated_at_ms = ?1 WHERE session_id = ?2",
+                params![command.accepted_at_ms, command.session_id.as_str()],
+            )
+            .map_err(|source| {
+                database_write_error(
+                    "session command acceptance time could not be stored",
+                    source,
+                )
+            })?;
+        transaction.commit().map_err(|source| {
+            database_write_error("session command acceptance could not be committed", source)
+        })?;
+        Ok(AcceptedStoredSessionCommand {
+            command: StoredSessionCommand {
+                queue_order: u64::try_from(priority_order).map_err(|source| {
+                    internal_error("session command queue order exceeds range", source)
+                })?,
+                input_id: command.input_id,
+                session_id: command.session_id,
+                idempotency_key: command.idempotency_key,
+                user_message_id: command.user_message_id,
+                agent_variant: command.agent_variant,
+                command: command.command,
+                result: None,
+                state: StoredSessionCommandState::Queued,
+                accepted_at_ms: command.accepted_at_ms,
+            },
+            is_duplicate: false,
+        })
+    }
+
+    pub(super) fn load_session_commands(&self) -> StorageResult<Vec<StoredSessionCommand>> {
+        self.query_session_commands(None)
+    }
+
+    // 全量恢复与精确幂等查询共享行解码/Run 归属校验，但在线请求只读取目标唯一键。
+    fn query_session_commands(
+        &self,
+        filter: Option<(&SessionId, &IdempotencyKey)>,
+    ) -> StorageResult<Vec<StoredSessionCommand>> {
+        let predicate = if filter.is_some() {
+            "AND session_id = ?1 AND idempotency_key = ?2"
+        } else {
+            ""
+        };
+        let mut statement = self
+            .connection
+            .prepare(&format!(
+                "SELECT COALESCE(priority_order, queue_order), input_id, session_id,
+                        idempotency_key, user_message_id, agent_variant, command_json,
+                        command_result_json, state, accepted_at_ms
+                 FROM inputs WHERE input_kind = 'command' {predicate}
+                 ORDER BY COALESCE(priority_order, queue_order), queue_order"
+            ))
+            .map_err(|source| internal_error("session commands could not be queried", source))?;
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(
+                    filter
+                        .into_iter()
+                        .flat_map(|(session, key)| [session.as_str(), key.as_str()]),
+                ),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                },
+            )
+            .map_err(|source| internal_error("session commands could not be read", source))?;
+        rows.map(|row| {
+            let (
+                queue_order,
+                input_id,
+                session_id,
+                idempotency_key,
+                user_message_id,
+                agent_variant,
+                command_json,
+                result_json,
+                state,
+                accepted_at_ms,
+            ) = row.map_err(|source| {
+                internal_error("session command row could not be read", source)
+            })?;
+            let state = match state.as_str() {
+                "queued" if result_json.is_none() => StoredSessionCommandState::Queued,
+                "committed" if result_json.is_some() => StoredSessionCommandState::Committed,
+                _ => return Err(invalid_data("stored session command state is invalid")),
+            };
+            let command =
+                serde_json::from_str::<SessionCommand>(&command_json).map_err(|source| {
+                    invalid_data_with_source("stored session command is invalid", source)
+                })?;
+            let result = result_json
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|source| {
+                        invalid_data_with_source("stored session command result is invalid", source)
+                    })
+                })
+                .transpose()?;
+            let parsed_input_id = InputId::new(input_id).map_err(|source| {
+                invalid_data_with_source("stored session command input id is invalid", source)
+            })?;
+            let run_count = self
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE input_id = ?1",
+                    [parsed_input_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|source| {
+                    internal_error("session command run count could not be read", source)
+                })?;
+            if run_count != 0 {
+                return Err(invalid_data(
+                    "stored session command unexpectedly owns a Run",
+                ));
+            }
+            Ok(StoredSessionCommand {
+                queue_order: u64::try_from(queue_order).map_err(|source| {
+                    invalid_data_with_source("stored command queue order is invalid", source)
+                })?,
+                input_id: parsed_input_id,
+                session_id: SessionId::new(session_id).map_err(|source| {
+                    invalid_data_with_source("stored command session id is invalid", source)
+                })?,
+                idempotency_key: idempotency_key
+                    .map(IdempotencyKey::new)
+                    .transpose()
+                    .map_err(|source| {
+                        invalid_data_with_source(
+                            "stored command idempotency key is invalid",
+                            source,
+                        )
+                    })?,
+                user_message_id: MessageId::new(user_message_id).map_err(|source| {
+                    invalid_data_with_source("stored command message id is invalid", source)
+                })?,
+                agent_variant: parse_agent_variant(&agent_variant)?,
+                command,
+                result,
+                state,
+                accepted_at_ms,
+            })
+        })
+        .collect()
+    }
+
     /// 从稳定存储重建 Input 队列投影，并严格校验组合字段是否自洽。
     pub(super) fn load_inputs(&self) -> StorageResult<Vec<StoredInput>> {
-        let mut statement = self.connection.prepare("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs ORDER BY COALESCE(priority_order, queue_order), queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
+        let mut statement = self.connection.prepare("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs WHERE input_kind = 'message' ORDER BY COALESCE(priority_order, queue_order), queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -719,6 +998,87 @@ impl StorageEngine {
         })
         .collect()
     }
+
+    /// 加载 Input/Conversation 标签恢复所需的 MCP Selection 小型关系事实。
+    pub(super) fn load_mcp_input_selections(&self) -> StorageResult<Vec<StoredMcpSelection>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT selection_id, session_id, input_id, message_id, server_key,
+                        display_name, created_at_ms
+                 FROM mcp_input_selections
+                 ORDER BY session_id, created_at_ms, selection_id",
+            )
+            .map_err(|source| {
+                internal_error("MCP input selections could not be queried", source)
+            })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(|source| internal_error("MCP input selections could not be read", source))?;
+        rows.map(|row| {
+            let (
+                selection_id,
+                session_id,
+                input_id,
+                message_id,
+                server_key,
+                display_name,
+                created_at_ms,
+            ) = row.map_err(|source| {
+                internal_error("MCP input selection row could not be read", source)
+            })?;
+            if selection_id.trim().is_empty()
+                || display_name.trim().is_empty()
+                || display_name.len() > 128
+            {
+                return Err(invalid_data("stored MCP input selection is invalid"));
+            }
+            Ok(StoredMcpSelection {
+                selection_id,
+                session_id: SessionId::new(session_id).map_err(|source| {
+                    invalid_data_with_source("stored MCP selection session id is invalid", source)
+                })?,
+                input_id: input_id.map(InputId::new).transpose().map_err(|source| {
+                    invalid_data_with_source("stored MCP selection input id is invalid", source)
+                })?,
+                message_id: MessageId::new(message_id).map_err(|source| {
+                    invalid_data_with_source("stored MCP selection message id is invalid", source)
+                })?,
+                server_key: McpServerKey::new(server_key).map_err(|source| {
+                    invalid_data_with_source("stored MCP selection server key is invalid", source)
+                })?,
+                display_name,
+                created_at_ms,
+            })
+        })
+        .collect()
+    }
+}
+
+fn validate_new_input_mcp_selection(input: &NewStoredInput) -> StorageResult<()> {
+    let Some(selection) = input.mcp_selection.as_ref() else {
+        return Ok(());
+    };
+    if input.origin != InputOrigin::User
+        || selection.session_id != input.session_id
+        || selection.input_id.as_ref() != Some(&input.input_id)
+        || selection.message_id != input.message.id
+        || selection.display_name.trim().is_empty()
+        || selection.display_name.len() > 128
+    {
+        return Err(invalid_data("MCP input selection is inconsistent"));
+    }
+    Ok(())
 }
 
 /// 校验新 Input 携带的技能激活是否属于本次创建的 Run。

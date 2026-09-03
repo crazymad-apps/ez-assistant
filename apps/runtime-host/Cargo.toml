@@ -44,6 +44,9 @@ pakery-spake2 = { version = "0.2.1", features = ["os_rng"] }
 rand_core.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+sse-stream = "0.2.5"
+rmcp.workspace = true
+process-wrap.workspace = true
 rustls-pki-types = { version = "1.14.0", features = ["std"] }
 rusqlite = { version = "0.40.1", features = ["bundled"], default-features = false }
 schemars = "1.2.1"

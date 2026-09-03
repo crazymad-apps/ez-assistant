@@ -12,6 +12,9 @@ import type {
   ConversationHistoryHit,
   GoalId,
   InputId,
+  ListMcpServerOptionsRequest,
+  McpServerKey,
+  McpServerOptionSnapshot,
   MessageId,
   MessageFeedback,
   ModelKey,
@@ -21,6 +24,7 @@ import type {
   RunId,
   SessionMaterializationManifest,
   SessionId,
+  SessionCommand,
   ToolCallId,
   ToolDetailSnapshot,
   SystemContextSnapshot,
@@ -224,6 +228,7 @@ export class RootStore {
       openSessionWorkspaceDirectory: action,
       copyWorkspacePath: action,
       submitInput: action,
+      submitSessionCommand: action,
       exportSession: action,
       setSessionModel: action,
       setSessionVariant: action,
@@ -684,6 +689,7 @@ export class RootStore {
     mode: SubmitInputMode = "normal",
     skill_name: string | null = null,
     quotes: readonly QuotedTextSnapshot[] = [],
+    mcp_server_key: McpServerKey | null = null,
   ): Promise<boolean> {
     this.transient_focus.clear();
     return this.#run_interaction.submitInput(
@@ -694,11 +700,32 @@ export class RootStore {
       mode,
       skill_name,
       quotes,
+      mcp_server_key,
     );
   }
 
   async exportSession(session_id: SessionId, title: string): Promise<boolean> {
     return this.#session_management.exportSession(session_id, title);
+  }
+
+  async listMcpServerOptions(request: ListMcpServerOptionsRequest): Promise<readonly McpServerOptionSnapshot[]> {
+    const client = this.#runtime.client;
+    if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
+    const result = await client.command({ type: "list_mcp_server_options", payload: request });
+    if (client !== this.#runtime.client || this.connection.state !== "connected") throw new Error("Runtime 连接已变化，请重试");
+    return result.payload.servers;
+  }
+
+  async submitSessionCommand(session_id: SessionId, command: SessionCommand): Promise<boolean> {
+    if (!this.projection.application?.capabilities.session_commands) {
+      this.interaction_error = "当前 Runtime 不支持会话控制指令";
+      return false;
+    }
+    if (this.projection.session_views.get(session_id)?.session.role === "controller") {
+      this.interaction_error = "请在普通会话中加入刷新队列";
+      return false;
+    }
+    return this.#run_interaction.submitSessionCommand(session_id, command);
   }
 
   async setSessionModel(session_id: SessionId, model_key: ModelKey): Promise<boolean> {
@@ -981,6 +1008,7 @@ export class RootStore {
     this.transient_focus.clear();
     this.#runtime.dispose();
     this.device_gateway.dispose();
+    this.settings.mcp.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
     for (const draft of this.new_session_drafts.clear()) {
@@ -1048,6 +1076,7 @@ function materializationManifest(draft: NewSessionDraft): SessionMaterialization
     })),
     quotes: [...draft.quotes],
     ...(draft.selected_skill_name ? { skill_name: draft.selected_skill_name } : {}),
+    ...(draft.selected_mcp ? { mcp_server_key: draft.selected_mcp.server_key } : {}),
   };
 }
 

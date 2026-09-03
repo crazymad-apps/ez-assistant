@@ -7,6 +7,7 @@ use thiserror::Error;
 use ts_rs::TS;
 
 const MAX_MODEL_KEY_BYTES: usize = 64;
+const MAX_MCP_SERVER_KEY_BYTES: usize = 64;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
 /// 应用层标识为空或只包含空白字符。
@@ -305,6 +306,97 @@ impl<'de> Deserialize<'de> for ModelKey {
     }
 }
 
+/// MCP Server 稳定业务 key 的校验错误。
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum McpServerKeyError {
+    #[error("mcp_server_key must not be empty")]
+    Empty,
+    #[error("mcp_server_key must not exceed 64 ASCII characters")]
+    TooLong,
+    #[error("mcp_server_key must start with a lowercase ASCII letter")]
+    InvalidStart,
+    #[error(
+        "mcp_server_key may contain only lowercase ASCII letters, digits, dots, hyphens, and underscores"
+    )]
+    InvalidCharacter,
+}
+
+/// MCP 配置、选择、权限和刷新共同使用的稳定 Server key。
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpServerKey(String);
+
+impl McpServerKey {
+    /// 按 `[a-z][a-z0-9._-]{0,63}` 校验并构造 key。
+    pub fn new(value: impl Into<String>) -> Result<Self, McpServerKeyError> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let Some(first) = bytes.first() else {
+            return Err(McpServerKeyError::Empty);
+        };
+        if bytes.len() > MAX_MCP_SERVER_KEY_BYTES {
+            return Err(McpServerKeyError::TooLong);
+        }
+        if !first.is_ascii_lowercase() {
+            return Err(McpServerKeyError::InvalidStart);
+        }
+        if !bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        }) {
+            return Err(McpServerKeyError::InvalidCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for McpServerKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for McpServerKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for McpServerKey {
+    type Err = McpServerKeyError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for McpServerKey {
+    type Error = McpServerKeyError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<McpServerKey> for String {
+    fn from(value: McpServerKey) -> Self {
+        value.0
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +556,34 @@ mod tests {
             key
         );
         assert!(serde_json::from_str::<ModelKey>("\"invalid key\"").is_err());
+    }
+
+    #[test]
+    fn mcp_server_key_enforces_lowercase_stable_grammar() {
+        for valid in ["a", "github", "local.files", "server-1", "server_1"] {
+            let key = McpServerKey::new(valid).expect("valid MCP server key");
+            assert_eq!(key.as_str(), valid);
+            assert_eq!(
+                serde_json::from_str::<McpServerKey>(
+                    &serde_json::to_string(&key).expect("serialize")
+                )
+                .expect("deserialize"),
+                key
+            );
+        }
+
+        assert_eq!(McpServerKey::new("").unwrap_err(), McpServerKeyError::Empty);
+        assert_eq!(
+            McpServerKey::new("GitHub").unwrap_err(),
+            McpServerKeyError::InvalidStart
+        );
+        assert_eq!(
+            McpServerKey::new("git/hub").unwrap_err(),
+            McpServerKeyError::InvalidCharacter
+        );
+        assert_eq!(
+            McpServerKey::new("a".repeat(65)).unwrap_err(),
+            McpServerKeyError::TooLong
+        );
     }
 }

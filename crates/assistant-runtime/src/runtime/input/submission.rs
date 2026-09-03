@@ -17,7 +17,7 @@ use super::super::{
 use crate::{
     InputChannelSource, InputOrigin, NewStoredInput, RuntimeError, RuntimeResult,
     SkillActivationOwner, SkillActivationResolveError, SkillActivationTrigger, SkillName,
-    StoredSkillActivation, SubmitSessionInputRequest, id,
+    StoredMcpSelection, StoredSkillActivation, SubmitSessionInputRequest, id,
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
@@ -52,6 +52,7 @@ impl AssistantRuntime {
                 || !input.attachment_ids.is_empty()
                 || !input.quotes.is_empty()
                 || input.skill_name.is_some()
+                || input.mcp_server_key.is_some()
             {
                 return Err(RuntimeError::InvalidRequest {
                     reason: "device input contains unsupported product intent",
@@ -125,6 +126,31 @@ impl AssistantRuntime {
             .as_ref()
             .map(|name| SkillName::parse(name.clone()).map_err(|_| RuntimeError::SkillNameInvalid))
             .transpose()?;
+        let selected_mcp = request
+            .mcp_server_key
+            .as_ref()
+            .map(|server_key| {
+                let server = self
+                    .mcp_service
+                    .registry
+                    .catalog_server(server_key)?
+                    .ok_or(RuntimeError::McpServerUnavailable)?;
+                let visible = server.tools.iter().any(|tool| {
+                    self.permission_coordinator
+                        .mcp_tool_is_explicitly_denied(
+                            &session.permission_scopes(),
+                            request.variant,
+                            server_key,
+                            &tool.name,
+                        )
+                        .is_ok_and(|denied| !denied)
+                });
+                if !visible {
+                    return Err(RuntimeError::McpServerUnavailable);
+                }
+                Ok((server_key.clone(), server.display_name))
+            })
+            .transpose()?;
         let goal_submission = self.goal_submission(session.as_ref(), request.mode)?;
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
@@ -153,7 +179,29 @@ impl AssistantRuntime {
             )
         };
         let accepted_at_ms = super::super::now_ms()?;
-        let prepared_goal = goal_submission.prepare(&mut message, accepted_at_ms)?;
+        let mut prepared_goal = goal_submission.prepare(&mut message, accepted_at_ms)?;
+        if let Some(goal) = prepared_goal.as_mut()
+            && let Some((server_key, _)) = selected_mcp.as_ref()
+        {
+            goal.control.mcp_server_key = Some(server_key.clone());
+        }
+        let mcp_selection = selected_mcp
+            .map(|(server_key, display_name)| {
+                Ok(StoredMcpSelection {
+                    selection_id: id::generate("mcp-selection").map_err(|_| {
+                        RuntimeError::InternalStateUnavailable {
+                            component: "MCP selection id random source",
+                        }
+                    })?,
+                    session_id: session.id().clone(),
+                    input_id: Some(input_id.clone()),
+                    message_id: message.id.clone(),
+                    server_key,
+                    display_name,
+                    created_at_ms: accepted_at_ms,
+                })
+            })
+            .transpose()?;
         let skill_activation = selected_skill
             .as_ref()
             .map(|name| {
@@ -228,6 +276,7 @@ impl AssistantRuntime {
                 cross_session: None,
                 channel_source: Some(channel_source),
                 skill_activation: skill_activation.clone(),
+                mcp_selection: mcp_selection.clone(),
                 approval_mode,
                 message,
                 new_goal,
@@ -281,7 +330,7 @@ impl AssistantRuntime {
                 }
                 if !removed_deliveries.is_empty() {
                     state
-                        .session_inputs
+                        .queue_item_ids
                         .retain(|input_id| !removed_deliveries.contains(input_id));
                     state
                         .inputs
@@ -298,7 +347,7 @@ impl AssistantRuntime {
                     state.goal = Some(control);
                 }
                 state.queue_paused_by_user = false;
-                let projection = project_accepted_input(&mut state, accepted);
+                let projection = project_accepted_input(&mut state, accepted, mcp_selection);
                 if !changes_session_queue && !removed_deliveries.is_empty() {
                     state.queue_revision = state.queue_revision.saturating_add(1);
                 }

@@ -68,6 +68,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -85,6 +86,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -150,6 +152,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -171,6 +174,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -270,6 +274,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -291,6 +296,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -367,6 +373,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -475,6 +482,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -514,6 +522,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -572,6 +581,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -588,6 +598,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -616,6 +627,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,
@@ -640,6 +652,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await,

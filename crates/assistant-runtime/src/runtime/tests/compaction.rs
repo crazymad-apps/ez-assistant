@@ -57,6 +57,7 @@ async fn submit_completed_turn(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -314,6 +315,7 @@ async fn manual_compaction_rejects_a_session_with_an_active_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -500,6 +502,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

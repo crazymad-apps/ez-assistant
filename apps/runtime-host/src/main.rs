@@ -13,6 +13,8 @@ mod endpoint;
 mod http;
 mod image;
 #[cfg(unix)]
+mod mcp;
+#[cfg(unix)]
 mod platform;
 #[cfg(unix)]
 mod recall_reference_key;
@@ -44,6 +46,7 @@ use crate::{
     config_source::{LocalConfigSource, prepare_runtime_home},
     device::{DeviceChannelOutputDispatcher, DeviceGatewayService},
     endpoint::RuntimeInstanceGuard,
+    mcp::{HostMcpConnectionFactory, HostMcpImageMaterializer, LocalMcpConfigSource},
     resources::HostResources,
     server::RuntimeServer,
     speech::SpeechService,
@@ -102,6 +105,10 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 );
                 let device_output_dispatcher = Arc::new(DeviceChannelOutputDispatcher::new());
                 let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
+                let mcp_config_source =
+                    Arc::new(LocalMcpConfigSource::new(config.runtime_home.clone()));
+                let mcp_connection_factory =
+                    Arc::new(HostMcpConnectionFactory::new(config.runtime_home.clone()));
                 let runtime = match AssistantRuntime::open_with_recall_key(
                     RuntimeConfig::new(config.event_capacity),
                     config_source.clone(),
@@ -118,7 +125,13 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 .await
                 {
                     Ok(runtime) => Arc::new(
-                        runtime.with_channel_output_dispatcher(device_output_dispatcher.clone()),
+                        runtime
+                            .with_mcp_services(
+                                mcp_config_source,
+                                mcp_connection_factory.clone(),
+                                Arc::new(HostMcpImageMaterializer),
+                            )
+                            .with_channel_output_dispatcher(device_output_dispatcher.clone()),
                     ),
                     Err(error) => {
                         store.shutdown().await?;
@@ -127,12 +140,23 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 };
                 if let Err(error) = runtime.reload_config(ReloadConfigRequest::default()).await {
                     let _ = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
+                    if mcp_connection_factory.shutdown().await.is_err() {
+                        eprintln!("runtime-host: MCP cleanup failed during startup rollback");
+                    }
                     return Err(Box::new(error));
+                }
+                // MCP 是可降级的外部能力。bootstrap 必须在监听端点发布前完成，但配置或
+                // Server 故障不能阻止其余 Runtime 能力启动。
+                if runtime.bootstrap_mcp().await.is_err() {
+                    eprintln!("runtime-host: MCP bootstrap is unavailable");
                 }
                 let endpoint = match instance.bind_and_publish().await {
                     Ok(endpoint) => endpoint,
                     Err(error) => {
                         let _ = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
+                        if mcp_connection_factory.shutdown().await.is_err() {
+                            eprintln!("runtime-host: MCP cleanup failed during endpoint rollback");
+                        }
                         return Err(Box::new(error));
                     }
                 };
@@ -182,6 +206,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 // Host 入口已经停止或被 deadline 强制回收；无论 Supervisor 是否报错，都必须
                 // 让 Runtime 结算活动 Run 并 flush/join Store，不能因主入口故障遗留 worker。
                 let runtime_result = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
+                mcp_connection_factory.shutdown().await?;
                 match (supervisor_result, runtime_result) {
                     (Ok(()), Ok(_)) => Ok(()),
                     (Err(supervisor), Ok(_)) => Err(Box::new(supervisor) as Box<dyn Error>),

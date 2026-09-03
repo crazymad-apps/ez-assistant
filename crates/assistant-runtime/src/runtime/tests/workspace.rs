@@ -404,6 +404,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await
@@ -460,6 +461,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

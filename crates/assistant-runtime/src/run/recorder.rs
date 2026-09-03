@@ -354,6 +354,7 @@ mod tests {
                 cross_session: None,
                 channel_source: Some(crate::InputChannelSource::desktop_text()),
                 skill_activation: None,
+                mcp_selection: None,
                 approval_mode: ApprovalMode::Ask,
                 message: user_message("parent-user"),
                 new_goal: None,

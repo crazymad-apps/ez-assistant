@@ -37,6 +37,178 @@ vi.mock("../../src/native-bridge/nativeResource", () => ({
 }));
 
 describe("ComposerDock", () => {
+  it("shows queued and Goal MCP identities from reliable snapshots", () => {
+    renderComposer({ goal: { ...goalSnapshot("paused"), mcp_server_key: "pencil" }, queue: {
+      revision: 2, state: "automatic", items: [{ type: "message", payload: {
+        input_id: "mcp-queue", text_preview: "正常消息", submitted_at_ms: 1, position: 1, is_prioritized: false,
+        source: { type: "user" }, held_by_goal: true,
+        mcp_selection: { server_key: "pencil", display_name: "Pencil" },
+      } }],
+    } });
+    expect(screen.getByText("MCP · Pencil")).toHaveAttribute("title", "pencil");
+    fireEvent.click(screen.getByRole("button", { name: /目标等待输入/ }));
+    expect(within(screen.getByRole("region", { name: "目标详情" })).getByText("pencil")).toBeVisible();
+  });
+
+  it("selects an MCP by stable key, supports search/keyboard, and retains it after rejected submit", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer();
+    const list = vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([
+      { server_key: "github-a", display_name: "GitHub", description: "仓库一", visible_tool_count: 2 },
+      { server_key: "github-b", display_name: "GitHub", description: "仓库二", visible_tool_count: 3 },
+    ]);
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const command = vi.spyOn(store, "submitSessionCommand");
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    await user.type(input, "/mcp");
+    await user.keyboard("{Enter}");
+    const search = await screen.findByRole("combobox", { name: "搜索MCP 服务" });
+    expect(search).toHaveFocus();
+    expect(list).toHaveBeenCalledWith({ context: { type: "session", payload: { session_id: "session-1" } }, variant: "build" });
+    expect(await screen.findByRole("option", { name: /GitHub \(github-a\)/ })).toBeVisible();
+    expect(screen.getByRole("option", { name: /GitHub \(github-b\)/ })).toBeVisible();
+    await user.type(search, "github-b");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(screen.getByText("MCP · GitHub")).toHaveAttribute("title", "github-b");
+    expect(submit).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
+    await user.type(input, "创建 issue");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", "创建 issue", "build", [], "normal", null, [], "github-b"));
+    expect(screen.getByRole("button", { name: "移除 MCP GitHub" })).toBeVisible();
+    expect(input).toHaveValue("创建 issue");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByText("MCP · GitHub")).not.toBeInTheDocument());
+    expect(input).toHaveValue("");
+  });
+
+  it("clears MCP on variant/session changes and ignores a picker response after leaving its owner", async () => {
+    const store = renderComposer();
+    const server = { server_key: "pencil", display_name: "Pencil", description: "画图", visible_tool_count: 1 };
+    const list = vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([server]);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/mcp" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: /Pencil/ }));
+    act(() => store.projection.applySessionSnapshot(observed(sessionView({ session: { current_variant: "plan" } }))));
+    expect(screen.queryByRole("button", { name: "移除 MCP Pencil" })).not.toBeInTheDocument();
+    let resolve!: (servers: typeof server[]) => void;
+    list.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    fireEvent.change(input, { target: { value: "/mcp" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(list).toHaveBeenLastCalledWith({ context: { type: "session", payload: { session_id: "session-1" } }, variant: "plan" });
+    act(() => store.navigation.selectSession("missing-session"));
+    await act(async () => resolve([server]));
+    expect(screen.queryByRole("option", { name: /Pencil/ })).not.toBeInTheDocument();
+  });
+
+  it("retries failed MCP discovery and Escape restores composer focus", async () => {
+    const store = renderComposer();
+    vi.spyOn(store, "listMcpServerOptions").mockRejectedValueOnce(new Error("服务暂不可用")).mockResolvedValueOnce([]);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/mcp" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("服务暂不可用");
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByText(/没有匹配的MCP 服务。/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "前往 MCP 设置" })).toBeVisible();
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "搜索MCP 服务" }), { key: "Escape" });
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("queries new-session MCP options and clears only MCP on workspace change", async () => {
+    const store = renderComposer();
+    const list = vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([{ server_key: "pencil", display_name: "Pencil", description: "画图", visible_tool_count: 1 }]);
+    act(() => store.openNewSessionDraft("workspace-1"));
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/mcp" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Pencil/ }));
+    expect(list).toHaveBeenCalledWith({ context: { type: "new_session", payload: { workspace_id: "workspace-1" } }, variant: "build" });
+    act(() => {
+      store.new_session_drafts.updateGoalArmed("workspace:workspace-1", true);
+      store.new_session_drafts.updateSelectedSkill("workspace:workspace-1", "review");
+      store.openNewSessionDraft(null);
+    });
+    expect(store.new_session_drafts.get("workspace:workspace-1")).toMatchObject({ selected_mcp: null, selected_skill_name: "review", goal_armed: true });
+    expect(screen.queryByText("MCP · Pencil")).not.toBeInTheDocument();
+  });
+
+  it("does not discard the idempotent first-send attempt when navigating after an unknown result", () => {
+    const store = renderComposer();
+    act(() => {
+      store.openNewSessionDraft(null);
+      store.new_session_drafts.updateSelectedMcp("unbound", { server_key: "pencil", display_name: "Pencil" });
+      store.new_session_drafts.beginMaterialization("unbound", {
+        idempotency_key: "unknown-send", message: "设计页面", variant: "build", approval_mode: "ask",
+        mode: "normal", mcp_server_key: "pencil",
+      });
+    });
+    act(() => store.openNewSessionDraft("workspace-1"));
+    expect(store.new_session_drafts.get("unbound")).toMatchObject({
+      selected_mcp: { server_key: "pencil" }, materialization_attempt: { idempotency_key: "unknown-send", mcp_server_key: "pencil" },
+    });
+  });
+
+  it("keeps attachments above Goal/Skill/MCP tags and blocks tagged refresh commands", async () => {
+    const store = renderComposer();
+    vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([{ server_key: "pencil", display_name: "Pencil", description: "画图", visible_tool_count: 1 }]);
+    const command = vi.spyOn(store, "submitSessionCommand");
+    vi.mocked(chooseAttachmentFiles).mockResolvedValue([{ selection_id: "order", original_name: "design.png", size_bytes: 10 }]);
+    fireEvent.click(screen.getByRole("button", { name: "添加附件" }));
+    const attachment = await screen.findByRole("button", { name: "查看附件 design.png" });
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/mcp" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: /Pencil/ }));
+    const tag = screen.getByText("MCP · Pencil");
+    expect(attachment.compareDocumentPosition(tag) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tag.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.change(input, { target: { value: "/mcp refresh" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert")).toHaveTextContent("刷新指令不能同时携带");
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("shows MCP identity, full arguments and untrusted annotations for child approvals", () => {
+    const arguments_json = JSON.stringify({ script: "x".repeat(8000) });
+    renderComposer({ approvals: [{ ...approvalSnapshot(), child_task_id: "child-1", subject: {
+      type: "mcp", identity: { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" },
+      arguments_json, untrusted_annotations_json: '{"readOnlyHint":true}',
+    } }] });
+    expect(screen.getByText(/Blender \(blender\)/)).toBeVisible();
+    expect(screen.getByText("子任务 · 由子智能体请求")).toBeVisible();
+    expect(screen.getByText(arguments_json)).toHaveTextContent(arguments_json);
+    expect(screen.getByText(/不能作为安全或只读保证/)).toBeVisible();
+    fireEvent.click(screen.getByText("服务自报的工具注解（未经验证）"));
+    expect(screen.getByText('{"readOnlyHint":true}')).toBeVisible();
+  });
+
+  it("submits MCP refresh as a command and keeps failed commands in the draft", async () => {
+    const store = renderComposer();
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
+    const command = vi.spyOn(store, "submitSessionCommand").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "/mcp refresh github" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(command).toHaveBeenCalledWith("session-1", { type: "mcp_refresh", payload: { server: "github" } }));
+    expect(input).toHaveValue("/mcp refresh github");
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it("keeps an executing refresh visible without run actions", () => {
+    renderComposer({ queue: { revision: 2, state: "automatic", items: [{ type: "command", payload: {
+      input_id: "refresh", command: { type: "mcp_refresh", payload: {} }, state: "executing",
+      submitted_at_ms: 1, position: 1, is_prioritized: false,
+    } }] } });
+    expect(screen.getByText("MCP 刷新：全部")).toBeVisible();
+    expect(screen.getByRole("status", { name: "正在刷新 MCP" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "移除" })).not.toBeInTheDocument();
+  });
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -241,6 +413,7 @@ describe("ComposerDock", () => {
       "build",
       [],
       "normal",
+      null, [], null,
     ));
     await waitFor(() => expect(input).toHaveValue(""));
 
@@ -293,8 +466,8 @@ describe("ComposerDock", () => {
       revision: 4,
       state: "automatic",
       items: [
-        { input_id: "input-1", text_preview: "先检查构建", submitted_at_ms: 1, position: 1, is_prioritized: false, held_by_goal: false, source: { type: "user" } },
-        { input_id: "input-2", text_preview: "再运行测试", submitted_at_ms: 2, position: 2, is_prioritized: false, held_by_goal: false, source: { type: "user" } },
+        { type: "message", payload: { input_id: "input-1", text_preview: "先检查构建", submitted_at_ms: 1, position: 1, is_prioritized: false, held_by_goal: false, source: { type: "user" } } },
+        { type: "message", payload: { input_id: "input-2", text_preview: "再运行测试", submitted_at_ms: 2, position: 2, is_prioritized: false, held_by_goal: false, source: { type: "user" } } },
       ],
     };
     const store = renderComposer({ queue });
@@ -356,7 +529,7 @@ describe("ComposerDock", () => {
     await user.type(input, "准备当前版本");
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(submit).toHaveBeenLastCalledWith(
-      "session-1", "准备当前版本", "build", [], "normal", "release",
+      "session-1", "准备当前版本", "build", [], "normal", "release", [], null,
     ));
     expect(screen.getByRole("button", { name: "移除技能 release" })).toBeVisible();
     expect(input).toHaveValue("准备当前版本");
@@ -372,7 +545,7 @@ describe("ComposerDock", () => {
     const queue: QueueSnapshot = {
       revision: 2,
       state: "automatic",
-      items: [{
+      items: [{ type: "message", payload: {
         input_id: "queued-during-approval",
         text_preview: "审批后执行下一项",
         submitted_at_ms: 2,
@@ -380,7 +553,7 @@ describe("ComposerDock", () => {
         is_prioritized: false,
         held_by_goal: false,
         source: { type: "user" },
-      }],
+      } }],
     };
     const store = renderComposer({ approvals: [approval], queue });
     const decide = vi.spyOn(store, "decideApproval").mockResolvedValue();
@@ -471,6 +644,7 @@ describe("ComposerDock", () => {
       "build",
       ["attachment-1"],
       "normal",
+      null, [], null,
     ));
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
   });
@@ -615,6 +789,7 @@ describe("ComposerDock", () => {
       "build",
       ["attachment-image-only"],
       "normal",
+      null, [], null,
     ));
   });
 
@@ -751,6 +926,7 @@ describe("ComposerDock", () => {
       "build",
       [],
       "start_goal",
+      null, [], null,
     ));
     expect(input).toHaveValue("完成本版本验收");
     await user.click(screen.getByRole("button", { name: "取消目标标记" }));
@@ -846,7 +1022,7 @@ describe("ComposerDock", () => {
     const queue: QueueSnapshot = {
       revision: 7,
       state: "resume_required",
-      items: [{
+      items: [{ type: "message", payload: {
         input_id: "input-held",
         text_preview: "补充检查边界情况",
         submitted_at_ms: 1,
@@ -854,7 +1030,7 @@ describe("ComposerDock", () => {
         is_prioritized: false,
         held_by_goal: true,
         source: { type: "user" },
-      }],
+      } }],
     };
     const store = renderComposer({ queue, goal: goalSnapshot("paused") });
     const resume_goal = vi.spyOn(store, "resumeGoal").mockResolvedValue(true);
@@ -1031,7 +1207,7 @@ function applicationSnapshot(): ApplicationSnapshot {
     archived_sessions: [],
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
-    capabilities: { conversation_paging: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
+    capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
   };
 }
 

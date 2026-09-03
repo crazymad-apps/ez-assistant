@@ -81,6 +81,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -114,6 +115,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -324,6 +326,7 @@ async fn completing_every_todo_clears_the_current_work_plan_automatically() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -474,6 +477,7 @@ async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

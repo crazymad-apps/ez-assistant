@@ -1,3 +1,5 @@
+@use "../../../styles/fields";
+
 .backdrop {
   position: fixed;
   inset: 0;
@@ -40,8 +42,8 @@
 .dialog h3,
 .confirm_dialog h3 { margin: 0; font-size: 16px; }
 .dialog button,
-.confirm_dialog button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 0 11px; border: 1px solid var(--ez-border-strong); border-radius: 8px; background: var(--ez-surface); color: var(--ez-text); }
-.dialog header button { width: 32px; padding: 0; border-color: transparent; }
+.confirm_dialog button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--ez-control-height); padding: 0 11px; border: 1px solid var(--ez-border-strong); border-radius: 8px; background: var(--ez-surface); color: var(--ez-text); }
+.dialog header button { width: var(--ez-control-height); padding: 0; border-color: transparent; }
 .dialog button:disabled,
 .confirm_dialog button:disabled { opacity: .48; }
 .dialog .primary { border-color: var(--ez-primary); background: var(--ez-primary); color: white; }
@@ -51,8 +53,8 @@
 .label_field { display: grid; gap: 7px; }
 .label_field > span,
 .directory_heading strong { font-size: 13px; font-weight: 650; }
-.label_field input { height: 36px; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: 8px; background: var(--ez-surface); color: var(--ez-text); outline: none; }
-.label_field input:focus { border-color: var(--ez-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ez-primary) 18%, transparent); }
+.label_field input { height: var(--ez-control-height); padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: 8px; background: var(--ez-surface); color: var(--ez-text); outline: none; }
+.label_field input:focus { @include fields.focus-border; }
 .label_field small,
 .directory_heading small,
 .directory_text small { color: var(--ez-text-muted); font-size: 11px; }
@@ -68,7 +70,7 @@
 .directory_text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .directories li > em { padding: 2px 7px; border-radius: 999px; background: var(--ez-primary-soft); color: var(--ez-primary); font-size: 11px; font-style: normal; }
 .directory_actions { display: flex; align-items: center; gap: 4px; }
-.directory_actions button { min-height: 27px; height: 27px; padding: 0 7px; font-size: 11px; }
-.directory_actions button:has(svg) { width: 27px; padding: 0; }
+.directory_actions button { --ez-control-default-height: var(--ez-control-height-small); min-height: var(--ez-control-height); height: var(--ez-control-height); padding: 0 7px; font-size: 11px; }
+.directory_actions button:has(svg) { width: var(--ez-control-height); padding: 0; }
 .error { margin: 12px 0 0; color: var(--ez-danger); font-size: 12px; }
 .confirm_dialog > p { margin: 0; padding: 20px; color: var(--ez-text-secondary); }

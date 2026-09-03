@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
@@ -10,6 +10,78 @@ afterEach(() => {
 });
 
 describe("ContextPanel", () => {
+  it("shows the three session skills even before any activation", () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    const names = ["skill-creator", "weather-query", "zhihu"];
+    store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: {
+        ...view,
+        skill_catalog: {
+          ...view.skill_catalog,
+          skills: names.map((name) => ({ ...view.skill_catalog.skills[0]!, name })),
+        },
+        active_skills: [],
+      },
+    });
+    renderPanel(store);
+
+    for (const name of names) expect(screen.getByText(name)).toBeVisible();
+    expect(screen.getAllByText("可用")).toHaveLength(3);
+    expect(screen.queryByText("当前还没有已激活技能")).not.toBeInTheDocument();
+    expect(screen.queryByText("用户激活")).not.toBeInTheDocument();
+    expect(screen.queryByText("智能体激活")).not.toBeInTheDocument();
+  });
+
+  it("updates activation labels without duplicating available skills or losing inherited activations", () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    renderPanel(store);
+    expect(screen.getByText("用户激活")).toBeVisible();
+
+    act(() => store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: {
+        ...view,
+        skill_catalog: {
+          ...view.skill_catalog,
+          skills: [
+            ...view.skill_catalog.skills,
+            { ...view.skill_catalog.skills[0]!, name: "weather-query" },
+          ],
+        },
+        active_skills: [
+          { ...view.active_skills[0]!, trigger: "model" },
+          { ...view.active_skills[0]!, tag: { name: "inherited-skill" }, message_id: "inherited-message" },
+        ],
+      },
+    }));
+
+    expect(screen.getAllByText("review-skill")).toHaveLength(1);
+    expect(screen.getByText("智能体激活")).toBeVisible();
+    expect(screen.getByText("inherited-skill")).toBeVisible();
+    expect(screen.getByText("用户激活")).toBeVisible();
+    expect(screen.getByText("weather-query")).toBeVisible();
+    expect(screen.getAllByText("可用")).toHaveLength(1);
+  });
+
+  it.each([
+    ["legacy_unavailable", "此历史会话没有可展示的技能信息"],
+    ["unavailable", "当前会话的技能信息不可用"],
+    ["empty", "当前会话没有可用技能"],
+  ] as const)("preserves the %s catalog empty state", (status, message) => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({
+      observed_sequence: 2,
+      value: { ...view, skill_catalog: { status, skills: [], diagnostics: [] }, active_skills: [] },
+    });
+    renderPanel(store);
+    expect(screen.getByText(message)).toBeVisible();
+    expect(screen.queryByText("可用")).not.toBeInTheDocument();
+  });
+
   it("stacks wide context sections in two independent vertical columns", () => {
     vi.stubGlobal("ResizeObserver", class ResizeObserverMock {
       readonly #callback: ResizeObserverCallback;

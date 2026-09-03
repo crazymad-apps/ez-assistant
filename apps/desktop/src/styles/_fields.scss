@@ -1,0 +1,9 @@
+// 普通输入框用于 :focus，复合字段外框用于 :focus-within；不改变边框宽度与控件尺寸。
+// 保留错误色，避免获得焦点后掩盖校验失败状态；不用于普通按钮、checkbox/radio 或浮层容器。
+@mixin focus-border {
+  border-color: var(--ez-primary);
+  outline: 0;
+  box-shadow: none;
+
+  &[aria-invalid="true"] { border-color: var(--ez-danger); }
+}

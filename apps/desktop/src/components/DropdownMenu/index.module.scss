@@ -31,9 +31,10 @@
 .content[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
 
 .item {
+  height: auto;
   display: flex;
   width: 100%;
-  min-height: 34px;
+  min-height: var(--ez-control-height);
   align-items: center;
   gap: 9px;
   padding: 6px 8px;

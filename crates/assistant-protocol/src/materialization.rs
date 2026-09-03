@@ -44,6 +44,9 @@ pub struct SessionMaterializationManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_server_key: Option<crate::McpServerKey>,
 }
 
 /// 首次发送可靠提交后返回给 Desktop 的完整定位结果。
@@ -74,5 +77,6 @@ mod tests {
         assert!(manifest.attachments.is_empty());
         assert!(manifest.quotes.is_empty());
         assert!(manifest.workspace_id.is_none());
+        assert!(manifest.mcp_server_key.is_none());
     }
 }

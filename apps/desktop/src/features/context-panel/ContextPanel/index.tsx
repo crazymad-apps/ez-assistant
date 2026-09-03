@@ -24,6 +24,7 @@ import {
   formatTokens,
   formatVariant,
   runStatusLabel,
+  sessionSkillRows,
   sessionStatusLabel,
 } from "./contextDisplay";
 import styles from "./index.module.scss";
@@ -38,6 +39,7 @@ export const ContextPanel = observer(function ContextPanel() {
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
   const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
+  const skills = sessionSkillRows(session_view);
   const session_workspace = session_view?.workspace;
   const draft_key = store.navigation.selected_draft_key;
   const new_session_draft = store.new_session_drafts.get(draft_key);
@@ -265,12 +267,12 @@ export const ContextPanel = observer(function ContextPanel() {
         >
           {session_view ? (
             <div className={styles.skill_context}>
-              {(session_view.active_skills?.length ?? 0) > 0 ? (
-                <div className={styles.active_skills}>
-                  {session_view.active_skills?.map((skill) => (
-                    <div key={`${skill.message_id}-${skill.tag.name}`}>
-                      <strong title={skill.tag.name}>{skill.tag.name}</strong>
-                      <span>{skill.trigger === "user" ? "用户激活" : "智能体激活"}</span>
+              {skills.length > 0 ? (
+                <div className={styles.skill_list}>
+                  {skills.map((skill) => (
+                    <div key={skill.name}>
+                      <strong title={skill.name}>{skill.name}</strong>
+                      <span>{skill.status_label}</span>
                     </div>
                   ))}
                 </div>
@@ -383,6 +385,5 @@ function emptySkillMessage(view: SessionViewSnapshot): string {
     return "此历史会话没有可展示的技能信息";
   }
   if (view.skill_catalog.status === "unavailable") return "当前会话的技能信息不可用";
-  if (view.skill_catalog.status === "empty") return "当前会话没有可用技能";
-  return "当前还没有已激活技能";
+  return "当前会话没有可用技能";
 }

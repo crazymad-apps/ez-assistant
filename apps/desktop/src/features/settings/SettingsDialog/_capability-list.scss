@@ -1,0 +1,38 @@
+// 设置中的 MCP/技能摘要共用排版；状态映射与启停行为仍归各自页面。
+@mixin row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--ez-border);
+  padding: 8px 0;
+
+  @media (max-width: 720px) { gap: 4px; }
+}
+
+@mixin body {
+  // 摘要包含多行内容，不套用单行按钮的固定高度。
+  height: auto;
+  min-height: var(--ez-control-height);
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font-size: var(--ez-font-base);
+  text-align: left;
+
+  &:hover:not(:disabled) { background: var(--ez-surface-subtle); }
+  &:focus-visible { outline: 2px solid var(--ez-primary-border); outline-offset: 2px; }
+  &:disabled { opacity: .5; }
+  > span { display: grid; flex: 1; min-width: 0; gap: 4px; }
+  :is(strong, em) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  em { font-style: normal; color: var(--ez-text-secondary); font-size: var(--ez-font-small); }
+  small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  i { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--ez-text-muted); }
+  > svg { flex-shrink: 0; }
+}

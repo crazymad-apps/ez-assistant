@@ -23,6 +23,15 @@ pub struct FakeProvider {
 
 impl FakeProvider {
     pub fn start() -> Self {
+        Self::with_router(
+            Router::new()
+                .route("/v1/chat/completions", post(provider_response))
+                .route("/v1/responses", post(responses_provider_response)),
+        )
+    }
+
+    /// 复用同一有界生命周期承载测试私有 wire fixture，不增加产品模型或 MCP 路由。
+    pub fn with_router(app: Router) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
         listener
             .set_nonblocking(true)
@@ -37,9 +46,6 @@ impl FakeProvider {
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener)
                     .expect("fake Provider Tokio listener");
-                let app = Router::new()
-                    .route("/v1/chat/completions", post(provider_response))
-                    .route("/v1/responses", post(responses_provider_response));
                 tokio::select! {
                     result = axum::serve(listener, app) => result.expect("serve fake Provider"),
                     _ = shutdown_receiver => {}
@@ -1147,8 +1153,13 @@ pub struct HostProcess {
 
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
+        // Runtime Home 与用户 Home 是不同的扫描来源。只隔离数据库不足以隔离 Skill；
+        // 仅为测试子进程指定私有 Home，不改当前进程环境或真实用户目录，重启沿用同一路径。
+        let user_directory = runtime_home.join("fixture-user-home");
+        fs::create_dir_all(&user_directory).expect("create isolated test user directory");
         let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
         command
+            .env("HOME", &user_directory)
             .arg("serve")
             .arg("--runtime-home")
             .arg(runtime_home)

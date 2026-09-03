@@ -25,31 +25,33 @@ use super::{
     ConversationWindowRequest, CrossSessionInputBinding, GoalClear, GoalHeldInputResume,
     GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
     ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
-    NewStoredSession, NewStoredSessionMaterialization, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, QueuePriorityChange, ReasoningEffortChange,
-    RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,
-    SessionTitleGenerationCommitResult, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
-    StoredConversationWindow, StoredGoal, StoredGoalPauseReason, StoredGoalSettlementEffect,
-    StoredGoalState, StoredInput, StoredInputState, StoredMessageFeedback, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionLifecycle,
+    NewStoredSession, NewStoredSessionCommand, NewStoredSessionMaterialization,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
+    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionCommandCommit,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
+    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
+    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationState, StoredConversationWindow, StoredGoal, StoredGoalPauseReason,
+    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
+    StoredMessageFeedback, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionCommand,
+    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
     StoredSessionMaterialization, StoredSessionUsage, StoredTodoItemStatus, StoredWorkPlan,
     StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
     VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
     WorkspaceUpdate, validate_input_message, validate_input_message_with_channel_source,
 };
 use crate::{
-    DeviceLifecycle, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
-    MemoryContextSnapshot, NewPairedDevice, PairedDevice, PcOutputHosting, PcOutputHostingChange,
-    PersonaMutation, PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult,
-    SkillActivationOwner, SkillActivationTrigger, SkillName, SkillNameState, SkillNameStateChange,
-    StoredPinnedMemory, StoredSkillActivation,
+    AcceptedStoredSessionCommand, DeviceLifecycle, DeviceNameChange, DeviceRevocation,
+    DeviceRevocationResult, MemoryContextSnapshot, NewPairedDevice, PairedDevice, PcOutputHosting,
+    PcOutputHostingChange, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, SkillActivationOwner, SkillActivationTrigger, SkillName,
+    SkillNameState, SkillNameStateChange, StoredMcpSelection, StoredPinnedMemory,
+    StoredSkillActivation,
 };
 
 struct VolatilePendingExchange {
@@ -86,6 +88,8 @@ struct State {
     sessions: BTreeMap<SessionId, StoredSession>,
     conversations: BTreeMap<SessionId, ConversationSnapshot>,
     inputs: BTreeMap<InputId, StoredInput>,
+    session_commands: BTreeMap<InputId, StoredSessionCommand>,
+    mcp_input_selections: BTreeMap<String, StoredMcpSelection>,
     runs: BTreeMap<RunId, StoredRun>,
     child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
     child_conversations: BTreeMap<ChildTaskId, ConversationSnapshot>,
@@ -151,12 +155,20 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .as_ref()
                     .is_none_or(|input_id| !stale_goal_inputs.contains(input_id))
             });
+            state.mcp_input_selections.retain(|_, selection| {
+                selection
+                    .input_id
+                    .as_ref()
+                    .is_none_or(|input_id| !stale_goal_inputs.contains(input_id))
+            });
             Ok(RecoveredRuntime {
                 devices: state.devices.values().cloned().collect(),
                 workspaces: state.workspaces.values().cloned().collect(),
                 attachments: state.attachments.values().cloned().collect(),
                 sessions: state.sessions.values().cloned().collect(),
                 inputs: state.inputs.values().cloned().collect(),
+                session_commands: state.session_commands.values().cloned().collect(),
+                mcp_input_selections: state.mcp_input_selections.values().cloned().collect(),
                 runs: state.runs.values().cloned().collect(),
                 child_tasks: state.child_tasks.values().cloned().collect(),
                 work_plans: state.work_plans.values().cloned().collect(),
@@ -647,6 +659,16 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             let mut state = self.lock()?;
+            if input.idempotency_key.as_ref().is_some_and(|key| {
+                state.session_commands.values().any(|command| {
+                    command.session_id == input.session_id
+                        && command.idempotency_key.as_ref() == Some(key)
+                })
+            }) {
+                return Err(conflict(
+                    "message idempotency key belongs to a session command",
+                ));
+            }
             if let Some(key) = input.idempotency_key.as_ref()
                 && let Some(existing) = state.inputs.values().find(|candidate| {
                     candidate.session_id == input.session_id
@@ -688,6 +710,16 @@ impl RuntimeStore for VolatileRuntimeStore {
                 }
             }
             validate_volatile_input_activation(&state, &input)?;
+            if let Some(selection) = input.mcp_selection.as_ref()
+                && (input.origin != InputOrigin::User
+                    || selection.session_id != input.session_id
+                    || selection.input_id.as_ref() != Some(&input.input_id)
+                    || selection.message_id != input.message.id
+                    || selection.display_name.trim().is_empty()
+                    || selection.display_name.len() > 128)
+            {
+                return Err(conflict("MCP input selection is inconsistent"));
+            }
             if input.new_goal.is_some() && input.resumed_goal.is_some() {
                 return Err(conflict("input cannot start and resume a Goal together"));
             }
@@ -840,6 +872,12 @@ impl RuntimeStore for VolatileRuntimeStore {
                             .as_ref()
                             .is_some_and(|input_id| removed.contains(input_id))
                     });
+                    state.mcp_input_selections.retain(|_, selection| {
+                        !selection
+                            .input_id
+                            .as_ref()
+                            .is_some_and(|input_id| removed.contains(input_id))
+                    });
                     if let Some(session) = state.sessions.get_mut(&input.session_id) {
                         session.proxy = None;
                     }
@@ -922,9 +960,97 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .insert(activation.activation_id.clone(), activation);
                 debug_assert!(previous.is_none(), "activation was prevalidated");
             }
+            if let Some(selection) = input.mcp_selection {
+                state
+                    .mcp_input_selections
+                    .insert(selection.selection_id.clone(), selection);
+            }
             Ok(AcceptedInput {
                 input: stored,
                 run,
+                is_duplicate: false,
+            })
+        })
+    }
+
+    fn accept_session_command(
+        &self,
+        command: NewStoredSessionCommand,
+    ) -> StoreFuture<'_, AcceptedStoredSessionCommand> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if let Some(key) = command.idempotency_key.as_ref() {
+                if state.inputs.values().any(|input| {
+                    input.session_id == command.session_id
+                        && input.idempotency_key.as_ref() == Some(key)
+                }) {
+                    return Err(conflict(
+                        "session command idempotency key belongs to a message input",
+                    ));
+                }
+                if let Some(existing) = state.session_commands.values().find(|candidate| {
+                    candidate.session_id == command.session_id
+                        && candidate.idempotency_key.as_ref() == Some(key)
+                }) {
+                    if existing.command != command.command {
+                        return Err(conflict(
+                            "session command idempotency key was reused with different content",
+                        ));
+                    }
+                    return Ok(AcceptedStoredSessionCommand {
+                        command: existing.clone(),
+                        is_duplicate: true,
+                    });
+                }
+            }
+            let session = state
+                .sessions
+                .get(&command.session_id)
+                .ok_or_else(|| conflict("session command target does not exist"))?;
+            if session.lifecycle != StoredSessionLifecycle::Active
+                || session.role != SessionRole::Standard
+                || state.inputs.contains_key(&command.input_id)
+                || state.session_commands.contains_key(&command.input_id)
+                || state
+                    .inputs
+                    .values()
+                    .any(|input| input.user_message_id == command.user_message_id)
+                || state
+                    .session_commands
+                    .values()
+                    .any(|existing| existing.user_message_id == command.user_message_id)
+                || state.conversations.values().any(|conversation| {
+                    conversation
+                        .messages
+                        .iter()
+                        .any(|message| message_id(message) == &command.user_message_id)
+                })
+            {
+                return Err(conflict("session command cannot be accepted"));
+            }
+            state.next_queue_order = state.next_queue_order.saturating_add(1);
+            let stored = StoredSessionCommand {
+                queue_order: state.next_queue_order,
+                input_id: command.input_id.clone(),
+                session_id: command.session_id,
+                idempotency_key: command.idempotency_key,
+                user_message_id: command.user_message_id,
+                agent_variant: command.agent_variant,
+                command: command.command,
+                result: None,
+                state: StoredSessionCommandState::Queued,
+                accepted_at_ms: command.accepted_at_ms,
+            };
+            state
+                .session_commands
+                .insert(stored.input_id.clone(), stored.clone());
+            state
+                .sessions
+                .get_mut(&stored.session_id)
+                .expect("checked session")
+                .updated_at_ms = stored.accepted_at_ms;
+            Ok(AcceptedStoredSessionCommand {
+                command: stored,
                 is_duplicate: false,
             })
         })
@@ -958,6 +1084,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .skill_activations
                 .retain(|_, activation| activation.input_id.as_ref() != Some(&input_id));
+            state
+                .mcp_input_selections
+                .retain(|_, selection| selection.input_id.as_ref() != Some(&input_id));
             Ok(())
         })
     }
@@ -971,11 +1100,24 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .filter(|input| {
                     input.session_id == change.session_id
                         && input.state == StoredInputState::Queued
-                        && input.origin == InputOrigin::User
+                        && (input.origin == InputOrigin::User
+                            || input.origin == InputOrigin::Runtime
+                                && input.cross_session.is_none()
+                                && input.channel_source.is_none())
                         && input.goal_binding.is_none()
                 })
                 .map(|input| (input.queue_order, input.input_id.clone()))
                 .collect::<Vec<_>>();
+            ordered.extend(
+                state
+                    .session_commands
+                    .values()
+                    .filter(|command| {
+                        command.session_id == change.session_id
+                            && command.state == StoredSessionCommandState::Queued
+                    })
+                    .map(|command| (command.queue_order, command.input_id.clone())),
+            );
             ordered.sort_by_key(|(queue_order, _)| *queue_order);
             let position = ordered
                 .iter()
@@ -984,12 +1126,15 @@ impl RuntimeStore for VolatileRuntimeStore {
             let selected = ordered.remove(position);
             ordered.insert(0, selected);
             for (queue_order, (_, input_id)) in ordered.into_iter().enumerate() {
-                state
-                    .inputs
-                    .get_mut(&input_id)
-                    .expect("queued input id came from the same map")
-                    .queue_order = u64::try_from(queue_order)
+                let queue_order = u64::try_from(queue_order)
                     .map_err(|_| conflict("queue order exceeds storage range"))?;
+                if let Some(input) = state.inputs.get_mut(&input_id) {
+                    input.queue_order = queue_order;
+                } else if let Some(command) = state.session_commands.get_mut(&input_id) {
+                    command.queue_order = queue_order;
+                } else {
+                    return Err(conflict("queued item disappeared"));
+                }
             }
             Ok(())
         })
@@ -1136,13 +1281,26 @@ impl RuntimeStore for VolatileRuntimeStore {
                                 })
                         })
                 });
-                if !materialization_semantically_matches(
-                    &existing,
-                    &attachments,
-                    &input,
-                    persisted_message.as_ref(),
-                    &materialization,
-                ) {
+                let existing_selection = state
+                    .mcp_input_selections
+                    .values()
+                    .find(|selection| selection.input_id.as_ref() == Some(&input.input_id));
+                let selection_matches = existing_selection
+                    .map(|selection| (&selection.server_key, selection.display_name.as_str()))
+                    == materialization
+                        .input
+                        .mcp_selection
+                        .as_ref()
+                        .map(|selection| (&selection.server_key, selection.display_name.as_str()));
+                if !selection_matches
+                    || !materialization_semantically_matches(
+                        &existing,
+                        &attachments,
+                        &input,
+                        persisted_message.as_ref(),
+                        &materialization,
+                    )
+                {
                     return Err(conflict(
                         "materialization key was reused with different content",
                     ));
@@ -1176,6 +1334,14 @@ impl RuntimeStore for VolatileRuntimeStore {
             )
             .map_err(|_| conflict("materialized input message is invalid"))?;
             validate_volatile_input_activation(&state, &materialization.input)?;
+            if let Some(selection) = materialization.input.mcp_selection.as_ref()
+                && (materialization.input.origin != InputOrigin::User
+                    || selection.session_id != materialization.input.session_id
+                    || selection.input_id.as_ref() != Some(&materialization.input.input_id)
+                    || selection.message_id != materialization.input.message.id)
+            {
+                return Err(conflict("materialized MCP selection is inconsistent"));
+            }
             if materialization.input.resumed_goal.is_some() {
                 return Err(conflict("new session cannot resume a Goal"));
             }
@@ -1230,6 +1396,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 attachments.push(stored);
             }
             let input = materialization.input;
+            let mcp_selection = input.mcp_selection.clone();
             let queue_order = state.next_queue_order.saturating_add(1);
             let stored_input = StoredInput {
                 queue_order,
@@ -1291,6 +1458,11 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .inputs
                 .insert(stored_input.input_id.clone(), stored_input.clone());
+            if let Some(selection) = mcp_selection {
+                state
+                    .mcp_input_selections
+                    .insert(selection.selection_id.clone(), selection);
+            }
             state.runs.insert(run.run_id.clone(), run.clone());
             Ok(StoredSessionMaterialization {
                 goal: state.goals.get(&stored_input.session_id).cloned(),
@@ -1387,6 +1559,54 @@ impl RuntimeStore for VolatileRuntimeStore {
                     return Err(conflict("fork skill activation is invalid"));
                 }
             }
+            let mut selection_ids = BTreeSet::new();
+            for selection in &fork.mcp_selections {
+                let source_selection = state.mcp_input_selections.values().find(|candidate| {
+                    candidate.session_id == fork.source_session_id
+                        && candidate.message_id == selection.message_id
+                });
+                if !selection_ids.insert(selection.selection_id.clone())
+                    || state
+                        .mcp_input_selections
+                        .contains_key(&selection.selection_id)
+                    || selection.session_id != fork.session.session_id
+                    || selection.input_id.is_some()
+                    || !message_ids.contains(selection.message_id.as_str())
+                    || !source_selection.is_some_and(|source| {
+                        source.server_key == selection.server_key
+                            && source.display_name == selection.display_name
+                            && source.created_at_ms == selection.created_at_ms
+                    })
+                {
+                    return Err(conflict("fork MCP selection is invalid"));
+                }
+            }
+            let mut command_ids = BTreeSet::new();
+            let mut command_message_ids = BTreeSet::new();
+            for copied in &fork.session_commands {
+                let command = &copied.command;
+                let source = state.session_commands.get(&copied.source_input_id);
+                if !command_ids.insert(command.input_id.clone())
+                    || !command_message_ids.insert(command.user_message_id.clone())
+                    || state.inputs.contains_key(&command.input_id)
+                    || state.session_commands.contains_key(&command.input_id)
+                    || command.session_id != fork.session.session_id
+                    || command.idempotency_key.is_some()
+                    || command.state != StoredSessionCommandState::Committed
+                    || !message_ids.contains(command.user_message_id.as_str())
+                    || !source.is_some_and(|source| {
+                        source.session_id == fork.source_session_id
+                            && source.state == StoredSessionCommandState::Committed
+                            && source.user_message_id != command.user_message_id
+                            && source.command == command.command
+                            && source.result == command.result
+                            && source.agent_variant == command.agent_variant
+                            && source.accepted_at_ms == command.accepted_at_ms
+                    })
+                {
+                    return Err(conflict("fork session command is invalid"));
+                }
+            }
 
             let mut path_rewrites = BTreeMap::new();
             let mut attachments = Vec::with_capacity(fork.attachments.len());
@@ -1478,11 +1698,28 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .skill_activations
                     .insert(activation.activation_id.clone(), activation.clone());
             }
+            for selection in &fork.mcp_selections {
+                state
+                    .mcp_input_selections
+                    .insert(selection.selection_id.clone(), selection.clone());
+            }
+            let session_commands = fork
+                .session_commands
+                .into_iter()
+                .map(|copied| copied.command)
+                .collect::<Vec<_>>();
+            for command in &session_commands {
+                state
+                    .session_commands
+                    .insert(command.input_id.clone(), command.clone());
+            }
             Ok(StoredSessionFork {
                 session: stored,
                 conversation,
                 attachments,
                 skill_activations: fork.skill_activations,
+                mcp_selections: fork.mcp_selections,
+                session_commands,
                 work_plan,
                 goal,
             })
@@ -1591,6 +1828,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .usage_request_ids
                 .retain(|(session_id, _)| session_id != &deletion.session_id);
             state.inputs.retain(|id, _| !input_ids.contains(id));
+            state
+                .session_commands
+                .retain(|_, command| command.session_id != deletion.session_id);
             state.runs.retain(|id, _| !run_ids.contains(id));
             state.child_tasks.retain(|id, _| !child_ids.contains(id));
             state
@@ -1605,6 +1845,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .skill_activations
                 .retain(|_, activation| activation.session_id != deletion.session_id);
+            state
+                .mcp_input_selections
+                .retain(|_, selection| selection.session_id != deletion.session_id);
             state
                 .pending_tool_exchanges
                 .retain(|_, exchange| exchange.session_id != deletion.session_id);
@@ -1678,6 +1921,9 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .inputs
                 .retain(|_, input| input.session_id != clear.session_id);
             state
+                .session_commands
+                .retain(|_, command| command.session_id != clear.session_id);
+            state
                 .runs
                 .retain(|_, run| run.session_id != clear.session_id);
             state
@@ -1703,6 +1949,9 @@ impl RuntimeStore for VolatileRuntimeStore {
             state
                 .skill_activations
                 .retain(|_, activation| activation.session_id != clear.session_id);
+            state
+                .mcp_input_selections
+                .retain(|_, selection| selection.session_id != clear.session_id);
             state
                 .usage_request_ids
                 .retain(|(session_id, _)| session_id != &clear.session_id);
@@ -2349,6 +2598,97 @@ impl RuntimeStore for VolatileRuntimeStore {
                 run.message_ids.push(message_id(message).clone());
             }
             Ok(())
+        })
+    }
+
+    fn commit_session_command(
+        &self,
+        commit: SessionCommandCommit,
+    ) -> StoreFuture<'_, StoredSessionCommand> {
+        Box::pin(async move {
+            if commit.operation_id.trim().is_empty()
+                || commit.message.origin != agent_types::UserMessageOrigin::Runtime
+                || commit.message.transcript_visibility
+                    != agent_types::TranscriptVisibility::Visible
+            {
+                return Err(conflict("session command result message is invalid"));
+            }
+            let mut state = self.lock()?;
+            let existing = state
+                .session_commands
+                .get(&commit.input_id)
+                .cloned()
+                .ok_or_else(|| conflict("session command does not exist"))?;
+            if existing.session_id != commit.session_id
+                || existing.user_message_id != commit.message.id
+            {
+                return Err(conflict("session command belongs to another session"));
+            }
+            if existing.state == StoredSessionCommandState::Committed {
+                if existing.result.as_ref() == Some(&commit.result)
+                    && state
+                        .conversations
+                        .get(&commit.session_id)
+                        .is_some_and(|conversation| {
+                            conversation
+                                .messages
+                                .iter()
+                                .any(|message| matches!(message, ConversationMessage::User(user) if user == &commit.message))
+                        })
+                {
+                    return Ok(existing);
+                }
+                return Err(conflict(
+                    "session command was already committed differently",
+                ));
+            }
+            if state.runs.values().any(|run| {
+                run.session_id == commit.session_id
+                    && matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+            }) || state
+                .pending_tool_exchanges
+                .values()
+                .any(|exchange| exchange.session_id == commit.session_id)
+                || state
+                    .child_tasks
+                    .values()
+                    .any(|task| task.session_id == commit.session_id && !task.status.is_terminal())
+                || state
+                    .pending_child_tool_exchanges
+                    .values()
+                    .any(|exchange| exchange.session_id == commit.session_id)
+                || state.goals.contains_key(&commit.session_id)
+            {
+                return Err(conflict("session command target is blocked"));
+            }
+            append(
+                &mut state,
+                &commit.session_id,
+                &[ConversationMessage::User(commit.message)],
+            )?;
+            let message_count = state
+                .conversations
+                .get(&commit.session_id)
+                .map(|conversation| conversation.messages.len())
+                .ok_or_else(|| conflict("session conversation does not exist"))?;
+            let session = state
+                .sessions
+                .get_mut(&commit.session_id)
+                .ok_or_else(|| conflict("session does not exist"))?;
+            session.body_generation = session
+                .body_generation
+                .checked_add(1)
+                .ok_or_else(|| conflict("session generation is exhausted"))?;
+            session.message_count = u64::try_from(message_count)
+                .map_err(|_| conflict("session message count exceeds storage range"))?;
+            session.updated_at_ms = commit.committed_at_ms;
+            let stored = state
+                .session_commands
+                .get_mut(&commit.input_id)
+                .expect("checked command");
+            stored.state = StoredSessionCommandState::Committed;
+            stored.result = Some(commit.result);
+            Ok(stored.clone())
         })
     }
 
@@ -3410,6 +3750,14 @@ impl RuntimeStore for VolatileRuntimeStore {
                 activation.session_id != rewrite.session_id
                     || retained_message_ids.contains(&activation.message_id)
             });
+            state.mcp_input_selections.retain(|_, selection| {
+                selection.session_id != rewrite.session_id
+                    || retained_message_ids.contains(&selection.message_id)
+            });
+            state.session_commands.retain(|_, command| {
+                command.session_id != rewrite.session_id
+                    || retained_message_ids.contains(&command.user_message_id)
+            });
             if let Some(effect) = rewrite.goal_effect.as_ref() {
                 state
                     .goals
@@ -3928,6 +4276,9 @@ fn ensure_idle(state: &State, session_id: &SessionId) -> Result<(), StoreError> 
         .inputs
         .values()
         .any(|input| input.session_id == *session_id && input.state == StoredInputState::Queued)
+        || state.session_commands.values().any(|command| {
+            command.session_id == *session_id && command.state == StoredSessionCommandState::Queued
+        })
         || state
             .runs
             .values()
@@ -4437,6 +4788,7 @@ mod tests {
                     payload,
                     payload_hash: hash,
                 },
+                mcp_server_key: None,
                 state: StoredGoalState::Running,
                 pause_reason: None,
                 generation: 1,

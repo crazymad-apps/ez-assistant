@@ -21,17 +21,19 @@ use assistant_protocol::{
     GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
     GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ListAttachmentsRequest,
     ListConversationPageRequest, ListConversationPageResult, ListSessionsRequest,
-    ListWorkspacesRequest, MessageId, ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot,
-    QueuedInputSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot, RecallNavigationTarget,
-    RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId,
-    RunSnapshot, SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
-    SessionUsageSnapshot, SessionViewSnapshot, SkillActivationTagSnapshot,
-    SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot,
-    SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
-    TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
-    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    ListWorkspacesRequest, McpToolIdentity, MessageId, ObservedSnapshot, PartId,
+    QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, QueuedSessionCommandSnapshot,
+    QueuedSessionItemSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot,
+    RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
+    RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot, SearchConversationHistoryRequest,
+    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSkillCatalogSnapshot,
+    SessionSkillCatalogStatusSnapshot, SessionUsageSnapshot, SessionViewSnapshot,
+    SkillActivationTagSnapshot, SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot,
+    SkillDiagnosticSnapshot, SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot,
+    SkillSummarySnapshot, TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus,
+    ToolCallId, ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin,
+    ToolFileResourceState, ToolInputSnapshot, UsageTotals, UserMessageSnapshot,
+    WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -61,8 +63,11 @@ pub(super) struct ProjectionContext {
     input_by_message: HashMap<String, assistant_protocol::InputId>,
     source_by_message: HashMap<String, ConversationInputSourceSnapshot>,
     skill_by_message: HashMap<String, SkillActivationTagSnapshot>,
+    mcp_selection_by_message: HashMap<String, assistant_protocol::McpSelectionTagSnapshot>,
+    control_result_by_message: HashMap<String, assistant_protocol::McpRefreshControlResultSnapshot>,
     attachment_by_path: HashMap<String, AttachmentId>,
     feedback_by_message: HashMap<String, assistant_protocol::MessageFeedback>,
+    mcp_identities: HashMap<(String, String), McpToolIdentity>,
     can_fork: bool,
 }
 
@@ -234,6 +239,9 @@ impl AssistantRuntime {
                                 queue_control: true,
                                 approval_queue: true,
                                 child_task_view: true,
+                                mcp_tools: !self.mcp_service.registry.server_keys()?.is_empty(),
+                                mcp_management: self.mcp_service.management_available(),
+                                session_commands: self.mcp_service.management_available(),
                             },
                         },
                     },
@@ -949,12 +957,14 @@ impl AssistantRuntime {
                     None,
                 ),
             };
+            let mcp_identities = self.current_mcp_tool_identities()?;
             let mut detail = project_tool_detail(
                 &snapshot,
                 request.owner.clone(),
                 &request.message_id,
                 &request.call_id,
                 run_id,
+                &mcp_identities,
             )?;
             if detail.tool_name == "recall_memory" {
                 detail.recall = self
@@ -1168,7 +1178,14 @@ impl AssistantRuntime {
         attachments: &[assistant_protocol::AttachmentSummary],
     ) -> RuntimeResult<ProjectionContext> {
         let device_names = self.device_names()?;
-        let (run_by_message, input_by_message, source_by_message, skill_by_message) = {
+        let (
+            run_by_message,
+            input_by_message,
+            source_by_message,
+            skill_by_message,
+            mcp_selection_by_message,
+            control_result_by_message,
+        ) = {
             let state = session.lock_state()?;
             let mut run_by_message = HashMap::new();
             for run in state.runs.values() {
@@ -1209,11 +1226,28 @@ impl AssistantRuntime {
                 .iter()
                 .map(|activation| (activation.message_id.as_str().to_owned(), activation.tag()))
                 .collect();
+            let mcp_selection_by_message = state
+                .mcp_selections
+                .iter()
+                .map(|selection| (selection.message_id.as_str().to_owned(), selection.tag()))
+                .collect();
+            let control_result_by_message = state
+                .commands
+                .values()
+                .filter_map(|command| {
+                    command
+                        .result
+                        .as_ref()
+                        .map(|result| (command.user_message_id.as_str().to_owned(), result.clone()))
+                })
+                .collect();
             (
                 run_by_message,
                 input_by_message,
                 source_by_message,
                 skill_by_message,
+                mcp_selection_by_message,
+                control_result_by_message,
             )
         };
         let attachment_by_path = attachments
@@ -1238,10 +1272,33 @@ impl AssistantRuntime {
             input_by_message,
             source_by_message,
             skill_by_message,
+            mcp_selection_by_message,
+            control_result_by_message,
             attachment_by_path,
             feedback_by_message,
+            mcp_identities: self.current_mcp_tool_identities()?,
             can_fork: true,
         })
+    }
+
+    fn current_mcp_tool_identities(
+        &self,
+    ) -> RuntimeResult<HashMap<(String, String), McpToolIdentity>> {
+        Ok(self
+            .mcp_service
+            .registry
+            .tool_identities()?
+            .into_iter()
+            .map(|identity| {
+                (
+                    (
+                        identity.server_key.as_str().to_owned(),
+                        identity.tool_name.clone(),
+                    ),
+                    identity,
+                )
+            })
+            .collect())
     }
 
     async fn child_task_tree_item(
@@ -1518,8 +1575,11 @@ pub(super) fn empty_child_projection() -> ProjectionContext {
         input_by_message: HashMap::new(),
         source_by_message: HashMap::new(),
         skill_by_message: HashMap::new(),
+        mcp_selection_by_message: HashMap::new(),
+        control_result_by_message: HashMap::new(),
         attachment_by_path: HashMap::new(),
         feedback_by_message: HashMap::new(),
+        mcp_identities: HashMap::new(),
         can_fork: false,
     }
 }
@@ -1531,30 +1591,51 @@ pub(super) fn queue_snapshot(
     let state = session.lock_state()?;
     let held_by_goal = state.goal.is_some();
     let items = state
-        .session_inputs
+        .queue_item_ids
         .iter()
         .enumerate()
         .filter_map(|(position, input_id)| {
-            let input = state.inputs.get(input_id)?;
-            let text_preview = input
-                .stored
-                .queued_message
-                .as_ref()
-                .map(user_text)
-                .unwrap_or_default();
-            Some(QueuedInputSnapshot {
-                input_id: input_id.clone(),
-                text_preview: truncate_chars(&text_preview, TOOL_SUMMARY_CHARS),
-                submitted_at_ms: input.stored.accepted_at_ms,
-                position: u32::try_from(position).unwrap_or(u32::MAX),
-                is_prioritized: position == 0,
-                source: project_input_source(&input.stored, device_names),
-                held_by_goal,
-                skill: input
+            let position = u32::try_from(position).unwrap_or(u32::MAX);
+            if let Some(input) = state.inputs.get(input_id) {
+                let text_preview = input
                     .stored
-                    .skill_activation
+                    .queued_message
                     .as_ref()
-                    .map(crate::StoredSkillActivation::tag),
+                    .map(user_text)
+                    .unwrap_or_default();
+                return Some(QueuedSessionItemSnapshot::Message(QueuedInputSnapshot {
+                    input_id: input_id.clone(),
+                    text_preview: truncate_chars(&text_preview, TOOL_SUMMARY_CHARS),
+                    submitted_at_ms: input.stored.accepted_at_ms,
+                    position,
+                    is_prioritized: position == 0,
+                    source: project_input_source(&input.stored, device_names),
+                    held_by_goal,
+                    skill: input
+                        .stored
+                        .skill_activation
+                        .as_ref()
+                        .map(crate::StoredSkillActivation::tag),
+                    mcp_selection: state
+                        .mcp_selections
+                        .iter()
+                        .find(|selection| selection.input_id.as_ref() == Some(input_id))
+                        .map(crate::StoredMcpSelection::tag),
+                }));
+            }
+            state.commands.get(input_id).map(|command| {
+                QueuedSessionItemSnapshot::Command(QueuedSessionCommandSnapshot {
+                    input_id: input_id.clone(),
+                    command: command.command.clone(),
+                    state: if state.executing_command.as_ref() == Some(input_id) {
+                        assistant_protocol::SessionCommandQueueState::Executing
+                    } else {
+                        assistant_protocol::SessionCommandQueueState::Queued
+                    },
+                    submitted_at_ms: command.accepted_at_ms,
+                    position,
+                    is_prioritized: position == 0,
+                })
             })
         })
         .collect();
@@ -1646,6 +1727,7 @@ pub(crate) fn project_goal(goal: &crate::goal::GoalControl) -> RuntimeResult<Goa
         objective_message_id: protocol_message_id(goal.objective.source_message_id.as_str())?,
         objective_preview: truncate_chars(&objective_text, TOOL_SUMMARY_CHARS),
         attachment_count: u32::try_from(attachment_count).unwrap_or(u32::MAX),
+        mcp_server_key: goal.mcp_server_key.clone(),
         state,
         pause_reason,
         generation: goal.generation,
@@ -1683,6 +1765,13 @@ pub(super) fn project_conversation(
     for message in &snapshot.messages {
         match message {
             ConversationMessage::User(user) if user.transcript_visibility.is_visible() => {
+                if let Some(result) = context.control_result_by_message.get(user.id.as_str()) {
+                    items.push(ConversationItem::ControlResult {
+                        message_id: protocol_message_id(user.id.as_str())?,
+                        result: result.clone(),
+                    });
+                    continue;
+                }
                 let attachment_ids = user
                     .parts
                     .iter()
@@ -1761,6 +1850,10 @@ pub(super) fn project_conversation(
                         .cloned()
                         .unwrap_or_default(),
                     skill: context.skill_by_message.get(user.id.as_str()).cloned(),
+                    mcp_selection: context
+                        .mcp_selection_by_message
+                        .get(user.id.as_str())
+                        .cloned(),
                     created_at_ms: None,
                 }));
             }
@@ -1792,12 +1885,22 @@ pub(super) fn project_conversation(
                         }
                         AssistantPart::ToolCall(call) => {
                             let result = tool_results.get(call.id.as_str()).copied();
+                            let mcp_identity = project_mcp_identity(
+                                call.name.as_str(),
+                                &call.arguments,
+                                &context.mcp_identities,
+                            );
                             pending_tools.push(ToolEventSnapshot {
                                 call_id: protocol_tool_call_id(call.id.as_str())?,
                                 tool_name: call.name.as_str().to_owned(),
+                                mcp_identity: mcp_identity.clone(),
                                 status: tool_status(result),
                                 summary: result.map(tool_result_summary),
-                                input: project_tool_input(call.name.as_str(), &call.arguments),
+                                input: project_tool_input(
+                                    call.name.as_str(),
+                                    &call.arguments,
+                                    mcp_identity.as_ref(),
+                                ),
                             });
                         }
                         AssistantPart::ProviderState(_) => {}
@@ -1846,6 +1949,7 @@ fn project_tool_detail(
     message_id: &MessageId,
     call_id: &ToolCallId,
     run_id: Option<RunId>,
+    mcp_identities: &HashMap<(String, String), McpToolIdentity>,
 ) -> RuntimeResult<ToolDetailSnapshot> {
     let workspace_resources_available = matches!(owner, ConversationOwner::MainSession { .. });
     let assistant = snapshot.messages.iter().find_map(|message| match message {
@@ -1871,7 +1975,8 @@ fn project_tool_detail(
         _ => None,
     });
     let summary = result.map(tool_result_summary);
-    let input = project_tool_input(call.name.as_str(), &call.arguments);
+    let mcp_identity = project_mcp_identity(call.name.as_str(), &call.arguments, mcp_identities);
+    let input = project_tool_input(call.name.as_str(), &call.arguments, mcp_identity.as_ref());
     let files = project_tool_files(&call.id, &input, result, workspace_resources_available)?;
     let (request_json, request_truncated) = formatted_json(&call.arguments);
     let (result_json, result_truncated) =
@@ -1887,6 +1992,7 @@ fn project_tool_detail(
         run_id,
         call_id: call_id.clone(),
         tool_name: call.name.as_str().to_owned(),
+        mcp_identity,
         status: tool_status(result),
         input,
         request_json: Some(request_json),
@@ -1924,7 +2030,7 @@ fn project_conversation_file_references(
             let AssistantPart::ToolCall(call) = part else {
                 continue;
             };
-            let input = project_tool_input(call.name.as_str(), &call.arguments);
+            let input = project_tool_input(call.name.as_str(), &call.arguments, None);
             let files = project_tool_files(
                 &call.id,
                 &input,
@@ -2068,7 +2174,20 @@ fn escape_inline_code(value: &str) -> String {
     value.replace('`', "\\`")
 }
 
-fn project_tool_input(name: &str, arguments: &serde_json::Value) -> ToolInputSnapshot {
+fn project_tool_input(
+    name: &str,
+    arguments: &serde_json::Value,
+    mcp_identity: Option<&McpToolIdentity>,
+) -> ToolInputSnapshot {
+    if let Some(identity) = mcp_identity {
+        return ToolInputSnapshot::Mcp {
+            identity: identity.clone(),
+            arguments_json: arguments
+                .get("arguments")
+                .filter(|value| value.is_object())
+                .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
+        };
+    }
     if name == "inspect_images" {
         return ToolInputSnapshot::ImageInspection {
             image_paths: arguments
@@ -2121,6 +2240,30 @@ fn project_tool_input(name: &str, arguments: &serde_json::Value) -> ToolInputSna
     ToolInputSnapshot::General {
         summary: truncate_chars(&arguments.to_string(), TOOL_SUMMARY_CHARS),
     }
+}
+
+fn project_mcp_identity(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    identities: &HashMap<(String, String), McpToolIdentity>,
+) -> Option<McpToolIdentity> {
+    if tool_name != "call_mcp_tool" {
+        return None;
+    }
+    let server = arguments.get("server")?.as_str()?;
+    let tool = arguments.get("tool")?.as_str()?;
+    identities
+        .get(&(server.to_owned(), tool.to_owned()))
+        .cloned()
+        .or_else(|| {
+            assistant_protocol::McpServerKey::new(server)
+                .ok()
+                .map(|server_key| McpToolIdentity {
+                    server_key,
+                    server_display_name: server.to_owned(),
+                    tool_name: tool.to_owned(),
+                })
+        })
 }
 
 fn project_image_inspection_detail(
@@ -2586,6 +2729,7 @@ mod tool_image_projection_tests {
             &MessageId::new(assistant_id.as_str()).expect("protocol message id"),
             &ToolCallId::new(call_id.as_str()).expect("protocol call id"),
             None,
+            &HashMap::new(),
         )
         .expect("tool detail");
 

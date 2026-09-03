@@ -113,6 +113,10 @@ pub struct GoalSnapshot {
     pub objective_message_id: MessageId,
     pub objective_preview: String,
     pub attachment_count: u32,
+    /// Goal 续跑沿用的服务身份；展示不查询当前目录，旧目标缺省为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_server_key: Option<crate::McpServerKey>,
     pub state: GoalStateSnapshot,
     pub pause_reason: Option<GoalPauseReasonSnapshot>,
     pub generation: u64,
@@ -144,6 +148,15 @@ pub struct ApplicationCapabilities {
     pub queue_control: bool,
     pub approval_queue: bool,
     pub child_task_view: bool,
+    /// Runtime 是否已经完整装配 MCP 发现与调用网关。
+    #[serde(default)]
+    pub mcp_tools: bool,
+    /// Runtime 是否已经完整装配 MCP 设置管理命令。
+    #[serde(default)]
+    pub mcp_management: bool,
+    /// Runtime 是否已经支持可靠 Session Command 队列。
+    #[serde(default)]
+    pub session_commands: bool,
 }
 
 /// Desktop 首屏所需的稳定组合投影。
@@ -201,6 +214,11 @@ pub struct ConversationPage {
 pub enum ConversationItem {
     User(UserMessageSnapshot),
     Assistant(AssistantMessageSnapshot),
+    /// Runtime 控制指令的可靠结算，不渲染为普通用户气泡。
+    ControlResult {
+        message_id: MessageId,
+        result: crate::McpRefreshControlResultSnapshot,
+    },
     /// 复用规范 Conversation 中已有的 Context Summary，只改变产品呈现。
     ContextSummary {
         message_id: MessageId,
@@ -279,6 +297,10 @@ pub struct UserMessageSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub skill: Option<crate::SkillActivationTagSnapshot>,
+    /// 用户随本条 Input 冻结的 MCP Server 标签。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_selection: Option<crate::McpSelectionTagSnapshot>,
     pub created_at_ms: Option<i64>,
 }
 
@@ -361,6 +383,9 @@ pub enum AssistantSegment {
 pub struct ToolEventSnapshot {
     pub call_id: ToolCallId,
     pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_identity: Option<crate::McpToolIdentity>,
     pub status: ToolActivityStatus,
     pub summary: Option<String>,
     /// 经过脱敏和结构化的输入；实时事件不携带，以快照为准。
@@ -388,6 +413,10 @@ pub enum ToolInputSnapshot {
         working_directory: String,
         timeout_ms: u64,
         process_mode: String,
+    },
+    Mcp {
+        identity: crate::McpToolIdentity,
+        arguments_json: String,
     },
     ImageInspection {
         image_paths: Vec<String>,
@@ -495,6 +524,9 @@ pub struct ToolDetailSnapshot {
     pub run_id: Option<RunId>,
     pub call_id: ToolCallId,
     pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_identity: Option<crate::McpToolIdentity>,
     pub status: ToolActivityStatus,
     pub input: ToolInputSnapshot,
     /// 有界、格式化后的完整请求 JSON；用于详情代码块，不替代结构化输入投影。
@@ -617,6 +649,9 @@ pub struct QueuedInputSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub skill: Option<crate::SkillActivationTagSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_selection: Option<crate::McpSelectionTagSnapshot>,
 }
 
 /// Session 的有序输入队列。
@@ -625,7 +660,7 @@ pub struct QueuedInputSnapshot {
 pub struct QueueSnapshot {
     pub revision: u64,
     pub state: QueueExecutionState,
-    pub items: Vec<QueuedInputSnapshot>,
+    pub items: Vec<crate::QueuedSessionItemSnapshot>,
 }
 
 /// Session 的有序审批队列；主、子 Agent 审批共享该队列。
@@ -932,6 +967,23 @@ pub struct RejectApprovalAndStopRunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_capabilities_default_new_mcp_fields_for_older_snapshots() {
+        let capabilities = serde_json::from_value::<ApplicationCapabilities>(serde_json::json!({
+            "conversation_paging": true,
+            "conversation_search": true,
+            "tool_detail": true,
+            "queue_control": true,
+            "approval_queue": true,
+            "child_task_view": true
+        }))
+        .expect("deserialize older capability snapshot");
+
+        assert!(!capabilities.mcp_tools);
+        assert!(!capabilities.mcp_management);
+        assert!(!capabilities.session_commands);
+    }
 
     #[test]
     fn product_projection_schema_contains_no_credentials() {

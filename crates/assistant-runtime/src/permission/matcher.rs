@@ -9,16 +9,17 @@ use agent_tools::{
 use assistant_protocol::AgentVariant;
 
 use super::{
-    CommandMatch, PathMatch, PermissionFileOperation, PermissionMatcher, PermissionProcessMode,
-    PermissionRule,
+    CommandMatch, McpPermissionServerMatch, McpPermissionToolMatch, PathMatch,
+    PermissionFileOperation, PermissionMatcher, PermissionProcessMode, PermissionRule,
 };
-use crate::delegation::DelegationAuthorizationFacts;
+use crate::{delegation::DelegationAuthorizationFacts, mcp::McpAuthorizationFacts};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InvocationFactKind {
     General,
     File,
     Shell,
+    Mcp,
     Unknown,
 }
 
@@ -29,6 +30,8 @@ pub(crate) fn fact_kind(invocation: &ResolvedToolInvocation) -> InvocationFactKi
         InvocationFactKind::File
     } else if invocation.facts::<ShellAuthorizationFacts>().is_some() {
         InvocationFactKind::Shell
+    } else if invocation.facts::<McpAuthorizationFacts>().is_some() {
+        InvocationFactKind::Mcp
     } else if invocation.facts::<GeneralAuthorizationFacts>().is_some()
         || invocation.facts::<DelegationAuthorizationFacts>().is_some()
     {
@@ -80,7 +83,32 @@ pub(crate) fn matches_rule(
                         && facts.workdir.as_path() == Path::new(&matcher.working_directory)
                         && process_mode(facts.process_mode) == matcher.process_mode
                 }),
+            PermissionMatcher::Mcp(matcher) => invocation
+                .facts::<McpAuthorizationFacts>()
+                .is_some_and(|facts| {
+                    mcp_matcher_matches(
+                        matcher,
+                        &facts.invocation.server_key,
+                        &facts.invocation.tool_name,
+                    )
+                }),
         }
+}
+
+pub(crate) fn mcp_matcher_matches(
+    matcher: &super::McpPermissionMatcher,
+    server_key: &assistant_protocol::McpServerKey,
+    tool_name: &str,
+) -> bool {
+    let server_matches = match &matcher.server {
+        McpPermissionServerMatch::Any => true,
+        McpPermissionServerMatch::Exact { value } => value == server_key,
+    };
+    let tool_matches = match &matcher.tool {
+        McpPermissionToolMatch::Any => true,
+        McpPermissionToolMatch::Exact { value } => value == tool_name,
+    };
+    server_matches && tool_matches
 }
 
 pub(crate) fn file_matcher_matches(
@@ -100,6 +128,10 @@ pub(crate) fn is_exact_allow_rule(rule: &PermissionRule) -> bool {
             PermissionMatcher::General(_) => false,
             PermissionMatcher::File(matcher) => matcher.path_match == PathMatch::Exact,
             PermissionMatcher::Shell(matcher) => matcher.command_match == CommandMatch::Exact,
+            PermissionMatcher::Mcp(matcher) => {
+                matches!(&matcher.server, McpPermissionServerMatch::Exact { .. })
+                    && matches!(&matcher.tool, McpPermissionToolMatch::Exact { .. })
+            }
         }
 }
 
@@ -145,9 +177,11 @@ mod tests {
         AbsolutePath, Dispatcher, ImageInspectionFuture, ImageInspector, InspectImagesRequest,
         InspectImagesTool, ResolvedBatchItemRef, SessionPathResolver, ShellExecTool,
         ShellExecToolConfig, ShellFuture, ShellOutputSink, ShellRequest, ShellTool, ShellToolError,
-        ToolRegistry,
+        Tool, ToolContext, ToolError, ToolExecuteFuture, ToolRegistry, ToolResolution,
     };
     use agent_types::{ToolCall, ToolCallId, ToolName};
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
@@ -160,6 +194,53 @@ mod tests {
     struct NeverShell;
 
     struct NeverInspector;
+
+    #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+    struct McpInput {
+        server: String,
+        tool: String,
+    }
+
+    struct McpFactsTool;
+
+    impl Tool for McpFactsTool {
+        type Input = McpInput;
+        type ResolvedInput = McpInput;
+        type Output = serde_json::Value;
+
+        fn name(&self) -> ToolName {
+            ToolName::new("call_mcp_tool").expect("name")
+        }
+
+        fn description(&self) -> String {
+            "fixture".to_owned()
+        }
+
+        fn resolve(
+            &self,
+            input: Self::Input,
+        ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+            let facts = McpAuthorizationFacts {
+                invocation: crate::mcp::ResolvedMcpInvocation::unavailable_for_test(
+                    assistant_protocol::McpServerKey::new(&input.server).expect("server"),
+                    input.tool.clone(),
+                ),
+            };
+            Ok(ToolResolution::with_facts(
+                input.clone(),
+                facts,
+                json!({"server": input.server, "tool": input.tool}),
+            ))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _input: Self::ResolvedInput,
+            _context: ToolContext,
+        ) -> ToolExecuteFuture<'a, Self::Output> {
+            Box::pin(std::future::pending())
+        }
+    }
 
     impl ImageInspector for NeverInspector {
         fn inspect<'a>(
@@ -313,6 +394,58 @@ mod tests {
             AgentVariant::Build,
             invocation
         ));
+    }
+
+    #[test]
+    fn mcp_matcher_requires_the_actual_server_and_raw_tool_identity() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(McpFactsTool)
+            .expect("register MCP fixture");
+        let batch = Dispatcher::resolve_batch(
+            &registry.snapshot(),
+            &[call(
+                "call_mcp_tool",
+                json!({"server": "github", "tool": "create_issue"}),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = batch.get(0).expect("item") else {
+            panic!("MCP gateway resolves");
+        };
+        assert_eq!(fact_kind(invocation), InvocationFactKind::Mcp);
+
+        let rule = |server, tool| PermissionRule {
+            id: "mcp".to_owned(),
+            effect: PermissionEffect::Allow,
+            variants: vec![AgentVariant::Plan],
+            matcher: PermissionMatcher::Mcp(crate::permission::McpPermissionMatcher {
+                server,
+                tool,
+            }),
+        };
+        let exact = rule(
+            McpPermissionServerMatch::Exact {
+                value: assistant_protocol::McpServerKey::new("github").expect("server"),
+            },
+            McpPermissionToolMatch::Exact {
+                value: "create_issue".to_owned(),
+            },
+        );
+        assert!(matches_rule(&exact, AgentVariant::Plan, invocation));
+        assert!(is_exact_allow_rule(&exact));
+        assert!(!matches_rule(
+            &rule(
+                McpPermissionServerMatch::Exact {
+                    value: assistant_protocol::McpServerKey::new("gitlab").expect("server"),
+                },
+                McpPermissionToolMatch::Any,
+            ),
+            AgentVariant::Plan,
+            invocation,
+        ));
+        let all = rule(McpPermissionServerMatch::Any, McpPermissionToolMatch::Any);
+        assert!(matches_rule(&all, AgentVariant::Plan, invocation));
+        assert!(!is_exact_allow_rule(&all));
     }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {

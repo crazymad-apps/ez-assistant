@@ -7,10 +7,12 @@ import type {
   ChildTaskId,
   GoalId,
   InputId,
+  McpServerKey,
   RunId,
   ReasoningEffortKey,
   QuotedTextSnapshot,
   SessionId,
+  SessionCommand,
   SubmitInputMode,
 } from "../generated/assistant-protocol";
 import type { ConnectionStore } from "./ConnectionStore";
@@ -65,6 +67,7 @@ export class RunInteractionController {
     mode: SubmitInputMode = "normal",
     skill_name: string | null = null,
     quotes: readonly QuotedTextSnapshot[] = [],
+    mcp_server_key: McpServerKey | null = null,
   ): Promise<boolean> {
     const { connection, runtime, state } = this.dependencies;
     const client = runtime.client;
@@ -89,6 +92,7 @@ export class RunInteractionController {
           attachment_ids: [...attachment_ids],
           quotes: [...quotes],
           skill_name: skill_name ?? undefined,
+          mcp_server_key: mcp_server_key ?? undefined,
           idempotency_key: createIdempotencyKey(),
         },
       });
@@ -110,6 +114,14 @@ export class RunInteractionController {
     await this.#runQueueMutation(session_id, input_id, () => this.dependencies.runtime.client!.command({
       type: "prioritize_queued_input",
       payload: { session_id, input_id, expected_revision: revision },
+    }));
+  }
+
+  async submitSessionCommand(session_id: SessionId, command: SessionCommand): Promise<boolean> {
+    const idempotency_key = createIdempotencyKey();
+    return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
+      type: "submit_session_command",
+      payload: { session_id, command, idempotency_key },
     }));
   }
 

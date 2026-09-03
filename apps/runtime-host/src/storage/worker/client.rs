@@ -8,20 +8,21 @@ use std::{
 
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
 use assistant_runtime::{
-    AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
-    CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
+    AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
+    ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
     ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
     ConversationWindowRequest, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewStoredSessionMaterialization, NewWorkspaceRegistration, PairedDevice, PcOutputHostingChange,
-    PendingChildToolExchange, PendingToolExchange, PermissionFileLoad, PermissionFileRevision,
-    PermissionFileScope, PermissionFileStore, PermissionStoreFuture, PersonaMutation,
-    PersonaSnapshot, PinnedMemoryMutation, PinnedMemoryMutationResult, QueuePriorityChange,
-    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionDeletion,
-    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    PairedDevice, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
+    PermissionFileLoad, PermissionFileRevision, PermissionFileScope, PermissionFileStore,
+    PermissionStoreFuture, PersonaMutation, PersonaSnapshot, PinnedMemoryMutation,
+    PinnedMemoryMutationResult, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteResult, RuntimeStore, SessionCommandCommit, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
     SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
     SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
@@ -29,9 +30,9 @@ use assistant_runtime::{
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage, StoredWorkPlan,
-    StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -505,6 +506,19 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn accept_session_command(
+        &self,
+        command: NewStoredSessionCommand,
+    ) -> StoreFuture<'_, AcceptedStoredSessionCommand> {
+        Box::pin(async move {
+            self.request(|reply| Command::AcceptSessionControl {
+                command: Box::new(command),
+                reply,
+            })
+            .await
+        })
+    }
+
     fn cancel_queued_input(
         &self,
         session_id: &SessionId,
@@ -540,6 +554,19 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             self.request(|reply| Command::CommitUserMessage { commit, reply })
                 .await
+        })
+    }
+
+    fn commit_session_command(
+        &self,
+        commit: SessionCommandCommit,
+    ) -> StoreFuture<'_, StoredSessionCommand> {
+        Box::pin(async move {
+            self.request(|reply| Command::CommitSessionControl {
+                commit: Box::new(commit),
+                reply,
+            })
+            .await
         })
     }
 

@@ -42,7 +42,7 @@ export type ToolDetailView = Pick<
   | "files"
   | "output_truncated"
   | "historical_fields_missing"
-> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id" | "call_id" | "image_inspection">>
+> & Partial<Pick<ToolDetailSnapshot, "owner" | "message_id" | "call_id" | "image_inspection" | "mcp_identity">>
   & Readonly<{ source?: "reliable" | "live" }>;
 
 export function ToolDetailDialog({
@@ -61,6 +61,7 @@ export function ToolDetailDialog({
   const [unavailable_file_refs, setUnavailableFileRefs] = useState<ReadonlySet<string>>(new Set());
   const owner = detail?.owner;
   const is_read_image = detail?.tool_name === "read_image";
+  const mcp_identity = detail?.mcp_identity ?? (detail?.input.type === "mcp" ? detail.input.identity : null);
 
   useEffect(() => {
     setUnavailableFileRefs(new Set());
@@ -163,7 +164,7 @@ export function ToolDetailDialog({
           <div className={styles.title_group}>
             <span className={styles.tool_icon}><Icon name="terminal" size={17} /></span>
             <div>
-              <h2 id="tool-detail-title">{detail?.tool_name ?? "工具详情"}</h2>
+              <h2 id="tool-detail-title">{mcp_identity ? `${mcp_identity.server_display_name} (${mcp_identity.server_key}) / ${mcp_identity.tool_name}` : detail?.tool_name ?? "工具详情"}</h2>
               {detail && <span>{statusLabel(detail.status)}</span>}
             </div>
           </div>
@@ -188,6 +189,7 @@ export function ToolDetailDialog({
                   ? <JsonBlock text={detail.request_json} />
                   : <ToolInput input={detail.input} is_live={detail.source === "live"} />}
               </DetailSection>
+              {mcp_identity && <p className={styles.notice}>MCP 工具注解由服务自报，未经验证，不能作为安全或只读保证。</p>}
               <DetailSection title="执行结果">
                 {detail.image_inspection && (
                   <dl className={styles.facts}>
@@ -356,6 +358,8 @@ function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_l
       return <><strong>{input.title}</strong><p>{input.task_summary}</p></>;
     case "general":
       return <p>{input.summary}</p>;
+    case "mcp":
+      return <JsonBlock text={input.arguments_json} />;
     case "image_inspection":
       return <dl className={styles.facts}>
         <div><dt>识别目标</dt><dd>{input.goal}</dd></div>

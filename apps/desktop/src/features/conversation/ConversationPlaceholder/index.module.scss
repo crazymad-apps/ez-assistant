@@ -18,7 +18,7 @@
   }
 
   button {
-    min-height: 32px;
+    min-height: var(--ez-control-height);
     margin-top: 5px;
     padding: 0 13px;
     border: 0;

@@ -12,6 +12,7 @@ import { PermissionSettingsPage } from "./PermissionSettingsPage";
 import { RuntimeSettingsPage } from "./RuntimeSettingsPage";
 import { SkillSettingsPage } from "./SkillSettingsPage";
 import { DeviceSettingsPage } from "./DeviceSettingsPage";
+import { McpSettingsPage } from "./McpSettingsPage";
 import styles from "./index.module.scss";
 
 const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
@@ -21,6 +22,7 @@ const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> 
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
   { id: "skills", label: "技能", icon: "folder" },
+  { id: "mcp", label: "MCP", icon: "plugin" },
 ];
 
 export const SettingsDialog = observer(function SettingsDialog() {
@@ -108,6 +110,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
               <MemorySettingsPage onDirtyChange={setFormDirty} />
             )}
             {settings.page === "skills" && <SkillSettingsPage />}
+            {settings.page === "mcp" && <McpSettingsPage onDirtyChange={setFormDirty} />}
           </div>
         </div>
     </Dialog>

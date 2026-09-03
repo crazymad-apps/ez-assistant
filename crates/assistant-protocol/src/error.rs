@@ -111,6 +111,18 @@ pub enum RuntimeErrorCode {
     Conflict,
     /// 模型配置 revision 已变化。
     ConfigurationConflict,
+    /// MCP 配置或候选文档无法完整接受。
+    McpConfigInvalid,
+    /// MCP 配置 revision 已变化。
+    McpConfigConflict,
+    /// MCP 导入包含尚未获准替换的同名 Server。
+    McpImportConflict,
+    /// 用户手选的 MCP Server 当前不可用或没有可披露工具。
+    McpServerUnavailable,
+    /// MCP 临时连接测试被取消。
+    McpTestCancelled,
+    /// MCP 临时连接测试失败。
+    McpTestFailed,
     /// 输入队列 revision 已变化。
     QueueConflict,
     /// Conversation generation 或快照依赖已经变化。
@@ -296,6 +308,15 @@ mod tests {
                 RuntimeErrorCode::ConfigurationConflict,
                 "configuration_conflict",
             ),
+            (RuntimeErrorCode::McpConfigInvalid, "mcp_config_invalid"),
+            (RuntimeErrorCode::McpConfigConflict, "mcp_config_conflict"),
+            (RuntimeErrorCode::McpImportConflict, "mcp_import_conflict"),
+            (
+                RuntimeErrorCode::McpServerUnavailable,
+                "mcp_server_unavailable",
+            ),
+            (RuntimeErrorCode::McpTestCancelled, "mcp_test_cancelled"),
+            (RuntimeErrorCode::McpTestFailed, "mcp_test_failed"),
             (RuntimeErrorCode::QueueConflict, "queue_conflict"),
             (RuntimeErrorCode::SnapshotStale, "snapshot_stale"),
             (

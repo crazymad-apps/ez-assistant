@@ -6,7 +6,7 @@ mod signal;
 use std::collections::BTreeSet;
 
 use agent_types::{FileReferencesPart, MessageId, TextPart, UserMessage, UserPart};
-use assistant_protocol::{GoalId, SessionId};
+use assistant_protocol::{GoalId, McpServerKey, SessionId};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -82,6 +82,7 @@ pub(crate) struct GoalBudget {
 pub(crate) struct GoalControl {
     pub(crate) id: GoalId,
     pub(crate) objective: GoalObjectiveSnapshot,
+    pub(crate) mcp_server_key: Option<McpServerKey>,
     pub(crate) state: GoalState,
     pub(crate) generation: u64,
     pub(crate) turn: u32,
@@ -115,6 +116,7 @@ impl GoalControl {
                 payload,
                 payload_hash,
             },
+            mcp_server_key: None,
             state: GoalState::Running,
             generation: 1,
             turn: 1,
@@ -162,6 +164,7 @@ impl GoalControl {
                     .collect(),
                 payload_hash: self.objective.payload_hash.clone(),
             },
+            mcp_server_key: self.mcp_server_key.clone(),
             state,
             pause_reason,
             generation: self.generation,
@@ -297,6 +300,7 @@ impl TryFrom<StoredGoal> for GoalControl {
                 payload,
                 payload_hash: value.objective.payload_hash,
             },
+            mcp_server_key: value.mcp_server_key,
             state,
             generation: value.generation,
             turn: value.turn,
@@ -422,6 +426,7 @@ mod tests {
                 payload: vec![part],
                 payload_hash: hash,
             },
+            mcp_server_key: None,
             state,
             pause_reason: reason,
             generation: 1,
@@ -461,5 +466,32 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_stored_goal_defaults_to_no_mcp_selection() {
+        let goal = stored_goal(StoredGoalState::Running, None);
+        let value = serde_json::to_value(&goal).expect("serialize goal");
+        assert!(value.get("mcp_server_key").is_none());
+        let recovered = serde_json::from_value::<StoredGoal>(value).expect("deserialize goal");
+        assert_eq!(recovered, goal);
+        assert!(recovered.mcp_server_key.is_none());
+    }
+
+    #[test]
+    fn goal_snapshot_preserves_selected_mcp_key_without_live_catalog() {
+        let mut stored = stored_goal(StoredGoalState::Running, None);
+        stored.mcp_server_key = Some(McpServerKey::new("github").expect("server key"));
+        let control = GoalControl::try_from(stored).expect("valid goal");
+        let snapshot = crate::runtime::product::project_goal(&control).expect("snapshot");
+        assert_eq!(snapshot.mcp_server_key, control.mcp_server_key);
+        let mut legacy = serde_json::to_value(snapshot).expect("serialize snapshot");
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("mcp_server_key");
+        let recovered: assistant_protocol::GoalSnapshot =
+            serde_json::from_value(legacy).expect("legacy snapshot");
+        assert!(recovered.mcp_server_key.is_none());
     }
 }

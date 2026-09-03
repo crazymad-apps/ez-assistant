@@ -23,6 +23,7 @@ pub(crate) struct AcceptedInputProjection {
 pub(crate) fn project_accepted_input(
     state: &mut SessionState,
     accepted: AcceptedInput,
+    mcp_selection: Option<crate::StoredMcpSelection>,
 ) -> AcceptedInputProjection {
     debug_assert!(
         !accepted.is_duplicate,
@@ -43,10 +44,10 @@ pub(crate) fn project_accepted_input(
         && accepted.input.cross_session.is_none()
         && accepted.input.channel_source.is_none()
     {
-        state.session_inputs.push_front(input_id.clone());
+        state.queue_item_ids.push_front(input_id.clone());
         None
     } else {
-        state.session_inputs.push_back(input_id.clone());
+        state.queue_item_ids.push_back(input_id.clone());
         state.queue_revision = state.queue_revision.saturating_add(1);
         if state.goal.is_some() {
             state.resume_required = true;
@@ -56,6 +57,9 @@ pub(crate) fn project_accepted_input(
 
     if let Some(activation) = accepted.input.skill_activation.clone() {
         state.skill_activations.push(activation);
+    }
+    if let Some(selection) = mcp_selection {
+        state.mcp_selections.push(selection);
     }
     let previous_run = state.runs.insert(run_id.clone(), record);
     let previous_input = state.inputs.insert(

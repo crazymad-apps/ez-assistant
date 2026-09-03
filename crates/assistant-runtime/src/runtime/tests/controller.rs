@@ -128,6 +128,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -151,6 +152,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -213,6 +215,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -264,6 +267,8 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         crate::runtime::product::queue_snapshot(&target_controller, &Default::default())
             .expect("queued delivery")
             .items[0]
+            .as_message()
+            .expect("message")
             .source,
         assistant_protocol::ConversationInputSourceSnapshot::ControllerDelivery {
             controller_session_id: controller.session.session_id.clone(),
@@ -301,6 +306,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: Some(
                 assistant_protocol::IdempotencyKey::new("takeover-1").expect("key"),
             ),
@@ -364,6 +370,7 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -548,6 +555,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -561,6 +569,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -694,6 +703,7 @@ async fn recovery_interrupts_source_and_accepts_proxy_report_before_registry_pub
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -802,6 +812,7 @@ async fn enabling_proxy_during_an_active_run_reports_that_run_at_settlement() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -887,6 +898,7 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -963,6 +975,7 @@ async fn disabling_proxy_during_an_active_run_suppresses_its_report() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1041,6 +1054,7 @@ async fn cancelled_run_reports_cancelled_after_proxy_is_enabled_mid_run() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

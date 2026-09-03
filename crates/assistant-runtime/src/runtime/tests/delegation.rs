@@ -299,6 +299,7 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -586,6 +587,7 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -674,6 +676,7 @@ async fn child_model_failure_is_persisted_before_the_parent_receives_an_error_re
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -750,6 +753,7 @@ async fn plan_and_build_parent_agents_expose_the_same_delegate_definition() {
                 attachment_ids: Vec::new(),
                 quotes: Vec::new(),
                 skill_name: None,
+                mcp_server_key: None,
                 idempotency_key: None,
             })
             .await
@@ -812,6 +816,7 @@ async fn sibling_delegations_overlap_but_respect_the_frozen_concurrency_limit() 
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -855,6 +860,7 @@ async fn task_limit_rejects_excess_calls_without_creating_extra_child_records() 
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -909,6 +915,7 @@ async fn child_timeout_is_failed_and_parent_can_still_summarize() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -951,6 +958,7 @@ async fn cancelling_one_child_does_not_cancel_its_sibling_or_parent() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1032,6 +1040,7 @@ async fn cancelling_parent_cascades_to_children_and_skips_parent_summary() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1107,6 +1116,7 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1194,6 +1204,7 @@ async fn denying_delegate_approval_does_not_create_a_child_task() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1265,6 +1276,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await
@@ -1423,6 +1435,7 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
+            mcp_server_key: None,
             idempotency_key: None,
         })
         .await

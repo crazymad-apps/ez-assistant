@@ -240,6 +240,7 @@ impl StorageEngine {
                 "DELETE FROM work_plan_completion_receipts WHERE session_id = ?1",
                 "DELETE FROM session_goals WHERE session_id = ?1",
                 "DELETE FROM skill_activations WHERE session_id = ?1",
+                "DELETE FROM mcp_input_selections WHERE session_id = ?1",
                 "DELETE FROM model_request_records WHERE session_id = ?1",
                 "DELETE FROM conversation_recall_documents WHERE session_id = ?1",
                 "DELETE FROM conversation_recall_heads WHERE session_id = ?1",

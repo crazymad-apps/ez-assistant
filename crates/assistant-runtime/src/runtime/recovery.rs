@@ -52,6 +52,9 @@ pub(super) fn prepare_interrupted_run_settlements(
             .ok_or_else(invalid_recovery)?;
         let source_queue_empty = !recovered.inputs.iter().any(|candidate| {
             candidate.session_id == run.session_id && candidate.state == StoredInputState::Queued
+        }) && !recovered.session_commands.iter().any(|candidate| {
+            candidate.session_id == run.session_id
+                && candidate.state == crate::StoredSessionCommandState::Queued
         });
         let proxy_report = if source.role == crate::SessionRole::Standard && source_queue_empty {
             source
@@ -202,6 +205,7 @@ pub(super) fn recover_registries(
         }
     }
     let mut input_sessions = BTreeMap::<InputId, SessionId>::new();
+    let mut input_messages = BTreeMap::new();
     let mut input_activations = BTreeMap::new();
     for input in &recovered.inputs {
         let target_role = session_roles.get(&input.session_id).copied();
@@ -263,6 +267,7 @@ pub(super) fn recover_registries(
         {
             return Err(invalid_recovery());
         }
+        input_messages.insert(input.input_id.clone(), input.user_message_id.clone());
         if let Some(activation) = input.skill_activation.as_ref()
             && input_activations
                 .insert(activation.activation_id.clone(), activation.clone())
@@ -270,6 +275,47 @@ pub(super) fn recover_registries(
         {
             return Err(invalid_recovery());
         }
+    }
+    let mut command_ids = std::collections::BTreeSet::new();
+    let mut command_message_ids = input_messages
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for command in &recovered.session_commands {
+        let valid_result = match command.state {
+            crate::StoredSessionCommandState::Queued => command.result.is_none(),
+            crate::StoredSessionCommandState::Committed => command.result.is_some(),
+        };
+        if session_roles
+            .get(&command.session_id)
+            .is_none_or(|(role, _)| *role != crate::SessionRole::Standard)
+            || input_sessions.contains_key(&command.input_id)
+            || !command_ids.insert(command.input_id.clone())
+            || !command_message_ids.insert(command.user_message_id.clone())
+            || !valid_result
+        {
+            return Err(invalid_recovery());
+        }
+    }
+    let mut selections_by_session = BTreeMap::<SessionId, Vec<_>>::new();
+    let mut selection_ids = std::collections::BTreeSet::new();
+    let mut selected_inputs = std::collections::BTreeSet::new();
+    for selection in recovered.mcp_input_selections {
+        let input_invalid = selection.input_id.as_ref().is_some_and(|input_id| {
+            input_sessions.get(input_id) != Some(&selection.session_id)
+                || input_messages.get(input_id) != Some(&selection.message_id)
+                || !selected_inputs.insert(input_id.clone())
+        });
+        if !session_roles.contains_key(&selection.session_id)
+            || !selection_ids.insert(selection.selection_id.clone())
+            || input_invalid
+        {
+            return Err(invalid_recovery());
+        }
+        selections_by_session
+            .entry(selection.session_id.clone())
+            .or_default()
+            .push(selection);
     }
     let mut stored_goals_by_session = BTreeMap::new();
     for goal in &recovered.goals {
@@ -333,6 +379,13 @@ pub(super) fn recover_registries(
             .entry(input.session_id.clone())
             .or_default()
             .push(input);
+    }
+    let mut commands_by_session = BTreeMap::<SessionId, Vec<_>>::new();
+    for command in recovered.session_commands {
+        commands_by_session
+            .entry(command.session_id.clone())
+            .or_default()
+            .push(command);
     }
     let mut ledger_activation_ids = std::collections::BTreeSet::new();
     let mut activations_by_session = BTreeMap::<SessionId, Vec<_>>::new();
@@ -423,6 +476,10 @@ pub(super) fn recover_registries(
             stored,
             runs_by_session.remove(&session_id).unwrap_or_default(),
             inputs_by_session.remove(&session_id).unwrap_or_default(),
+            commands_by_session.remove(&session_id).unwrap_or_default(),
+            selections_by_session
+                .remove(&session_id)
+                .unwrap_or_default(),
             work_plans_by_session.remove(&session_id),
             goals_by_session.remove(&session_id),
             activations,
@@ -433,6 +490,8 @@ pub(super) fn recover_registries(
     }
     if !runs_by_session.is_empty()
         || !inputs_by_session.is_empty()
+        || !commands_by_session.is_empty()
+        || !selections_by_session.is_empty()
         || !work_plans_by_session.is_empty()
         || !goals_by_session.is_empty()
         || !activations_by_session.is_empty()

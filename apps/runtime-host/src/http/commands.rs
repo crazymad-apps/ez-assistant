@@ -300,6 +300,40 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::GetMcpConfiguration(request) => (
+            RuntimeCommandResult::GetMcpConfiguration(
+                runtime.get_mcp_configuration(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::PreviewMcpImport(request) => (
+            RuntimeCommandResult::PreviewMcpImport(runtime.preview_mcp_import(request).await?),
+            false,
+        ),
+        RuntimeCommand::MutateMcpConfiguration(request) => (
+            RuntimeCommandResult::MutateMcpConfiguration(
+                runtime.mutate_mcp_configuration(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::TestMcpServer(request) => (
+            RuntimeCommandResult::TestMcpServer(runtime.test_mcp_server(request).await?),
+            false,
+        ),
+        RuntimeCommand::CancelMcpServerTest(request) => (
+            RuntimeCommandResult::CancelMcpServerTest(runtime.cancel_mcp_server_test(request)?),
+            false,
+        ),
+        RuntimeCommand::ListMcpServerOptions(request) => (
+            RuntimeCommandResult::ListMcpServerOptions(runtime.list_mcp_server_options(request)?),
+            false,
+        ),
+        RuntimeCommand::SubmitSessionCommand(request) => (
+            RuntimeCommandResult::SubmitSessionCommand(
+                runtime.submit_session_command(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetConfigStatus(request) => (
             RuntimeCommandResult::GetConfigStatus(runtime.get_config_status(request)?),
             false,

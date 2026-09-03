@@ -36,8 +36,8 @@
 
   button {
     display: grid;
-    width: 30px;
-    height: 30px;
+    width: var(--ez-control-height);
+    height: var(--ez-control-height);
     flex: 0 0 auto;
     place-items: center;
     border: 0;
@@ -67,7 +67,7 @@
   padding: 0 18px 18px;
 
   button {
-    min-height: 34px;
+    min-height: var(--ez-control-height);
     padding: 0 14px;
     border: 1px solid var(--ez-border-strong);
     border-radius: var(--ez-radius-small);

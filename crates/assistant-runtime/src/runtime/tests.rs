@@ -892,6 +892,7 @@ mod memory;
 mod permission;
 mod product;
 mod runs;
+mod session_commands;
 mod session_management;
 mod sessions;
 mod store;

@@ -267,14 +267,16 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
               </DropdownMenuItem>
             )}
             {!is_archived && session && (
-              <DropdownMenuItem
-                className={styles.clear_action}
-                disabled={blocks_clear || !session_view || store.pending_session_action || store.composer_pending}
-                onSelect={() => setClearOpen(true)}
-                title={blocks_clear ? "请等待运行、审批、队列、子任务或压缩结束" : undefined}
-              >
-                <span>清空会话历史…</span>
-              </DropdownMenuItem>
+              <>
+                <div aria-orientation="horizontal" className={styles.session_menu_separator} role="separator" />
+                <DropdownMenuItem
+                  disabled={blocks_clear || !session_view || store.pending_session_action || store.composer_pending}
+                  onSelect={() => setClearOpen(true)}
+                  title={blocks_clear ? "请等待运行、审批、队列、子任务或压缩结束" : undefined}
+                >
+                  <span>清空会话历史…</span>
+                </DropdownMenuItem>
+              </>
             )}
             {!is_archived && session && (
               <>

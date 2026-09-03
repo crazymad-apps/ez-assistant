@@ -25,7 +25,7 @@ use super::super::input::projection::project_accepted_input;
 pub(in crate::runtime) enum GoalSubmission {
     None,
     Start,
-    Resume(GoalControl),
+    Resume(Box<GoalControl>),
 }
 
 #[derive(Clone, Copy)]
@@ -64,7 +64,7 @@ impl AssistantRuntime {
                     (state.model_key.clone(), goal.clone())
                 };
                 ensure_goal_model_supported(&self.config_registry, session, &model_key)?;
-                Ok(GoalSubmission::Resume(goal))
+                Ok(GoalSubmission::Resume(Box::new(goal)))
             }
             SubmitInputMode::StartGoal => {
                 let model_key = {
@@ -155,7 +155,7 @@ impl AssistantRuntime {
                     .map(|active| active.cancellation.clone())
             });
             state.goal = Some(authoritative);
-            state.resume_required = !state.session_inputs.is_empty();
+            state.resume_required = !state.queue_item_ids.is_empty();
             (cancellation, run_snapshot)
         };
         if result.cancelling_run_id.is_some() && cancellation.is_none() {
@@ -235,7 +235,7 @@ impl AssistantRuntime {
         let mut state = session.lock_state()?;
         state.goal = None;
         state.goal_inputs.clear();
-        state.resume_required = !state.session_inputs.is_empty();
+        state.resume_required = !state.queue_item_ids.is_empty();
         drop(state);
         self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
             session_id: request.session_id,
@@ -326,6 +326,7 @@ impl AssistantRuntime {
                 cross_session: None,
                 channel_source: None,
                 skill_activation: None,
+                mcp_selection: None,
                 approval_mode,
                 message,
                 new_goal: None,
@@ -341,7 +342,7 @@ impl AssistantRuntime {
         let projection = {
             let mut state = session.lock_state()?;
             state.goal = Some(resumed);
-            project_accepted_input(&mut state, accepted)
+            project_accepted_input(&mut state, accepted, None)
         };
 
         // 事件发布和队列唤醒必须晚于内存投影，使观察者看到 RunAccepted 时已能读取完整状态。
@@ -400,7 +401,7 @@ impl AssistantRuntime {
                     session_id: request.session_id.clone(),
                     input_id: input_id.clone(),
                 })?;
-            if !state.session_inputs.contains(&input_id)
+            if !state.queue_item_ids.contains(&input_id)
                 || input.stored.state != crate::StoredInputState::Queued
                 || input.stored.origin != InputOrigin::User
                 || input.stored.goal_binding.is_some()
@@ -447,16 +448,16 @@ impl AssistantRuntime {
         let (snapshot, revision) = {
             let mut state = session.lock_state()?;
             let position = state
-                .session_inputs
+                .queue_item_ids
                 .iter()
                 .position(|candidate| candidate == &input_id)
                 .ok_or(RuntimeError::InternalStateUnavailable {
                     component: "held input queue position",
                 })?;
-            state.session_inputs.remove(position);
+            state.queue_item_ids.remove(position);
             state.goal_inputs.push_back(input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
-            state.resume_required = !state.session_inputs.is_empty();
+            state.resume_required = !state.queue_item_ids.is_empty();
             state.goal = Some(authoritative);
             state
                 .inputs
@@ -568,7 +569,7 @@ impl GoalSubmission {
             Self::None => Ok(None),
             Self::Start => prepare_goal_start(message, accepted_at_ms, None).map(Some),
             Self::Resume(goal) => {
-                let control = goal.resume(accepted_at_ms).map_err(|_| {
+                let control = (*goal).resume(accepted_at_ms).map_err(|_| {
                     RuntimeError::InternalStateUnavailable {
                         component: "Goal resume transition",
                     }

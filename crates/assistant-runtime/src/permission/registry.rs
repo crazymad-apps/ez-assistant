@@ -230,6 +230,38 @@ impl PermissionCoordinator {
         self.registry.snapshot_cohort(scopes)
     }
 
+    /// MCP 目录披露只过滤显式 Deny；Ask、Allow 和未匹配项仍可被模型发现。
+    /// 任一权限文件不可用时返回错误，由 Run 装配对 MCP 能力单独 fail closed。
+    pub(crate) fn mcp_tool_is_explicitly_denied(
+        &self,
+        scopes: &[PermissionFileScope],
+        variant: assistant_protocol::AgentVariant,
+        server_key: &assistant_protocol::McpServerKey,
+        tool_name: &str,
+    ) -> RuntimeResult<bool> {
+        let loads = self.snapshot(scopes)?;
+        if loads.iter().any(|load| !load.is_valid()) {
+            return Err(RuntimeError::PermissionFileInvalid);
+        }
+        Ok(loads.iter().any(|load| {
+            load.document.as_ref().is_some_and(|document| {
+                document.rules.iter().any(|rule| {
+                    rule.effect == super::PermissionEffect::Deny
+                        && rule.variants.contains(&variant)
+                        && matches!(
+                            &rule.matcher,
+                            super::PermissionMatcher::Mcp(matcher)
+                                if super::matcher::mcp_matcher_matches(
+                                    matcher,
+                                    server_key,
+                                    tool_name,
+                                )
+                        )
+                })
+            })
+        }))
+    }
+
     /// 将交互审批产生的一条或多条 exact Allow 作为一次 CAS 变更可靠写入。
     pub(crate) async fn append_allow_rules(
         &self,

@@ -20,7 +20,7 @@
   header { min-height: 48px; display: flex; align-items: center; padding: 0 18px; }
   h3 { margin: 0; font-size: var(--ez-font-large); }
   footer { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 18px; }
-  footer button { min-height: 32px; padding: 0 12px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text-secondary); background: var(--ez-surface); }
+  footer button { min-height: var(--ez-control-height); padding: 0 12px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text-secondary); background: var(--ez-surface); }
   footer button:disabled { opacity: 0.5; }
 }
 

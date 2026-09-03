@@ -1,0 +1,42 @@
+.control_result {
+  min-width: 0;
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  summary::-webkit-details-marker { display: none; }
+  summary:focus-visible { outline: 2px solid var(--ez-primary); outline-offset: 3px; }
+  small { font-size: var(--ez-font-small); }
+}
+
+.results {
+  display: grid;
+  gap: 8px;
+  // 竖线对齐标题图标中心，正文维持与标题文字相同的左边界。
+  margin-left: 6.5px;
+  border-left: 1px solid var(--ez-border-strong);
+  padding: 8px 0 8px 14.5px;
+  max-height: 240px;
+  overflow: auto;
+  overscroll-behavior: contain;
+
+  > p { margin: 0; }
+}
+
+.server_result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+
+  p { flex-basis: 100%; margin: 0; }
+}

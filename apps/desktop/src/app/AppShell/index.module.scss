@@ -52,9 +52,10 @@
 }
 
 .title_icon {
+  --ez-control-default-height: var(--ez-control-height-small);
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   place-items: center;
   border: 0;
   border-radius: var(--ez-radius-small);
@@ -241,9 +242,10 @@
 }
 
 .child_back {
+  --ez-control-default-height: var(--ez-control-height-small);
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   place-items: center;
   border: 0;
   border-radius: var(--ez-radius-small);
@@ -299,8 +301,9 @@
 }
 
 .child_cancel {
+  --ez-control-default-height: var(--ez-control-height-small);
   min-width: 48px;
-  height: 28px;
+  height: var(--ez-control-height);
   padding: 0 9px;
   border: 1px solid var(--ez-border);
   border-radius: var(--ez-radius-small);
@@ -327,7 +330,7 @@
   min-width: 0;
   max-width: 100%;
   flex: 0 1 auto;
-  height: 30px;
+  height: var(--ez-control-height);
   padding: 0 7px;
   border: 1px solid transparent;
   border-radius: var(--ez-radius-small);
@@ -398,10 +401,11 @@
   white-space: nowrap;
 }
 
-.clear_action {
-  border-top: 1px solid var(--ez-border);
-  margin-top: 4px;
-  padding-top: 8px;
+.session_menu_separator {
+  // 独立画线，不受菜单项的圆角与悬停背景影响。
+  height: 1px;
+  margin: 4px 0;
+  background: var(--ez-border);
 }
 
 .session_header_error {
@@ -445,8 +449,8 @@
 .session_navigation > button,
 .session_actions button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   place-items: center;
   border: 0;
   border-radius: var(--ez-radius-small);

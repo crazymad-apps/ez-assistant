@@ -74,7 +74,7 @@
   margin: 2px 0 24px;
 
   button {
-    padding: 4px 7px;
+    padding: 0 7px;
     border: 0;
     border-radius: var(--ez-radius-small);
     color: var(--ez-text-muted);
@@ -149,7 +149,7 @@
   strong { color: var(--ez-text-secondary); font-weight: 650; }
   span { padding: 2px 6px; border-radius: 999px; background: var(--ez-surface-muted); }
   button {
-    padding: 2px 5px;
+    padding: 0 5px;
     border: 0;
     color: var(--ez-primary);
     background: transparent;
@@ -232,12 +232,13 @@
 }
 
 .proxy_report_collapse {
+  --ez-control-default-height: var(--ez-control-height-small);
   display: flex;
-  min-height: 28px;
+  min-height: var(--ez-control-height);
   align-items: center;
   gap: 3px;
   margin: 5px auto 0;
-  padding: 3px 8px;
+  padding: 0 8px;
   border: 0;
   border-radius: 6px;
   color: var(--ez-primary);
@@ -259,13 +260,14 @@
   margin-bottom: 5px;
 
   button {
+    --ez-control-default-height: var(--ez-control-height-small);
     display: flex;
     min-width: 0;
     max-width: 260px;
-    min-height: 27px;
+    min-height: var(--ez-control-height);
     align-items: center;
     gap: 5px;
-    padding: 3px 8px;
+    padding: 0 8px;
     border: 1px solid var(--ez-border);
     border-radius: 7px;
     color: var(--ez-text-secondary);
@@ -284,7 +286,7 @@
   gap: 5px;
   margin-bottom: 5px;
 
-  button { display: flex; min-width: 0; max-width: 300px; min-height: 27px; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--ez-primary-border); border-radius: 7px; color: var(--ez-primary); background: var(--ez-primary-soft); }
+  button { --ez-control-default-height: var(--ez-control-height-small); display: flex; min-width: 0; max-width: 300px; min-height: var(--ez-control-height); align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--ez-primary-border); border-radius: 7px; color: var(--ez-primary); background: var(--ez-primary-soft); }
   svg { flex: 0 0 auto; }
   span { overflow: hidden; font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 }
@@ -366,7 +368,7 @@
     opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
     transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
 
-  button { display: flex; min-height: 30px; align-items: center; gap: 6px; padding: 0 9px; border: 0; color: var(--ez-text-secondary); background: transparent; }
+  button { display: flex; min-height: var(--ez-control-height); align-items: center; gap: 6px; padding: 0 9px; border: 0; color: var(--ez-text-secondary); background: transparent; }
   button:hover { color: var(--ez-primary); background: var(--ez-primary-soft); }
 }
 
@@ -434,9 +436,10 @@
 }
 
 .tool_row {
+  --ez-control-default-height: var(--ez-control-height-small); height: auto;
   display: flex;
   width: calc(100% + 12px);
-  min-height: 26px;
+  min-height: var(--ez-control-height-small);
   min-width: 0;
   align-items: center;
   gap: 6px;
@@ -472,9 +475,10 @@
   color: var(--ez-text-muted);
 
   button {
+    --ez-control-default-height: var(--ez-control-height-small);
     display: grid;
-    width: 27px;
-    height: 27px;
+    width: var(--ez-control-height);
+    height: var(--ez-control-height);
     place-items: center;
     border: 0;
     border-radius: 5px;
@@ -488,9 +492,10 @@
 }
 
 .collapsed_message {
+  height: auto;
   display: grid;
   width: 100%;
-  min-height: 36px;
+  min-height: var(--ez-control-height);
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
@@ -561,7 +566,8 @@
   grid-template-columns: minmax(0, 1fr);
 
   button {
-    min-height: 30px;
+    height: auto;
+    min-height: var(--ez-control-height);
     padding: 3px 7px;
   }
 
@@ -604,10 +610,11 @@
   align-items: center;
 
   button {
+    --ez-control-default-height: var(--ez-control-height-large); height: auto;
     display: grid;
     width: 100%;
     min-width: 0;
-    min-height: 39px;
+    min-height: var(--ez-control-height);
     grid-template-columns: 7px minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 8px;
@@ -665,8 +672,8 @@
   right: max(16px, var(--conversation-horizontal-padding));
   bottom: 16px;
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   place-items: center;
   border: 1px solid var(--ez-border-strong);
   border-radius: 50%;

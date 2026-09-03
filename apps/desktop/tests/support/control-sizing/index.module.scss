@@ -1,0 +1,9 @@
+.fixture { width: min(900px, 100%); padding: 20px; }
+.fixture h1 { font-size: var(--ez-font-large); }
+.fixture h2 { margin: 16px 0 8px; font-size: var(--ez-font-base); }
+.fixture nav { display: flex; gap: 8px; }
+.row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: center; gap: 8px; margin-bottom: 8px; }
+.row > button { display: inline-flex; align-items: center; justify-content: center; }
+.row [aria-invalid="true"] { border: 2px solid var(--ez-danger); }
+.row > button:hover { border-width: 2px; }
+@media (max-width: 760px) { .row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

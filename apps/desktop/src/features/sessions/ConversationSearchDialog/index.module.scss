@@ -46,7 +46,7 @@
     > div { display: flex; gap: 8px; }
 
     button {
-      min-height: 32px;
+      min-height: var(--ez-control-height);
       padding: 0 12px;
       border: 1px solid var(--ez-border-strong);
       border-radius: var(--ez-radius-small);
@@ -61,8 +61,8 @@
 
 .close_button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: var(--ez-control-height);
+  height: var(--ez-control-height);
   flex: 0 0 auto;
   place-items: center;
   border: 0;

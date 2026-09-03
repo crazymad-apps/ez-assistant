@@ -22,8 +22,9 @@ use agent_types::{
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, DeviceId,
-    GoalId, IdempotencyKey, InputId, MessageFeedback, ModelKey, PermissionDiagnosticCode, RunId,
-    RunStatus, SessionHistoryCleanupStatus, SessionId, SessionTitleOrigin, TodoItemId, WorkspaceId,
+    GoalId, IdempotencyKey, InputId, McpServerKey, MessageFeedback, ModelKey,
+    PermissionDiagnosticCode, RunId, RunStatus, SessionHistoryCleanupStatus, SessionId,
+    SessionTitleOrigin, TodoItemId, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
@@ -46,10 +47,10 @@ use assistant_runtime::{
     SkillMetadata, SkillName, SkillNameState, SkillNameStateChange, SkillSource, StoreErrorKind,
     StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState, StoredGoal,
     StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredRunSettlement, StoredSession,
-    StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkspaceRemoval, WorkspaceUpdate,
+    StoredGoalSettlementEffect, StoredGoalState, StoredMcpSelection, StoredRunSettlement,
+    StoredSession, StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem,
+    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
+    WorkPlanMutation, WorkspaceRemoval, WorkspaceUpdate,
 };
 use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
@@ -370,6 +371,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: controller_message.clone(),
             new_goal: None,
@@ -430,6 +432,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             cross_session: Some(binding.clone()),
             channel_source: None,
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: delivery_message,
             new_goal: None,
@@ -460,6 +463,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: raw_user_message("m-user-takeover", "user request"),
             new_goal: None,
@@ -526,6 +530,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: controller_message.clone(),
             new_goal: None,
@@ -596,6 +601,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
             payload: vec![objective_part],
             payload_hash: objective_hash,
         },
+        mcp_server_key: None,
         state: StoredGoalState::Running,
         pause_reason: None,
         generation: 1,
@@ -641,6 +647,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
             cross_session: Some(envelope.clone()),
             channel_source: None,
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message,
             new_goal: Some(goal),
@@ -702,6 +709,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: source_message.clone(),
             new_goal: None,
@@ -760,6 +768,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         }),
         channel_source: None,
         skill_activation: None,
+        mcp_selection: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: report_message,
         new_goal: None,
@@ -915,6 +924,8 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1012,6 +1023,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: Some(activation.clone()),
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: message.clone(),
             new_goal: None,
@@ -1072,6 +1084,8 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: vec![fork_activation.clone()],
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1245,6 +1259,8 @@ fn committed_model_requests_update_durable_usage_and_fork_starts_from_zero() {
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1423,6 +1439,8 @@ fn fork_copies_tool_images_without_cross_session_links() {
             attachments: Vec::new(),
             tool_images: vec![reference.clone()],
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -1491,6 +1509,8 @@ fn failed_tool_image_fork_rolls_back_target_session_directory() {
         attachments: Vec::new(),
         tool_images: vec![reference],
         skill_activations: Vec::new(),
+        mcp_selections: Vec::new(),
+        session_commands: Vec::new(),
         work_plan: None,
         goal: None,
     });
@@ -1802,6 +1822,7 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -1977,6 +1998,169 @@ fn open_engine(root: &TempDir) -> StorageEngine {
 }
 
 #[test]
+fn mcp_command_idempotency_does_not_decode_unrelated_session_rows() {
+    use assistant_protocol::SessionCommand;
+    use assistant_runtime::NewStoredSessionCommand;
+
+    let root = TempDir::new().expect("isolated command store");
+    let mut engine = open_engine(&root);
+    for name in ["unrelated", "target"] {
+        engine
+            .create_session(new_session(name, &engine.sessions_directory))
+            .expect("session");
+    }
+    let request = |name: &str| NewStoredSessionCommand {
+        input_id: InputId::new(format!("{name}-input")).expect("input"),
+        session_id: session_id(name),
+        idempotency_key: Some(IdempotencyKey::new("same-key").expect("key")),
+        user_message_id: MessageId::new(format!("{name}-message")).expect("message"),
+        agent_variant: assistant_protocol::AgentVariant::Build,
+        command: SessionCommand::McpRefresh { server: None },
+        accepted_at_ms: 2000,
+    };
+    engine
+        .accept_session_command(request("unrelated"))
+        .expect("unrelated input");
+    // 只污染隔离夹具：证明在线操作不解析其他 Session，启动全量恢复仍严格报错。
+    engine
+        .connection
+        .execute(
+            "UPDATE inputs SET command_json = 'invalid' WHERE input_id = 'unrelated-input'",
+            [],
+        )
+        .expect("fixture corruption");
+    assert!(engine.load_session_commands().is_err());
+    assert!(
+        !engine
+            .accept_session_command(request("target"))
+            .expect("target accepted")
+            .is_duplicate
+    );
+    assert!(
+        engine
+            .accept_session_command(request("target"))
+            .expect("target duplicate")
+            .is_duplicate
+    );
+    let count: i64 = engine
+        .connection
+        .query_row("SELECT COUNT(*) FROM inputs", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn mcp_command_is_durable_without_run_and_commit_is_idempotent() {
+    use assistant_protocol::{McpRefreshControlResultSnapshot, McpRefreshOutcome, SessionCommand};
+    use assistant_runtime::{
+        NewStoredSessionCommand, SessionCommandCommit, StoredSessionCommandState,
+    };
+
+    let root = TempDir::new().expect("isolated command store");
+    let mut engine = open_engine(&root);
+    let session = session_id("command-session");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("session");
+    let request = NewStoredSessionCommand {
+        input_id: InputId::new("command-input").expect("input"),
+        session_id: session.clone(),
+        idempotency_key: Some(IdempotencyKey::new("command-key").expect("key")),
+        user_message_id: MessageId::new("command-message").expect("message"),
+        agent_variant: assistant_protocol::AgentVariant::Build,
+        command: SessionCommand::McpRefresh { server: None },
+        accepted_at_ms: 2000,
+    };
+    let accepted = engine
+        .accept_session_command(request.clone())
+        .expect("accept");
+    assert!(!accepted.is_duplicate);
+    assert!(
+        engine
+            .accept_session_command(request.clone())
+            .expect("duplicate")
+            .is_duplicate
+    );
+    let recovered = engine.load_runtime().expect("snapshot");
+    assert!(recovered.runs.is_empty());
+    assert_eq!(recovered.session_commands.len(), 1);
+    assert!(
+        engine
+            .load_conversation(&session)
+            .expect("conversation")
+            .messages
+            .is_empty()
+    );
+    drop(engine);
+
+    let mut engine = open_engine(&root);
+    assert_eq!(
+        engine.load_session_commands().expect("recover")[0].state,
+        StoredSessionCommandState::Queued
+    );
+    let ConversationMessage::User(mut message) =
+        user_message("command-message", "{RUNTIME_CONTROL_RESULT_V1} refreshed")
+    else {
+        panic!("user message")
+    };
+    message.origin = UserMessageOrigin::Runtime;
+    let commit = SessionCommandCommit {
+        operation_id: "command-commit".to_owned(),
+        input_id: request.input_id,
+        session_id: session.clone(),
+        result: McpRefreshControlResultSnapshot {
+            outcome: McpRefreshOutcome::Success,
+            servers: Vec::new(),
+        },
+        message,
+        committed_at_ms: 3000,
+    };
+    engine
+        .commit_session_command(commit.clone())
+        .expect("commit");
+    engine
+        .commit_session_command(commit.clone())
+        .expect("idempotent commit");
+    let mut conflicting = commit;
+    conflicting.message.parts.clear();
+    assert_eq!(
+        engine
+            .commit_session_command(conflicting)
+            .expect_err("reject changed result body")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+    drop(engine);
+
+    let mut engine = open_engine(&root);
+    let recovered = engine.load_runtime().expect("committed recovery");
+    assert_eq!(
+        recovered.session_commands[0].state,
+        StoredSessionCommandState::Committed
+    );
+    assert!(recovered.runs.is_empty());
+    assert_eq!(recovered.sessions[0].body_generation, 2);
+    assert_eq!(recovered.sessions[0].message_count, 1);
+    assert_eq!(
+        engine
+            .load_conversation(&session)
+            .expect("one message")
+            .messages
+            .len(),
+        1
+    );
+    for (table, expected) in [("inputs", 1), ("runs", 0), ("body_appends", 0)] {
+        let count: i64 = engine
+            .connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("exact count");
+        assert_eq!(count, expected, "{table}");
+    }
+}
+
+#[test]
 fn persona_and_pinned_memory_use_cas_and_survive_reopen() {
     let root = TempDir::new().expect("runtime home");
     let mut engine = open_engine(&root);
@@ -2137,6 +2321,7 @@ fn commit_completed_turn(
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -2188,6 +2373,19 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
         .create_session(new_session(source_id.as_str(), &sessions_directory))
         .expect("create source");
     commit_completed_turn(&mut engine, &source_id, "transfer", 2_000);
+    engine
+        .connection
+        .execute(
+            "INSERT INTO mcp_input_selections (
+                selection_id, session_id, input_id, message_id, server_key, display_name,
+                created_at_ms
+             ) VALUES (
+                'selection-transfer-source', ?1, 'input-transfer', 'user-transfer', 'github',
+                'GitHub', 2_000
+             )",
+            [source_id.as_str()],
+        )
+        .expect("insert source MCP selection");
     let source_generation = engine
         .connection
         .query_row(
@@ -2209,6 +2407,16 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: vec![StoredMcpSelection {
+                selection_id: "selection-transfer-fork".to_owned(),
+                session_id: forked_id.clone(),
+                input_id: None,
+                message_id: MessageId::new("user-transfer").expect("message id"),
+                server_key: McpServerKey::new("github").expect("server key"),
+                display_name: "GitHub".to_owned(),
+                created_at_ms: 2_000,
+            }],
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -2217,6 +2425,8 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
     assert_eq!(forked.session.body_generation, 1);
     assert_default_session_permissions(&forked.session);
     assert_eq!(forked.conversation, source_conversation);
+    assert_eq!(forked.mcp_selections.len(), 1);
+    assert!(forked.mcp_selections[0].input_id.is_none());
     assert_eq!(
         engine
             .load_conversation(&forked.session.session_id)
@@ -2245,6 +2455,9 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
     let recovered = reopened.load_runtime().expect("recover runtime");
     assert_eq!(recovered.sessions.len(), 1);
     assert_eq!(recovered.sessions[0].session_id, forked_id);
+    assert_eq!(recovered.mcp_input_selections.len(), 1);
+    assert_eq!(recovered.mcp_input_selections[0].session_id, forked_id);
+    assert!(recovered.mcp_input_selections[0].input_id.is_none());
 }
 
 #[test]
@@ -2304,6 +2517,8 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
             }],
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -2623,6 +2838,7 @@ fn paired_device_and_controller_hosting_survive_restart_and_revoke_atomically() 
                 requested_output: OutputPreference::Audio,
             })),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: raw_user_message("message-device-durable", "设备输入"),
             new_goal: None,
@@ -2738,6 +2954,7 @@ fn paired_device_input_can_target_an_active_standard_session() {
                 requested_output: OutputPreference::Text,
             })),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: raw_user_message("message-device-standard", "设备输入普通会话"),
             new_goal: None,
@@ -3053,6 +3270,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
             payload: vec![objective_part],
             payload_hash: objective_hash,
         },
+        mcp_server_key: None,
         state: StoredGoalState::Running,
         pause_reason: None,
         generation: 1,
@@ -3086,6 +3304,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
         cross_session: None,
         channel_source: Some(desktop_channel_source()),
         skill_activation: None,
+        mcp_selection: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: message.clone(),
         new_goal: Some(goal.clone()),
@@ -3168,6 +3387,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             payload: vec![objective_part],
             payload_hash: objective_hash,
         },
+        mcp_server_key: None,
         state: StoredGoalState::Running,
         pause_reason: None,
         generation: 1,
@@ -3202,6 +3422,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: first_message,
             new_goal: Some(goal.clone()),
@@ -3316,6 +3537,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: held_message.clone(),
             new_goal: None,
@@ -3480,6 +3702,7 @@ fn running_goal_is_durably_paused_once_during_recovery() {
             cross_session: None,
             channel_source: None,
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: UserMessage {
                 id: MessageId::new("recovery-continuation-message").expect("message id"),
@@ -3563,6 +3786,8 @@ fn work_plan_fork_is_independent_and_session_delete_cascades() {
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: Some(source_plan.clone()),
             goal: None,
         })
@@ -3676,6 +3901,8 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
             attachments: Vec::new(),
             tool_images: Vec::new(),
             skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
             work_plan: None,
             goal: None,
         })
@@ -4638,6 +4865,7 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
                 cross_session: None,
                 channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
+                mcp_selection: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -4948,6 +5176,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -6323,6 +6552,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 cross_session: None,
                 channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
+                mcp_selection: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -6400,6 +6630,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 cross_session: None,
                 channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
+                mcp_selection: None,
                 new_goal: None,
                 resumed_goal: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -6492,6 +6723,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             new_goal: None,
             resumed_goal: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
@@ -6778,6 +7010,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
                 cross_session: None,
                 channel_source: Some(desktop_channel_source()),
                 skill_activation: None,
+                mcp_selection: None,
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
                 message,
                 new_goal: None,
@@ -7921,6 +8154,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: source_message.clone(),
             new_goal: None,
@@ -7980,6 +8214,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         cross_session: Some(report_binding.clone()),
         channel_source: None,
         skill_activation: None,
+        mcp_selection: None,
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         message: report_message,
         new_goal: None,
@@ -8121,6 +8356,7 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
             cross_session: None,
             channel_source: Some(desktop_channel_source()),
             skill_activation: None,
+            mcp_selection: None,
             approval_mode: assistant_protocol::ApprovalMode::Ask,
             message: queued,
             new_goal: None,
@@ -8398,4 +8634,138 @@ async fn recall_queries_share_the_bounded_store_worker() {
     assert_eq!(first.expect("first worker search").hits.len(), 2);
     assert_eq!(second.expect("second worker search").hits.len(), 2);
     store.shutdown().await.expect("shutdown recall worker");
+}
+
+#[test]
+fn mcp_command_rows_are_not_recovered_as_message_inputs() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-mcp-command-baseline");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    engine
+        .connection
+        .execute(
+            "INSERT INTO inputs (
+                input_id, session_id, user_message_id, state, input_kind, command_json,
+                accepted_at_ms, origin
+             ) VALUES (
+                'command-mcp-refresh', ?1, 'message-mcp-refresh', 'queued', 'command',
+                '{\"type\":\"mcp_refresh\",\"payload\":{}}', 2_000, 'runtime'
+             )",
+            [session.as_str()],
+        )
+        .expect("insert command fixture");
+    drop(engine);
+
+    let engine = open_engine(&root);
+    assert!(
+        engine
+            .load_inputs()
+            .expect("load message inputs")
+            .is_empty(),
+        "a Command must never be projected as a message Input with a Run"
+    );
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE input_id = 'command-mcp-refresh'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("command Run count"),
+        0
+    );
+}
+
+#[test]
+fn mcp_selection_and_goal_identity_recover_without_a_catalog_copy() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let session = session_id("s-mcp-selection-baseline");
+    engine
+        .create_session(new_session(session.as_str(), &engine.sessions_directory))
+        .expect("create session");
+    engine
+        .connection
+        .execute(
+            "INSERT INTO inputs (
+                input_id, session_id, user_message_id, state, accepted_at_ms
+             ) VALUES ('input-mcp-selection', ?1, 'message-mcp-selection', 'committed', 2_000)",
+            [session.as_str()],
+        )
+        .expect("insert message input fixture");
+    engine
+        .connection
+        .execute(
+            "INSERT INTO mcp_input_selections (
+                selection_id, session_id, input_id, message_id, server_key, display_name,
+                created_at_ms
+             ) VALUES (
+                'selection-1', ?1, 'input-mcp-selection', 'message-mcp-selection', 'github',
+                'GitHub', 2_000
+             )",
+            [session.as_str()],
+        )
+        .expect("insert selection fixture");
+
+    let objective_part = StoredGoalObjectivePart::Text(TextPart {
+        id: PartId::new("goal-mcp-text").expect("part id"),
+        text: "use selected server".to_owned(),
+    });
+    let objective_hash = format!(
+        "sha256-v1:{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&vec![objective_part.clone()]).expect("encode objective")
+        )
+    );
+    let goal = StoredGoal {
+        goal_id: GoalId::new("goal-mcp-selection").expect("goal id"),
+        session_id: session.clone(),
+        objective: StoredGoalObjective {
+            source_message_id: MessageId::new("message-mcp-selection").expect("message id"),
+            payload: vec![objective_part],
+            payload_hash: objective_hash,
+        },
+        mcp_server_key: Some(McpServerKey::new("github").expect("server key")),
+        state: StoredGoalState::Running,
+        pause_reason: None,
+        generation: 1,
+        turn: 1,
+        budget: StoredGoalBudget {
+            max_runs: 20,
+            max_total_tokens: 500_000,
+            max_consecutive_failures: 3,
+            used_runs: 0,
+            used_total_tokens: 0,
+            usage_complete: true,
+        },
+        consecutive_failures: 0,
+        created_at_ms: 2_000,
+        updated_at_ms: 2_000,
+        completed_at_ms: None,
+    };
+    let transaction = engine.connection.transaction().expect("goal transaction");
+    super::goal::insert_new_goal(&transaction, &goal).expect("insert goal");
+    transaction.commit().expect("commit goal");
+    drop(engine);
+
+    let engine = open_engine(&root);
+    let selections = engine
+        .load_mcp_input_selections()
+        .expect("recover selections");
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections[0].server_key.as_str(), "github");
+    let encoded = serde_json::to_string(&selections[0]).expect("encode selection");
+    assert!(!encoded.contains("tools"));
+    assert!(!encoded.contains("catalog"));
+    assert_eq!(
+        engine.load_all_goals().expect("recover goals")[0]
+            .mcp_server_key
+            .as_ref()
+            .map(McpServerKey::as_str),
+        Some("github")
+    );
 }

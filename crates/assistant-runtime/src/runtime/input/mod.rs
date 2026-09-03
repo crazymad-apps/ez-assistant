@@ -2,8 +2,10 @@
 
 mod commands;
 pub(crate) mod projection;
+mod session_command;
 mod submission;
 
+use session_command::execute_session_command;
 pub(in crate::runtime) use submission::automatic_session_title;
 
 use std::{
@@ -51,9 +53,24 @@ struct QueueDriverContext {
     store: Arc<dyn RuntimeStore>,
     output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
+    mcp_registry: Arc<crate::mcp::McpRegistry>,
+    mcp_config_store: Arc<crate::mcp::McpConfigStore>,
+    mcp_image_materializer: Arc<dyn crate::McpImageMaterializer>,
     events: ObservationCoordinator,
     root_cancellation: CancellationToken,
     tasks: Arc<super::tasks::RuntimeTasks>,
+}
+
+fn with_disclosure_context(
+    mut conversation: agent_types::ConversationSnapshot,
+    context: Option<&agent_types::UserMessage>,
+) -> agent_types::ConversationSnapshot {
+    if let Some(context) = context {
+        conversation
+            .messages
+            .push(ConversationMessage::User(context.clone()));
+    }
+    conversation
 }
 
 impl AssistantRuntime {
@@ -82,6 +99,9 @@ impl AssistantRuntime {
             store: self.store.clone(),
             output_dispatcher: self.output_dispatcher.clone(),
             recall_reference_codec: self.recall_reference_codec.clone(),
+            mcp_registry: self.mcp_service.registry.clone(),
+            mcp_config_store: self.mcp_service.config_store.clone(),
+            mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             events: self.event_sender.clone(),
             root_cancellation: self.root_cancellation.clone(),
             tasks: self.tasks.clone(),
@@ -211,7 +231,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             return;
         }
         let mutation = session.mutation().await;
-        let next = {
+        let (input_id, command, queue_revision) = {
             let mut state = match session.lock_state() {
                 Ok(state) => state,
                 Err(_) => return,
@@ -223,6 +243,34 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             let Some(input_id) = state.next_runnable_input() else {
                 state.is_queue_driver_running = false;
                 return;
+            };
+            let command = state.commands.get(&input_id).cloned();
+            if command.is_some() {
+                state.executing_command = Some(input_id.clone());
+                state.queue_revision = state.queue_revision.saturating_add(1);
+            }
+            (input_id, command, state.queue_revision)
+        };
+        if let Some(command) = command {
+            let _ = context.events.send(RuntimeEvent::QueueChanged {
+                session_id: session.id().clone(),
+                revision: queue_revision,
+            });
+            // Command 持有唯一消费位，但网络刷新不占用接纳门禁；新消息仍可实时可靠入队。
+            drop(mutation);
+            if execute_session_command(&context, &session, command)
+                .await
+                .is_err()
+            {
+                fault_driver(&session);
+                return;
+            }
+            continue;
+        }
+        let next = {
+            let mut state = match session.lock_state() {
+                Ok(state) => state,
+                Err(_) => return,
             };
             let Some(input) = state.inputs.get(&input_id).cloned() else {
                 fault_locked_driver(&mut state);
@@ -255,6 +303,8 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     recall_reference_codec: context.recall_reference_codec.clone(),
                     controller_tools,
                     output_dispatcher: context.output_dispatcher.clone(),
+                    mcp_registry: context.mcp_registry.clone(),
+                    mcp_image_materializer: context.mcp_image_materializer.clone(),
                 },
                 RunAuthorizationInput {
                     permission_coordinator: context.permission_coordinator.clone(),
@@ -286,6 +336,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     goal_signal_latch,
                     skill_activation_latch,
                     can_speak,
+                    disclosure_context,
                 } = compiled.into_parts();
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     let plan = match session.lock_state() {
@@ -421,7 +472,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         .expect("loaded conversation")
                         .snapshot();
                     (
-                        ExecutionInput { conversation },
+                        ExecutionInput {
+                            conversation: with_disclosure_context(
+                                conversation,
+                                disclosure_context.as_ref(),
+                            ),
+                        },
                         cancellation,
                         queue_revision,
                         state.body_generation,
@@ -480,6 +536,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         completion,
                         context.events.clone(),
                         model_diagnostics.clone(),
+                        context.mcp_registry.clone(),
                     )
                     .await;
                     let (consumption, compaction_reason) = match observed.outcome.as_ref() {
@@ -541,7 +598,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                     let Some(continued_input) =
                                         session.lock_state().ok().and_then(|state| {
                                             state.journal.as_ref().map(|journal| ExecutionInput {
-                                                conversation: journal.snapshot(),
+                                                conversation: with_disclosure_context(
+                                                    journal.snapshot(),
+                                                    disclosure_context.as_ref(),
+                                                ),
                                             })
                                         })
                                     else {
@@ -591,7 +651,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     let Some(reason) = compaction_reason else {
                         input = match session.lock_state().ok().and_then(|state| {
                             state.journal.as_ref().map(|journal| ExecutionInput {
-                                conversation: journal.snapshot(),
+                                conversation: with_disclosure_context(
+                                    journal.snapshot(),
+                                    disclosure_context.as_ref(),
+                                ),
                             })
                         }) {
                             Some(input) => input,
@@ -633,7 +696,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     {
                         Ok(replacement) => {
                             input = ExecutionInput {
-                                conversation: replacement,
+                                conversation: with_disclosure_context(
+                                    replacement,
+                                    disclosure_context.as_ref(),
+                                ),
                             };
                         }
                         Err(error) if error.is_cancelled() || cancellation.is_cancelled() => {
