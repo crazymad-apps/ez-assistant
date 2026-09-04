@@ -1,0 +1,140 @@
+{
+  "status": "passed",
+  "url": "http://127.0.0.1:57474",
+  "steps": [
+    {
+      "step": 1,
+      "name": "browser_navigate",
+      "passed": true
+    },
+    {
+      "step": 2,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 3,
+      "name": "browser_click",
+      "passed": true
+    },
+    {
+      "step": 4,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 5,
+      "name": "browser_type",
+      "passed": true
+    },
+    {
+      "step": 6,
+      "name": "browser_press_key",
+      "passed": true
+    },
+    {
+      "step": 7,
+      "name": "browser_fill_form",
+      "passed": true
+    },
+    {
+      "step": 8,
+      "name": "browser_click",
+      "passed": true
+    },
+    {
+      "step": 9,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 10,
+      "name": "browser_wait_for",
+      "passed": true
+    },
+    {
+      "step": 11,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 12,
+      "name": "browser_take_screenshot",
+      "passed": true
+    },
+    {
+      "step": 13,
+      "name": "browser_click",
+      "passed": true
+    },
+    {
+      "step": 14,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 15,
+      "name": "browser_click",
+      "passed": true
+    },
+    {
+      "step": 16,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 17,
+      "name": "browser_tabs",
+      "passed": true
+    },
+    {
+      "step": 18,
+      "name": "browser_tabs",
+      "passed": true
+    },
+    {
+      "step": 19,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 20,
+      "name": "browser_tabs",
+      "passed": true
+    },
+    {
+      "step": 21,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 22,
+      "name": "browser_close",
+      "passed": true
+    },
+    {
+      "step": 23,
+      "name": "browser_navigate",
+      "passed": true
+    },
+    {
+      "step": 24,
+      "name": "browser_snapshot",
+      "passed": true
+    },
+    {
+      "step": 25,
+      "name": "browser_close",
+      "passed": true
+    }
+  ],
+  "persistent_login": true,
+  "submissions": [
+    {
+      "name": "张小明",
+      "city": "hangzhou",
+      "confirm": true
+    }
+  ],
+  "initialization": "2024-11-05"
+}

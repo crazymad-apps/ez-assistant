@@ -232,7 +232,7 @@ async fn max_tool_calls_zero_settles_batch_without_dispatch() {
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 error_result("call_1", "tool call budget exceeded (limit 0)"),
             )),
         ]
@@ -370,11 +370,11 @@ async fn max_tool_calls_crossed_within_batch_settles_rest() {
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!({"date": "2026-07-27"})),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "tool call budget exceeded (limit 1)"),
             )),
         ]

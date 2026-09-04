@@ -1,0 +1,46 @@
+{
+  "date": "2026-09-04",
+  "status": "connected",
+  "server_key": "browser_current",
+  "configuration_change": [
+    "--executable-path",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  ],
+  "token_value_logged": false,
+  "runtime_refresh": "success",
+  "runtime_state": "connected",
+  "tool_count": 24,
+  "verification": {
+    "tool": "browser_tabs",
+    "action": "list",
+    "tab_count": 1,
+    "tab_titles_or_urls_logged": false
+  },
+  "database": {
+    "host": "local SQLite",
+    "file": "/Users/chenjiale/.ez-assistant/data/runtime.sqlite3",
+    "before": {
+      "sessions": 34,
+      "inputs": 200,
+      "runs": 194,
+      "session_history_operations": 4
+    },
+    "after": {
+      "sessions": 34,
+      "inputs": 201,
+      "runs": 194,
+      "session_history_operations": 4
+    },
+    "impact": "one mcp_refresh command Input; no Session or Run"
+  },
+  "backup": {
+    "file": "/Users/chenjiale/.ez-assistant/backups/mcp.json.20260904-014750.pre-executable-path",
+    "mode": "0600",
+    "sha256": "26347986ade94bca2b677f884b9e556b1eb2f67d81defc667c9400024eddd15a"
+  },
+  "remaining": [
+    "selected existing page state continuity",
+    "full current-browser task",
+    "active-call cancellation/timeout"
+  ]
+}

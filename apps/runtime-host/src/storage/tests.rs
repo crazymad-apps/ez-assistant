@@ -1329,10 +1329,18 @@ fn pending_legacy_usage_is_backfilled_once_from_the_authoritative_conversation()
 }
 
 fn tool_exchange() -> Vec<ConversationMessage> {
-    let call_id = ToolCallId::new("call-1").expect("tool call id");
+    tool_exchange_with_ids("assistant-tool", "call-1", "tool-result")
+}
+
+fn tool_exchange_with_ids(
+    assistant_id: &str,
+    call_id: &str,
+    tool_message_id: &str,
+) -> Vec<ConversationMessage> {
+    let call_id = ToolCallId::new(call_id).expect("tool call id");
     vec![
         ConversationMessage::Assistant(AssistantMessage {
-            id: MessageId::new("assistant-tool").expect("message id"),
+            id: MessageId::new(assistant_id).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
                 "fixture-model",
@@ -1359,7 +1367,7 @@ fn tool_exchange() -> Vec<ConversationMessage> {
             usage: None,
         }),
         ConversationMessage::Tool(ToolMessage {
-            id: MessageId::new("tool-result").expect("message id"),
+            id: MessageId::new(tool_message_id).expect("message id"),
             result: ToolResult {
                 call_id,
                 status: ToolResultStatus::Success,
@@ -5840,7 +5848,7 @@ fn startup_commits_ready_tool_exchange_with_its_recorded_results() {
             .load_conversation(&session_id("s-ready"))
             .expect("load recovered conversation")
             .messages,
-        tool_exchange()
+        tool_exchange_with_ids("assistant-tool", "call-1", "toolmsg_receipt-ready_1")
     );
     assert_eq!(
         reopened
@@ -5856,6 +5864,87 @@ fn startup_commits_ready_tool_exchange_with_its_recorded_results() {
             .query_row("SELECT COUNT(*) FROM pending_tool_starts", [], |row| row
                 .get::<_, i64>(0))
             .expect("count pending starts"),
+        0
+    );
+}
+
+#[test]
+fn startup_rewrites_legacy_ready_tool_id_that_conflicts_with_history() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-legacy-ready", "r-legacy-ready");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "append-prior-tool".to_owned(),
+            session_id: session_id("s-legacy-ready"),
+            run_id: run_id("r-legacy-ready"),
+            messages: tool_exchange_with_ids("assistant-prior", "call-prior", "toolmsg_1"),
+            message_step: Some(1),
+            created_at_ms: 1_400,
+        })
+        .expect("append prior exchange");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1_500
+             WHERE run_id = 'r-legacy-ready'",
+            [],
+        )
+        .expect("mark run running");
+    engine
+        .begin_tool_exchange(pending_tool_exchange(
+            "s-legacy-ready",
+            "r-legacy-ready",
+            "receipt-legacy-ready",
+        ))
+        .expect("begin tool exchange");
+    start_tool(
+        &mut engine,
+        "s-legacy-ready",
+        "r-legacy-ready",
+        "receipt-legacy-ready",
+    );
+    let legacy_results = tool_exchange_with_ids("unused", "call-1", "toolmsg_1")
+        .into_iter()
+        .filter_map(|message| match message {
+            ConversationMessage::Tool(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    engine
+        .connection
+        .execute(
+            "UPDATE pending_tool_exchanges SET state = 'ready', results_json = ?1
+             WHERE receipt_id = 'receipt-legacy-ready'",
+            [serde_json::to_string(&legacy_results).expect("encode legacy results")],
+        )
+        .expect("mark legacy ready fixture");
+    drop(engine);
+
+    let mut reopened = open_engine(&root);
+    let recovered = reopened
+        .load_runtime()
+        .expect("recover legacy ready exchange");
+    assert_eq!(recovered.runs[0].status, RunStatus::Running);
+    let mut expected = tool_exchange_with_ids("assistant-prior", "call-prior", "toolmsg_1");
+    expected.extend(tool_exchange_with_ids(
+        "assistant-tool",
+        "call-1",
+        "toolmsg_receipt-legacy-ready_1",
+    ));
+    assert_eq!(
+        reopened
+            .load_conversation(&session_id("s-legacy-ready"))
+            .expect("load recovered conversation")
+            .messages,
+        expected
+    );
+    assert_eq!(
+        reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM pending_tool_exchanges", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count pending"),
         0
     );
 }

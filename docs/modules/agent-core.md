@@ -48,8 +48,9 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；
   `complete_tool_exchange` 只有在可靠提交成功后才能请求通用的上下文改变 continuation，规范快照不得
   暴露 pending exchange。
-- Core 生成的 `ToolMessage.id` 必须相对输入的完整 Conversation 唯一。每个 Run 都会创建新的
-  Engine，因此不得只依赖执行内从 1 开始的计数器；后续 Run 必须避开历史 Run 已占用的 ID。
+- Core 生成的 `ToolMessage.id` 使用 `ExchangeReceipt + 批内序号` 作为命名空间，不扫描当前
+  Conversation。Recorder 必须保证同一规范 Conversation 中可共存的 exchange receipt 唯一且
+  稳定；compact、窗口裁剪或新建 Engine 后仍不能复用历史 ToolMessage ID。
 - 普通观察事件允许背压丢弃，唯一终态通过独立通道可靠交付；终态包括
   Completed、Failed、Cancelled、CompactionRequired 和 ContinuationRequired，均报告丢弃计数。
 - CompactionRequired 同时携带 Engine 自身统计的已消费 Step 与实际 dispatch 工具数；这些值属于
@@ -141,7 +142,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - 覆盖 Recorder begin/complete 失败与 pending 恢复、Authorizer Allow/Deny、授权等待中的
   取消 race、普通记忆工具多轮调用、工具取消清理完成和 Provider reasoning/tool-call
   往返保真。
-- 覆盖同一 Conversation 的后续执行继续调用工具，并断言新 ToolMessage 不复用历史 ID。
+- 覆盖当前执行投影中存在历史 ToolMessage 的后续调用，并断言新 ToolMessage 使用 exchange
+  receipt 命名空间，不依赖遍历可见历史分配 ID。
 - 事件顺序必须可断言，不依赖真实模型网络。
 - 可运行效果演示位于 `crates/agent-testkit/examples/engine_demo.rs`。
 

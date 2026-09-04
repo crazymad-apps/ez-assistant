@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "browser_dedicated": {
+      "command": "/ABSOLUTE/PATH/TO/node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/deps/node_modules/@playwright/mcp/cli.js",
+        "--browser",
+        "chrome",
+        "--user-data-dir",
+        "/ABSOLUTE/PATH/TO/browser-data/dedicated",
+        "--output-dir",
+        "/ABSOLUTE/PATH/TO/browser-data/output",
+        "--viewport-size",
+        "1100x760",
+        "--image-responses",
+        "allow"
+      ],
+      "displayName": "浏览器 · 专用",
+      "description": "独立数据目录的本地 Chrome。导航或切换标签后调用 browser_snapshot；截图回传图片时不要传 filename。",
+      "toolTimeoutMs": 15000
+    },
+    "browser_current": {
+      "command": "/ABSOLUTE/PATH/TO/node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/deps/node_modules/@playwright/mcp/cli.js",
+        "--extension",
+        "--executable-path",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "--output-dir",
+        "/ABSOLUTE/PATH/TO/browser-data/current-output",
+        "--image-responses",
+        "allow"
+      ],
+      "displayName": "浏览器 · 当前",
+      "description": "通过 Playwright Extension 连接用户选定的已有 Chrome 页面。需要安装扩展并确认连接。",
+      "toolTimeoutMs": 20000
+    }
+  }
+}

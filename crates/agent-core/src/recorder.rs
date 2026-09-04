@@ -33,8 +33,9 @@ pub struct RecordError {
 
 /// Recorder 为一个 pending tool exchange 返回的不透明标识。
 ///
-/// Core 只原样回传给同一 Recorder，不解释其中内容；Runtime 可用自己的 journal
-/// entry ID、事务序号或其他稳定标识实现。
+/// Core 使用 receipt 为该 exchange 的 ToolMessage ID 建立命名空间，并原样回传给同一
+/// Recorder，不解释其他内容。Recorder 必须保证同一规范 Conversation 中可共存的 exchange
+/// receipt 唯一且稳定；Runtime 可用自己的 journal entry ID、事务序号或其他稳定标识实现。
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct ExchangeReceipt(String);
@@ -70,8 +71,8 @@ pub struct ExchangeCompletion {
 pub trait ExecutionRecorder: Send + Sync {
     /// 工具副作用前持久化 pending exchange。
     ///
-    /// 成功返回的 receipt 必须稳定指向该 pending exchange；失败时不得留下对规范
-    /// 快照可见的 AssistantMessage。
+    /// 成功返回的 receipt 必须稳定指向该 pending exchange，并且不能与同一规范 Conversation
+    /// 中其他 exchange 的 receipt 重复；失败时不得留下对规范快照可见的 AssistantMessage。
     fn begin_tool_exchange<'a>(
         &'a self,
         step: u32,

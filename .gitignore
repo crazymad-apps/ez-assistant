@@ -2,6 +2,7 @@
 .DS_Store
 .idea/
 .vscode/
+.workbuddy/
 node_modules/
 dist/
 apps/desktop/src-tauri/binaries/

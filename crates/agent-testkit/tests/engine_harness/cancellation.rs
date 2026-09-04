@@ -199,22 +199,22 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
             LogEntry::RecordTool,
         ]
     );
-    // 落账：Assistant + 三个 ToolMessage（toolmsg_1..=3 确定性序号），配对完整。
+    // 落账：Assistant + 三个按 exchange receipt 命名的 ToolMessage，配对完整。
     let deltas = recorder.deltas();
     assert_eq!(
         deltas,
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!({"ok": true})),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "interrupted: execution cancelled"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_3",
+                "toolmsg_exchange_1_3",
                 error_result("call_3", "interrupted: execution cancelled"),
             )),
         ]
@@ -314,11 +314,11 @@ async fn cancel_during_authorize_hang_settles_batch() {
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 error_result("call_1", "interrupted: execution cancelled"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "interrupted: execution cancelled"),
             )),
         ]

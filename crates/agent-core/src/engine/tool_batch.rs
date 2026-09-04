@@ -505,9 +505,9 @@ impl Engine {
         results: Vec<ToolResult>,
     ) -> Result<ExchangeCompletion, RecordError> {
         let mut messages = Vec::with_capacity(results.len());
-        for result in results {
+        for (index, result) in results.into_iter().enumerate() {
             messages.push(ToolMessage {
-                id: self.next_tool_message_id()?,
+                id: tool_message_id(exchange, index)?,
                 result,
             });
         }
@@ -525,30 +525,6 @@ impl Engine {
             self.projection.push(ConversationMessage::Tool(message));
         }
         Ok(completion)
-    }
-
-    fn next_tool_message_id(&mut self) -> Result<MessageId, RecordError> {
-        loop {
-            self.tool_messages = self
-                .tool_messages
-                .checked_add(1)
-                .ok_or_else(|| RecordError {
-                    message: "tool message id sequence is exhausted".to_owned(),
-                })?;
-            let candidate =
-                MessageId::new(format!("toolmsg_{}", self.tool_messages)).map_err(|_| {
-                    RecordError {
-                        message: "tool message id could not be constructed".to_owned(),
-                    }
-                })?;
-            if self
-                .projection
-                .iter()
-                .all(|message| conversation_message_id(message) != &candidate)
-            {
-                return Ok(candidate);
-            }
-        }
     }
 
     /// 工具流式输出桥接：`ToolOutputChunk` → `AgentEvent::ToolOutput`。
@@ -580,14 +556,18 @@ fn parallel_group_end(resolved: &ResolvedToolBatch, start: usize) -> usize {
     end
 }
 
-fn conversation_message_id(message: &ConversationMessage) -> &MessageId {
-    match message {
-        ConversationMessage::System(message) => &message.id,
-        ConversationMessage::ContextSummary(message) => &message.id,
-        ConversationMessage::User(message) => &message.id,
-        ConversationMessage::Assistant(message) => &message.id,
-        ConversationMessage::Tool(message) => &message.id,
-    }
+/// Receipt 在工具副作用前已经可靠记录且每个 exchange 唯一；以它作为命名空间后，
+/// ToolMessage ID 不依赖当前上下文是否仍包含早期历史，也不会被 compact 或窗口裁剪复用。
+fn tool_message_id(
+    exchange: &ExchangeReceipt,
+    batch_index: usize,
+) -> Result<MessageId, RecordError> {
+    let sequence = batch_index.checked_add(1).ok_or_else(|| RecordError {
+        message: "tool message id sequence is exhausted".to_owned(),
+    })?;
+    MessageId::new(format!("toolmsg_{}_{sequence}", exchange.as_str())).map_err(|_| RecordError {
+        message: "tool message id could not be constructed".to_owned(),
+    })
 }
 
 fn completion_status(result: &ToolResult) -> ToolCompletionStatus {

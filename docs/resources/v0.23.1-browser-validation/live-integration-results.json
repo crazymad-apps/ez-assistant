@@ -1,0 +1,75 @@
+{
+  "date": "2026-09-04",
+  "runtime_home": "/Users/chenjiale/.ez-assistant",
+  "package": "@playwright/mcp@0.0.80",
+  "package_directory": "/Users/chenjiale/.ez-assistant/mcp-packages/playwright-mcp-0.0.80",
+  "config_file": "/Users/chenjiale/.ez-assistant/mcp.json",
+  "config_mode": "0600",
+  "backup_file": "/Users/chenjiale/.ez-assistant/backups/mcp.json.20260904-011030.pre-browser",
+  "backup_mode": "0600",
+  "backup_sha256": "0e550850c12f5c9d41c488bbb2b82ec1ae85572af555fcba80d35e0fe7811eae",
+  "server_count": 5,
+  "servers": [
+    {
+      "server_key": "blender",
+      "display_name": "Blender",
+      "runtime_state": "connected",
+      "tool_count": 22
+    },
+    {
+      "server_key": "browser_current",
+      "display_name": "浏览器 · 当前",
+      "runtime_state": "connected",
+      "tool_count": 24
+    },
+    {
+      "server_key": "browser_dedicated",
+      "display_name": "浏览器 · 专用",
+      "runtime_state": "connected",
+      "tool_count": 24
+    },
+    {
+      "server_key": "microsoft-learn",
+      "display_name": "microsoft-learn",
+      "runtime_state": "connected",
+      "tool_count": 3
+    },
+    {
+      "server_key": "pencil",
+      "display_name": "Pencil",
+      "runtime_state": "connected",
+      "tool_count": 13
+    }
+  ],
+  "needs_refresh": false,
+  "refresh_outcome": "success",
+  "refresh_session": {
+    "session_id": "s_BxmUfcCkB6JI",
+    "title": "浏览器 MCP 接入验证",
+    "message_count": 1
+  },
+  "database": {
+    "host": "local SQLite",
+    "file": "/Users/chenjiale/.ez-assistant/data/runtime.sqlite3",
+    "before": {
+      "sessions": 32,
+      "inputs": 182,
+      "runs": 179,
+      "session_history_operations": 4
+    },
+    "after": {
+      "sessions": 33,
+      "inputs": 183,
+      "runs": 179,
+      "session_history_operations": 4
+    },
+    "input_delta_explanation": "mcp_refresh is persisted as one input_kind=command row and does not create a Run"
+  },
+  "existing_servers_preserved": [
+    "blender",
+    "microsoft-learn",
+    "pencil"
+  ],
+  "extension_state": "connected after adding explicit Chrome executable path; browser_tabs(list) returned one tab without logging private details",
+  "current_browser_fix_evidence": "current-browser-fix-results.json"
+}

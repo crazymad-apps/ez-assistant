@@ -62,8 +62,6 @@ pub(crate) struct Engine {
     starting_step: std::num::NonZeroU32,
     /// 已实际 dispatch 的工具调用数（`max_tool_calls` 预检基数；Deny 不计入）。
     dispatched: u32,
-    /// 本次执行已尝试的 ToolMessage 序号，用于寻找 Conversation 中未占用的 `toolmsg_{n}`。
-    tool_messages: u32,
     /// 仅在当前 AgentExecution 内保留的重复调用与连续失败状态。
     guardrails: GuardrailState,
 }
@@ -97,7 +95,6 @@ impl Engine {
             steps: 0,
             starting_step,
             dispatched: 0,
-            tool_messages: 0,
             guardrails: GuardrailState::default(),
         }
     }

@@ -478,15 +478,15 @@ async fn repeated_enforce_stops_before_triggering_invocation_and_settles_batch()
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!(null))
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", expected_message),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_3",
+                "toolmsg_exchange_1_3",
                 error_result("call_3", expected_message),
             )),
         ]
@@ -763,15 +763,15 @@ async fn invalid_and_deny_count_as_failures_before_enforce() {
         vec![
             ConversationDelta::Assistant(turn1),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 error_result("call_1", "unknown tool: `missing`"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "denied by test"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_3",
+                "toolmsg_exchange_1_3",
                 error_result(
                     "call_3",
                     "guardrail enforced: ConsecutiveFailures reached threshold 2",

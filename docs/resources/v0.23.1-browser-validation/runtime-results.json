@@ -1,0 +1,121 @@
+{
+  "runtime_home": "/tmp/ez-browser-v0231-91lBBY/runtime-1788454622549",
+  "provider": "deterministic local fixture",
+  "native_ui": false,
+  "real_model": false,
+  "import_preview": [
+    "browser_current",
+    "browser_dedicated"
+  ],
+  "servers": [
+    {
+      "key": "browser_current",
+      "state": "connected",
+      "tools": 24
+    },
+    {
+      "key": "browser_dedicated",
+      "state": "connected",
+      "tools": 24
+    }
+  ],
+  "denied_navigation_requests": 0,
+  "image_reached_provider": true,
+  "preview": {
+    "status": 200,
+    "bytes": 45456,
+    "mime": "image/png"
+  },
+  "approvals": [
+    {
+      "scenario": "deny",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_navigate"
+      },
+      "decision": "deny"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_navigate"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_snapshot"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_type"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_snapshot"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_fill_form"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_click"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_snapshot"
+      },
+      "decision": "allow_once"
+    },
+    {
+      "scenario": "happy",
+      "identity": {
+        "server_key": "browser_dedicated",
+        "server_display_name": "浏览器 · 专用",
+        "tool_name": "browser_take_screenshot"
+      },
+      "decision": "allow_once"
+    }
+  ],
+  "submissions": [
+    {
+      "name": "运行时中文验证",
+      "city": "hangzhou",
+      "confirm": true
+    }
+  ],
+  "request_count": 11,
+  "status": "passed"
+}

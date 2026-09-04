@@ -103,11 +103,11 @@ async fn explicit_parallel_group_authorizes_and_executes_concurrently_in_origina
         vec![
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!({"tool": "first"})),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 success_result("call_2", json!({"tool": "second"})),
             )),
         ]
@@ -316,11 +316,11 @@ async fn denied_call_in_parallel_group_does_not_block_allowed_sibling() {
         vec![
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!({"tool": "allowed"})),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "denied by test"),
             )),
         ]
@@ -369,11 +369,11 @@ async fn started_record_failure_in_parallel_group_blocks_every_tool_side_effect(
         vec![
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 error_result("call_1", "tool execution start could not be recorded"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "tool execution start could not be recorded"),
             )),
         ]
@@ -431,11 +431,11 @@ async fn parallel_group_reserves_budget_before_starting_excess_calls() {
         vec![
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 success_result("call_1", json!({"tool": "first"})),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "tool call budget exceeded (limit 1)"),
             )),
         ]
@@ -499,11 +499,11 @@ async fn cancellation_waits_for_every_parallel_tool_cleanup_and_settles_the_grou
         vec![
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_1",
+                "toolmsg_exchange_1_1",
                 error_result("call_1", "interrupted: execution cancelled"),
             )),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_2",
                 error_result("call_2", "interrupted: execution cancelled"),
             )),
         ]

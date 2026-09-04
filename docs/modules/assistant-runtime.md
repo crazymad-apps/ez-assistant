@@ -255,6 +255,9 @@ Runtime Host 进程
 - Core 只新增实现无关的 `mark_tool_execution_started(receipt, call_id)` 可靠接缝；Runtime Recorder
   在实际 Tool SPI 前调用 Store，失败时不执行工具并形成错误 Tool Result。工具输出正文不复制到
   其他投影，完整结果仍由 Conversation Tool Message 保存。
+- Runtime Recorder 为每个 pending tool exchange 分配稳定随机 receipt；receipt 在同一规范
+  Conversation 中唯一，Core 以它和批内序号生成 ToolMessage ID。Host 启动恢复旧版 ready pending
+  时只规范化消息外层 ID，不重放工具、不改变 Call ID 或结果内容。
 
 ## v0.13.0 单层子任务执行边界
 

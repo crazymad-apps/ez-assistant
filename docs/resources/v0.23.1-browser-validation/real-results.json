@@ -1,0 +1,48 @@
+{
+  "provider": "existing default model",
+  "model_key": "deepseek-flash",
+  "runtime_home": "/tmp/ez-browser-v0231-91lBBY/real-runtime-1788454693822",
+  "native_ui": false,
+  "real_model": true,
+  "approvals": [
+    {
+      "tool": "browser_navigate",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_snapshot",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_fill_form",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_snapshot",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_click",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_snapshot",
+      "decision": "allow_once"
+    },
+    {
+      "tool": "browser_take_screenshot",
+      "decision": "allow_once"
+    }
+  ],
+  "run_status": "completed",
+  "submissions": [
+    {
+      "name": "真实模型验收",
+      "city": "hangzhou",
+      "confirm": true
+    }
+  ],
+  "screenshot_called": true,
+  "status": "passed",
+  "temporary_model_config_removed": true
+}

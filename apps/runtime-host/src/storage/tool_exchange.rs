@@ -350,7 +350,7 @@ impl StorageEngine {
         table: PendingTable,
     ) -> StorageResult<()> {
         let pending = self.load_pending_exchange(receipt_id, table)?;
-        let ready = match pending.state {
+        let mut ready = match pending.state {
             PendingState::Begun => {
                 let results = self.recovered_results(&pending)?;
                 let ready = ReadyExchangePayload {
@@ -366,6 +366,10 @@ impl StorageEngine {
                 .clone()
                 .ok_or_else(|| invalid_data("ready tool exchange has no payload"))?,
         };
+        // v0.23.0 可能在 compact 后按局部上下文重新生成 `toolmsg_1`。ready 结果已经
+        // 冻结真实工具输出，恢复时只把消息外层 ID 规范化到可靠 Receipt 命名空间，
+        // 不重放工具、不改 Call ID 或结果内容。
+        normalize_tool_message_ids(&pending.receipt, &mut ready.results)?;
         validate_exchange(&pending.assistant, &ready.results)?;
         validate_model_activations(
             &pending.target,
@@ -445,7 +449,7 @@ impl StorageEngine {
             .map_err(|source| {
                 internal_error("delegated child result could not be queried", source)
             })?;
-        let id = recovered_message_id(receipt_id, index)?;
+        let id = tool_message_id(receipt_id, index)?;
         let Some((child_task_id, status, final_message_id, error_code)) = row else {
             return Ok(delegation_error_result(
                 id,
@@ -925,7 +929,7 @@ fn recovered_unknown_result(
     started: bool,
 ) -> StorageResult<ToolMessage> {
     Ok(ToolMessage {
-        id: recovered_message_id(receipt_id, index)?,
+        id: tool_message_id(receipt_id, index)?,
         result: ToolResult {
             call_id: call.id.clone(),
             status: ToolResultStatus::Error,
@@ -942,8 +946,21 @@ fn recovered_unknown_result(
     })
 }
 
-fn recovered_message_id(receipt_id: &str, index: usize) -> StorageResult<MessageId> {
-    MessageId::new(format!("recovered-{receipt_id}-{}", index + 1))
+fn normalize_tool_message_ids(
+    receipt: &ExchangeReceipt,
+    results: &mut [ToolMessage],
+) -> StorageResult<()> {
+    for (index, message) in results.iter_mut().enumerate() {
+        message.id = tool_message_id(receipt.as_str(), index)?;
+    }
+    Ok(())
+}
+
+fn tool_message_id(receipt_id: &str, index: usize) -> StorageResult<MessageId> {
+    let sequence = index
+        .checked_add(1)
+        .ok_or_else(|| invalid_data("tool message id sequence is exhausted"))?;
+    MessageId::new(format!("toolmsg_{receipt_id}_{sequence}"))
         .map_err(|source| invalid_data_with_source("recovered tool message id is invalid", source))
 }
 

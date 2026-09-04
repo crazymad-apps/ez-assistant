@@ -266,7 +266,7 @@ async fn single_tool_round_trip_in_strict_side_effect_order() {
         recorder.deltas(),
         vec![
             ConversationDelta::Assistant(turn1.clone()),
-            ConversationDelta::Tool(tool_message("toolmsg_1", result.clone())),
+            ConversationDelta::Tool(tool_message("toolmsg_exchange_1_1", result.clone())),
         ]
     );
     // ToolResult 回填进下一轮请求的 conversation（Assistant 在前、Tool 在后）。
@@ -277,7 +277,7 @@ async fn single_tool_round_trip_in_strict_side_effect_order() {
         vec![
             ConversationMessage::User(user_input.clone()),
             ConversationMessage::Assistant(turn1),
-            ConversationMessage::Tool(tool_message("toolmsg_1", result)),
+            ConversationMessage::Tool(tool_message("toolmsg_exchange_1_1", result)),
         ]
     );
     // 配对完整。
@@ -361,8 +361,8 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
         recorder.deltas(),
         vec![
             ConversationDelta::Assistant(turn1.clone()),
-            ConversationDelta::Tool(tool_message("toolmsg_1", allow_result.clone())),
-            ConversationDelta::Tool(tool_message("toolmsg_2", deny_result.clone())),
+            ConversationDelta::Tool(tool_message("toolmsg_exchange_1_1", allow_result.clone())),
+            ConversationDelta::Tool(tool_message("toolmsg_exchange_1_2", deny_result.clone())),
         ]
     );
     // 事件：被拒绝的调用无 ToolStarted，只有 ToolCompleted{Failed}。
@@ -383,15 +383,15 @@ async fn same_batch_allow_and_deny_mix_settles_and_continues() {
         vec![
             ConversationMessage::User(user_input.clone()),
             ConversationMessage::Assistant(turn1),
-            ConversationMessage::Tool(tool_message("toolmsg_1", allow_result)),
-            ConversationMessage::Tool(tool_message("toolmsg_2", deny_result)),
+            ConversationMessage::Tool(tool_message("toolmsg_exchange_1_1", allow_result)),
+            ConversationMessage::Tool(tool_message("toolmsg_exchange_1_2", deny_result)),
         ]
     );
     assert_tool_pairing(&reconstruct(&user_input, &recorder.deltas()));
 }
 
 #[tokio::test]
-async fn later_execution_skips_tool_message_ids_already_used_by_the_conversation() {
+async fn tool_message_ids_use_the_exchange_receipt_instead_of_visible_history() {
     let log = OrderLog::new();
     let prior_user = UserMessage {
         origin: Default::default(),
@@ -447,7 +447,7 @@ async fn later_execution_skips_tool_message_ids_already_used_by_the_conversation
         vec![
             ConversationDelta::Assistant(current_assistant),
             ConversationDelta::Tool(tool_message(
-                "toolmsg_2",
+                "toolmsg_exchange_1_1",
                 success_result("call_current", json!({"value": 2})),
             )),
         ]
@@ -538,17 +538,17 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     let mut expected = history;
     expected.push(ConversationMessage::User(user_input.clone()));
     assert_eq!(requests[0].conversation.messages, expected);
-    // 第二轮：turn1 完整回填（reasoning / ProviderState 保真）+ toolmsg_1。
+    // 第二轮：turn1 完整回填（reasoning / ProviderState 保真）+ 第一批工具结果。
     expected.push(ConversationMessage::Assistant(turn1.clone()));
     expected.push(ConversationMessage::Tool(tool_message(
-        "toolmsg_1",
+        "toolmsg_exchange_1_1",
         success_result("call_1", json!({"date": "2026-07-27"})),
     )));
     assert_eq!(requests[1].conversation.messages, expected);
-    // 第三轮：turn2 + toolmsg_2。
+    // 第三轮：turn2 + 第二批工具结果。
     expected.push(ConversationMessage::Assistant(turn2.clone()));
     expected.push(ConversationMessage::Tool(tool_message(
-        "toolmsg_2",
+        "toolmsg_exchange_2_1",
         success_result("call_2", json!({"time": "10:00"})),
     )));
     assert_eq!(requests[2].conversation.messages, expected);

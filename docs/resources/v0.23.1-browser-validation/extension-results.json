@@ -1,0 +1,17 @@
+{
+  "mode": "existing Chrome via extension",
+  "browser_installed": true,
+  "init": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "Playwright",
+      "version": "1.63.0-alpha-2026-08-31"
+    }
+  },
+  "tool_count": 24,
+  "isError": true,
+  "error": "### Error\nError: Playwright Extension not found in \"/Users/chenjiale/Library/Application Support/Google/Chrome\". Install it from https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm, or set the PLAYWRIGHT_MCP_EXECUTABLE_PATH environment variable to use a browser at a custom location."
+}
