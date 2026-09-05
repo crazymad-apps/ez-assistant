@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "../../components/Icon";
 import { Tooltip } from "../../components/Tooltip";
 import { usePresence } from "../../components/Presence";
-import { ContextPanel } from "../../features/context-panel/ContextPanel";
+import { ResourceWorkspace } from "../../features/resource-workspace/ResourceWorkspace";
 import { DesktopLifecycleDialog } from "../../features/desktop-lifecycle/DesktopLifecycleDialog";
 import { ComposerDock } from "../../features/composer/ComposerDock";
 import { ConversationView } from "../../features/conversation/ConversationView";
@@ -43,6 +43,7 @@ export const AppShell = observer(function AppShell() {
   const navigation = store.navigation;
   const workspace_editor_presence = usePresence(store.workspace_editor !== null, 120);
   const retained_workspace_editor_ref = useRef(store.workspace_editor);
+  const overlay_root_ref = useRef<HTMLDivElement>(null);
   if (store.workspace_editor) retained_workspace_editor_ref.current = store.workspace_editor;
 
   useEffect(() => {
@@ -138,7 +139,7 @@ export const AppShell = observer(function AppShell() {
           </div>
         </section>
         {navigation.effective_right_sidebar_open && <SidebarResizeHandle side="right" />}
-        {navigation.effective_right_sidebar_open && <ContextPanel />}
+        <ResourceWorkspace hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />
       </div>
       <SettingsDialog />
       <DesktopLifecycleDialog />
@@ -153,7 +154,7 @@ export const AppShell = observer(function AppShell() {
           presence_state={workspace_editor_presence.state}
         />
       )}
-      <div id="overlay-root" />
+      <div id="overlay-root" ref={overlay_root_ref} />
     </main>
   );
 });
@@ -176,7 +177,7 @@ const SidebarResizeHandle = observer(function SidebarResizeHandle(props: Readonl
   const maximum = props.side === "left"
     ? navigation.left_sidebar_current_max_width
     : navigation.right_sidebar_current_max_width;
-  const label = props.side === "left" ? "会话栏" : "当前上下文栏";
+  const label = props.side === "left" ? "会话栏" : "资源栏";
 
   function announce(next_width: number) {
     setAnnouncement(`${label}宽度 ${Math.round(next_width)} 像素`);

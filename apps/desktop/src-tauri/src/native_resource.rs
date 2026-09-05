@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::Write as _,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -13,11 +14,15 @@ use std::{
 };
 
 use assistant_protocol::{
-    AttachmentId, AttachmentState, ChildTaskId, GetAttachmentRequest, MessageId, ResourceRefId,
+    AttachmentId, AttachmentState, ChildTaskId, GetAttachmentRequest,
+    ListSessionResourceFilesRequest, ListSessionResourceFilesResult, MessageId,
+    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, ResourceRefId,
     RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, RuntimeHostFeature, SessionId,
-    SessionMaterializationManifest, SessionMaterializationResult, UploadAttachmentResult,
+    SessionMaterializationManifest, SessionMaterializationResult, SessionResourceLocator,
+    UploadAttachmentResult,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::GenericImageView as _;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State, ipc::InvokeBody};
@@ -34,12 +39,30 @@ const MAX_CLIPBOARD_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CLIPBOARD_TEMP_BYTES: u64 = 256 * 1024 * 1024;
 const SELECTION_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_PREVIEW_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TEXT_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_IMAGE_EDGE: u32 = 16_384;
+const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+const MAX_RESOURCE_HANDLES: usize = 512;
 
 pub(crate) struct NativeResourceBridge {
     selections: Mutex<HashMap<String, SelectedAttachment>>,
     operations: Mutex<HashMap<String, CancellationToken>>,
+    resource_handles: Mutex<ResourceHandleRegistry>,
     next_id: AtomicU64,
     http: reqwest::Client,
+}
+
+#[derive(Default)]
+struct ResourceHandleRegistry {
+    entries: HashMap<String, LocalResourceHandle>,
+    keys_by_path: HashMap<PathBuf, String>,
+}
+
+#[derive(Clone)]
+struct LocalResourceHandle {
+    path: PathBuf,
+    navigation_root: PathBuf,
 }
 
 #[derive(Clone)]
@@ -78,6 +101,7 @@ enum AttachmentSelectionOrigin {
 enum PreviewKind {
     Text,
     Image,
+    Pdf,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,6 +111,37 @@ pub(crate) struct AttachmentPreview {
     size_bytes: u64,
     text: Option<String>,
     data_url: Option<String>,
+    data_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RegisteredLocalResource {
+    resource_key: String,
+    display_name: String,
+    path_segments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LocalResourcePreview {
+    kind: PreviewKind,
+    media_type: String,
+    size_bytes: u64,
+    text: Option<String>,
+    data_base64: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LocalResourceSiblingKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LocalResourceSibling {
+    display_name: String,
+    kind: LocalResourceSiblingKind,
+    current: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -111,6 +166,7 @@ enum NativeResourceErrorCode {
     SystemOpenFailed,
     ExportFailed,
     RuntimeUnavailable,
+    ResourceOutsideRoot,
     Cancelled,
 }
 
@@ -135,6 +191,7 @@ impl NativeResourceBridge {
         Self {
             selections: Mutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
+            resource_handles: Mutex::new(ResourceHandleRegistry::default()),
             next_id: AtomicU64::new(1),
             http: reqwest::Client::new(),
         }
@@ -192,6 +249,412 @@ impl NativeResourceBridge {
             operations.remove(operation_id);
         }
     }
+
+    fn register_local_path(
+        &self,
+        path: PathBuf,
+        navigation_root: PathBuf,
+    ) -> Result<RegisteredLocalResource, NativeResourceError> {
+        let display_name = display_file_name(&path)?;
+        let path_segments = display_path_segments(&path)?;
+        let mut registry = self
+            .resource_handles
+            .lock()
+            .map_err(|_| unavailable("本地资源状态不可用。"))?;
+        if let Some(resource_key) = registry.keys_by_path.get(&path).cloned() {
+            if let Some(entry) = registry.entries.get_mut(&resource_key)
+                && navigation_root.components().count() > entry.navigation_root.components().count()
+            {
+                entry.navigation_root = navigation_root;
+            }
+            return Ok(RegisteredLocalResource {
+                resource_key,
+                display_name,
+                path_segments,
+            });
+        }
+        if registry.entries.len() >= MAX_RESOURCE_HANDLES {
+            return Err(error(
+                NativeResourceErrorCode::SelectionLimitReached,
+                "本次应用运行登记的本地资源过多，请重启应用后再试。",
+            ));
+        }
+        let resource_key = self.allocate_id("resource");
+        registry
+            .keys_by_path
+            .insert(path.clone(), resource_key.clone());
+        registry.entries.insert(
+            resource_key.clone(),
+            LocalResourceHandle {
+                path,
+                navigation_root,
+            },
+        );
+        Ok(RegisteredLocalResource {
+            resource_key,
+            display_name,
+            path_segments,
+        })
+    }
+
+    fn local_resource(
+        &self,
+        resource_key: &str,
+    ) -> Result<LocalResourceHandle, NativeResourceError> {
+        self.resource_handles
+            .lock()
+            .map_err(|_| unavailable("本地资源状态不可用。"))?
+            .entries
+            .get(resource_key)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    NativeResourceErrorCode::SelectionUnavailable,
+                    "本地资源句柄已失效，请重新打开链接。",
+                )
+            })
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn register_local_file_uri(
+    bridge: State<'_, NativeResourceBridge>,
+    file_uri: String,
+) -> Result<RegisteredLocalResource, NativeResourceError> {
+    let path = file_uri_path(&file_uri)?;
+    let canonical = validate_local_file(path).await?;
+    let navigation_root = canonical
+        .parent()
+        .ok_or_else(invalid_local_resource)?
+        .to_path_buf();
+    bridge.register_local_path(canonical, navigation_root)
+}
+
+#[tauri::command]
+pub(crate) async fn register_relative_local_resource(
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+    reference: String,
+) -> Result<RegisteredLocalResource, NativeResourceError> {
+    if reference.trim().is_empty() || reference.contains('\0') || reference.contains('\\') {
+        return Err(invalid_local_resource());
+    }
+    let source = bridge.local_resource(&resource_key)?;
+    let reference_path = relative_reference_path(&reference)?;
+    let parent = source.path.parent().ok_or_else(invalid_local_resource)?;
+    let canonical = validate_local_file(parent.join(reference_path)).await?;
+    if !canonical.starts_with(&source.navigation_root) {
+        return Err(error(
+            NativeResourceErrorCode::ResourceOutsideRoot,
+            "本地资源位于当前文件范围之外。",
+        ));
+    }
+    bridge.register_local_path(canonical, source.navigation_root)
+}
+
+#[tauri::command]
+pub(crate) async fn preview_local_resource(
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+) -> Result<LocalResourcePreview, NativeResourceError> {
+    let resource = bridge.local_resource(&resource_key)?;
+    let canonical = validate_registered_resource(&resource).await?;
+    preview_local_path(&canonical).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_local_resource_siblings(
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+) -> Result<Vec<LocalResourceSibling>, NativeResourceError> {
+    let resource = bridge.local_resource(&resource_key)?;
+    let canonical = validate_registered_resource(&resource).await?;
+    let mut directory = tokio::fs::read_dir(&resource.navigation_root)
+        .await
+        .map_err(|_| unavailable("无法读取本地资源目录。"))?;
+    let mut siblings = Vec::new();
+    while let Some(entry) = directory
+        .next_entry()
+        .await
+        .map_err(|_| unavailable("无法读取本地资源目录。"))?
+    {
+        if siblings.len() >= 2_000 {
+            break;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| unavailable("资源名称不是有效文本。"))?;
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|_| unavailable("无法读取本地资源信息。"))?;
+        let kind = if file_type.is_dir() {
+            LocalResourceSiblingKind::Directory
+        } else if file_type.is_file() {
+            LocalResourceSiblingKind::File
+        } else {
+            continue;
+        };
+        siblings.push(LocalResourceSibling {
+            display_name: name,
+            kind,
+            current: entry.path() == canonical,
+        });
+    }
+    siblings.sort_by(|left, right| {
+        sibling_order(left.kind)
+            .cmp(&sibling_order(right.kind))
+            .then_with(|| {
+                left.display_name
+                    .to_lowercase()
+                    .cmp(&right.display_name.to_lowercase())
+            })
+    });
+    Ok(siblings)
+}
+
+#[tauri::command]
+pub(crate) async fn register_local_resource_sibling(
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+    display_name: String,
+) -> Result<RegisteredLocalResource, NativeResourceError> {
+    if display_name.is_empty()
+        || display_name.contains('/')
+        || display_name.contains('\\')
+        || display_name == "."
+        || display_name == ".."
+    {
+        return Err(invalid_local_resource());
+    }
+    let source = bridge.local_resource(&resource_key)?;
+    let canonical = validate_local_file(source.navigation_root.join(display_name)).await?;
+    if canonical.parent() != Some(source.navigation_root.as_path()) {
+        return Err(error(
+            NativeResourceErrorCode::ResourceOutsideRoot,
+            "本地资源位于当前文件范围之外。",
+        ));
+    }
+    bridge.register_local_path(canonical, source.navigation_root)
+}
+
+#[tauri::command]
+pub(crate) async fn open_local_resource_in_system(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+) -> Result<(), NativeResourceError> {
+    let resource = bridge.local_resource(&resource_key)?;
+    let canonical = validate_registered_resource(&resource).await?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| unavailable("本地资源路径不是有效文本。"))?;
+    app.opener().open_path(path, None::<&str>).map_err(|_| {
+        error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法使用系统应用打开该资源。",
+        )
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn reveal_local_resource_in_directory(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+) -> Result<(), NativeResourceError> {
+    let resource = bridge.local_resource(&resource_key)?;
+    let canonical = validate_registered_resource(&resource).await?;
+    app.opener().reveal_item_in_dir(canonical).map_err(|_| {
+        error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法在 Finder 中显示该资源。",
+        )
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn copy_local_resource_path(
+    bridge: State<'_, NativeResourceBridge>,
+    resource_key: String,
+) -> Result<(), NativeResourceError> {
+    let resource = bridge.local_resource(&resource_key)?;
+    let canonical = validate_registered_resource(&resource).await?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| unavailable("本地资源路径不是有效文本。"))?;
+    copy_path_to_clipboard(path)
+}
+
+#[tauri::command]
+pub(crate) async fn list_session_resource_files(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    request: ListSessionResourceFilesRequest,
+) -> Result<ListSessionResourceFilesResult, NativeResourceError> {
+    let session_id = parse_session_id(session_id)?;
+    send_session_resource_request(&bridge.http, &coordinator, &session_id, "list", &request).await
+}
+
+#[tauri::command]
+pub(crate) async fn preview_session_resource_file(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    request: PreviewSessionResourceFileRequest,
+) -> Result<PreviewSessionResourceFileResult, NativeResourceError> {
+    let session_id = parse_session_id(session_id)?;
+    send_session_resource_request(&bridge.http, &coordinator, &session_id, "preview", &request)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn open_session_resource_in_system(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    locator: SessionResourceLocator,
+) -> Result<(), NativeResourceError> {
+    let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    app.opener().open_path(path, None::<&str>).map_err(|_| {
+        error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法使用系统应用打开该资源。",
+        )
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn copy_session_resource_path(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    locator: SessionResourceLocator,
+) -> Result<(), NativeResourceError> {
+    let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    copy_path_to_clipboard(&path)
+}
+
+fn copy_path_to_clipboard(path: &str) -> Result<(), NativeResourceError> {
+    let mut child = Command::new("/usr/bin/pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            error(
+                NativeResourceErrorCode::SystemOpenFailed,
+                "无法访问系统剪贴板。",
+            )
+        })?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| {
+            error(
+                NativeResourceErrorCode::SystemOpenFailed,
+                "无法访问系统剪贴板。",
+            )
+        })?
+        .write_all(path.as_bytes())
+        .map_err(|_| {
+            error(
+                NativeResourceErrorCode::SystemOpenFailed,
+                "无法复制资源路径。",
+            )
+        })?;
+    let status = child.wait().map_err(|_| {
+        error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法复制资源路径。",
+        )
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法复制资源路径。",
+        ))
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn reveal_session_resource_in_directory(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    locator: SessionResourceLocator,
+) -> Result<(), NativeResourceError> {
+    let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    app.opener().reveal_item_in_dir(path).map_err(|_| {
+        error(
+            NativeResourceErrorCode::SystemOpenFailed,
+            "无法在 Finder 中显示该资源。",
+        )
+    })
+}
+
+fn parse_session_id(session_id: String) -> Result<SessionId, NativeResourceError> {
+    SessionId::new(session_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))
+}
+
+pub(crate) async fn resolve_session_resource_path(
+    bridge: &NativeResourceBridge,
+    coordinator: &RuntimeBootstrapCoordinator,
+    session_id: String,
+    locator: SessionResourceLocator,
+) -> Result<String, NativeResourceError> {
+    let session_id = parse_session_id(session_id)?;
+    let resource: NativeResourcePath = send_session_resource_request(
+        &bridge.http,
+        coordinator,
+        &session_id,
+        "native-path",
+        &locator,
+    )
+    .await?;
+    Ok(resource.path)
+}
+
+async fn send_session_resource_request<Request, ResponseBody>(
+    http: &reqwest::Client,
+    coordinator: &RuntimeBootstrapCoordinator,
+    session_id: &SessionId,
+    operation: &str,
+    request: &Request,
+) -> Result<ResponseBody, NativeResourceError>
+where
+    Request: Serialize + ?Sized,
+    ResponseBody: for<'de> Deserialize<'de>,
+{
+    let bootstrap = coordinator
+        .bootstrap()
+        .await
+        .map_err(|_| runtime_unavailable())?;
+    let url = runtime_resource_url(
+        &bootstrap.base_url,
+        &["sessions", session_id.as_str(), "resource-files", operation],
+    )?;
+    let response = http
+        .post(url)
+        .bearer_auth(&bootstrap.access_token)
+        .json(request)
+        .send()
+        .await
+        .map_err(|_| runtime_unavailable())?;
+    if !response.status().is_success() {
+        return Err(
+            decode_runtime_failure(response, NativeResourceErrorCode::PreviewUnavailable).await,
+        );
+    }
+    response
+        .json::<ResponseBody>()
+        .await
+        .map_err(|_| unavailable("Runtime 资源响应无效。"))
 }
 
 #[tauri::command]
@@ -709,6 +1172,17 @@ fn preview_from_bytes(
             size_bytes,
             text: None,
             data_url: Some(data_url),
+            data_base64: None,
+        });
+    }
+    if media_type.starts_with("application/pdf") && is_pdf(&bytes) {
+        return Ok(AttachmentPreview {
+            kind: PreviewKind::Pdf,
+            media_type,
+            size_bytes,
+            text: None,
+            data_url: None,
+            data_base64: Some(STANDARD.encode(bytes)),
         });
     }
     if media_type.starts_with("text/") || media_type.starts_with("application/json") {
@@ -724,12 +1198,221 @@ fn preview_from_bytes(
             size_bytes,
             text: Some(text),
             data_url: None,
+            data_base64: None,
         });
     }
     Err(error(
         NativeResourceErrorCode::ResourceNotPreviewable,
         "该文件类型不支持应用内预览。",
     ))
+}
+
+async fn validate_local_file(path: PathBuf) -> Result<PathBuf, NativeResourceError> {
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .map_err(|_| unavailable("本地文件不存在或不可读取。"))?;
+    let metadata = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|_| unavailable("本地文件不存在或不可读取。"))?;
+    if !metadata.is_file() {
+        return Err(error(
+            NativeResourceErrorCode::ResourceNotPreviewable,
+            "只能打开普通文件。",
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn validate_registered_resource(
+    resource: &LocalResourceHandle,
+) -> Result<PathBuf, NativeResourceError> {
+    let canonical = validate_local_file(resource.path.clone()).await?;
+    if !canonical.starts_with(&resource.navigation_root) {
+        return Err(error(
+            NativeResourceErrorCode::ResourceOutsideRoot,
+            "本地资源位于当前文件范围之外。",
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn preview_local_path(path: &Path) -> Result<LocalResourcePreview, NativeResourceError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| unavailable("本地文件不存在或不可读取。"))?;
+    let file_name = display_file_name(path)?;
+    let extension_media_type = media_type_from_name(&file_name).to_owned();
+    if metadata.len() > MAX_IMAGE_PREVIEW_BYTES {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "文件超过 16 MiB 预览上限。",
+        ));
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| unavailable("无法读取本地文件。"))?;
+    if is_pdf(&bytes) {
+        return Ok(LocalResourcePreview {
+            kind: PreviewKind::Pdf,
+            media_type: "application/pdf".to_owned(),
+            size_bytes: bytes.len() as u64,
+            text: None,
+            data_base64: Some(STANDARD.encode(bytes)),
+        });
+    }
+    if let Some(kind) = infer::get(&bytes).filter(|kind| kind.mime_type().starts_with("image/")) {
+        if bytes.len() as u64 > MAX_IMAGE_PREVIEW_BYTES {
+            return Err(error(
+                NativeResourceErrorCode::ResourceTooLarge,
+                "图片超过 16 MiB 预览限制。",
+            ));
+        }
+        let decoded = image::load_from_memory(&bytes).map_err(|_| {
+            error(
+                NativeResourceErrorCode::ResourceNotPreviewable,
+                "图片内容无效或格式不受支持。",
+            )
+        })?;
+        let (width, height) = decoded.dimensions();
+        if width > MAX_IMAGE_EDGE
+            || height > MAX_IMAGE_EDGE
+            || u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_PIXELS
+        {
+            return Err(error(
+                NativeResourceErrorCode::ResourceTooLarge,
+                "图片尺寸超过预览限制。",
+            ));
+        }
+        return Ok(LocalResourcePreview {
+            kind: PreviewKind::Image,
+            media_type: kind.mime_type().to_owned(),
+            size_bytes: bytes.len() as u64,
+            text: None,
+            data_base64: Some(STANDARD.encode(bytes)),
+        });
+    }
+    if bytes.len() as u64 > MAX_TEXT_PREVIEW_BYTES {
+        return Err(error(
+            NativeResourceErrorCode::ResourceTooLarge,
+            "文本文件超过 4 MiB 预览限制。",
+        ));
+    }
+    if bytes.contains(&0) {
+        return Err(error(
+            NativeResourceErrorCode::ResourceNotPreviewable,
+            "该文件不是可预览的文本、图片或 PDF。",
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        error(
+            NativeResourceErrorCode::ResourceNotPreviewable,
+            "文件不是有效的 UTF-8 文本。",
+        )
+    })?;
+    Ok(LocalResourcePreview {
+        kind: PreviewKind::Text,
+        media_type: extension_media_type,
+        size_bytes: text.len() as u64,
+        text: Some(text),
+        data_base64: None,
+    })
+}
+
+fn file_uri_path(file_uri: &str) -> Result<PathBuf, NativeResourceError> {
+    let parsed = url::Url::parse(file_uri).map_err(|_| invalid_local_resource())?;
+    if parsed.scheme() != "file"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_some_and(|host| host != "localhost")
+    {
+        return Err(invalid_local_resource());
+    }
+    parsed.to_file_path().map_err(|_| invalid_local_resource())
+}
+
+fn relative_reference_path(reference: &str) -> Result<PathBuf, NativeResourceError> {
+    let without_fragment = reference.split(['?', '#']).next().unwrap_or_default();
+    let decoded = percent_decode(without_fragment)?;
+    if decoded.contains(':') {
+        return Err(invalid_local_resource());
+    }
+    let path = Path::new(&decoded);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            )
+        })
+    {
+        return Err(invalid_local_resource());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn percent_decode(value: &str) -> Result<String, NativeResourceError> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return Err(invalid_local_resource());
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    let query = format!("value={}", value.replace('+', "%2B"));
+    let decoded = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "value")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(invalid_local_resource)?;
+    if decoded.contains('\0') {
+        return Err(invalid_local_resource());
+    }
+    Ok(decoded)
+}
+
+fn display_file_name(path: &Path) -> Result<String, NativeResourceError> {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| unavailable("资源名称不是有效文本。"))
+}
+
+fn display_path_segments(path: &Path) -> Result<Vec<String>, NativeResourceError> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        let text = match component {
+            std::path::Component::RootDir => "/".to_owned(),
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| unavailable("资源路径不是有效文本。"))?,
+            _ => continue,
+        };
+        segments.push(text);
+    }
+    Ok(segments)
+}
+
+fn sibling_order(kind: LocalResourceSiblingKind) -> u8 {
+    match kind {
+        LocalResourceSiblingKind::Directory => 0,
+        LocalResourceSiblingKind::File => 1,
+    }
+}
+
+fn invalid_local_resource() -> NativeResourceError {
+    error(
+        NativeResourceErrorCode::InvalidRequest,
+        "本地文件链接无效。",
+    )
 }
 
 #[tauri::command]
@@ -786,6 +1469,26 @@ pub(crate) async fn reveal_attachment_in_directory(
                 "无法在目录中显示附件。",
             )
         })
+}
+
+#[tauri::command]
+pub(crate) async fn copy_attachment_path(
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    attachment_id: String,
+) -> Result<(), NativeResourceError> {
+    let session_id = SessionId::new(session_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
+    let attachment_id = AttachmentId::new(attachment_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "附件标识无效。"))?;
+    let attachment = get_attachment(&coordinator, session_id, attachment_id).await?;
+    if attachment.state != AttachmentState::Ready {
+        return Err(error(
+            NativeResourceErrorCode::AttachmentUnavailable,
+            "附件当前不可用。",
+        ));
+    }
+    copy_path_to_clipboard(&attachment.agent_readable_path)
 }
 
 #[tauri::command]
@@ -854,6 +1557,33 @@ pub(crate) async fn reveal_tool_file_in_directory(
             "无法在目录中显示文件。",
         )
     })
+}
+
+#[tauri::command]
+pub(crate) async fn copy_tool_file_path(
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    session_id: String,
+    child_task_id: Option<String>,
+    message_id: String,
+    resource_ref_id: String,
+) -> Result<(), NativeResourceError> {
+    let session_id = SessionId::new(session_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
+    let message_id = MessageId::new(message_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "消息标识无效。"))?;
+    let resource_ref_id = ResourceRefId::new(resource_ref_id)
+        .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "文件引用无效。"))?;
+    let resource = get_tool_file_native_path(
+        &bridge,
+        &coordinator,
+        &session_id,
+        child_task_id.as_deref(),
+        &message_id,
+        &resource_ref_id,
+    )
+    .await?;
+    copy_path_to_clipboard(&resource.path)
 }
 
 async fn get_tool_file_native_path(
@@ -1217,8 +1947,15 @@ fn media_type_from_name(name: &str) -> &'static str {
             | "html" | "xml" | "toml" | "yaml" | "yml",
         ) => "text/plain",
         Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
         _ => "application/octet-stream",
     }
+}
+
+fn is_pdf(bytes: &[u8]) -> bool {
+    bytes
+        .get(..bytes.len().min(1_024))
+        .is_some_and(|header| header.windows(5).any(|window| window == b"%PDF-"))
 }
 
 async fn get_attachment(
@@ -1280,6 +2017,12 @@ async fn decode_runtime_failure(
 ) -> NativeResourceError {
     if let Ok(body) = response.json::<RuntimeFailureBody>().await {
         let code = match body.error.code {
+            assistant_protocol::RuntimeErrorCode::InvalidRequest => {
+                NativeResourceErrorCode::InvalidRequest
+            }
+            assistant_protocol::RuntimeErrorCode::OperationNotAllowed => {
+                NativeResourceErrorCode::ResourceOutsideRoot
+            }
             assistant_protocol::RuntimeErrorCode::ResourceNotPreviewable => {
                 NativeResourceErrorCode::ResourceNotPreviewable
             }
@@ -1397,6 +2140,10 @@ fn error(code: NativeResourceErrorCode, message: impl Into<String>) -> NativeRes
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
@@ -1496,5 +2243,82 @@ mod tests {
         let parent = Path::new("/tmp/export-target");
         let path = temporary_export_path(parent, "export-1");
         assert_eq!(path.parent(), Some(parent));
+    }
+
+    #[test]
+    fn local_file_uri_accepts_encoded_local_paths_and_rejects_remote_or_qualified_urls() {
+        assert_eq!(
+            file_uri_path("file:///tmp/%E6%8A%A5%E5%91%8A%20final.md").expect("encoded local path"),
+            PathBuf::from("/tmp/报告 final.md")
+        );
+        assert_eq!(
+            file_uri_path("file://localhost/tmp/report.md").expect("localhost path"),
+            PathBuf::from("/tmp/report.md")
+        );
+        for invalid in [
+            "https://example.com/report.md",
+            "file://example.com/tmp/report.md",
+            "file:///tmp/report.md?download=1",
+            "file:///tmp/report.md#section",
+        ] {
+            assert!(file_uri_path(invalid).is_err(), "must reject {invalid}");
+        }
+    }
+
+    #[test]
+    fn relative_resource_reference_decodes_unicode_without_accepting_absolute_paths() {
+        assert_eq!(
+            relative_reference_path("images/%E6%88%AA%E5%9B%BE%20one.png").expect("relative path"),
+            PathBuf::from("images/截图 one.png")
+        );
+        assert!(relative_reference_path("/tmp/report.md").is_err());
+        assert!(relative_reference_path("%2Ftmp/report.md").is_err());
+        assert!(relative_reference_path("file:///tmp/report.md").is_err());
+        assert!(relative_reference_path("bad%2/path.md").is_err());
+    }
+
+    #[tokio::test]
+    async fn local_preview_uses_content_boundaries_for_text_and_binary_files() {
+        let directory = TempDir::new().expect("resource directory");
+        let text_path = directory.path().join("报告 final.md");
+        fs::write(&text_path, "# 结果\n").expect("text fixture");
+        let text = preview_local_path(&text_path).await.expect("text preview");
+        assert!(matches!(text.kind, PreviewKind::Text));
+        assert_eq!(text.text.as_deref(), Some("# 结果\n"));
+
+        let binary_path = directory.path().join("fake.txt");
+        fs::write(&binary_path, b"prefix\0suffix").expect("binary fixture");
+        let binary = preview_local_path(&binary_path)
+            .await
+            .expect_err("binary content must not become text");
+        assert!(matches!(
+            binary.code,
+            NativeResourceErrorCode::ResourceNotPreviewable
+        ));
+
+        let pdf_path = directory.path().join("document.data");
+        let pdf_bytes = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        fs::write(&pdf_path, pdf_bytes).expect("PDF fixture");
+        let pdf = preview_local_path(&pdf_path).await.expect("PDF preview");
+        assert!(matches!(pdf.kind, PreviewKind::Pdf));
+        assert_eq!(pdf.media_type, "application/pdf");
+        assert_eq!(
+            pdf.data_base64.as_deref(),
+            Some(STANDARD.encode(pdf_bytes).as_str())
+        );
+
+        let oversized_path = directory.path().join("large.txt");
+        fs::write(
+            &oversized_path,
+            vec![b'a'; MAX_TEXT_PREVIEW_BYTES as usize + 1],
+        )
+        .expect("oversized fixture");
+        let oversized = preview_local_path(&oversized_path)
+            .await
+            .expect_err("oversized text must fail");
+        assert!(matches!(
+            oversized.code,
+            NativeResourceErrorCode::ResourceTooLarge
+        ));
     }
 }

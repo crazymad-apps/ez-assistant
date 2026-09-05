@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "EZ Assistant",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "identifier": "com.ez-assistant.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; img-src 'self' blob: data: http: https:; style-src 'self'; script-src 'self'; object-src 'none'; frame-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

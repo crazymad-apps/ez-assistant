@@ -10,6 +10,23 @@ afterEach(() => {
 });
 
 describe("ContextPanel", () => {
+  it("opens the exact session private root from the workspace card", () => {
+    const store = contextStore();
+    renderPanel(store);
+
+    expect(screen.getByText("会话私有目录")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "浏览 会话私有目录" }));
+
+    expect(store.resource_workspace.active_tab).toEqual({
+      type: "workspace",
+      scopeKey: "session:session-1",
+    });
+    expect(store.resource_workspace.workspace_locations.get("session:session-1")).toEqual({
+      root: { type: "session_private" },
+      relative_path: "",
+    });
+  });
+
   it("shows the three session skills even before any activation", () => {
     const store = contextStore();
     const view = store.projection.session_views.get("session-1")!;
@@ -139,13 +156,13 @@ describe("ContextPanel", () => {
     expect(screen.queryByRole("button", { name: /report\.txt/ })).not.toBeInTheDocument();
   });
 
-  it("shows the current Workspace label with frozen directories and opens the shared editor", () => {
+  it("shows frozen Workspace directories without a duplicate label and opens the shared editor", () => {
     const store = contextStore();
     const open = vi.spyOn(store, "openSessionWorkspaceDirectory").mockResolvedValue();
     const copy = vi.spyOn(store, "copyWorkspacePath").mockResolvedValue();
     renderPanel(store);
 
-    expect(screen.getByText("当前项目")).toBeVisible();
+    expect(screen.queryByText("当前项目")).not.toBeInTheDocument();
     const workspace_heading = screen.getByRole("button", { name: "工作区" });
     const workspace_edit = screen.getByRole("button", { name: "编辑工作空间" });
     const workspace_toggle = screen.getByRole("button", { name: "收起工作区" });
@@ -156,11 +173,16 @@ describe("ContextPanel", () => {
     expect(screen.getByLabelText("主目录")).toHaveAttribute("data-primary", "true");
     expect(screen.queryByText("主要")).not.toBeInTheDocument();
     expect(screen.getByText("本会话继续使用创建时的工作目录。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "浏览 /workspace/old-project" }));
     fireEvent.click(screen.getByRole("button", { name: "打开 /workspace/old-docs" }));
     fireEvent.click(screen.getByRole("button", { name: "复制 /workspace/old-project" }));
     fireEvent.click(screen.getByRole("button", { name: "编辑工作空间" }));
 
     expect(open).toHaveBeenCalledWith("session-1", 1);
+    expect(store.resource_workspace.workspace_locations.get("session:session-1")).toEqual({
+      root: { type: "workspace_primary" },
+      relative_path: "",
+    });
     expect(copy).toHaveBeenCalledWith("/workspace/old-project");
     expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1" });
     expect(screen.queryByText("本会话创建时使用")).not.toBeInTheDocument();

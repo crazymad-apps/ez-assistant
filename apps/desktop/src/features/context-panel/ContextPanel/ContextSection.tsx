@@ -1,6 +1,6 @@
 import { useId, type CSSProperties, type ReactNode } from "react";
-import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
+import { InlineIconButton } from "../../../components/InlineIconButton";
 import styles from "./index.module.scss";
 
 export function ContextSection({ action, children, is_open, on_toggle, title }: Readonly<{
@@ -24,18 +24,17 @@ export function ContextSection({ action, children, is_open, on_toggle, title }: 
           <span>{title}</span>
         </button>
         {action}
-        <button
+        <InlineIconButton
           aria-controls={content_id}
           aria-expanded={is_open}
-          aria-label={`${is_open ? "收起" : "展开"}${title}`}
-          className={styles.section_toggle}
+          icon={is_open ? "chevron-up" : "chevron-down"}
+          label={`${is_open ? "收起" : "展开"}${title}`}
           onClick={on_toggle}
-          type="button"
-        >
-          <Icon name={is_open ? "chevron-up" : "chevron-down"} size={14} />
-        </button>
+        />
       </div>
-      <Collapse class_name={styles.section_body} id={content_id} open={is_open}>{children}</Collapse>
+      <Collapse id={content_id} open={is_open}>
+        <div className={styles.section_body}>{children}</div>
+      </Collapse>
     </section>
   );
 }

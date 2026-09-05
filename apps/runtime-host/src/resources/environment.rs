@@ -251,6 +251,7 @@ fn render_directory_prompt(environment: &SessionExecutionEnvironment) -> String 
             "  <session_private_directory>{}</session_private_directory>",
             escape_xml(&environment.session_private_directory)
         ),
+        "  <local_resource_presentation>When presenting an existing local regular file that the user may open, prefer a Markdown link with a valid absolute file URI, for example [report](file:///absolute/path/report.md). Use Markdown image syntax for an existing local image. Percent-encode spaces and reserved characters in path segments. Only link a target after confirming it exists and is a regular file. Do not link directories, guessed paths, or unavailable files.</local_resource_presentation>".to_owned(),
         "</runtime_directories>".to_owned(),
     ]);
     lines.join("\n")
@@ -403,6 +404,7 @@ mod tests {
         );
         assert!(parts[3].starts_with("<workspace_context>"));
         assert!(parts[5].starts_with("<runtime_directories>"));
+        assert_eq!(parts[5].matches("<local_resource_presentation>").count(), 1);
     }
 
     #[test]
@@ -569,6 +571,13 @@ mod tests {
         assert_eq!(
             &source_parts[..source_parts.len() - 1],
             &fork_parts[..fork_parts.len() - 1]
+        );
+        assert_eq!(
+            fork_parts
+                .iter()
+                .map(|part| part.matches("<local_resource_presentation>").count())
+                .sum::<usize>(),
+            1
         );
         assert!(
             fork_parts

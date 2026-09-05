@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 import { platform } from "node:process";
 
+import { selectMacDeveloperDirectory } from "./mac-developer-directory.mjs";
+
+selectMacDeveloperDirectory("tauri");
+
 const arguments_ = process.argv.slice(2);
 if (arguments_[0] === "build") {
   await run("npm", ["run", "prepare:sidecar"]);

@@ -18,12 +18,13 @@ tauri-build = { version = "2.6.3", features = [] }
 assistant-protocol = { path = "../../../crates/assistant-protocol" }
 dirs.workspace = true
 infer.workspace = true
+image.workspace = true
 libc.workspace = true
 base64.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.5", features = ["image-png", "tray-icon"] }
+tauri = { version = "=2.11.5", features = ["image-png", "tray-icon", "unstable"] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-window-state = "2"
@@ -32,3 +33,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { workspace = true, features = ["io"] }
 url.workspace = true
+portable-pty = "=0.9.0"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.28.0", features = ["signal", "process", "fs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already present through tauri-utils; read Safari's installed version without shelling out.
+plist = { version = "=1.10.0", default-features = false }

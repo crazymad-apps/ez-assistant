@@ -191,3 +191,15 @@ npm run tauri -- build --no-bundle
 ```
 
 涉及窗口、托盘、快捷键、屏幕捕获、TTS 或系统权限时，必须补充 macOS 实机验证并说明权限状态。
+
+
+## v0.24.0 资源栏与原生资源生命周期
+
+- 右栏由 Desktop 按 Session/草稿持有标签组；会话切换选择所属组，迟到的文件、浏览器回调必须保留原 owner。轻量索引、查看位置与页面实例分离；非终端页面共用 20 实例 LRU，终端不参加淘汰。
+- 持久快照只复用桌面偏好 JSON，不进入 Runtime 数据库。只保存可校验的资源描述、最后 URL、终端启动来源和有界查看状态，不保存文件正文、网页 DOM、凭据或终端输出。恢复完成前不能以空状态覆盖磁盘；受控退出先 flush，后回收终端。
+- 跨客户端重启重新登记本地文件句柄、加载最后 URL；终端标签首次激活才按原启动来源创建新 Shell。它与同一客户端内保留 PTY/xterm 的会话切回不同，不宣称恢复旧进程或运行中命令。
+- 本地文件链接只在受信任 Assistant 消息正文启用，使用显式绝对 file URI，经原生校验和有界读取后返回受控句柄。System Context、Skill、普通路径和不受信任外部网页不获得该能力。
+- 文件类型图标与映射直接引用 Material Icon Theme；Monaco 仅按需加载只读编辑器及所需语言，Markdown 复用消息渲染器；图片缩放/拖拽直接引用 react-zoom-pan-pinch，变换保存到现有 ResourceViewState 和偏好快照。图片与 PDF 使用受控 Blob URL 并随页面释放。
+- 外部网页是同窗口 child WebView，不共享主 WebView 的 bootstrap、command 权限或 DOM。资源 `+` 采用原生菜单；其他 HTML 遮罩按已确认方案暂时隐藏网页，不靠 CSS z-index 声称覆盖原生层。
+- 原生窗口操作使用 `get_window("main")`。创建 child WebView 后不得再把 `get_webview_window("main")` 当作窗口存在的依据。隐藏窗口保留 PTY；真正退出等待进程组清理，不能绑定或停止独立 Runtime 的后台任务。
+- 用户终端与 Agent Shell 完全分开，环境变量过滤私有凭据，后台输出受 ack 背压及 xterm scrollback 上限约束。Ctrl+D 只发送 EOF，收到实际 Shell 退出事件才关闭标签；Session 删除先完成所属终端回收，再提交删除意图。

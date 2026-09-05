@@ -12,9 +12,8 @@ export type ConversationLocation = Readonly<{
 export const LEFT_SIDEBAR_DEFAULT_WIDTH = 286;
 export const LEFT_SIDEBAR_MIN_WIDTH = 220;
 export const LEFT_SIDEBAR_MAX_WIDTH = 420;
-export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 326;
-export const RIGHT_SIDEBAR_MIN_WIDTH = 220;
-export const RIGHT_SIDEBAR_MAX_WIDTH = 800;
+export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
+export const RIGHT_SIDEBAR_MIN_WIDTH = 320;
 export const CONVERSATION_MIN_WIDTH = 500;
 
 export class NavigationStore {
@@ -126,7 +125,7 @@ export class NavigationStore {
     const other_width = this.effective_left_sidebar_open ? this.effective_left_sidebar_width : 0;
     return Math.max(
       RIGHT_SIDEBAR_MIN_WIDTH,
-      Math.min(RIGHT_SIDEBAR_MAX_WIDTH, this.viewport_width - other_width - CONVERSATION_MIN_WIDTH),
+      this.viewport_width - other_width - CONVERSATION_MIN_WIDTH,
     );
   }
 
@@ -343,7 +342,10 @@ export class NavigationStore {
     this.right_sidebar_width = clamp(
       Number.isFinite(preferences.right_sidebar_width) ? preferences.right_sidebar_width : RIGHT_SIDEBAR_DEFAULT_WIDTH,
       RIGHT_SIDEBAR_MIN_WIDTH,
-      RIGHT_SIDEBAR_MAX_WIDTH,
+      Math.max(
+        RIGHT_SIDEBAR_MIN_WIDTH,
+        this.viewport_width - this.left_sidebar_width - CONVERSATION_MIN_WIDTH,
+      ),
     );
     this.expanded_workspaces.clear();
     this.workspace_expansion_initialized = preferences.expanded_workspace_ids !== null;

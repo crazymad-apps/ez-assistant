@@ -1,0 +1,48 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { RootStore } from "../../src/stores/RootStore";
+import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
+import type { DesktopPreferences } from "../../src/native-bridge/desktopPreferences";
+const bridge = vi.hoisted(() => ({ load: vi.fn(), save: vi.fn() }));
+vi.mock("../../src/native-bridge/desktopPreferences", () => ({ loadDesktopPreferences: bridge.load, saveDesktopPreferences: bridge.save }));
+const stores: RootStore[] = [];
+const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: [], close_behavior: "hide_to_tray" };
+beforeEach(() => { vi.spyOn(RuntimeLifecycleCoordinator.prototype, "connect").mockResolvedValue(); bridge.load.mockResolvedValue(defaults); bridge.save.mockResolvedValue(undefined); });
+afterEach(async () => { for (const store of stores.splice(0)) { await store.flushPreferences(); store.dispose(); } vi.restoreAllMocks(); vi.clearAllMocks(); });
+function create() { const store = new RootStore(); stores.push(store); return store; }
+it("loads once before connecting and never saves the empty startup projection over the existing snapshot", async () => {
+  let load!: (value: DesktopPreferences) => void;
+  bridge.load.mockImplementationOnce(() => new Promise((resolve) => { load = resolve; }));
+  const store = create();
+  const initialized = store.initializePreferences();
+  const connected = store.connect(); const repeated = store.connect();
+  await store.flushPreferences();
+  expect(bridge.save).not.toHaveBeenCalled();
+  expect(RuntimeLifecycleCoordinator.prototype.connect).not.toHaveBeenCalled();
+  load({ ...defaults, resource_workspace: { current_scope_key: "session:saved", groups: [{ scope_key: "session:saved", active_index: 1, focused_index: 1, tabs: [{ page: { type: "context" } }, { page: { type: "workspace" } }] }] } });
+  await Promise.all([initialized, connected, repeated]);
+  expect(bridge.load).toHaveBeenCalledOnce();
+  expect(RuntimeLifecycleCoordinator.prototype.connect).toHaveBeenCalledOnce();
+  expect(store.navigation.selected_session_id).toBe("saved");
+  expect(store.resource_workspace.active_tab.type).toBe("workspace");
+  await store.flushPreferences();
+  expect(bridge.save.mock.calls[0]?.[0].resource_workspace.current_scope_key).toBe("session:saved");
+});
+it("serializes disk writes and freezes the final snapshot before terminal shutdown removes its tab", async () => {
+  const store = create(); await store.connect();
+  store.navigation.selectSession("a");
+  store.resource_workspace.openTerminal({ type: "workspace", workspace_id: "workspace" }, undefined, true);
+  let finish!: () => void;
+  bridge.save.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const first = store.flushPreferences(); await Promise.resolve();
+  store.resource_workspace.openWorkspace("session:a");
+  const second = store.flushPreferences(); await Promise.resolve();
+  expect(bridge.save).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  finish(); await Promise.all([first, second]);
+  expect(bridge.save).toHaveBeenCalledTimes(2);
+  const persisted = bridge.save.mock.calls[1]![0];
+  await store.resource_workspace.shutdownTerminals();
+  await store.flushPreferences();
+  expect(bridge.save).toHaveBeenCalledTimes(2);
+  expect(persisted.resource_workspace.groups.find((group: { scope_key: string }) => group.scope_key === "session:a").tabs.map((tab: { page: { type: string } }) => tab.page.type)).toEqual(["context", "terminal", "workspace"]);
+});

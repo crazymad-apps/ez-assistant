@@ -18,6 +18,28 @@
   --ez-surface-subtle: #f8f9fb;
   --ez-surface-muted: #f1f3f6;
   --ez-sidebar: #f7f8fa;
+  // 终端跟随应用表面与文字；ANSI 色集中在主题中，避免渲染器保留深色默认配色。
+  --ez-terminal-background: var(--ez-sidebar);
+  --ez-terminal-foreground: var(--ez-text);
+  --ez-terminal-cursor: var(--ez-primary-text);
+  --ez-terminal-selection: #496cf238;
+  --ez-terminal-selection-inactive: #5f667326;
+  --ez-terminal-black: var(--ez-text);
+  --ez-terminal-red: #b42336;
+  --ez-terminal-green: #27743f;
+  --ez-terminal-yellow: #895c00;
+  --ez-terminal-blue: var(--ez-primary-text);
+  --ez-terminal-magenta: #9340a0;
+  --ez-terminal-cyan: #087985;
+  --ez-terminal-white: #c5cbd6;
+  --ez-terminal-bright-black: var(--ez-text-secondary);
+  --ez-terminal-bright-red: #c33044;
+  --ez-terminal-bright-green: #238147;
+  --ez-terminal-bright-yellow: #986600;
+  --ez-terminal-bright-blue: var(--ez-primary);
+  --ez-terminal-bright-magenta: #a13eaa;
+  --ez-terminal-bright-cyan: #087f8c;
+  --ez-terminal-bright-white: var(--ez-surface);
   --ez-border: #e2e5eb;
   --ez-border-strong: #d3d8e1;
   --ez-success: #249d65;
@@ -52,6 +74,6 @@
   --ez-z-modal: 30;
   --ez-z-popover: 36;
   --ez-z-toast: 40;
-  --conversation-content-width: 820px;
-  --conversation-horizontal-padding: clamp(24px, 4vw, 64px);
+  --conversation-content-max-width: 820px;
+  --conversation-horizontal-padding: clamp(12px, 3vw, 24px);
 }

@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-openai-compatible"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-protocol"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1009,6 +1009,12 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg_aliases"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
+
+[[package]]
+name = "cfg_aliases"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
@@ -1134,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1394,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1573,6 +1579,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1689,7 +1701,7 @@ dependencies = [
  "rustc_version",
  "toml 1.1.2+spec-1.1.0",
  "vswhom",
- "winreg",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -1792,13 +1804,17 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
  "dirs",
+ "image",
  "infer",
  "libc",
+ "nix 0.28.0",
+ "plist",
+ "portable-pty",
  "reqwest",
  "serde",
  "serde_json",
@@ -1876,6 +1892,17 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
+]
+
+[[package]]
+name = "filedescriptor"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e40758ed24c9b2eeb76c35fb0aebc66c626084edd827e07e1552279814c6682d"
+dependencies = [
+ "libc",
+ "thiserror 1.0.69",
+ "winapi",
 ]
 
 [[package]]
@@ -3238,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3388,13 +3415,25 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nix"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if",
+ "cfg_aliases 0.1.1",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
  "libc",
 ]
 
@@ -4039,6 +4078,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-pty"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a596a2b3d2752d94f51fac2d4a96737b8705dddd311a32b9af47211f08671e"
+dependencies = [
+ "anyhow",
+ "bitflags 1.3.2",
+ "downcast-rs",
+ "filedescriptor",
+ "lazy_static",
+ "libc",
+ "log",
+ "nix 0.28.0",
+ "serial2",
+ "shared_library",
+ "shell-words",
+ "winapi",
+ "winreg 0.10.1",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4147,7 +4207,7 @@ checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
 dependencies = [
  "futures",
  "indexmap 2.14.0",
- "nix",
+ "nix 0.31.3",
  "tokio",
  "windows 0.62.2",
 ]
@@ -4180,7 +4240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
 dependencies = [
  "bytes",
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
@@ -4222,7 +4282,7 @@ version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
 dependencies = [
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
  "socket2",
@@ -4420,7 +4480,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4546,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4707,7 +4767,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -5050,6 +5110,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial2"
+version = "0.2.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b16809bc35793b19ce4e0c53924bc0dce3937f15487997cfdaed936004180730"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "serialize-to-javascript"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5112,6 +5183,22 @@ dependencies = [
  "cpufeatures 0.3.0",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "shared_library"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a9e7e0f2bfae24d8a5b5a66c5b257a83c7412304311512a0c054cd5e619da11"
+dependencies = [
+ "lazy_static",
+ "libc",
+]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
@@ -7184,6 +7271,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winreg"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
+dependencies = [
+ "winapi",
 ]
 
 [[package]]

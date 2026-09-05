@@ -30,8 +30,10 @@ use self::{
     events::stream_events,
     materializations::materialize_session,
     resources::{
-        export_session_markdown, preview_attachment, preview_child_tool_file, preview_tool_file,
-        resolve_child_tool_file_native_path, resolve_tool_file_native_path, thumbnail_attachment,
+        export_session_markdown, list_session_resource_files, preview_attachment,
+        preview_child_tool_file, preview_session_resource_file, preview_tool_file,
+        resolve_child_tool_file_native_path, resolve_session_resource_native_path,
+        resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
 use crate::{device::DeviceGatewayHandle, speech::SpeechServiceHandle};
@@ -144,6 +146,18 @@ pub(crate) fn router(state: HttpState) -> Router {
             "/sessions/{session_id}/export.md",
             get(export_session_markdown),
         )
+        .route(
+            "/sessions/{session_id}/resource-files/list",
+            post(list_session_resource_files),
+        )
+        .route(
+            "/sessions/{session_id}/resource-files/preview",
+            post(preview_session_resource_file),
+        )
+        .route(
+            "/sessions/{session_id}/resource-files/native-path",
+            post(resolve_session_resource_native_path),
+        )
         .route("/events", get(stream_events))
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
@@ -177,6 +191,7 @@ async fn capabilities() -> Json<RuntimeHostCapabilities> {
             RuntimeHostFeature::ApprovalQueue,
             RuntimeHostFeature::SessionManagement,
             RuntimeHostFeature::SessionMaterialization,
+            RuntimeHostFeature::SessionResourceFiles,
         ],
     })
 }

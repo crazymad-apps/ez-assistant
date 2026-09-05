@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
+import { PdfViewer } from "../../../components/PdfViewer";
 import type { SessionId } from "../../../generated/assistant-protocol";
 import {
   NativeResourceFailure,
@@ -71,6 +72,9 @@ export function AttachmentDetailDialog(props: Readonly<{
           {preview_fallback && <p className={styles.state}>{preview_fallback === "too_large" ? "文件较大，无法在应用内预览。" : "此文件暂不支持应用内预览。"}</p>}
           {preview?.kind === "text" && <pre>{preview.text}</pre>}
           {preview?.kind === "image" && preview.data_url && <img alt={props.attachment.original_name} src={preview.data_url} />}
+          {preview?.kind === "pdf" && preview.data_base64 && (
+            <PdfViewer base64={preview.data_base64} title={`${props.attachment.original_name} PDF 预览`} />
+          )}
         </section>
       </main>
       <footer><button onClick={props.on_close} type="button">关闭</button></footer>

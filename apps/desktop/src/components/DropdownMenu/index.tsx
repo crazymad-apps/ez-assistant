@@ -12,6 +12,10 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  buttonVisualProps,
+  type ButtonVisualProps,
+} from "../Button";
 import { usePresence } from "../Presence";
 import styles from "./index.module.scss";
 
@@ -28,7 +32,7 @@ type DropdownMenuProps = PropsWithChildren<{
   readonly className?: string;
 }>;
 
-type DropdownMenuTriggerProps = ButtonHTMLAttributes<HTMLButtonElement>;
+type DropdownMenuTriggerProps = ButtonHTMLAttributes<HTMLButtonElement> & ButtonVisualProps;
 
 type DropdownMenuContentProps = PropsWithChildren<
   Omit<HTMLAttributes<HTMLDivElement>, "role"> & {
@@ -103,11 +107,23 @@ export function DropdownMenu(props: DropdownMenuProps) {
 
 export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
   const menu = useDropdownMenu();
-  const { onClick, onKeyDown, ...button_props } = props;
+  const {
+    className,
+    iconOnly,
+    onClick,
+    onKeyDown,
+    size,
+    variant,
+    ...button_props
+  } = props;
+  const visual_props = variant
+    ? buttonVisualProps({ className, iconOnly, size, variant })
+    : { className };
 
   return (
     <button
       {...button_props}
+      {...visual_props}
       aria-controls={menu.open ? menu.content_id : undefined}
       aria-expanded={menu.open}
       aria-haspopup="menu"

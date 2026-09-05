@@ -1,10 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window",
-  "windows": ["main"],
+  "description": "Default capability for the main WebView",
+  "webviews": ["main"],
   "permissions": [
     "core:event:default",
+    "core:menu:allow-new",
+    "core:menu:allow-popup",
+    "core:menu:allow-set-enabled",
+    "core:resources:allow-close",
+    "core:webview:allow-webview-size",
+    "core:webview:allow-webview-position",
+    "core:window:allow-scale-factor",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]

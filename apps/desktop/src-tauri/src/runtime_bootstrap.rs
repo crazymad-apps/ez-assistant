@@ -37,6 +37,7 @@ const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
     RuntimeHostFeature::SessionView,
     RuntimeHostFeature::ChildTaskView,
     RuntimeHostFeature::SessionManagement,
+    RuntimeHostFeature::SessionResourceFiles,
 ];
 
 #[derive(Clone)]

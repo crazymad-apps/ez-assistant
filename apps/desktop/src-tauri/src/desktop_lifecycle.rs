@@ -1,5 +1,6 @@
 //! 原生窗口、菜单、托盘与 Desktop 退出语义的单一协调入口。
 
+use crate::user_terminal::{TerminalError, UserTerminalManager};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
@@ -468,7 +469,7 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
             let app = app.clone();
             app.dialog()
                 .message(
-                    "退出桌面客户端默认不会停止 Runtime，后台任务可以继续运行。\n\n如需同时停止 Runtime，请选择“退出并停止 Runtime”。",
+                    "退出将关闭全部终端及其中运行的进程；Runtime 默认继续运行。\n\n如需同时停止 Runtime，请选择“退出并停止 Runtime”。",
                 )
                 .title("退出桌面客户端？")
                 .kind(MessageDialogKind::Warning)
@@ -479,19 +480,13 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
                 ))
                 .show_with_result(move |result| match result {
                     MessageDialogResult::Yes => {
-                        let coordinator = app.state::<DesktopLifecycleCoordinator>();
-                        coordinator.finish_native_action();
-                        coordinator.allow_exit();
-                        app.exit(0);
+                        spawn_quit(app);
                     }
                     MessageDialogResult::No => {
                         spawn_runtime_action(app, DesktopLifecycleIntent::StopRuntime, true);
                     }
                     MessageDialogResult::Custom(value) if value == QUIT_DESKTOP_BUTTON => {
-                        let coordinator = app.state::<DesktopLifecycleCoordinator>();
-                        coordinator.finish_native_action();
-                        coordinator.allow_exit();
-                        app.exit(0);
+                        spawn_quit(app);
                     }
                     MessageDialogResult::Custom(value) if value == QUIT_AND_STOP_BUTTON => {
                         spawn_runtime_action(app, DesktopLifecycleIntent::StopRuntime, true);
@@ -502,6 +497,32 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
                 });
         }
     }
+}
+
+// 托盘/原生确认路径没有前端编排，仍须等 PTY 回收后才放行退出。
+fn spawn_quit<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        match app.state::<UserTerminalManager>().shutdown().await {
+            Ok(()) => {
+                let coordinator = app.state::<DesktopLifecycleCoordinator>();
+                coordinator.finish_native_action();
+                coordinator.allow_exit();
+                app.exit(0);
+            }
+            Err(error) => report_quit_failure(&app, error),
+        }
+    });
+}
+
+fn report_quit_failure<R: Runtime>(app: &AppHandle<R>, error: TerminalError) {
+    app.state::<DesktopLifecycleCoordinator>()
+        .finish_native_action();
+    app.dialog()
+        .message(error.to_string())
+        .title("终端清理失败，尚未退出")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(|_| {});
 }
 
 fn runtime_impact_message(impact: NativeRuntimeImpact, consequence: &str) -> String {
@@ -517,6 +538,12 @@ fn spawn_runtime_action<R: Runtime>(
     quit_after_success: bool,
 ) {
     tauri::async_runtime::spawn(async move {
+        if quit_after_success
+            && let Err(error) = app.state::<UserTerminalManager>().shutdown().await
+        {
+            report_quit_failure(&app, error);
+            return;
+        }
         let runtime = app.state::<RuntimeBootstrapCoordinator>().inner().clone();
         let mutation_kind = match intent {
             DesktopLifecycleIntent::StopRuntime => NativeRuntimeMutationKind::Stop,
@@ -566,6 +593,9 @@ fn spawn_runtime_action<R: Runtime>(
                 }
             }
             Err(error) => {
+                if quit_after_success {
+                    app.state::<UserTerminalManager>().resume().await;
+                }
                 coordinator.update_runtime_state(NativeRuntimeState::Disconnected);
                 let action = match intent {
                     DesktopLifecycleIntent::StopRuntime => "停止 Runtime",
@@ -590,12 +620,13 @@ pub(crate) fn request_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLife
     let _ = app.emit(EVENT_LIFECYCLE_INTENT, intent);
 }
 
+// 加入浏览器 child WebView 后窗口不再是单 WebviewWindow；窗口操作必须按 Window 身份查找。
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), DesktopLifecycleError> {
     #[cfg(target_os = "macos")]
     app.set_dock_visibility(true)
         .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?;
     window
         .show()
@@ -606,7 +637,7 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), DesktopLifecyc
 
 fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), DesktopLifecycleError> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?;
     window
         .hide()
@@ -647,7 +678,7 @@ pub(crate) fn show_desktop_window(app: AppHandle) -> Result<(), DesktopLifecycle
 
 #[tauri::command]
 pub(crate) fn minimize_desktop_window(app: AppHandle) -> Result<(), DesktopLifecycleError> {
-    app.get_webview_window("main")
+    app.get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?
         .minimize()
         .map_err(|_| DesktopLifecycleError::WindowActionFailed)
@@ -658,7 +689,7 @@ pub(crate) fn toggle_maximize_desktop_window(
     app: AppHandle,
 ) -> Result<bool, DesktopLifecycleError> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?;
     let maximized = window
         .is_maximized()
@@ -674,7 +705,7 @@ pub(crate) fn toggle_maximize_desktop_window(
 
 #[tauri::command]
 pub(crate) fn is_desktop_window_maximized(app: AppHandle) -> Result<bool, DesktopLifecycleError> {
-    app.get_webview_window("main")
+    app.get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?
         .is_maximized()
         .map_err(|_| DesktopLifecycleError::WindowActionFailed)
@@ -686,9 +717,11 @@ pub(crate) fn request_desktop_close(app: AppHandle) -> Result<(), DesktopLifecyc
 }
 
 #[tauri::command]
-pub(crate) fn quit_desktop(app: AppHandle, coordinator: State<'_, DesktopLifecycleCoordinator>) {
-    coordinator.allow_exit();
+pub(crate) async fn quit_desktop(app: AppHandle) -> Result<(), TerminalError> {
+    app.state::<UserTerminalManager>().shutdown().await?;
+    app.state::<DesktopLifecycleCoordinator>().allow_exit();
     app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]

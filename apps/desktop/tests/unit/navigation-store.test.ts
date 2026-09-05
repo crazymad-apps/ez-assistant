@@ -79,7 +79,7 @@ describe("NavigationStore", () => {
     store.setSidebarWidth("left", 999);
     store.setSidebarWidth("right", 999);
     expect(store.left_sidebar_width).toBe(420);
-    expect(store.right_sidebar_width).toBe(800);
+    expect(store.right_sidebar_width).toBe(999);
 
     store.toggleLeftSidebar();
     expect(store.left_sidebar_width).toBe(420);
@@ -88,7 +88,7 @@ describe("NavigationStore", () => {
 
     store.resetSidebarLayout();
     expect(store.left_sidebar_width).toBe(286);
-    expect(store.right_sidebar_width).toBe(326);
+    expect(store.right_sidebar_width).toBe(380);
   });
 
   it("keeps preferred sidebar widths fixed and hides the lower-priority sidebar when they no longer fit", () => {
@@ -112,17 +112,46 @@ describe("NavigationStore", () => {
   it("hides the right sidebar first and then the left at fixed-width thresholds", () => {
     const store = new NavigationStore();
 
-    store.setViewportWidth(1_112);
+    store.setViewportWidth(1_166);
     expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(true);
 
-    store.setViewportWidth(1_111);
+    store.setViewportWidth(1_165);
     expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(false);
 
     store.setViewportWidth(785);
     expect(store.effective_left_sidebar_open).toBe(false);
     expect(store.effective_right_sidebar_open).toBe(false);
+  });
+
+  it("uses the remaining viewport as the right sidebar maximum without a fixed cap", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(2_400);
+
+    expect(store.right_sidebar_current_max_width).toBe(1_614);
+    store.setSidebarWidth("right", 1_500);
+    expect(store.right_sidebar_width).toBe(1_500);
+    expect(store.left_sidebar_width).toBe(286);
+
+    store.setSidebarWidth("right", 2_000);
+    expect(store.right_sidebar_width).toBe(1_614);
+    expect(store.left_sidebar_width).toBe(286);
+  });
+
+  it("clamps restored right sidebar preferences to the current viewport", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(1_400);
+    store.applyPreferences({
+      left_sidebar_open: true,
+      right_sidebar_open: true,
+      left_sidebar_width: 300,
+      right_sidebar_width: 9_999,
+      expanded_workspace_ids: null,
+    });
+
+    expect(store.left_sidebar_width).toBe(300);
+    expect(store.right_sidebar_width).toBe(600);
   });
 });
 

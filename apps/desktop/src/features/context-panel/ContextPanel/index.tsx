@@ -1,15 +1,27 @@
 import { observer } from "mobx-react-lite";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   AttachmentSummary,
+  SessionResourceLocator,
   SessionViewSnapshot,
   SystemContextSnapshot,
 } from "../../../generated/assistant-protocol";
+import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
+import { InlineIconButton } from "../../../components/InlineIconButton";
 import { PresenceBoundary } from "../../../components/Presence";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import {
+  openAttachmentInSystem,
+  revealAttachmentInDirectory,
+} from "../../../native-bridge/nativeResource";
 import { AttachmentPreviewDialog } from "../AttachmentPreviewDialog";
+import { isPreviewableResource } from "../../resource-workspace/ResourceWorkspaceStore";
+import {
+  ResourceContextMenu,
+  type ResourceMenuLocation,
+} from "../../resource-workspace/ResourceContextMenu";
 import { SystemContextDialog } from "../SystemContextDialog";
 import { ContextRing, ContextSection } from "./ContextSection";
 import { ContextSectionLayout } from "./ContextSectionLayout";
@@ -31,7 +43,12 @@ import styles from "./index.module.scss";
 
 type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "children" | "runs";
 
-export const ContextPanel = observer(function ContextPanel() {
+type ContextPanelProps = Readonly<{
+  embedded?: boolean;
+}>;
+
+export const ContextPanel = observer(function ContextPanel(props: ContextPanelProps) {
+  const PanelRoot = props.embedded ? "div" : "aside";
   const store = useRootStore();
   const application = store.projection.application;
   const session_id = store.navigation.selected_session_id;
@@ -48,6 +65,10 @@ export const ContextPanel = observer(function ContextPanel() {
   );
   const attachments = session_view?.attachments ?? [];
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
+  const [attachment_menu, setAttachmentMenu] = useState<Readonly<{
+    attachment: AttachmentSummary;
+    location: ResourceMenuLocation;
+  }> | null>(null);
   const [system_context, setSystemContext] = useState<SystemContextSnapshot | null>(null);
   const [system_context_error, setSystemContextError] = useState<string | null>(null);
   const [system_context_loading, setSystemContextLoading] = useState(false);
@@ -67,11 +88,43 @@ export const ContextPanel = observer(function ContextPanel() {
     }));
   };
 
+  const openAttachment = (attachment: AttachmentSummary) => {
+    if (!session_id || !isPreviewableResource(attachment.original_name, attachment.media_type)) {
+      setPreviewAttachment(attachment);
+      return;
+    }
+    store.resource_workspace.openAttachment(`session:${session_id}`, attachment, attachments);
+    if (!store.navigation.effective_right_sidebar_open) store.toggleRightSidebar();
+  };
+
+  const showAttachmentMenu = (
+    attachment: AttachmentSummary,
+    event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
+  ) => {
+    if ("key" in event && event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    const location = "clientX" in event
+      ? { x: event.clientX, y: event.clientY }
+      : (() => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          return { x: bounds.left + 16, y: bounds.bottom };
+        })();
+    setAttachmentMenu({ attachment, location });
+  };
+
+  const runAttachmentAction = (request: Promise<void>, fallback: string) => {
+    void request.catch((failure: unknown) => {
+      store.showInteractionError(failure instanceof Error ? failure.message : fallback);
+    });
+  };
+
   useEffect(() => {
     setSystemContext(null);
     setSystemContextError(null);
     setSystemContextLoading(false);
     setAllWorkspaceDirectoriesVisible(false);
+    setAttachmentMenu(null);
   }, [session_id]);
 
   const locateRun = async (run_id: string) => {
@@ -103,10 +156,10 @@ export const ContextPanel = observer(function ContextPanel() {
       ? [draft_workspace.user_directory, ...draft_workspace.additional_directories]
       : [];
     return (
-      <aside className={styles.panel} aria-label="当前上下文">
-        <header className={styles.panel_header}>
+      <PanelRoot className={styles.panel} aria-label={props.embedded ? undefined : "当前上下文"} data-embedded={props.embedded || undefined}>
+        {!props.embedded && <header className={styles.panel_header}>
           <h2>当前上下文</h2>
-        </header>
+        </header>}
         <ContextSectionLayout>
           <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="草稿设置">
             <dl className={styles.definition_list}>
@@ -117,13 +170,12 @@ export const ContextPanel = observer(function ContextPanel() {
           <ContextSection
             action={draft_workspace ? (
               <Tooltip content="编辑工作空间">
-                <button
-                  aria-label="编辑工作空间"
-                  className={styles.section_header_action}
+                <InlineIconButton
                   disabled={store.pending_workspace_action}
+                  icon="edit"
+                  label="编辑工作空间"
                   onClick={() => store.openWorkspaceEditor(draft_workspace.workspace_id)}
-                  type="button"
-                ><Icon name="edit" size={14} /></button>
+                />
               </Tooltip>
             ) : undefined}
             is_open={sectionIsOpen("workspace")}
@@ -131,35 +183,43 @@ export const ContextPanel = observer(function ContextPanel() {
             title="工作区"
           >
             {draft_workspace ? (
-              <>
-                <strong className={styles.workspace_label}>{draft_workspace.label}</strong>
-                <div className={styles.workspace_directories}>
-                  {draft_directories.map((directory, index) => (
-                    <div className={styles.path_row} key={directory} title={directory}>
-                      <span aria-label={index === 0 ? "主目录" : undefined} className={styles.directory_icon} data-primary={index === 0 ? "true" : undefined}>
-                        <Icon name="folder" size={16} />
-                      </span>
-                      <span className={styles.path_text}>{directory}</span>
-                      <div className={styles.path_actions}>
-                        {index === 0 && <button aria-label={`打开 ${directory}`} onClick={() => void store.openWorkspace(draft_workspace.workspace_id)} type="button"><Icon name="external-link" size={13} /></button>}
-                        <button aria-label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} type="button"><Icon name="copy" size={13} /></button>
-                      </div>
+              <div className={styles.workspace_directories}>
+                {draft_directories.map((directory, index) => (
+                  <div className={styles.path_row} key={directory} title={directory}>
+                    <span aria-label={index === 0 ? "主目录" : undefined} className={styles.directory_icon} data-primary={index === 0 ? "true" : undefined}>
+                      <Icon name="folder" size={16} />
+                    </span>
+                    <span className={styles.path_text}>{directory}</span>
+                    <div className={styles.path_actions}>
+                      {index === 0 && <InlineIconButton icon="external-link" label={`打开 ${directory}`} onClick={() => void store.openWorkspace(draft_workspace.workspace_id)} />}
+                      <InlineIconButton icon="copy" label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} />
                     </div>
-                  ))}
+                  </div>
+                ))}
+                <div className={styles.private_directory_row}>
+                  <Icon name="folder" size={16} />
+                  <span>会话私有目录</span>
+                  <em>创建会话后可用</em>
                 </div>
-              </>
-            ) : <p className={styles.empty_row}>未绑定目录</p>}
+              </div>
+            ) : (
+              <div className={styles.private_directory_row}>
+                <Icon name="folder" size={16} />
+                <span>会话私有目录</span>
+                <em>创建会话后可用</em>
+              </div>
+            )}
           </ContextSection>
         </ContextSectionLayout>
-      </aside>
+      </PanelRoot>
     );
   }
 
   return (
-    <aside className={styles.panel} aria-label="当前上下文">
-      <header className={styles.panel_header}>
+    <PanelRoot className={styles.panel} aria-label={props.embedded ? undefined : "当前上下文"} data-embedded={props.embedded || undefined}>
+      {!props.embedded && <header className={styles.panel_header}>
         <h2>当前上下文</h2>
-      </header>
+      </header>}
       <ContextSectionLayout>
         <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="会话">
           {session ? (
@@ -211,54 +271,71 @@ export const ContextPanel = observer(function ContextPanel() {
         <ContextSection
           action={workspace ? (
             <Tooltip content="编辑工作空间">
-              <button
-                aria-label="编辑工作空间"
-                className={styles.section_header_action}
+              <InlineIconButton
                 disabled={store.pending_workspace_action}
+                icon="edit"
+                label="编辑工作空间"
                 onClick={() => store.openWorkspaceEditor(workspace.workspace_id)}
-                type="button"
-              ><Icon name="edit" size={14} /></button>
+              />
             </Tooltip>
           ) : undefined}
           is_open={sectionIsOpen("workspace")}
           on_toggle={() => toggleSection("workspace")}
           title="工作区"
         >
-          {workspace && session && session_workspace ? (
+          {session ? (
             <>
-              <strong className={styles.workspace_label}>{session_workspace.label}</strong>
-              <div className={styles.workspace_directories}>
-                {[session_workspace.primary_directory, ...session_workspace.additional_directories]
-                  .slice(0, all_workspace_directories_visible ? undefined : 3)
-                  .map((directory, index) => (
-                    <div className={styles.path_row} key={directory} title={directory}>
-                      {index === 0 ? (
-                        <Tooltip content="主目录">
-                          <span aria-label="主目录" className={styles.directory_icon} data-primary="true" role="img">
-                            <Icon name="folder" size={16} />
-                          </span>
-                        </Tooltip>
-                      ) : (
-                        <span className={styles.directory_icon}>
-                          <Icon name="folder" size={16} />
-                        </span>
+              {workspace && session_workspace ? (
+                <>
+                  <div className={styles.workspace_directories}>
+                    {[session_workspace.primary_directory, ...session_workspace.additional_directories]
+                      .slice(0, all_workspace_directories_visible ? undefined : 3)
+                      .map((directory, index) => {
+                        const locator = sessionWorkspaceLocator(index);
+                        return (
+                          <WorkspaceDirectoryRow
+                            key={directory}
+                            label={directory}
+                            on_copy={() => void store.copyWorkspacePath(directory)}
+                            on_open_system={() => void store.openSessionWorkspaceDirectory(session.session_id, index)}
+                            on_open_tab={() => store.resource_workspace.openWorkspace(`session:${session.session_id}`, locator)}
+                            primary={index === 0}
+                          />
+                        );
+                      })}
+                    {!all_workspace_directories_visible && session_workspace.additional_directories.length > 2 && (
+                      <Button className={styles.more_directories} onClick={() => setAllWorkspaceDirectoriesVisible(true)} size="small" variant="text">
+                        显示其余 {session_workspace.additional_directories.length - 2} 条
+                      </Button>
+                    )}
+                    <WorkspaceDirectoryRow
+                      label="会话私有目录"
+                      on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
+                      on_open_system={() => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT)}
+                      on_open_tab={() => store.resource_workspace.openWorkspace(
+                        `session:${session.session_id}`,
+                        SESSION_PRIVATE_ROOT,
                       )}
-                      <span className={styles.path_text}>{directory}</span>
-                      <div className={styles.path_actions}>
-                        <button aria-label={`打开 ${directory}`} onClick={() => void store.openSessionWorkspaceDirectory(session.session_id, index)} type="button"><Icon name="external-link" size={13} /></button>
-                        <button aria-label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} type="button"><Icon name="copy" size={13} /></button>
-                      </div>
-                    </div>
-                  ))}
-                {!all_workspace_directories_visible && session_workspace.additional_directories.length > 2 && (
-                  <button className={styles.more_directories} onClick={() => setAllWorkspaceDirectoriesVisible(true)} type="button">
-                    显示其余 {session_workspace.additional_directories.length - 2} 条
-                  </button>
-                )}
-              </div>
-              {!session_workspace.directories_match_current && <p className={styles.workspace_changed_note}>本会话继续使用创建时的工作目录。</p>}
+                    />
+                  </div>
+                  {!session_workspace.directories_match_current && <p className={styles.workspace_changed_note}>本会话继续使用创建时的工作目录。</p>}
+                </>
+              ) : (
+                <>
+                  <p className={styles.empty_row}>未绑定工作空间</p>
+                  <WorkspaceDirectoryRow
+                    label="会话私有目录"
+                    on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
+                    on_open_system={() => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT)}
+                    on_open_tab={() => store.resource_workspace.openWorkspace(
+                      `session:${session.session_id}`,
+                      SESSION_PRIVATE_ROOT,
+                    )}
+                  />
+                </>
+              )}
             </>
-          ) : <p className={styles.empty_row}>未绑定目录</p>}
+          ) : <p className={styles.empty_row}>尚未选择会话</p>}
         </ContextSection>
         <ContextSection
           is_open={sectionIsOpen("skills")}
@@ -278,9 +355,9 @@ export const ContextPanel = observer(function ContextPanel() {
                 </div>
               ) : <p className={styles.empty_row}>{emptySkillMessage(session_view)}</p>}
               {(session_view.skill_catalog?.diagnostics.length ?? 0) > 0 && (
-                <button className={styles.skill_diagnostics} onClick={() => store.settings.open("skills")} type="button">
+                <Button className={styles.skill_diagnostics} onClick={() => store.settings.open("skills")} size="small" variant="text">
                   查看 {session_view.skill_catalog?.diagnostics.length} 项技能诊断
-                </button>
+                </Button>
               )}
             </div>
           ) : <p className={styles.empty_row}>尚未选择会话</p>}
@@ -296,7 +373,9 @@ export const ContextPanel = observer(function ContextPanel() {
                 <button
                   disabled={attachment.state !== "ready"}
                   key={attachment.attachment_id}
-                  onClick={() => setPreviewAttachment(attachment)}
+                  onClick={() => openAttachment(attachment)}
+                  onContextMenu={(event) => showAttachmentMenu(attachment, event)}
+                  onKeyDown={(event) => showAttachmentMenu(attachment, event)}
                   title={attachment.original_name}
                   type="button"
                 >
@@ -357,6 +436,42 @@ export const ContextPanel = observer(function ContextPanel() {
           ) : <p className={styles.empty_row}>还没有运行记录</p>}
         </ContextSection>
       </ContextSectionLayout>
+      {attachment_menu && (
+        <ResourceContextMenu
+          items={[
+            {
+              disabled: !isPreviewableResource(
+                attachment_menu.attachment.original_name,
+                attachment_menu.attachment.media_type,
+              ),
+              label: "在资源栏打开",
+              on_select: () => openAttachment(attachment_menu.attachment),
+            },
+            {
+              label: "使用系统应用打开",
+              on_select: () => runAttachmentAction(
+                openAttachmentInSystem(
+                  attachment_menu.attachment.session_id,
+                  attachment_menu.attachment.attachment_id,
+                ),
+                "无法使用系统应用打开。",
+              ),
+            },
+            {
+              label: "在 Finder 中显示",
+              on_select: () => runAttachmentAction(
+                revealAttachmentInDirectory(
+                  attachment_menu.attachment.session_id,
+                  attachment_menu.attachment.attachment_id,
+                ),
+                "无法在 Finder 中显示。",
+              ),
+            },
+          ]}
+          location={attachment_menu.location}
+          on_close={() => setAttachmentMenu(null)}
+        />
+      )}
       <PresenceBoundary present={preview_attachment !== null}>
       {preview_attachment && (
         <AttachmentPreviewDialog
@@ -370,9 +485,48 @@ export const ContextPanel = observer(function ContextPanel() {
         <SystemContextDialog on_close={() => setSystemContext(null)} snapshot={system_context} />
       )}
       </PresenceBoundary>
-    </aside>
+    </PanelRoot>
   );
 });
+
+const SESSION_PRIVATE_ROOT: SessionResourceLocator = {
+  root: { type: "session_private" },
+  relative_path: "",
+};
+
+function sessionWorkspaceLocator(directory_index: number): SessionResourceLocator {
+  return directory_index === 0
+    ? { root: { type: "workspace_primary" }, relative_path: "" }
+    : { root: { type: "workspace_additional", directory_index: directory_index - 1 }, relative_path: "" };
+}
+
+function WorkspaceDirectoryRow(props: Readonly<{
+  label: string;
+  on_copy: () => void;
+  on_open_system: () => void;
+  on_open_tab: () => void;
+  primary?: boolean;
+}>) {
+  return (
+    <div className={styles.path_row}>
+      <button aria-label={`浏览 ${props.label}`} className={styles.path_open} onClick={props.on_open_tab} type="button">
+        <span
+          aria-label={props.primary ? "主目录" : undefined}
+          className={styles.directory_icon}
+          data-primary={props.primary || undefined}
+          role={props.primary ? "img" : undefined}
+        >
+          <Icon name="folder" size={16} />
+        </span>
+        <span className={styles.path_text}>{props.label}</span>
+      </button>
+      <div className={styles.path_actions}>
+        <InlineIconButton icon="external-link" label={`打开 ${props.label}`} onClick={props.on_open_system} />
+        <InlineIconButton icon="copy" label={`复制 ${props.label}`} onClick={props.on_copy} />
+      </div>
+    </div>
+  );
+}
 
 function imageHandlingLabel(mode: SessionViewSnapshot["composer_capabilities"]["image_handling"] | undefined): string {
   if (mode === "native") return "模型原生";

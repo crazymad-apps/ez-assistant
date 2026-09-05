@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.23.0",
+  "version": "0.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,13 +10,14 @@
     "check:icon:macos": "node scripts/generate-macos-icon.mjs --check",
     "generate:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs",
     "check:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs --check",
-    "generate:protocol": "cargo run -p assistant-protocol --example export_typescript",
-    "check:protocol": "cargo run -p assistant-protocol --example export_typescript -- --check",
+    "cargo": "node scripts/run-cargo.mjs",
+    "generate:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript",
+    "check:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript -- --check",
     "lint": "oxlint --ignore-pattern src/generated/** src tests vite.config.ts vitest.config.ts playwright.config.ts",
     "test": "npm run check:protocol && vitest run",
-    "test:e2e": "cargo build -p assistant-runtime-host && playwright test",
+    "test:e2e": "npm run cargo -- build -p assistant-runtime-host && playwright test",
     "preview": "vite preview",
-    "prepare:sidecar": "cargo build -p assistant-runtime-host --release && node scripts/prepare-sidecar.mjs",
+    "prepare:sidecar": "npm run cargo -- build -p assistant-runtime-host --release && node scripts/prepare-sidecar.mjs",
     "release:macos": "node scripts/release-macos.mjs",
     "verify:macos-release": "node scripts/verify-macos-release.mjs",
     "tauri": "node scripts/run-tauri.mjs"
@@ -26,10 +27,15 @@
     "@streamdown/math": "1.0.2",
     "@streamdown/mermaid": "1.0.2",
     "@tauri-apps/api": "2.11.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "material-icon-theme": "5.38.1",
     "mobx": "7.0.0",
     "mobx-react-lite": "5.0.0",
+    "monaco-editor": "0.56.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-zoom-pan-pinch": "4.2.0",
     "streamdown": "2.5.0"
   },
   "devDependencies": {
@@ -47,6 +53,11 @@
     "typescript": "7.0.2",
     "vite": "8.2.1",
     "vitest": "4.1.10"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "3.4.14"
+    }
   },
   "packageManager": "npm@10.9.2"
 }

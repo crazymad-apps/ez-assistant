@@ -29,6 +29,13 @@
     text-underline-offset: 2px;
   }
 
+  img {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+  }
+
   blockquote {
     padding-left: 11px;
     border-left: 2px solid var(--ez-border-strong);
@@ -187,4 +194,42 @@
   line-height: 1.72;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.local_link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  color: var(--ez-primary-text);
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.local_image {
+  display: block;
+  width: fit-content;
+  height: auto;
+  min-height: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  line-height: 0;
+
+  img { max-width: 100%; }
+}
+
+.image_unavailable {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid var(--ez-border);
+  color: var(--ez-text-muted);
+  background: var(--ez-surface-subtle);
+  font-size: 12px;
 }

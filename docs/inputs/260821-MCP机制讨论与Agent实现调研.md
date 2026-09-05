@@ -10,7 +10,7 @@
 > `discover_mcp_tools` / `call_mcp_tool` 两个网关、完整定义使用普通 Tool Result、
 > `/mcp refresh` 手动刷新，以及 stdio 与 Streamable HTTP 同版交付。本文第四节及后续保留早期
 > 调研和候选推演，不再代表当前设计结论；正式范围以
-> [`v0.23.0 功能设计`](../design/v0.23.0-功能设计.md)为准。
+> [`v0.23.0 功能设计`](../versions/v0.23.0/功能设计.md)为准。
 
 ## 一、原始目标
 

@@ -1,0 +1,20 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ez-z-modal);
+  display: grid;
+  place-items: center;
+  background: rgb(36 42 54 / 28%);
+}
+.dialog {
+  width: min(460px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-large);
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-shell);
+  h2 { margin: 0; font-size: var(--ez-font-large); }
+  p { margin: 16px 0; line-height: 1.6; color: var(--ez-text-secondary); }
+  footer { display: flex; justify-content: flex-end; gap: 8px; }
+}

@@ -1,3 +1,5 @@
+import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
+import { shutdownUserTerminals, resumeUserTerminals } from "../native-bridge/userTerminal";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import type { ApplicationSnapshot } from "../generated/assistant-protocol";
 import {
@@ -17,11 +19,13 @@ import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 import type { RuntimeConnectionState } from "./ConnectionStore";
 
 type Dependencies = Readonly<{
+  resources: ResourceWorkspaceStore;
   get_application: () => ApplicationSnapshot | null;
   prepare_runtime_mutation: (kind: "stop" | "restart") => void;
   reconnect_runtime: (bootstrap?: RuntimeBootstrap) => Promise<void>;
   mark_runtime_stopped: () => void;
   save_preferences: () => void;
+  flush_preferences?: () => Promise<void>;
 }>;
 
 export type RuntimeImpact = Readonly<{
@@ -64,6 +68,7 @@ export class DesktopLifecycleStore {
       error_message: observable,
       close_behavior: observable,
       impact: computed,
+      terminal_count: computed,
       applyPreferences: action,
       request: action,
       dismiss: action,
@@ -73,6 +78,8 @@ export class DesktopLifecycleStore {
       dispose: action,
     });
   }
+
+  get terminal_count(): number { return this.dependencies.resources.runningTerminalCount(); }
 
   get impact(): RuntimeImpact {
     const sessions = this.dependencies.get_application()?.active_sessions ?? [];
@@ -134,11 +141,19 @@ export class DesktopLifecycleStore {
     if (!intent || this.pending) return;
     this.pending = true;
     this.error_message = null;
+    let runtime_mutating = false;
     try {
+      if (intent === "quit_desktop") {
+        if (this.dependencies.flush_preferences) await this.dependencies.flush_preferences();
+        await this.dependencies.resources.shutdownTerminals();
+        // 原生 gate 接住仍在创建的 PTY，停止 Runtime 前保证全部进程已回收。
+        await shutdownUserTerminals();
+      }
       if (intent === "quit_desktop" && !this.stop_runtime_on_quit) {
         await quitDesktopClient();
         return;
       }
+      runtime_mutating = true;
       if (intent === "restart_runtime") {
         this.dependencies.prepare_runtime_mutation("restart");
         await updateNativeRuntimeState("restarting", this.impact);
@@ -160,11 +175,20 @@ export class DesktopLifecycleStore {
         this.intent = null;
       });
     } catch (error: unknown) {
+      let message = error instanceof Error ? error.message : "桌面生命周期操作失败。";
+      if (intent === "quit_desktop") {
+        try {
+          await resumeUserTerminals();
+          this.dependencies.resources.resumeCreation();
+        } catch {
+          message += " 终端服务尚未恢复，请重试退出或重启客户端。";
+        }
+      }
       runInAction(() => {
         this.pending = false;
-        this.error_message = error instanceof Error ? error.message : "桌面生命周期操作失败。";
+        this.error_message = message;
       });
-      await updateNativeRuntimeState("disconnected", this.impact).catch(() => undefined);
+      if (runtime_mutating) await updateNativeRuntimeState("disconnected", this.impact).catch(() => undefined);
     }
   }
 

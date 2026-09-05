@@ -18,6 +18,7 @@ mod permission;
 pub(crate) mod product;
 mod quote;
 mod recovery;
+mod resource;
 mod session_management;
 mod shutdown;
 mod skills;

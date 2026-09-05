@@ -1,3 +1,4 @@
+import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApplicationSnapshot } from "../../src/generated/assistant-protocol";
 import type {
@@ -19,7 +20,14 @@ const native = vi.hoisted(() => ({
   stop: vi.fn(async () => undefined),
   take_pending: vi.fn<() => Promise<DesktopLifecycleIntent | null>>(async () => null),
   update: vi.fn(async (_state: string) => undefined),
+  shutdown_terminals: vi.fn(async () => undefined),
+  resume_terminals: vi.fn(async () => undefined),
   runtime_mutation_listener: null as ((event: NativeRuntimeMutationEvent) => void) | null,
+}));
+
+vi.mock("../../src/native-bridge/userTerminal", () => ({
+  shutdownUserTerminals: native.shutdown_terminals,
+  resumeUserTerminals: native.resume_terminals,
 }));
 
 vi.mock("../../src/native-bridge/desktopLifecycle", () => ({
@@ -156,6 +164,7 @@ type Overrides = Partial<ConstructorParameters<typeof DesktopLifecycleStore>[0]>
 
 function createStore(application: ApplicationSnapshot | null, overrides: Overrides = {}) {
   return new DesktopLifecycleStore({
+    resources: new ResourceWorkspaceStore(),
     get_application: () => application,
     prepare_runtime_mutation: () => undefined,
     reconnect_runtime: async () => undefined,
@@ -181,3 +190,45 @@ function applicationSnapshot(): ApplicationSnapshot {
     ],
   } as ApplicationSnapshot;
 }
+
+it("waits for terminal cleanup before stopping Runtime or exiting and aborts on cleanup failure", async () => {
+  const resources = new ResourceWorkspaceStore();
+  let complete!: () => void;
+  vi.spyOn(resources, "shutdownTerminals").mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }))
+    .mockRejectedValueOnce(new Error("terminal cleanup failed"));
+  const store = createStore(null, { resources });
+  store.request("quit_desktop");
+  store.setStopRuntimeOnQuit(true);
+  const closing = store.confirm();
+  expect(native.stop).not.toHaveBeenCalled();
+  expect(native.quit).not.toHaveBeenCalled();
+  complete();
+  await closing;
+  expect(native.stop).toHaveBeenCalledOnce();
+  expect(native.quit).toHaveBeenCalledOnce();
+  const retry = createStore(null, { resources });
+  native.stop.mockClear(); native.quit.mockClear();
+  retry.request("quit_desktop"); retry.setStopRuntimeOnQuit(true);
+  await retry.confirm();
+  expect(native.stop).not.toHaveBeenCalled();
+  expect(native.quit).not.toHaveBeenCalled();
+  expect(retry.pending).toBe(false);
+  expect(retry.error_message).toBe("terminal cleanup failed");
+});
+
+it("allows retrying a failed quit even if restoring the native terminal service also fails", async () => {
+  const resources = new ResourceWorkspaceStore();
+  const store = createStore(null, { resources });
+  native.quit.mockRejectedValueOnce(new Error("quit failed"));
+  native.resume_terminals.mockRejectedValueOnce(new Error("native bridge unavailable"));
+  store.request("quit_desktop");
+
+  await store.confirm();
+
+  expect(store.pending).toBe(false);
+  expect(resources.shutting_down).toBe(true);
+  expect(store.error_message).toContain("quit failed");
+  expect(store.error_message).toContain("终端服务尚未恢复");
+  await store.confirm();
+  expect(native.quit).toHaveBeenCalledTimes(2);
+});

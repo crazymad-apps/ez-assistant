@@ -6,10 +6,10 @@ import type {
   ConversationOwner,
   MessageId,
   QuotedTextSnapshot,
+  ToolFileReference,
   ToolCallId,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
-import { MarkdownContent } from "../../../components/MarkdownContent";
 import { Collapse } from "../../../components/Collapse";
 import { PresenceBoundary, usePresence } from "../../../components/Presence";
 import type { LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
@@ -21,6 +21,16 @@ import { mergeChildTaskItems } from "../childTaskPresentation";
 import { groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { AssistantTurn, EmptyConversation, LiveAssistantMessage, UserMessage } from "./MessageViews";
 import { createQuotedTextSnapshot, quoteSourceRange } from "../quoteSelection";
+import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
+import { isPreviewableResource } from "../../resource-workspace/ResourceWorkspaceStore";
+import {
+  openAttachmentInSystem,
+  revealAttachmentInDirectory,
+} from "../../../native-bridge/nativeResource";
+import {
+  ResourceContextMenu,
+  type ResourceMenuLocation,
+} from "../../resource-workspace/ResourceContextMenu";
 import styles from "./index.module.scss";
 
 const BOTTOM_THRESHOLD = 72;
@@ -50,6 +60,10 @@ export const ConversationView = observer(function ConversationView() {
   } | null>(null);
   const [fork_point, setForkPoint] = useState<MessageId | null>(null);
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
+  const [attachment_menu, setAttachmentMenu] = useState<Readonly<{
+    attachment: AttachmentSummary;
+    location: ResourceMenuLocation;
+  }> | null>(null);
   const [summary_expanded, setSummaryExpanded] = useState(false);
   const [selection_action, setSelectionAction] = useState<{
     quote: QuotedTextSnapshot;
@@ -84,6 +98,25 @@ export const ConversationView = observer(function ConversationView() {
   const attachment_by_id = useMemo(() => new Map(
     (session_view?.attachments ?? []).map((attachment) => [attachment.attachment_id, attachment]),
   ), [session_view?.attachments]);
+
+  const openAttachment = useCallback((attachment: AttachmentSummary) => {
+    if (!session_id || !isPreviewableResource(attachment.original_name, attachment.media_type)) {
+      setPreviewAttachment(attachment);
+      return;
+    }
+    store.resource_workspace.openAttachment(
+      `session:${session_id}`,
+      attachment,
+      session_view?.attachments ?? [attachment],
+    );
+    if (!store.navigation.effective_right_sidebar_open) store.toggleRightSidebar();
+  }, [session_id, session_view?.attachments, store]);
+
+  const runAttachmentAction = useCallback((request: Promise<void>, fallback: string) => {
+    void request.catch((failure: unknown) => {
+      store.showInteractionError(failure instanceof Error ? failure.message : fallback);
+    });
+  }, [store]);
 
   const confirmFork = useCallback(async () => {
     if (!session_id || !fork_point || !history) {
@@ -383,8 +416,23 @@ export const ConversationView = observer(function ConversationView() {
     });
   }, []);
 
+  const openToolResource = useCallback((file: ToolFileReference) => {
+    const detail = detail_state?.detail;
+    if (!session_id || !detail?.owner || !detail.message_id) return;
+    store.resource_workspace.openToolResource(
+      `session:${session_id}`,
+      detail.owner,
+      detail.message_id,
+      file,
+      detail.files,
+    );
+    if (!store.navigation.effective_right_sidebar_open) store.toggleRightSidebar();
+    setDetailState(null);
+  }, [detail_state?.detail, session_id, store]);
+
   useEffect(() => {
     setSummaryExpanded(false);
+    setAttachmentMenu(null);
   }, [history?.generation, session_id]);
 
   const renderConversationRows = (rows: readonly ConversationRow[]) => (
@@ -407,7 +455,7 @@ export const ConversationView = observer(function ConversationView() {
             <div className={styles.context_summary_collapse}>
               <Collapse open={summary_expanded}>
                 <div className={styles.context_summary_text}>
-                  <MarkdownContent text={row.message.text} />
+                  <ConversationMarkdownContent text={row.message.text} />
                 </div>
               </Collapse>
             </div>
@@ -422,7 +470,8 @@ export const ConversationView = observer(function ConversationView() {
             })}
             key={row.message.message_id}
             message={row.message}
-            on_attachment_click={setPreviewAttachment}
+            on_attachment_click={openAttachment}
+            on_attachment_menu={(attachment, location) => setAttachmentMenu({ attachment, location })}
             on_quote_locate={(quote) => session_id
               ? store.locateTextQuoteSource(session_id, quote)
               : Promise.resolve(false)}
@@ -481,6 +530,7 @@ export const ConversationView = observer(function ConversationView() {
               error={detail_state.error}
               is_loading={detail_state.is_loading}
               on_close={() => setDetailState(null)}
+              on_file_open={openToolResource}
               on_recall_navigate={(target) => {
                 setDetailState(null);
                 void store.openRecallNavigationTarget(target);
@@ -559,6 +609,42 @@ export const ConversationView = observer(function ConversationView() {
           <Icon name="arrow-down" size={16} />
         </button>
       )}
+      {attachment_menu && (
+        <ResourceContextMenu
+          items={[
+            {
+              disabled: !isPreviewableResource(
+                attachment_menu.attachment.original_name,
+                attachment_menu.attachment.media_type,
+              ),
+              label: "在资源栏打开",
+              on_select: () => openAttachment(attachment_menu.attachment),
+            },
+            {
+              label: "使用系统应用打开",
+              on_select: () => runAttachmentAction(
+                openAttachmentInSystem(
+                  attachment_menu.attachment.session_id,
+                  attachment_menu.attachment.attachment_id,
+                ),
+                "无法使用系统应用打开。",
+              ),
+            },
+            {
+              label: "在 Finder 中显示",
+              on_select: () => runAttachmentAction(
+                revealAttachmentInDirectory(
+                  attachment_menu.attachment.session_id,
+                  attachment_menu.attachment.attachment_id,
+                ),
+                "无法在 Finder 中显示。",
+              ),
+            },
+          ]}
+          location={attachment_menu.location}
+          on_close={() => setAttachmentMenu(null)}
+        />
+      )}
       <PresenceBoundary present={detail_state !== null}>
       {detail_state && (
         <ToolDetailDialog
@@ -566,6 +652,7 @@ export const ConversationView = observer(function ConversationView() {
           error={detail_state.error}
           is_loading={detail_state.is_loading}
           on_close={() => setDetailState(null)}
+          on_file_open={openToolResource}
           on_recall_navigate={(target) => {
             setDetailState(null);
             void store.openRecallNavigationTarget(target);

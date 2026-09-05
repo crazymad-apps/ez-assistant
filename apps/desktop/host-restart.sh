@@ -1,3 +1,5 @@
-#! /bin/bash
+#!/bin/bash
+
+cd "$(dirname "$0")" || exit 1
 pkill -f 'ez-assistant-runtime serve'
-cargo run -p assistant-runtime-host -- launch
+node scripts/run-cargo.mjs run -p assistant-runtime-host -- launch

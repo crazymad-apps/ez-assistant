@@ -39,9 +39,9 @@
 }
 
 .message_list {
-  width: min(var(--conversation-content-width), 100%);
+  width: 100%;
   min-width: 0;
-  max-width: 100%;
+  max-width: var(--conversation-content-max-width);
   min-height: 100%;
   margin: 0 auto;
 }

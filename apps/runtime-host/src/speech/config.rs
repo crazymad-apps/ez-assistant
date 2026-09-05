@@ -22,6 +22,8 @@ pub(super) struct CompiledSpeechConfig {
     pub(super) tts: Option<Arc<dyn TtsProvider>>,
     pub(super) status: DeviceSpeechServicesSnapshot,
     pub(super) debug_audio_directory: Option<PathBuf>,
+    pub(super) asr_timeout: Duration,
+    pub(super) tts_timeout: Duration,
 }
 
 impl CompiledSpeechConfig {
@@ -31,6 +33,8 @@ impl CompiledSpeechConfig {
             tts: None,
             status: DeviceSpeechServicesSnapshot::default(),
             debug_audio_directory: None,
+            asr_timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+            tts_timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
         }
     }
 }
@@ -45,8 +49,9 @@ struct SpeechDocument {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSpeechConfig {
-    asr: Option<RawAsrConfig>,
-    tts: Option<RawTtsConfig>,
+    // 先隔离原始表，单能力字段缺失/类型错误不能令另一能力一起反序列化失败。
+    asr: Option<toml::Value>,
+    tts: Option<toml::Value>,
     debug_audio_directory: Option<PathBuf>,
 }
 
@@ -88,8 +93,24 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> CompiledSpeechConf
         return CompiledSpeechConfig::unavailable();
     };
 
-    let asr = speech.asr.and_then(compile_asr);
-    let tts = speech.tts.and_then(compile_tts);
+    let raw_asr = speech
+        .asr
+        .and_then(|raw| raw.try_into::<RawAsrConfig>().ok());
+    let raw_tts = speech
+        .tts
+        .and_then(|raw| raw.try_into::<RawTtsConfig>().ok());
+    let asr_timeout = Duration::from_millis(
+        raw_asr
+            .as_ref()
+            .map_or(DEFAULT_TIMEOUT_MS, |raw| raw.timeout_ms),
+    );
+    let tts_timeout = Duration::from_millis(
+        raw_tts
+            .as_ref()
+            .map_or(DEFAULT_TIMEOUT_MS, |raw| raw.timeout_ms),
+    );
+    let asr = raw_asr.and_then(compile_asr);
+    let tts = raw_tts.and_then(compile_tts);
     CompiledSpeechConfig {
         status: DeviceSpeechServicesSnapshot {
             asr: if asr.is_some() {
@@ -106,6 +127,8 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> CompiledSpeechConf
         asr,
         tts,
         debug_audio_directory: debug_audio_directory(speech.debug_audio_directory),
+        asr_timeout,
+        tts_timeout,
     }
 }
 
@@ -262,5 +285,42 @@ timeout_ms = 30000
         assert_eq!(invalid.status, DeviceSpeechServicesSnapshot::default());
         let missing = load(&StaticSource("schema_version = 1")).await;
         assert_eq!(missing.status, DeviceSpeechServicesSnapshot::default());
+    }
+
+    #[tokio::test]
+    async fn malformed_provider_table_does_not_disable_the_other_capability() {
+        for invalid in [
+            "provider = 42",
+            "provider = 'dashscope'",
+            "unknown = true",
+            "timeout_ms = 'bad'",
+        ] {
+            let asr_valid = format!(
+                "[speech.asr]\nprovider = 'dashscope'\nmodel = 'asr'\ncredential = 'fixture'\n[speech.tts]\n{invalid}\n"
+            );
+            let tts_valid = format!(
+                "[speech.tts]\nprovider = 'dashscope'\nmodel = 'tts'\nvoice = 'voice'\ncredential = 'fixture'\n[speech.asr]\n{invalid}\n"
+            );
+            struct OwnedSource(String);
+            impl RuntimeConfigSource for OwnedSource {
+                fn load(&self) -> ConfigSourceFuture<'_> {
+                    Box::pin(std::future::ready(ConfigSourceLoad::Document(
+                        ConfigDocument::new(self.0.clone(), "test".to_owned()),
+                    )))
+                }
+            }
+            let compiled = load(&OwnedSource(asr_valid)).await;
+            assert_eq!(compiled.status.asr, SpeechServiceStatusSnapshot::Ready);
+            assert_eq!(
+                compiled.status.tts,
+                SpeechServiceStatusSnapshot::Unavailable
+            );
+            let compiled = load(&OwnedSource(tts_valid)).await;
+            assert_eq!(
+                compiled.status.asr,
+                SpeechServiceStatusSnapshot::Unavailable
+            );
+            assert_eq!(compiled.status.tts, SpeechServiceStatusSnapshot::Ready);
+        }
     }
 }

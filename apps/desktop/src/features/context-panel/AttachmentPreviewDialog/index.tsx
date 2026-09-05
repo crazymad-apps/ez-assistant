@@ -9,6 +9,7 @@ import {
 } from "../../../native-bridge/nativeResource";
 import { Icon } from "../../../components/Icon";
 import { Dialog } from "../../../components/Dialog";
+import { PdfViewer } from "../../../components/PdfViewer";
 import styles from "./index.module.scss";
 
 export function AttachmentPreviewDialog(props: Readonly<{
@@ -99,6 +100,9 @@ export function AttachmentPreviewDialog(props: Readonly<{
           {preview?.kind === "text" && <pre>{preview.text}</pre>}
           {preview?.kind === "image" && preview.data_url && (
             <img alt={props.attachment.original_name} src={preview.data_url} />
+          )}
+          {preview?.kind === "pdf" && preview.data_base64 && (
+            <PdfViewer base64={preview.data_base64} title={`${props.attachment.original_name} PDF 预览`} />
           )}
           {action_error && <p className={styles.error}>{action_error}</p>}
         </main>

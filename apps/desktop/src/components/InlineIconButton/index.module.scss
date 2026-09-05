@@ -1,0 +1,26 @@
+.button {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--ez-text-muted);
+  background: transparent;
+  line-height: 0;
+  vertical-align: middle;
+
+  &:hover:not(:disabled) {
+    color: var(--ez-text);
+    background: transparent;
+  }
+
+  > svg {
+    display: block;
+    flex: 0 0 auto;
+  }
+}

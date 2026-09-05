@@ -95,7 +95,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page).toHaveTitle("EZ Assistant");
   await expect(page.getByText("ez-assistant · 本地 AI 助手")).toBeVisible();
   await expect(page.getByRole("button", { name: "新对话" })).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "当前上下文" })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "当前上下文" })).toBeVisible();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
   await expectModelCatalogForm(page);
@@ -225,7 +225,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("工具执行完成。", { exact: true })).toBeVisible();
   await expect(session_header.getByText("空闲", { exact: true })).toHaveCount(0);
 
-  const context_panel = page.getByRole("complementary", { name: "当前上下文" });
+  const context_panel = page.getByRole("tabpanel", { name: "当前上下文" });
   await expect(context_panel.getByText("图片理解").locator("xpath=following-sibling::*[1]")).toContainText("当前不可用");
   const workspace_section = context_panel.getByRole("button", { name: "工作区", exact: true });
   const open_workspace_directory = context_panel.getByRole("button", { name: /^打开 / }).first();
@@ -418,7 +418,7 @@ async function expectResponsiveLayouts(page: Page): Promise<void> {
   for (const layout of layouts) {
     await page.setViewportSize({ width: layout.width, height: layout.height });
     const left_sidebar = page.getByRole("complementary", { name: "会话导航" });
-    const right_sidebar = page.getByRole("complementary", { name: "当前上下文" });
+    const right_sidebar = page.getByRole("complementary", { name: "资源栏" });
     await expect(left_sidebar).toBeVisible({ visible: layout.left_sidebar });
     await expect(right_sidebar).toBeVisible({ visible: layout.right_sidebar });
     await expect(page.getByText("ez-assistant · 本地 AI 助手")).toBeVisible();

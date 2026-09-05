@@ -1,0 +1,23 @@
+.viewport.viewport {
+  width: 100%;
+  height: 100%;
+  background: var(--ez-sidebar);
+  cursor: grab;
+
+  &:active { cursor: grabbing; }
+  &:focus-visible { outline: 1px solid var(--ez-primary-border); outline-offset: -1px; }
+}
+
+.content img {
+  display: block;
+  flex: none;
+  max-width: none;
+  max-height: none;
+}
+
+.error {
+  margin: 0;
+  padding: 24px;
+  color: var(--ez-text-secondary);
+  text-align: center;
+}

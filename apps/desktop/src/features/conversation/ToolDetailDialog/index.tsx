@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   RecallNavigationTarget,
   RecallToolDetailSnapshot,
@@ -8,6 +8,7 @@ import type {
   TokenUsageSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
+import { PdfViewer } from "../../../components/PdfViewer";
 import { Dialog } from "../../../components/Dialog";
 import {
   NativeResourceFailure,
@@ -17,6 +18,11 @@ import {
   type AttachmentPreview,
 } from "../../../native-bridge/nativeResource";
 import styles from "./index.module.scss";
+import { isPreviewableResource } from "../../resource-workspace/ResourceWorkspaceStore";
+import {
+  ResourceContextMenu,
+  type ResourceMenuLocation,
+} from "../../resource-workspace/ResourceContextMenu";
 
 type ToolDetailDialogProps = Readonly<{
   detail: ToolDetailView | null;
@@ -24,6 +30,7 @@ type ToolDetailDialogProps = Readonly<{
   initial_file_ref_id?: string | null;
   is_loading: boolean;
   on_close: () => void;
+  on_file_open?: (file: ToolFileReference) => void;
   on_recall_navigate?: (target: RecallNavigationTarget) => void;
 }>;
 
@@ -51,6 +58,7 @@ export function ToolDetailDialog({
   initial_file_ref_id,
   is_loading,
   on_close,
+  on_file_open,
   on_recall_navigate,
 }: ToolDetailDialogProps) {
   const [selected_file, setSelectedFile] = useState<ToolFileReference | null>(null);
@@ -59,6 +67,10 @@ export function ToolDetailDialog({
   const [file_preview_fallback, setFilePreviewFallback] = useState<"unsupported" | "too_large" | null>(null);
   const [file_loading, setFileLoading] = useState(false);
   const [unavailable_file_refs, setUnavailableFileRefs] = useState<ReadonlySet<string>>(new Set());
+  const [file_menu, setFileMenu] = useState<Readonly<{
+    file: ToolFileReference;
+    location: ResourceMenuLocation;
+  }> | null>(null);
   const owner = detail?.owner;
   const is_read_image = detail?.tool_name === "read_image";
   const mcp_identity = detail?.mcp_identity ?? (detail?.input.type === "mcp" ? detail.input.identity : null);
@@ -153,6 +165,29 @@ export function ToolDetailDialog({
     }
   }
 
+  function showFileMenu(
+    file: ToolFileReference,
+    event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
+  ) {
+    if ("key" in event && event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    const location = "clientX" in event
+      ? { x: event.clientX, y: event.clientY }
+      : (() => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          return { x: bounds.left + 16, y: bounds.bottom };
+        })();
+    setFileMenu({ file, location });
+  }
+
+  function runFileAction(request: Promise<void>, fallback: string) {
+    setFileError(null);
+    void request.catch((failure: unknown) => {
+      setFileError(failure instanceof Error ? failure.message : fallback);
+    });
+  }
+
   return (
     <Dialog
       aria_labelledby="tool-detail-title"
@@ -182,6 +217,8 @@ export function ToolDetailDialog({
                 file_loading={file_loading}
                 file_preview={file_preview}
                 file_preview_fallback={file_preview_fallback}
+                on_open={on_file_open}
+                on_open_menu={showFileMenu}
               />
             ) : <>
               <DetailSection title="请求参数">
@@ -218,7 +255,15 @@ export function ToolDetailDialog({
                       <li key={file.resource_ref_id}>
                         <button
                           disabled={file.state !== "available" || unavailable_file_refs.has(file.resource_ref_id)}
-                          onClick={() => setSelectedFile(file)}
+                          onClick={() => {
+                            if (on_file_open && isPreviewableResource(file.display_name, file.media_type)) {
+                              on_file_open(file);
+                            } else {
+                              setSelectedFile(file);
+                            }
+                          }}
+                          onContextMenu={(event) => showFileMenu(file, event)}
+                          onKeyDown={(event) => showFileMenu(file, event)}
                           type="button"
                         >
                           <span>{file.display_name}</span>
@@ -261,6 +306,9 @@ export function ToolDetailDialog({
                   {file_preview?.kind === "image" && file_preview.data_url && (
                     <img alt={selected_file.display_name} className={styles.file_preview_image} src={file_preview.data_url} />
                   )}
+                  {file_preview?.kind === "pdf" && file_preview.data_base64 && (
+                    <PdfViewer base64={file_preview.data_base64} title={`${selected_file.display_name} PDF 预览`} />
+                  )}
                 </DetailSection>
               )}
               {(detail.output_truncated || detail.historical_fields_missing) && (
@@ -275,6 +323,38 @@ export function ToolDetailDialog({
             </>
           )}
         </div>
+        {file_menu && owner && detail?.message_id && (
+          <ResourceContextMenu
+            items={[
+              {
+                disabled: !on_file_open || !isPreviewableResource(
+                  file_menu.file.display_name,
+                  file_menu.file.media_type,
+                ),
+                label: "在资源栏打开",
+                on_select: () => on_file_open?.(file_menu.file),
+              },
+              {
+                disabled: file_menu.file.origin === "session_tool_image",
+                label: "使用系统应用打开",
+                on_select: () => runFileAction(
+                  openToolFileInSystem(owner, detail.message_id!, file_menu.file.resource_ref_id),
+                  "无法使用系统应用打开。",
+                ),
+              },
+              {
+                disabled: file_menu.file.origin === "session_tool_image",
+                label: "在 Finder 中显示",
+                on_select: () => runFileAction(
+                  revealToolFileInDirectory(owner, detail.message_id!, file_menu.file.resource_ref_id),
+                  "无法在 Finder 中显示。",
+                ),
+              },
+            ]}
+            location={file_menu.location}
+            on_close={() => setFileMenu(null)}
+          />
+        )}
     </Dialog>
   );
 }
@@ -286,6 +366,8 @@ function ReadImageDetail({
   file_loading,
   file_preview,
   file_preview_fallback,
+  on_open,
+  on_open_menu,
 }: Readonly<{
   detail: ToolDetailView;
   file: ToolFileReference | null;
@@ -293,6 +375,11 @@ function ReadImageDetail({
   file_loading: boolean;
   file_preview: AttachmentPreview | null;
   file_preview_fallback: "unsupported" | "too_large" | null;
+  on_open?: (file: ToolFileReference) => void;
+  on_open_menu: (
+    file: ToolFileReference,
+    event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
+  ) => void;
 }>) {
   const source_path = detail.input.type === "file" ? detail.input.path : null;
   const unavailable = file?.state === "unavailable";
@@ -325,6 +412,14 @@ function ReadImageDetail({
           <div><dt>大小</dt><dd>{formatBytes(file.size_bytes)}</dd></div>
         )}
       </dl>
+      {file?.state === "available" && on_open && (
+        <button
+          onClick={() => on_open(file)}
+          onContextMenu={(event) => on_open_menu(file, event)}
+          onKeyDown={(event) => on_open_menu(file, event)}
+          type="button"
+        >在资源栏打开</button>
+      )}
       {(detail.output_truncated || detail.historical_fields_missing) && (
         <p className={styles.notice}>
           {detail.output_truncated ? "工具记录已截断。" : "较早记录缺少部分附属信息。"}

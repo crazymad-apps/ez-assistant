@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import type {
   AssistantMessageSnapshot,
   AttachmentSummary,
@@ -25,11 +33,13 @@ import { AssistantSegmentView, LiveSteps } from "./ToolSegments";
 import { DeviceMessageSourceDialog } from "./DeviceMessageSourceDialog";
 import { QuoteDetailDialog } from "../QuoteDetailDialog";
 import styles from "./index.module.scss";
+import type { ResourceMenuLocation } from "../../resource-workspace/ResourceContextMenu";
 
 export function UserMessage(props: Readonly<{
   message: UserMessageSnapshot;
   attachments: readonly AttachmentSummary[];
   on_attachment_click: (attachment: AttachmentSummary) => void;
+  on_attachment_menu?: (attachment: AttachmentSummary, location: ResourceMenuLocation) => void;
   source_session?: SessionSummary;
   on_source_open: (session: SessionSummary) => void;
   on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
@@ -67,7 +77,12 @@ export function UserMessage(props: Readonly<{
       {images.length > 0 && (
         <div aria-label="消息图片" className={styles.user_images}>
           {images.map((attachment) => (
-            <MessageImage attachment={attachment} key={attachment.attachment_id} on_click={() => props.on_attachment_click(attachment)} />
+            <MessageImage
+              attachment={attachment}
+              key={attachment.attachment_id}
+              on_click={() => props.on_attachment_click(attachment)}
+              on_menu={(location) => props.on_attachment_menu?.(attachment, location)}
+            />
           ))}
         </div>
       )}
@@ -78,6 +93,8 @@ export function UserMessage(props: Readonly<{
               disabled={attachment.state !== "ready"}
               key={attachment.attachment_id}
               onClick={() => props.on_attachment_click(attachment)}
+              onContextMenu={(event) => openAttachmentMenuFromPointer(event, attachment, props.on_attachment_menu)}
+              onKeyDown={(event) => openAttachmentMenuFromKeyboard(event, attachment, props.on_attachment_menu)}
               type="button"
             >
               <Icon name="paperclip" size={13} />
@@ -203,7 +220,11 @@ function ProxyReportBody(props: Readonly<{ text: string }>) {
   );
 }
 
-function MessageImage(props: Readonly<{ attachment: AttachmentSummary; on_click: () => void }>) {
+function MessageImage(props: Readonly<{
+  attachment: AttachmentSummary;
+  on_click: () => void;
+  on_menu: (location: ResourceMenuLocation) => void;
+}>) {
   const [source, setSource] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
@@ -213,10 +234,49 @@ function MessageImage(props: Readonly<{ attachment: AttachmentSummary; on_click:
     return () => { active = false; };
   }, [props.attachment.attachment_id, props.attachment.session_id]);
   return (
-    <button aria-label={`预览图片 ${props.attachment.original_name}`} disabled={props.attachment.state !== "ready"} onClick={props.on_click} type="button">
+    <button
+      aria-label={`预览图片 ${props.attachment.original_name}`}
+      disabled={props.attachment.state !== "ready"}
+      onClick={props.on_click}
+      onContextMenu={(event) => openAttachmentMenuFromPointer(
+        event,
+        props.attachment,
+        (_attachment, location) => props.on_menu(location),
+      )}
+      onKeyDown={(event) => openAttachmentMenuFromKeyboard(
+        event,
+        props.attachment,
+        (_attachment, location) => props.on_menu(location),
+      )}
+      type="button"
+    >
       {source ? <img alt={props.attachment.original_name} src={source} /> : <span><Icon name="paperclip" size={18} /></span>}
     </button>
   );
+}
+
+function openAttachmentMenuFromPointer(
+  event: MouseEvent<HTMLElement>,
+  attachment: AttachmentSummary,
+  open: ((attachment: AttachmentSummary, location: ResourceMenuLocation) => void) | undefined,
+) {
+  if (!open) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.focus();
+  open(attachment, { x: event.clientX, y: event.clientY });
+}
+
+function openAttachmentMenuFromKeyboard(
+  event: KeyboardEvent<HTMLElement>,
+  attachment: AttachmentSummary,
+  open: ((attachment: AttachmentSummary, location: ResourceMenuLocation) => void) | undefined,
+) {
+  if (!open || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const bounds = event.currentTarget.getBoundingClientRect();
+  open(attachment, { x: bounds.left + 16, y: bounds.bottom });
 }
 
 export function AssistantTurn(props: Readonly<{

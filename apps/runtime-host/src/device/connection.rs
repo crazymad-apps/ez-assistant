@@ -49,6 +49,7 @@ use super::{
         preference_is_supported,
     },
 };
+use crate::media_diagnostics::{correlation_id, timestamp_ms};
 use crate::speech::SpeechServiceError;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -323,8 +324,8 @@ async fn authenticate_device(
     }
     let capabilities = effective_capabilities(
         hello.capabilities,
-        shared.speech.asr_ready(),
-        shared.speech.tts_ready(),
+        shared.speech.asr_available(),
+        shared.speech.tts_available(),
     );
     if !preference_is_supported(capabilities, hello.output_preference) {
         send_wire_error(&mut socket, "unsupported_output_preference", None, true).await?;
@@ -432,7 +433,7 @@ async fn authenticated_loop(
                         send_payload(socket, "state_changed", &state).await?;
                     }
                     ConnectionCommand::PreparePlayback(preparation) => {
-                        let result = if receiving.is_some() || voice_turn.lock().await.is_some() {
+                        let result = if preparation.response.is_closed() || preparation.cancellation.is_cancelled() || receiving.is_some() || voice_turn.lock().await.is_some() {
                             preparation.cancellation.cancel();
                             PlaybackPreparationResult::Interrupted
                         } else if reserve_playback(
@@ -445,10 +446,12 @@ async fn authenticated_loop(
                             preparation.cancellation.cancel();
                             PlaybackPreparationResult::CapacityExceeded
                         };
-                        let _ = preparation.response.send(result);
+                        if preparation.response.send(result).is_err() {
+                            preparation.cancellation.cancel();
+                        }
                     }
-                    ConnectionCommand::StartPlayback(output) => {
-                        attach_playback_output(&mut playback, output);
+                    ConnectionCommand::StartPlayback { output, response } => {
+                        acknowledge_playback_output(&mut playback, output, response);
                     }
                 }
                 synchronize_playback(socket, &mut playback).await?;
@@ -545,7 +548,7 @@ async fn authenticated_loop(
                             }
                             "listen_start" => {
                                 let request = envelope.payload::<ListenStart>()?;
-                                if !capabilities.input_pcm16_16k_mono || !shared.speech.asr_ready() {
+                                if !capabilities.input_pcm16_16k_mono || !shared.speech.asr_available() {
                                     send_wire_error(socket, "asr_unavailable", Some(envelope.message_id), true).await?;
                                     continue;
                                 }
@@ -584,6 +587,7 @@ async fn authenticated_loop(
                                     aggregation.pause_commit();
                                 }
                                 let client_input_id = request.client_input_id.clone();
+                                eprintln!("event=voice_capture_started ts_ms={} device={} input={} stream_id={}", timestamp_ms(), correlation_id(device_id.as_str()), correlation_id(&client_input_id), request.stream_id);
                                 receiving = Some(UplinkUtterance::new(request));
                                 send_payload(socket, "state_changed", &InteractionStateChanged {
                                     run_id: None,
@@ -775,6 +779,7 @@ async fn authenticated_loop(
 ///
 /// TTS 生成期间 `output` 为空；生成完成后再附加 PCM，并且只有队首会创建传输流。
 struct ActivePlayback {
+    prepared_at: Instant,
     output_id: String,
     cancellation: tokio_util::sync::CancellationToken,
     output: Option<super::gateway::PlaybackOutput>,
@@ -783,6 +788,7 @@ struct ActivePlayback {
 
 /// 当前下行 PCM 流的发送游标和严格递增帧序号。
 struct PlaybackStream {
+    started_at: Instant,
     stream_id: u32,
     pcm: Arc<[u8]>,
     offset: usize,
@@ -792,6 +798,7 @@ struct PlaybackStream {
 impl ActivePlayback {
     fn prepared(output_id: String, cancellation: tokio_util::sync::CancellationToken) -> Self {
         Self {
+            prepared_at: Instant::now(),
             output_id,
             cancellation,
             output: None,
@@ -801,6 +808,7 @@ impl ActivePlayback {
 
     fn start(&mut self, stream_id: u32, pcm: Arc<[u8]>) {
         self.stream = Some(PlaybackStream {
+            started_at: Instant::now(),
             stream_id,
             pcm,
             offset: 0,
@@ -824,10 +832,15 @@ fn reserve_playback(
     output_id: String,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> bool {
-    if playback.len() >= MAX_QUEUED_PLAYBACKS {
+    if playback.len() >= MAX_QUEUED_PLAYBACKS
+        || playback.iter().any(|entry| entry.output_id == output_id)
+    {
         return false;
     }
     playback.push_back(ActivePlayback::prepared(output_id, cancellation));
+    if let Some(active) = playback.back() {
+        log_playback_queue("reserved", &active.output_id, playback, "ok");
+    }
     true
 }
 
@@ -835,14 +848,62 @@ fn attach_playback_output(
     playback: &mut VecDeque<ActivePlayback>,
     output: super::gateway::PlaybackOutput,
 ) -> bool {
-    let Some(queued) = playback
-        .iter_mut()
-        .find(|queued| queued.output_id == output.output_id && !queued.cancellation.is_cancelled())
-    else {
+    let Some(queued) = playback.iter_mut().find(|queued| {
+        queued.output_id == output.output_id
+            && !queued.cancellation.is_cancelled()
+            && queued.output.is_none()
+            && queued.stream.is_none()
+    }) else {
         return false;
     };
     queued.output = Some(output);
     true
+}
+
+/// 连接 owner 先附加 PCM 再确认；回执接收者已消失时不播放未确认的输出。
+fn acknowledge_playback_output(
+    playback: &mut VecDeque<ActivePlayback>,
+    output: super::gateway::PlaybackOutput,
+    response: tokio::sync::oneshot::Sender<bool>,
+) {
+    let output_id = output.output_id.clone();
+    let accepted = !response.is_closed() && attach_playback_output(playback, output);
+    log_playback_queue(
+        "attached",
+        &output_id,
+        playback,
+        if accepted { "ok" } else { "rejected" },
+    );
+    if response.send(accepted).is_err()
+        && accepted
+        && let Some(queued) = playback.iter().find(|queued| queued.output_id == output_id)
+    {
+        queued.cancellation.cancel();
+    }
+}
+
+fn log_playback_queue(
+    stage: &'static str,
+    output_id: &str,
+    playback: &VecDeque<ActivePlayback>,
+    result: &str,
+) {
+    let pcm_bytes: usize = playback
+        .iter()
+        .map(|entry| {
+            entry.output.as_ref().map_or(0, |output| output.pcm.len())
+                + entry.stream.as_ref().map_or(0, |stream| stream.pcm.len())
+        })
+        .sum();
+    eprintln!(
+        "event=playback_queue ts_ms={} request={} stage={} depth={} pcm_bytes={} result={}",
+        timestamp_ms(),
+        correlation_id(output_id),
+        stage,
+        playback.len(),
+        pcm_bytes,
+        result
+    );
 }
 
 async fn cancel_playback(
@@ -856,6 +917,13 @@ async fn cancel_playback(
             .map(|stream_id| (active.output_id.clone(), stream_id))
     });
     for active in playback.drain(..) {
+        eprintln!(
+            "event=playback_discarded ts_ms={} request={} stream_id={} result={}",
+            timestamp_ms(),
+            correlation_id(&active.output_id),
+            active.stream_id().unwrap_or(0),
+            reason
+        );
         active.cancellation.cancel();
     }
     if let Some((output_id, stream_id)) = active_stream {
@@ -887,6 +955,7 @@ async fn synchronize_playback(
         .is_some_and(|active| active.cancellation.is_cancelled())
     {
         let active = playback.pop_front().expect("front checked");
+        log_playback_queue("discarded", &active.output_id, playback, "cancelled");
         if let Some(stream_id) = active.stream_id() {
             send_playback_end(socket, &active.output_id, stream_id, "cancelled").await?;
         }
@@ -913,6 +982,14 @@ async fn synchronize_playback(
         )
         .await?;
         if let Some(active) = playback.front_mut() {
+            eprintln!(
+                "event=playback_started ts_ms={} request={} stream_id={} queue_ms={} pcm_bytes={}",
+                timestamp_ms(),
+                correlation_id(&active.output_id),
+                stream_id,
+                active.prepared_at.elapsed().as_millis(),
+                output.pcm.len()
+            );
             active.start(stream_id, output.pcm);
         }
     }
@@ -953,7 +1030,17 @@ async fn send_next_playback_frame(
         let stream_id = stream.stream_id;
         active.cancellation.cancel();
         playback.pop_front();
+        log_playback_queue("finished", &output_id, playback, "backpressure");
         return send_playback_end(socket, &output_id, stream_id, "backpressure").await;
+    }
+    if stream.sequence == 0 {
+        eprintln!(
+            "event=playback_first_frame ts_ms={} request={} stream_id={} elapsed_ms={}",
+            timestamp_ms(),
+            correlation_id(&active.output_id),
+            stream.stream_id,
+            stream.started_at.elapsed().as_millis()
+        );
     }
     stream.offset = end;
     stream.sequence = stream
@@ -963,7 +1050,17 @@ async fn send_next_playback_frame(
     if stream.offset == stream.pcm.len() {
         let output_id = active.output_id.clone();
         let stream_id = stream.stream_id;
+        eprintln!(
+            "event=playback_sent ts_ms={} request={} stream_id={} frames={} pcm_bytes={} elapsed_ms={} result=completed",
+            timestamp_ms(),
+            correlation_id(&output_id),
+            stream_id,
+            stream.sequence,
+            stream.pcm.len(),
+            stream.started_at.elapsed().as_millis()
+        );
         playback.pop_front();
+        log_playback_queue("finished", &output_id, playback, "completed");
         send_playback_end(socket, &output_id, stream_id, "completed").await?;
     }
     Ok(())
@@ -1064,6 +1161,7 @@ struct RecognitionOutcome {
 ///
 /// 只有全部已接管段识别完成并经过短暂收口期后，才合并为一个 Runtime Input。
 pub(super) struct VoiceTurnAggregation {
+    started_at: Instant,
     logical_client_input_id: String,
     output_preference: OutputPreferenceSnapshot,
     next_ordinal: usize,
@@ -1093,6 +1191,7 @@ impl VoiceTurnAggregation {
 
     fn new(logical_client_input_id: String, output_preference: OutputPreferenceSnapshot) -> Self {
         Self {
+            started_at: Instant::now(),
             logical_client_input_id,
             output_preference,
             next_ordinal: 0,
@@ -1231,6 +1330,18 @@ async fn process_voice_turn(
         (outcomes, completed)
     };
     for outcome in outcomes {
+        eprintln!(
+            "event=voice_segment_finished ts_ms={} device={} input={} stream_id={} result={}",
+            timestamp_ms(),
+            correlation_id(device_id.as_str()),
+            correlation_id(&outcome.client_input_id),
+            outcome.stream_id,
+            outcome
+                .result
+                .as_ref()
+                .err()
+                .map_or("ok", SpeechServiceError::code)
+        );
         match outcome.result {
             Ok(recognized) => {
                 if capabilities.display_transcript {
@@ -1254,6 +1365,15 @@ async fn process_voice_turn(
     let Some(completed) = completed else {
         return Ok(());
     };
+    eprintln!(
+        "event=voice_turn_ready ts_ms={} device={} input={} segments={} recognized={} elapsed_ms={}",
+        timestamp_ms(),
+        correlation_id(device_id.as_str()),
+        correlation_id(&completed.logical_client_input_id),
+        completed.segment_count(),
+        completed.transcripts.len(),
+        completed.started_at.elapsed().as_millis()
+    );
     let transcript = match completed.merged_transcript() {
         Ok(Some(transcript)) => transcript,
         Ok(None) => {
@@ -1286,6 +1406,7 @@ async fn process_voice_turn(
             return Ok(());
         }
     };
+    let submission_started = Instant::now();
     match submit_speech_input(
         shared.runtime.as_ref(),
         device_id,
@@ -1295,9 +1416,26 @@ async fn process_voice_turn(
     )
     .await
     {
-        Ok(accepted) => send_payload(socket, "input_accepted", &accepted).await?,
+        Ok(accepted) => {
+            eprintln!(
+                "event=voice_input_accepted ts_ms={} device={} input={} run={} elapsed_ms={}",
+                timestamp_ms(),
+                correlation_id(device_id.as_str()),
+                correlation_id(&completed.logical_client_input_id),
+                correlation_id(accepted.run_id.as_str()),
+                submission_started.elapsed().as_millis()
+            );
+            send_payload(socket, "input_accepted", &accepted).await?;
+        }
         Err(error) => {
             let (code, recoverable) = input_error(&error);
+            eprintln!(
+                "event=voice_input_rejected ts_ms={} input={} elapsed_ms={} result={}",
+                timestamp_ms(),
+                correlation_id(&completed.logical_client_input_id),
+                submission_started.elapsed().as_millis(),
+                code
+            );
             send_wire_error(socket, code, None, recoverable).await?;
             send_payload(
                 socket,
@@ -1329,6 +1467,15 @@ async fn recognize_segment(
         now_ms().unwrap_or_default(),
         device_id.as_str().chars().take(12).collect::<String>(),
         client_input_id.chars().take(24).collect::<String>()
+    );
+    eprintln!(
+        "event=voice_segment_started ts_ms={} device={} input={} request={} stream_id={} pcm_bytes={}",
+        timestamp_ms(),
+        correlation_id(device_id.as_str()),
+        correlation_id(&client_input_id),
+        correlation_id(&debug_name),
+        stream_id,
+        utterance.pcm.len()
     );
     let result = match speech
         .recognize(utterance.pcm, debug_name, cancellation)
@@ -1529,7 +1676,8 @@ impl ClientInputWindow {
 
 fn speech_error(error: SpeechServiceError) -> (&'static str, bool) {
     match error {
-        SpeechServiceError::Unavailable => ("asr_unavailable", true),
+        SpeechServiceError::Unavailable | SpeechServiceError::Busy => ("asr_unavailable", true),
+        SpeechServiceError::InvalidInput => ("asr_provider_failed", false),
         SpeechServiceError::Cancelled => ("asr_cancelled", true),
         SpeechServiceError::Authentication => ("asr_auth_failed", true),
         SpeechServiceError::Timeout => ("asr_timeout", true),
@@ -2135,5 +2283,41 @@ mod tests {
         ));
 
         assert!(playback_should_start(&playback));
+    }
+
+    #[test]
+    fn playback_ack_rejects_cancelled_missing_duplicate_and_abandoned_output() {
+        let mut playback = VecDeque::new();
+        let token = tokio_util::sync::CancellationToken::new();
+        assert!(reserve_playback(
+            &mut playback,
+            "output".to_owned(),
+            token.clone()
+        ));
+        let output = || super::super::gateway::PlaybackOutput {
+            output_id: "output".to_owned(),
+            run_id: assistant_protocol::RunId::new("run").unwrap(),
+            text: "播报".to_owned(),
+            pcm: Arc::from([0_u8; 640]),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        acknowledge_playback_output(&mut playback, output(), tx);
+        assert!(playback.front().unwrap().output.is_none());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        acknowledge_playback_output(&mut playback, output(), tx);
+        assert_eq!(rx.try_recv(), Ok(true));
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        acknowledge_playback_output(&mut playback, output(), tx);
+        assert_eq!(rx.try_recv(), Ok(false));
+        token.cancel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        acknowledge_playback_output(&mut playback, output(), tx);
+        assert_eq!(rx.try_recv(), Ok(false));
+        playback.clear();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        acknowledge_playback_output(&mut playback, output(), tx);
+        assert_eq!(rx.try_recv(), Ok(false));
+        assert!(playback.is_empty());
     }
 }

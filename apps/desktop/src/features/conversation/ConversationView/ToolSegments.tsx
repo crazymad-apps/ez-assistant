@@ -10,8 +10,8 @@ import type {
   ToolInputSnapshot,
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
-import { MarkdownContent } from "../../../components/MarkdownContent";
 import { Collapse } from "../../../components/Collapse";
+import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
 import type {
   LiveExecutionSegment,
   LiveRunProjection,
@@ -46,7 +46,7 @@ export function AssistantSegmentView(props: Readonly<{
         className={styles.assistant_text}
         data-quote-content="true"
       >
-        <MarkdownContent text={props.segment.text} />
+        <ConversationMarkdownContent text={props.segment.text} />
       </div>
     );
   }
@@ -102,7 +102,7 @@ function LiveSegmentView(props: Readonly<{
     return <ReasoningBox is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
   }
   if (props.segment.type === "text") {
-    return <div className={styles.assistant_text}><MarkdownContent is_streaming text={props.segment.text} /></div>;
+    return <div className={styles.assistant_text}><ConversationMarkdownContent is_streaming text={props.segment.text} /></div>;
   }
   return <LiveToolGroup child_tasks={props.child_tasks} on_child_open={props.on_child_open} on_tool_click={props.on_tool_click} tools={props.segment.tools} />;
 }

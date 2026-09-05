@@ -1,3 +1,4 @@
+import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 import { runInAction } from "mobx";
 import type {
   AgentVariant,
@@ -43,6 +44,7 @@ type SessionManagementDependencies = Readonly<{
   connection: ConnectionStore;
   navigation: NavigationStore;
   runtime: RuntimeLifecycleCoordinator;
+  resources: ResourceWorkspaceStore;
   save_preferences: () => void;
   select_draft: (workspace_id: WorkspaceId | null) => void;
   select_session: (session_id: SessionId) => Promise<void>;
@@ -110,14 +112,16 @@ export class SessionManagementController {
   }
 
   async deleteSession(prepared: PrepareDeleteSessionResult): Promise<boolean> {
-    const { connection, navigation, runtime, state } = this.dependencies;
+    const { connection, navigation, runtime, state, resources } = this.dependencies;
     const client = runtime.client;
     if (!client || connection.state !== "connected" || state.pending_session_action || state.composer_pending) {
       return false;
     }
     state.pending_session_action = true;
     state.interaction_error = null;
+    const scope = `session:${prepared.session.session_id}`;
     try {
+      await resources.closeScopeTerminals(scope);
       await client.command({
         type: "delete_session",
         payload: {
@@ -125,6 +129,7 @@ export class SessionManagementController {
           confirmation_token: prepared.confirmation_token,
         },
       });
+      resources.releaseScope(scope);
       if (navigation.selected_session_id === prepared.session.session_id) {
         navigation.selectSession(null, false);
       }
@@ -137,6 +142,7 @@ export class SessionManagementController {
       });
       return false;
     } finally {
+      resources.resumeScope(scope);
       runInAction(() => {
         state.pending_session_action = false;
       });

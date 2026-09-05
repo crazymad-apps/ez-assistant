@@ -38,7 +38,8 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
         <div className={styles.body}>
           {intent === "quit_desktop" ? (
             <>
-              <p>退出只会关闭桌面客户端，Runtime 默认继续运行。</p>
+              <p>退出桌面客户端后，Runtime 默认继续运行。</p>
+              {lifecycle.terminal_count > 0 && <p>将关闭 {lifecycle.terminal_count} 个终端，终端内运行的进程将结束。</p>}
               <label className={styles.checkbox}>
                 <input
                   checked={lifecycle.stop_runtime_on_quit}

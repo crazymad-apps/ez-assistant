@@ -502,6 +502,42 @@ cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnin
 - 输出周期结束仍无成功 `speak` 时明确返回 `no_speak_text`，不得退回朗读完整 Assistant 正文。开发构建只在
   显式绝对 debug 目录下尽力保存 `*-tts.pcm`，Release 默认不保存。
 
+## SpeechService 健康、预算与恢复边界
+
+- ASR/TTS 配置表分别反序列化和编译，单侧字段缺失、类型错误或 Provider 构造失败只令该能力
+  unavailable；整个 TOML 或共享 speech 配置无效时整体 fail-closed。
+- ready 表示 Adapter 已可用或最近调用成功，不代表后台探测已验证远端。auth、timeout、请求失败
+  和 panic 只使所属能力 degraded；空 transcript 不代表服务故障，取消与本地满载不改变健康。
+- degraded 仍允许下一次显式请求；成功恢复 ready。没有后台收费探测、失败请求重放或自动重试循环，
+  因此不引入隐式退避等待。配置不可用须显式 reload；actor 退出后 unavailable，进程监督仍不自动重启。
+- 入口以独立 Semaphore 限制 ASR 4 个、TTS 2 个已接纳请求，命令排队、执行和完成回收共用许可；
+  满载返回 Host 内部 Busy，并映射现有设备错误，不新增 wire code。ASR 单句不超过 1,920,000 byte，
+  TTS 文本不超过 120 字；现有 Adapter 仍限制 JSON 1 MiB、TTS 输出 PCM 1,920,000 byte。
+- 上述上限约束 SpeechService 持有的请求载荷和任务，不是整个 Host RSS 上限。ASR WAV/Base64/JSON、
+  HTTP 缓冲和已交付 Gateway 播放队列另有内存成本；Gateway 队列不能因 Provider 许可释放而取消上限。
+- 默认 30 秒、最大 120 秒的配置超时包围完整请求（包含 TTS 合成和下载），取消包围 debug 音频 I/O。
+  调用方取消或丢弃结果时停止等待并回收 Provider future；不得自动重放可能已发送的请求。
+- 配置重载保留在途请求的原快照；完成时用 Provider Arc 身份核对是否仍为当前实例，旧结果只回复
+  原调用方，不覆盖新配置的健康。不新增 generation、持久化状态或服务端会话。
+- actor 拥有两组有界 JoinSet；先停止入口、置 unavailable、取消队列及在途请求，再等待回收。
+  强制 abort/panic 也使最终快照不可用；Gateway/Runtime/终端不复制这份权威状态。
+
+## Device Gateway 播放接纳与媒体诊断
+
+S3.2 联调的内部播放接纳与诊断约束：
+
+- `PreparedPlayback` 仅拥有尚未交付的连接预留；合成失败、PTT、连接替换、确认超时或调用方
+  Future 丢弃均取消原槽位。内部 `StartPlayback` oneshot 必须在 connection owner 实际附加 PCM
+  后才成功；仅进入 command channel 不算接纳，重复/缺失/已取消槽位不得覆盖现有输出。
+- 每连接 FIFO 保持最多 20 段，确认等待最多 1 秒。PCM 接纳后由连接 owner 管理取消和发送；
+  已形成成功回执优先于短音频完成时取消的令牌。没有 detached 取消 watcher、自动重放或 wire ACK。
+- `speak` 成功只表示 Host 队列接纳，不表示 WSS 全部发送、终端消费或扬声器物理完成。
+- `media_diagnostics` 对 request/run/input/device ID 做固定长度 SHA-256 摘要关联；普通诊断仅有
+  时间、静态原因、深度及字节计数，无 PCM、正文、密钥或完整标识。Provider 记录整次请求耗时，
+  Gateway 记录下行首帧和发送完成；不得据此声称具备 Provider 首包或声学完成指标。
+- 部署沿用用户明确选择的 Runtime Home；联调自动化使用独立临时 Home 和本地测试 Provider，
+  不借验收重启覆盖正在运行的用户配置或数据库。
+
 ## v0.21.0 M1 设备与 Channel 存储边界
 
 - SQLite `devices` 只保存 Device ID、当前展示名、Ed25519 原始公钥、paired/revoked 生命周期及配对、
@@ -604,3 +640,11 @@ cargo clippy -p assistant-runtime-host --all-targets --all-features -- -D warnin
   `.ez-assistant` 优先于 `.agents`，用户来源顺序不变。
 - SQLite 保存 Workspace 当前目录与 Session 冻结目录两类事实。恢复 Session 只要求关联 Workspace
   仍存在，不用当前 Workspace 目录覆盖或否定历史冻结环境；相关迁移与恢复测试只使用隔离目录。
+
+
+## v0.24.0 Session 文件资源与模型交付约定
+
+- Session 资源根的可用身份由 Runtime 提供；Host 按 locator 校验主目录、附加目录序号和精确 Session 私有根，负责有界列举、媒体识别、预览及本地操作前解析。每次读取重新验证 canonical 路径、符号链接和根归属，不把展示路径或缓存当作授权。
+- 未知扩展名经过内容检查可作为普通文本预览；二进制不得因改后缀被当作文本。图片与 PDF 必须通过类型校验和字节上限，不返回任意本地路径给网页。
+- 新建/清空 Session 冻结一次 file URI 交付约定；继续使用原 System Prompt，Fork 复用冻结指令并重建目标 Session 目录部分。模型请求捕获测试覆盖这些边界，不以静态 Prompt 断言替代真实 Provider 文件交付验收。
+- 浏览器、用户终端、页面 LRU 和右栏快照属于 Desktop，不进入 Host 的 Session/Run/Conversation 或 Agent 工具定义。

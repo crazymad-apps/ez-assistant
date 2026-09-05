@@ -14,6 +14,7 @@ mod mcp;
 mod memory;
 mod permission;
 mod product;
+mod resource;
 mod skill;
 mod snapshot;
 
@@ -139,6 +140,12 @@ pub use product::{
     SessionViewSnapshot, SessionWorkspaceSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
     ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
     ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+};
+pub use resource::{
+    ListSessionResourceFilesRequest, ListSessionResourceFilesResult,
+    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, SessionResourceEntry,
+    SessionResourceEntryKind, SessionResourceEntryState, SessionResourceLocator,
+    SessionResourcePreviewKind, SessionResourceRoot,
 };
 pub use skill::{
     ActiveSkillSnapshot, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,

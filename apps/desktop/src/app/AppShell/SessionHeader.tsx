@@ -311,7 +311,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
           </DropdownMenuContent>
         </DropdownMenu>
         <button
-          aria-label={store.navigation.effective_right_sidebar_open ? "收起当前上下文" : "展开当前上下文"}
+          aria-label={store.navigation.effective_right_sidebar_open ? "收起资源栏" : "展开资源栏"}
           className={styles.context_toggle}
           onClick={() => store.toggleRightSidebar()}
           type="button"
@@ -335,6 +335,10 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             {delete_preview.impact.child_task_count} 个子任务和 {delete_preview.impact.attachment_count} 个附件引用。
             工作目录中的用户文件不会被删除。
           </p>
+          {store.resource_workspace.runningTerminalCount(`session:${delete_preview.session.session_id}`) > 0 && (
+            <p>同时关闭该会话的 {store.resource_workspace.runningTerminalCount(`session:${delete_preview.session.session_id}`)} 个终端，终端内运行的进程将结束。</p>
+          )}
+          {store.interaction_error && <p role="alert">{store.interaction_error}</p>}
         </SessionActionDialog>
       )}
       </PresenceBoundary>

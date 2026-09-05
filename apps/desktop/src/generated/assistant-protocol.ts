@@ -909,6 +909,10 @@ export type ListRunsRequest = { session_id: SessionId, };
 
 export type ListRunsResult = { runs: Array<RunSnapshot>, };
 
+export type ListSessionResourceFilesRequest = { locator: SessionResourceLocator, include_hidden: boolean, include_generated: boolean, };
+
+export type ListSessionResourceFilesResult = { entries: Array<SessionResourceEntry>, truncated: boolean, };
+
 /**
  * 按生命周期列出 Session；缺省只返回活动 Session。
  */
@@ -1272,6 +1276,13 @@ export type PrepareDeleteSessionResult = { session: SessionSummary, impact: Dele
 export type PreviewMcpImportRequest = { document: string, };
 
 export type PreviewMcpImportResult = { entries: Array<McpImportPreviewEntry>, diagnostics: Array<McpDiagnosticSnapshot>, };
+
+export type PreviewSessionResourceFileRequest = { locator: SessionResourceLocator, };
+
+/**
+ * Host 返回给受信任 Desktop 桥的有界预览；图片与 PDF 正文使用 base64，WebView 不接触物理路径。
+ */
+export type PreviewSessionResourceFileResult = { kind: SessionResourcePreviewKind, media_type: string, size_bytes: number, text?: string, data_base64?: string, };
 
 export type PrioritizeQueuedInputRequest = { session_id: SessionId, input_id: InputId, expected_revision: number, };
 
@@ -1799,7 +1810,7 @@ features?: Array<RuntimeHostFeature>, };
 /**
  * Host 可以逐项声明的产品能力；Desktop 只检查当前页面实际依赖的项目。
  */
-export type RuntimeHostFeature = "event_envelopes" | "application_snapshot" | "session_view" | "child_task_view" | "conversation_paging" | "tool_detail" | "queue_control" | "approval_queue" | "session_management" | "session_materialization";
+export type RuntimeHostFeature = "event_envelopes" | "application_snapshot" | "session_view" | "child_task_view" | "conversation_paging" | "tool_detail" | "queue_control" | "approval_queue" | "session_management" | "session_materialization" | "session_resource_files";
 
 /**
  * Host 已完成 Runtime 恢复并可以接受已授权请求。
@@ -1901,6 +1912,27 @@ export type SessionMaterializationResult = { session: SessionSummary, input_id: 
  * 普通 Session 当前绑定的主控代理。
  */
 export type SessionProxySnapshot = { controller_session_id: SessionId, changed_at_ms: number, };
+
+/**
+ * 一层目录项；符号链接保留自身身份，同时公开最终目标是否仍在根内。
+ */
+export type SessionResourceEntry = { locator: SessionResourceLocator, display_name: string, kind: SessionResourceEntryKind, state: SessionResourceEntryState, is_symbolic_link: boolean, is_hidden: boolean, is_generated: boolean, size_bytes?: number, };
+
+export type SessionResourceEntryKind = "directory" | "file";
+
+export type SessionResourceEntryState = "available" | "outside_root" | "unsupported";
+
+/**
+ * 根内资源定位。空相对路径表示根本身。
+ */
+export type SessionResourceLocator = { root: SessionResourceRoot, relative_path: string, };
+
+export type SessionResourcePreviewKind = "text" | "image" | "pdf";
+
+/**
+ * Session 创建时冻结的文件根身份；协议不传输根的物理路径。
+ */
+export type SessionResourceRoot = { "type": "workspace_primary" } | { "type": "workspace_additional", directory_index: number, } | { "type": "session_private" };
 
 /**
  * Session 在产品中的稳定职责。

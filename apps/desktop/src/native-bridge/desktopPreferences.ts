@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 
 export type DesktopPreferences = {
   readonly left_sidebar_open: boolean;
@@ -7,6 +8,7 @@ export type DesktopPreferences = {
   readonly right_sidebar_width: number;
   readonly expanded_workspace_ids: readonly string[] | null;
   readonly close_behavior: DesktopCloseBehavior;
+  readonly resource_workspace?: ResourceWorkspaceSnapshot | null;
 };
 
 export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
@@ -17,7 +19,7 @@ export async function loadDesktopPreferences(): Promise<DesktopPreferences> {
       left_sidebar_open: true,
       right_sidebar_open: true,
       left_sidebar_width: 286,
-      right_sidebar_width: 326,
+      right_sidebar_width: 380,
       expanded_workspace_ids: null,
       close_behavior: "hide_to_tray",
     };

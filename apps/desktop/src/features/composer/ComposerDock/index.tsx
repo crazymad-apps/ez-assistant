@@ -10,6 +10,7 @@ import type {
   SkillSummarySnapshot,
   SubmitInputMode,
 } from "../../../generated/assistant-protocol";
+import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
 import { useInputMethodGuard } from "../../../components/InputMethodGuard";
@@ -554,15 +555,15 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
           />
           <footer className={styles.composer_actions}>
             <Tooltip content="添加附件">
-              <button
+              <Button
                 aria-label="添加附件"
-                className={styles.icon_button}
                 disabled={store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
+                iconOnly
                 onClick={() => void attachment_flow.choose()}
-                type="button"
+                variant="outlined"
               >
                 <Icon name="plus" size={17} />
-              </button>
+              </Button>
             </Tooltip>
             <ExecutionSettingsPopover
               approval_mode={session.approval_mode}
@@ -836,9 +837,9 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
         />
         <footer className={styles.composer_actions}>
           <Tooltip content="添加附件">
-            <button aria-label="添加附件" className={styles.icon_button} disabled={store.composer_pending || attachment_flow.pending} onClick={() => void attachment_flow.choose()} type="button">
+            <Button aria-label="添加附件" disabled={store.composer_pending || attachment_flow.pending} iconOnly onClick={() => void attachment_flow.choose()} variant="outlined">
               <Icon name="plus" size={17} />
-            </button>
+            </Button>
           </Tooltip>
           <ExecutionSettingsPopover
             approval_mode={draft.approval_mode}

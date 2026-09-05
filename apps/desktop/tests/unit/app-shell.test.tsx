@@ -146,7 +146,7 @@ describe("AppShell session header", () => {
     expect(export_action).toHaveFocus();
   });
 
-  it("keeps the context toggle beside the session more button while the sidebar opens and closes", () => {
+  it("keeps the resource toggle beside the session more button while the sidebar opens and closes", () => {
     vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
     const store = storeWithSessions();
     store.navigation.setViewportWidth(1400);
@@ -154,16 +154,16 @@ describe("AppShell session header", () => {
 
     const header = screen.getByLabelText("会话标题栏");
     const more = within(header).getByRole("button", { name: "更多会话操作" });
-    const collapse = within(header).getByRole("button", { name: "收起当前上下文" });
+    const collapse = within(header).getByRole("button", { name: "收起资源栏" });
     expect(more.compareDocumentPosition(collapse) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(within(screen.getByLabelText("当前上下文")).queryByRole("button", {
-      name: "收起当前上下文",
+    expect(within(screen.getByRole("complementary", { name: "资源栏" })).queryByRole("button", {
+      name: "收起资源栏",
     })).not.toBeInTheDocument();
 
     fireEvent.click(collapse);
 
     expect(store.navigation.right_sidebar_open).toBe(false);
-    expect(within(header).getByRole("button", { name: "展开当前上下文" })).toBeVisible();
+    expect(within(header).getByRole("button", { name: "展开资源栏" })).toBeVisible();
   });
 
   it("resizes the visible sidebar with separator keyboard semantics and restores defaults", () => {
@@ -188,7 +188,7 @@ describe("AppShell session header", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "恢复默认布局" }));
     expect(store.navigation.left_sidebar_open).toBe(true);
     expect(store.navigation.right_sidebar_open).toBe(true);
-    expect(store.navigation.right_sidebar_width).toBe(326);
+    expect(store.navigation.right_sidebar_width).toBe(380);
   });
 
   it("updates sidebar width immediately while pointer dragging", () => {
@@ -211,6 +211,29 @@ describe("AppShell session header", () => {
     expect(store.navigation.left_sidebar_width).toBe(318);
     fireEvent.pointerUp(separator, { clientX: 332, pointerId: 7 });
     expect(document.documentElement).not.toHaveAttribute("data-sidebar-resizing");
+  });
+
+  it("resizes only the resource rail and retains its active tab while hidden", () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
+    const store = storeWithSessions();
+    store.navigation.setViewportWidth(1400);
+    store.resource_workspace.openTab({ type: "browser", browserId: "browser-1" });
+    renderShell(store);
+
+    const separator = screen.getByRole("separator", { name: "调整资源栏宽度" });
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+    expect(store.navigation.right_sidebar_width).toBe(388);
+    expect(store.navigation.left_sidebar_width).toBe(286);
+    fireEvent.keyDown(separator, { key: "End" });
+    expect(store.navigation.right_sidebar_width).toBe(614);
+    expect(store.navigation.left_sidebar_width).toBe(286);
+
+    fireEvent.click(screen.getByRole("button", { name: "收起资源栏" }));
+    expect(screen.queryByRole("complementary", { name: "资源栏" })).not.toBeInTheDocument();
+    expect(store.resource_workspace.active_tab_key).toBe("browser:browser-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "展开资源栏" }));
+    expect(screen.getByRole("tab", { name: "浏览器" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("previews the exact runtime impact before permanently deleting a session", async () => {

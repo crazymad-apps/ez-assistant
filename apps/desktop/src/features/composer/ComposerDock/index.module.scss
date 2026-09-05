@@ -1,7 +1,8 @@
 .dock {
   position: relative;
   z-index: var(--ez-z-sticky);
-  width: min(var(--conversation-content-width), calc(100% - 2 * var(--conversation-horizontal-padding)));
+  width: calc(100% - 2 * var(--conversation-horizontal-padding));
+  max-width: var(--conversation-content-max-width);
   min-width: 0;
   margin: 0 auto 16px;
 }
@@ -116,7 +117,6 @@
   margin-top: 8px;
 }
 
-.icon_button,
 .send_button,
 .execution_selector,
 .model_selector,
@@ -146,19 +146,6 @@
 .hosting_menu button > svg { flex: 0 0 auto; }
 .hosting_menu strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hosting_option_tail { margin-left: auto; }
-
-.icon_button {
-  display: grid;
-  flex: 0 0 auto;
-  width: var(--ez-control-height);
-  height: var(--ez-control-height);
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--ez-border);
-  line-height: 0;
-
-  > svg { display: block; }
-}
 
 .execution_selector,
 .model_selector {

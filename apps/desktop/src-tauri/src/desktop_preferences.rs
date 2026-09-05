@@ -9,12 +9,12 @@ use thiserror::Error;
 const PREFERENCES_FILE: &str = "desktop-preferences.json";
 const PREFERENCES_STAGING_FILE: &str = ".desktop-preferences.tmp";
 const MAX_EXPANDED_WORKSPACES: usize = 256;
+const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
 const LEFT_SIDEBAR_DEFAULT_WIDTH: i32 = 286;
 const LEFT_SIDEBAR_MIN_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_MAX_WIDTH: i32 = 420;
-const RIGHT_SIDEBAR_DEFAULT_WIDTH: i32 = 326;
-const RIGHT_SIDEBAR_MIN_WIDTH: i32 = 220;
-const RIGHT_SIDEBAR_MAX_WIDTH: i32 = 800;
+const RIGHT_SIDEBAR_DEFAULT_WIDTH: i32 = 380;
+const RIGHT_SIDEBAR_MIN_WIDTH: i32 = 320;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DesktopPreferences {
@@ -28,6 +28,9 @@ pub(crate) struct DesktopPreferences {
     expanded_workspace_ids: Option<Vec<String>>,
     #[serde(default)]
     close_behavior: DesktopCloseBehavior,
+    /// WebView 拥有的轻量恢复索引；原生层只限界并原子保存，不装配 Runtime 业务状态。
+    #[serde(default)]
+    resource_workspace: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +50,7 @@ impl Default for DesktopPreferences {
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             expanded_workspace_ids: None,
             close_behavior: DesktopCloseBehavior::HideToTray,
+            resource_workspace: None,
         }
     }
 }
@@ -96,6 +100,9 @@ pub(crate) fn save_desktop_preferences(
 
 fn load_from_directory(directory: &Path) -> Result<DesktopPreferences, DesktopPreferencesError> {
     let path = directory.join(PREFERENCES_FILE);
+    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_PREFERENCES_BYTES) {
+        return Err(DesktopPreferencesError::Invalid);
+    }
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -118,19 +125,41 @@ fn save_to_directory(
     let destination = directory.join(PREFERENCES_FILE);
     let bytes =
         serde_json::to_vec_pretty(&preferences).map_err(|_| DesktopPreferencesError::SaveFailed)?;
-    fs::write(&staging, bytes).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    if bytes.len() as u64 > MAX_PREFERENCES_BYTES {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    // 快照含用户路径及网址，暂存文件使用私有权限，写完后再替换上一次成功快照。
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    let mut file = options
+        .open(&staging)
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
     fs::rename(&staging, destination).map_err(|_| DesktopPreferencesError::SaveFailed)
 }
 
 fn validate(
     mut preferences: DesktopPreferences,
 ) -> Result<DesktopPreferences, DesktopPreferencesError> {
+    if preferences
+        .resource_workspace
+        .as_ref()
+        .is_some_and(|snapshot| !snapshot.is_object())
+    {
+        return Err(DesktopPreferencesError::Invalid);
+    }
     preferences.left_sidebar_width = preferences
         .left_sidebar_width
         .clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH);
-    preferences.right_sidebar_width = preferences
-        .right_sidebar_width
-        .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH);
+    preferences.right_sidebar_width = preferences.right_sidebar_width.max(RIGHT_SIDEBAR_MIN_WIDTH);
     if let Some(expanded_workspace_ids) = &mut preferences.expanded_workspace_ids {
         if expanded_workspace_ids.len() > MAX_EXPANDED_WORKSPACES
             || expanded_workspace_ids
@@ -169,6 +198,9 @@ mod tests {
             right_sidebar_width: 374,
             expanded_workspace_ids: Some(vec!["workspace-b".to_owned(), "workspace-a".to_owned()]),
             close_behavior: DesktopCloseBehavior::QuitDesktop,
+            resource_workspace: Some(
+                serde_json::json!({"current_scope_key":"session:a","groups":[]}),
+            ),
         };
         save_to_directory(directory.path(), preferences).expect("save");
         let loaded = load_from_directory(directory.path()).expect("load");
@@ -179,6 +211,10 @@ mod tests {
         assert_eq!(loaded.right_sidebar_width, 374);
         assert_eq!(loaded.close_behavior, DesktopCloseBehavior::QuitDesktop);
         assert_eq!(
+            loaded.resource_workspace.unwrap()["current_scope_key"],
+            "session:a"
+        );
+        assert_eq!(
             loaded
                 .expanded_workspace_ids
                 .expect("explicit expansion state"),
@@ -187,7 +223,39 @@ mod tests {
     }
 
     #[test]
-    fn missing_widths_use_defaults_and_out_of_range_widths_are_clamped() {
+    fn oversize_snapshot_does_not_replace_last_successful_save() {
+        let directory = tempdir().expect("tempdir");
+        save_to_directory(directory.path(), DesktopPreferences::default()).expect("initial save");
+        let oversized = DesktopPreferences {
+            resource_workspace: Some(
+                serde_json::json!({"data": "x".repeat(MAX_PREFERENCES_BYTES as usize)}),
+            ),
+            ..DesktopPreferences::default()
+        };
+        assert!(matches!(
+            save_to_directory(directory.path(), oversized),
+            Err(DesktopPreferencesError::Invalid)
+        ));
+        assert_eq!(
+            load_from_directory(directory.path()).expect("previous snapshot"),
+            DesktopPreferences::default()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(directory.path().join(PREFERENCES_FILE))
+                    .expect("private file")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn missing_widths_use_defaults_and_only_minimum_widths_are_clamped() {
         let legacy: DesktopPreferences =
             serde_json::from_str(r#"{"left_sidebar_open":true,"right_sidebar_open":false}"#)
                 .expect("legacy preferences");
@@ -201,6 +269,6 @@ mod tests {
         })
         .expect("clamped preferences");
         assert_eq!(clamped.left_sidebar_width, LEFT_SIDEBAR_MIN_WIDTH);
-        assert_eq!(clamped.right_sidebar_width, RIGHT_SIDEBAR_MAX_WIDTH);
+        assert_eq!(clamped.right_sidebar_width, 9_999);
     }
 }

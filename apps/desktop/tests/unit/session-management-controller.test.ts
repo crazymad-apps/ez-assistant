@@ -1,3 +1,4 @@
+import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSummary } from "../../src/generated/assistant-protocol";
 import { ConnectionStore } from "../../src/stores/ConnectionStore";
@@ -132,7 +133,9 @@ function controllerFixture(restored: boolean) {
     pending_compaction_cancel_session_id: null,
     session_notice: null,
   };
+  const resources = new ResourceWorkspaceStore();
   const controller = new SessionManagementController({
+    resources,
     connection,
     navigation,
     runtime,
@@ -142,6 +145,7 @@ function controllerFixture(restored: boolean) {
     state,
   });
   return {
+    resources, state,
     command,
     controller,
     load_application,
@@ -152,3 +156,32 @@ function controllerFixture(restored: boolean) {
     select_session,
   };
 }
+
+it("closes every terminal owned by a deleted session before consuming its confirmation token", async () => {
+  const fixture = controllerFixture(false);
+  fixture.resources.selectScope("session:delete-me");
+  fixture.resources.openWorkspace("session:delete-me");
+  const prepared = { session: { session_id: "delete-me" }, confirmation_token: "confirmed" } as Parameters<SessionManagementController["deleteSession"]>[0];
+  let cleanup!: () => void;
+  const close = vi.spyOn(fixture.resources, "closeScopeTerminals").mockImplementation(() => new Promise<void>((resolve) => { cleanup = resolve; }));
+  fixture.command.mockReset().mockResolvedValue({});
+  const deleting = fixture.controller.deleteSession(prepared);
+  expect(close).toHaveBeenCalledWith("session:delete-me");
+  expect(fixture.command).not.toHaveBeenCalled();
+  cleanup();
+  expect(await deleting).toBe(true);
+  expect(fixture.command).toHaveBeenCalledWith({ type: "delete_session", payload: { session_id: "delete-me", confirmation_token: "confirmed" } });
+  expect(fixture.resources.groups.has("session:delete-me")).toBe(false);
+});
+
+it("does not consume the delete token or discard indexes when terminal cleanup fails", async () => {
+  const fixture = controllerFixture(false);
+  fixture.resources.selectScope("session:keep-me");
+  fixture.resources.openWorkspace("session:keep-me");
+  const prepared = { session: { session_id: "keep-me" }, confirmation_token: "unused" } as Parameters<SessionManagementController["deleteSession"]>[0];
+  vi.spyOn(fixture.resources, "closeScopeTerminals").mockRejectedValue(new Error("PTY cleanup failed"));
+  expect(await fixture.controller.deleteSession(prepared)).toBe(false);
+  expect(fixture.command).not.toHaveBeenCalled();
+  expect(fixture.resources.groups.has("session:keep-me")).toBe(true);
+  expect(fixture.state.interaction_error).toBe("PTY cleanup failed");
+});

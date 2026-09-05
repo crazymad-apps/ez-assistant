@@ -14,6 +14,7 @@ mod http;
 mod image;
 #[cfg(unix)]
 mod mcp;
+mod media_diagnostics;
 #[cfg(unix)]
 mod platform;
 #[cfg(unix)]

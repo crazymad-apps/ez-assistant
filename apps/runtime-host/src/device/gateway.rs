@@ -1,5 +1,9 @@
 //! Device Gateway 的进程内所有权、启停、发现与管理投影。
 
+mod playback;
+
+use playback::PreparedPlayback;
+
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -125,7 +129,10 @@ pub(super) enum ConnectionCommand {
     TextOutput(TextOutput),
     OutputUnavailable(InteractionStateChanged),
     PreparePlayback(PlaybackPreparation),
-    StartPlayback(PlaybackOutput),
+    StartPlayback {
+        output: PlaybackOutput,
+        response: oneshot::Sender<bool>,
+    },
 }
 
 /// 为一个播报片段预留设备播放队列容量的请求。
@@ -872,7 +879,7 @@ impl GatewayShared {
     }
 
     pub(super) async fn requires_speech(&self, deliveries: &[ResolvedChannelDelivery]) -> bool {
-        if !self.speech.tts_ready() {
+        if !self.speech.tts_available() {
             return false;
         }
         let state = self.state.lock().await;
@@ -902,10 +909,17 @@ impl GatewayShared {
         &self,
         segment: ChannelSpeechSegment,
     ) -> Result<(), ChannelOutputDispatchError> {
-        if !self.speech.tts_ready() {
+        if !self.speech.tts_available() {
             return Err(ChannelOutputDispatchError::Unavailable);
         }
         let output_id = format!("{}-{}", segment.run_id.as_str(), segment.segment_id);
+        eprintln!(
+            "event=speech_delivery_started ts_ms={} request={} run={} targets={}",
+            crate::media_diagnostics::timestamp_ms(),
+            crate::media_diagnostics::correlation_id(&output_id),
+            crate::media_diagnostics::correlation_id(segment.run_id.as_str()),
+            segment.deliveries.len()
+        );
         let mut targets = Vec::new();
         let mut failed = false;
         let mut interrupted = false;
@@ -937,28 +951,16 @@ impl GatewayShared {
                 failed = true;
                 continue;
             }
-            let cancellation = segment.cancellation.child_token();
-            let (response, accepted) = oneshot::channel();
-            if target
-                .0
-                .try_send(ConnectionCommand::PreparePlayback(PlaybackPreparation {
-                    output_id: output_id.clone(),
-                    cancellation: cancellation.clone(),
-                    response,
-                }))
-                .is_err()
+            match PreparedPlayback::reserve(
+                target.0,
+                output_id.clone(),
+                segment.cancellation.child_token(),
+            )
+            .await
             {
-                failed = true;
-                continue;
-            }
-            match tokio::time::timeout(Duration::from_secs(1), accepted).await {
-                Ok(Ok(PlaybackPreparationResult::Accepted)) => {
-                    targets.push((device_id.clone(), target.0, cancellation));
-                }
-                Ok(Ok(PlaybackPreparationResult::Interrupted)) => interrupted = true,
-                Ok(Ok(PlaybackPreparationResult::CapacityExceeded)) | Err(_) | Ok(Err(_)) => {
-                    failed = true;
-                }
+                Ok(target) => targets.push(target),
+                Err(ChannelOutputDispatchError::Cancelled) => interrupted = true,
+                Err(_) => failed = true,
             }
         }
         if targets.is_empty() {
@@ -968,42 +970,28 @@ impl GatewayShared {
                 ChannelOutputDispatchError::Unavailable
             });
         }
-        let synthesis_cancellation = segment.cancellation.child_token();
-        let wait_tokens = targets
-            .iter()
-            .map(|(_, _, cancellation)| cancellation.clone())
-            .collect::<Vec<_>>();
-        let cancel_synthesis = synthesis_cancellation.clone();
-        let cancellation_task = tokio::spawn(async move {
-            for cancellation in wait_tokens {
-                cancellation.cancelled().await;
-            }
-            cancel_synthesis.cancel();
-        });
         let debug_name = format!("{}-{}", segment.run_id.as_str(), segment.segment_id);
-        let synthesized = self
-            .speech
-            .synthesize(segment.text.clone(), debug_name, synthesis_cancellation)
-            .await;
-        cancellation_task.abort();
+        // 与调用方 Future 同生共死，不再创建无人等待的取消监视任务；丢弃合成 Future 由
+        // SpeechService 的 response.closed 收口。任一未交付预留在退出时自动取消。
+        let synthesized = tokio::select! {
+            result = self.speech.synthesize(segment.text.clone(), debug_name, segment.cancellation.child_token()) => result,
+            () = async { for target in &targets { target.cancellation().cancelled().await; } } => Err(SpeechServiceError::Cancelled),
+        };
         match synthesized {
             Ok(pcm) => {
-                for (_, command, cancellation) in targets {
-                    if cancellation.is_cancelled() {
-                        failed = true;
-                        continue;
-                    }
-                    if command
-                        .try_send(ConnectionCommand::StartPlayback(PlaybackOutput {
+                for target in targets {
+                    match target
+                        .attach(PlaybackOutput {
                             output_id: output_id.clone(),
                             run_id: segment.run_id.clone(),
                             text: segment.text.clone(),
                             pcm: pcm.clone(),
-                        }))
-                        .is_err()
+                        })
+                        .await
                     {
-                        cancellation.cancel();
-                        failed = true;
+                        Ok(()) => {}
+                        Err(ChannelOutputDispatchError::Cancelled) => interrupted = true,
+                        Err(_) => failed = true,
                     }
                 }
             }
@@ -1011,19 +999,19 @@ impl GatewayShared {
                 return Err(ChannelOutputDispatchError::Cancelled);
             }
             Err(_) => {
-                for (_, command, cancellation) in targets {
-                    if !cancellation.is_cancelled() {
-                        cancellation.cancel();
-                        let _ = command.try_send(ConnectionCommand::OutputUnavailable(
-                            segment_unavailable_state(&segment, "tts_provider_failed"),
-                        ));
-                    }
+                for target in targets {
+                    target.notify_unavailable(segment_unavailable_state(
+                        &segment,
+                        "tts_provider_failed",
+                    ));
                 }
                 return Err(ChannelOutputDispatchError::Unavailable);
             }
         }
         if failed {
             Err(ChannelOutputDispatchError::Unavailable)
+        } else if interrupted {
+            Err(ChannelOutputDispatchError::Cancelled)
         } else {
             Ok(())
         }

@@ -1,3 +1,4 @@
+import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 import { action, makeObservable, observable, reaction, runInAction, type IReactionDisposer } from "mobx";
 import type {
   AgentVariant,
@@ -24,6 +25,7 @@ import type {
   RunId,
   SessionMaterializationManifest,
   SessionId,
+  SessionResourceLocator,
   SessionCommand,
   ToolCallId,
   ToolDetailSnapshot,
@@ -33,8 +35,10 @@ import type {
 } from "../generated/assistant-protocol";
 import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import {
+  copySessionResourcePath as copyNativeSessionResourcePath,
   materializeNewSession,
   NativeResourceFailure,
+  openSessionResourceInSystem as openNativeSessionResourceInSystem,
   releaseAttachmentSelection,
 } from "../native-bridge/nativeResource";
 import { RuntimeClientError } from "../runtime-client/RuntimeClient";
@@ -58,6 +62,7 @@ import { RunInteractionController } from "./RunInteractionController";
 import { SessionManagementController } from "./SessionManagementController";
 import { SettingsStore } from "./SettingsStore";
 import { TransientFocusStore } from "./TransientFocusStore";
+import { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 
 export class RootStore {
   readonly connection = new ConnectionStore();
@@ -66,6 +71,7 @@ export class RootStore {
   readonly projection = new RuntimeProjectionStore();
   readonly live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
+  readonly resource_workspace = new ResourceWorkspaceStore();
   readonly new_session_drafts = new NewSessionDraftStore();
   readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
@@ -97,9 +103,19 @@ export class RootStore {
   readonly #session_management: SessionManagementController;
   #disposed = false;
   #preferences_save_timer: number | null = null;
+  #preferences_initialization: Promise<void> | null = null;
+  #initial_connection: Promise<void> | null = null;
+  #pending_snapshot: ResourceWorkspaceSnapshot | null = null;
+  #preferences_ready = false;
+  #preferences_pending: Promise<void> = Promise.resolve();
+  #last_saved_preferences = "";
+  #resource_snapshot_disposer: IReactionDisposer;
+  readonly #save_view_state = () => this.#schedulePreferencesSave();
+  readonly #flush_view_state = () => { void this.flushPreferences().catch(() => undefined); };
   #conversation_search_revision = 0;
   #title_notice_timer: number | null = null;
   #runtime_state_disposer: IReactionDisposer;
+  #resource_scope_disposer: IReactionDisposer;
 
   constructor() {
     this.#runtime = new RuntimeLifecycleCoordinator({
@@ -138,12 +154,31 @@ export class RootStore {
       refresh_application: () => this.#runtime.loadApplication(),
     });
     this.desktop_lifecycle = new DesktopLifecycleStore({
+      resources: this.resource_workspace,
       get_application: () => this.projection.application,
       prepare_runtime_mutation: (kind) => this.#runtime.prepareForNativeRuntimeMutation(kind),
       reconnect_runtime: (bootstrap) => this.#runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
       mark_runtime_stopped: () => this.connection.markRuntimeStopped(),
       save_preferences: () => this.#schedulePreferencesSave(),
+      flush_preferences: () => this.flushPreferences(),
     });
+    this.#resource_scope_disposer = reaction(
+      () => this.navigation.selected_session_id ? `session:${this.navigation.selected_session_id}`
+        : `draft:${this.navigation.selected_draft_key ?? "unbound"}`,
+      (scope) => this.resource_workspace.selectScope(scope),
+      { fireImmediately: true },
+    );
+    this.#resource_snapshot_disposer = reaction(
+      () => this.resource_workspace.captureSnapshot(),
+      () => this.#schedulePreferencesSave(),
+    );
+    // 原生滚动事件以 capture 接住嵌套查看器；查看状态仍由各页面持有。
+    window.addEventListener("scroll", this.#save_view_state, true);
+    window.addEventListener("pointerup", this.#save_view_state);
+    window.addEventListener("wheel", this.#save_view_state, { capture: true, passive: true });
+    window.addEventListener("keyup", this.#save_view_state);
+    window.addEventListener("blur", this.#flush_view_state);
+    window.addEventListener("pagehide", this.#flush_view_state);
     this.desktop_lifecycle.start();
     this.#runtime_state_disposer = reaction(
       () => this.connection.state,
@@ -168,6 +203,7 @@ export class RootStore {
       get_client: () => this.#runtime.client,
     });
     this.#session_management = new SessionManagementController({
+      resources: this.resource_workspace,
       connection: this.connection,
       navigation: this.navigation,
       runtime: this.#runtime,
@@ -226,6 +262,8 @@ export class RootStore {
       removeWorkspace: action,
       openWorkspace: action,
       openSessionWorkspaceDirectory: action,
+      openSessionResourceInSystem: action,
+      copySessionResourcePath: action,
       copyWorkspacePath: action,
       submitInput: action,
       submitSessionCommand: action,
@@ -266,25 +304,57 @@ export class RootStore {
   }
 
   connect(): Promise<void> {
+    this.#initial_connection ??= this.#connectAndRestore();
+    return this.#initial_connection;
+  }
+
+  async #connectAndRestore(): Promise<void> {
     this.#disposed = false;
-    return this.#runtime.connect();
+    await this.initializePreferences();
+    if (this.#disposed) return;
+    await this.#runtime.connect();
+    await this.#restoreResourceSnapshot();
   }
 
   retryConnection(): void {
     this.#runtime.retryConnection();
   }
 
-  async initializePreferences(): Promise<void> {
+  initializePreferences(): Promise<void> {
+    this.#preferences_initialization ??= this.#loadPreferences();
+    return this.#preferences_initialization;
+  }
+
+  async #loadPreferences(): Promise<void> {
     try {
       const preferences = await loadDesktopPreferences();
-      if (!this.#disposed) {
-        runInAction(() => {
-          this.navigation.applyPreferences(preferences);
-          this.desktop_lifecycle.applyPreferences(preferences);
-        });
+      if (this.#disposed) return;
+      runInAction(() => {
+        this.navigation.applyPreferences(preferences);
+        this.desktop_lifecycle.applyPreferences(preferences);
+      });
+      this.#pending_snapshot = parseResourceSnapshot(preferences.resource_workspace);
+      const scope = this.navigation.selected_session_id || this.navigation.selected_draft_key
+        ? null : this.#pending_snapshot?.current_scope_key;
+      if (scope?.startsWith("session:")) this.navigation.selectSession(scope.slice(8), false);
+      else if (scope?.startsWith("draft:")) {
+        const workspace = scope.startsWith("draft:workspace:") ? scope.slice(16) : null;
+        this.openNewSessionDraft(workspace);
       }
-    } catch {
-      // Missing/corrupt device preferences intentionally fall back to design defaults.
+    } catch (failure) {
+      runInAction(() => { this.interaction_error = `桌面状态读取失败：${displayError(failure)}`; });
+    }
+  }
+
+  async #restoreResourceSnapshot(): Promise<void> {
+    if (this.#disposed) return;
+    try {
+      if (this.#pending_snapshot) await this.resource_workspace.restoreSnapshot(this.#pending_snapshot);
+    } catch (failure) {
+      runInAction(() => { this.interaction_error = `右栏恢复失败：${displayError(failure)}`; });
+    } finally {
+      this.#pending_snapshot = null;
+      this.#preferences_ready = !this.#disposed;
     }
   }
 
@@ -539,6 +609,8 @@ export class RootStore {
     try {
       const result = await materializeNewSession(manifest, createOperationId("materialize"));
       runInAction(() => {
+        // 物化已可靠成功，先转移标签 owner 再改导航；活跃 PTY/浏览器不重新创建。
+        this.resource_workspace.transferDraft(key, result.session.session_id);
         this.new_session_drafts.remove(key);
         this.navigation.selectSession(result.session.session_id, false);
         if (result.session.workspace_id) {
@@ -667,6 +739,34 @@ export class RootStore {
 
   async openSessionWorkspaceDirectory(session_id: SessionId, directory_index: number): Promise<void> {
     await this.#session_management.openSessionWorkspaceDirectory(session_id, directory_index);
+  }
+
+  async openSessionResourceInSystem(
+    session_id: SessionId,
+    locator: SessionResourceLocator,
+  ): Promise<void> {
+    this.interaction_error = null;
+    try {
+      await openNativeSessionResourceInSystem(session_id, locator);
+    } catch (error: unknown) {
+      runInAction(() => {
+        this.interaction_error = displayError(error);
+      });
+    }
+  }
+
+  async copySessionResourcePath(
+    session_id: SessionId,
+    locator: SessionResourceLocator,
+  ): Promise<void> {
+    this.interaction_error = null;
+    try {
+      await copyNativeSessionResourcePath(session_id, locator);
+    } catch (error: unknown) {
+      runInAction(() => {
+        this.interaction_error = displayError(error);
+      });
+    }
   }
 
   async copyWorkspacePath(path: string): Promise<void> {
@@ -1004,8 +1104,18 @@ export class RootStore {
   }
 
   dispose(): void {
+    this.#flush_view_state();
     this.#disposed = true;
+    this.#resource_snapshot_disposer();
+    window.removeEventListener("scroll", this.#save_view_state, true);
+    window.removeEventListener("pointerup", this.#save_view_state);
+    window.removeEventListener("wheel", this.#save_view_state, true);
+    window.removeEventListener("keyup", this.#save_view_state);
+    window.removeEventListener("blur", this.#flush_view_state);
+    window.removeEventListener("pagehide", this.#flush_view_state);
     this.transient_focus.clear();
+    this.#resource_scope_disposer();
+    this.resource_workspace.dispose();
     this.#runtime.dispose();
     this.device_gateway.dispose();
     this.settings.mcp.dispose();
@@ -1025,20 +1135,41 @@ export class RootStore {
   }
 
   #schedulePreferencesSave(): void {
-    if (this.#preferences_save_timer !== null) {
-      window.clearTimeout(this.#preferences_save_timer);
-    }
+    if (!this.#preferences_ready || this.#disposed || this.resource_workspace.shutting_down) return;
+    if (this.#preferences_save_timer !== null) window.clearTimeout(this.#preferences_save_timer);
     this.#preferences_save_timer = window.setTimeout(() => {
       this.#preferences_save_timer = null;
-      void saveDesktopPreferences({
+      this.#flush_view_state();
+    }, 300);
+  }
+
+  async flushPreferences(): Promise<void> {
+    if (this.#preferences_save_timer !== null) window.clearTimeout(this.#preferences_save_timer);
+    this.#preferences_save_timer = null;
+    if (!this.#preferences_ready || this.#disposed || this.resource_workspace.shutting_down) return this.#preferences_pending;
+    try {
+      const preferences = {
         left_sidebar_open: this.navigation.left_sidebar_open,
         right_sidebar_open: this.navigation.right_sidebar_open,
         left_sidebar_width: this.navigation.left_sidebar_width,
         right_sidebar_width: this.navigation.right_sidebar_width,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
         close_behavior: this.desktop_lifecycle.close_behavior,
-      }).catch(() => undefined);
-    }, 120);
+        resource_workspace: parseResourceSnapshot(this.resource_workspace.captureSnapshot()),
+      };
+      const serialized = JSON.stringify(preferences);
+      // 同一个 staging 文件只允许串行写入，后提交的快照不能被旧任务覆盖。
+      const pending = this.#preferences_pending.catch(() => undefined).then(async () => {
+        if (serialized === this.#last_saved_preferences) return;
+        await saveDesktopPreferences(preferences);
+        this.#last_saved_preferences = serialized;
+      });
+      this.#preferences_pending = pending;
+      await pending;
+    } catch (failure) {
+      runInAction(() => { this.interaction_error = `桌面状态保存失败：${displayError(failure)}`; });
+      throw failure;
+    }
   }
 
   async #loadNewSessionDraftSkills(key: NewSessionDraftKey): Promise<void> {
