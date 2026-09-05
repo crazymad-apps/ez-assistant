@@ -36,6 +36,11 @@
   HTTPS 地址和远程身份，不另造命令、事件或上传客户端。
 - WebView 中的 Runtime Token 只存内存，不进入 URL、`localStorage`、日志或普通前端事件；
   配套 CSP、受控导航和精确 WebView Origin 白名单。
+- xterm DOM renderer 会动态生成字体、ANSI 色、光标样式表及 truecolor/对比度内联样式，因此主窗口
+  CSP 的 `style-src` 允许 `'unsafe-inline'`，并仅对 `style-src` 关闭 Tauri 的自动 hash/nonce 注入，
+  避免注入的 hash 使该许可失效；脚本 CSP 与其他指令继续保持限制。终端内容仍通过 xterm 写入，
+  不转换为 HTML。终端渲染验收必须使用正式 CSP 的 Release WebView，检查等宽字、ANSI/truecolor、
+  光标和尺寸变化，不能以放宽策略的独立验证页替代安装包配置。
 - 事件订阅使用能携带 Authorization header 的 `fetch` streaming SSE，不在 URL 中传 Token。
 - 纯浏览器直连本地 Runtime 保留为未来显式开放的可选模式，默认关闭；它可通过
   独立的 Origin 白名单和授权边界直连，不强制引入 companion bridge。
