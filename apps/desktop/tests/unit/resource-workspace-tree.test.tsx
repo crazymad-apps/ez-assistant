@@ -48,7 +48,7 @@ describe("SessionResourceTree", () => {
           size_bytes: 1024,
         },
       ],
-      truncated: true,
+      skipped_entries: 0, truncated: true,
     });
     render(<SessionResourceTree
       focus_locator={null}
@@ -69,7 +69,7 @@ describe("SessionResourceTree", () => {
     expect(screen.getByText("README.md").closest("[title]")).toBeNull();
     expect(screen.getByText("1.0 KB")).toBeVisible();
     expect(screen.getByText("目标位于当前根之外")).toBeVisible();
-    expect(screen.getByText("目录内容过多，请使用 Finder 查看。")).toBeVisible();
+    expect(screen.getByText("仅显示部分条目，可进入子目录继续浏览。")).toBeVisible();
     expect(listSessionResourceFiles).toHaveBeenCalledWith("session-1", {
       locator: { root: { type: "workspace_primary" }, relative_path: "" },
       include_hidden: false,
@@ -84,7 +84,7 @@ describe("SessionResourceTree", () => {
   });
 
   it("reloads expanded directories when hidden files are enabled", async () => {
-    vi.mocked(listSessionResourceFiles).mockResolvedValue({ entries: [], truncated: false });
+    vi.mocked(listSessionResourceFiles).mockResolvedValue({ entries: [], skipped_entries: 0, truncated: false });
     render(<SessionResourceTree
       focus_locator={{ root: { type: "session_private" }, relative_path: "" }}
       roots={[{
@@ -119,7 +119,7 @@ describe("SessionResourceTree", () => {
             is_hidden: false,
             is_generated: false,
           }],
-          truncated: false,
+          skipped_entries: 0, truncated: false,
         };
       }
       if (request.locator.relative_path === "src") {
@@ -133,10 +133,10 @@ describe("SessionResourceTree", () => {
             is_hidden: false,
             is_generated: false,
           }],
-          truncated: false,
+          skipped_entries: 0, truncated: false,
         };
       }
-      return { entries: [], truncated: false };
+      return { entries: [], skipped_entries: 0, truncated: false };
     });
     render(<SessionResourceTree
       focus_locator={null}
@@ -170,7 +170,7 @@ describe("SessionResourceTree", () => {
             is_hidden: false,
             is_generated: false,
           }],
-          truncated: false,
+          skipped_entries: 0, truncated: false,
         };
       }
       if (request.locator.relative_path === "src") {
@@ -184,10 +184,10 @@ describe("SessionResourceTree", () => {
             is_hidden: false,
             is_generated: false,
           }],
-          truncated: false,
+          skipped_entries: 0, truncated: false,
         };
       }
-      return { entries: [], truncated: false };
+      return { entries: [], skipped_entries: 0, truncated: false };
     });
     render(<SessionResourceTree
       focus_locator={{ root: { type: "workspace_primary" }, relative_path: "src/components" }}
@@ -229,7 +229,7 @@ describe("SessionResourceTree", () => {
 });
 
 it("rebuilds expanded directories and filtering after eviction without replaying a consumed focus intent", async () => {
-  vi.mocked(listSessionResourceFiles).mockResolvedValue({ entries: [], truncated: false });
+  vi.mocked(listSessionResourceFiles).mockResolvedValue({ entries: [], skipped_entries: 0, truncated: false });
   const root = { root: { type: "session_private" as const }, relative_path: "" };
   const state: ResourceViewState = {};
   const props = { view_state: state, session_id: "a", focus_locator: root,
@@ -248,4 +248,15 @@ it("rebuilds expanded directories and filtering after eviction without replaying
   render(<SessionResourceTree {...props} />);
   expect(screen.getByRole("treeitem")).toHaveAttribute("aria-expanded", "false");
   expect(listSessionResourceFiles).toHaveBeenCalledTimes(3);
+});
+
+
+vi.mock("../../src/stores/RootStoreContext", async () => {
+  const { ClientResources } = await import("../../src/runtime-client/ClientResources");
+  const files = new ClientResources(() => null, true);
+  return {useRootStore: () => ({files})};
+});
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
 });

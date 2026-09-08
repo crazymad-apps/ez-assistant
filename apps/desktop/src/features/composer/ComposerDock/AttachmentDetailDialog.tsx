@@ -1,3 +1,4 @@
+import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import { useEffect, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
@@ -5,8 +6,6 @@ import { PdfViewer } from "../../../components/PdfViewer";
 import type { SessionId } from "../../../generated/assistant-protocol";
 import {
   NativeResourceFailure,
-  previewAttachment,
-  previewAttachmentSelection,
   type AttachmentPreview,
 } from "../../../native-bridge/nativeResource";
 import type { ComposerAttachment } from "./useComposerAttachments";
@@ -17,7 +16,8 @@ export function AttachmentDetailDialog(props: Readonly<{
   on_close: () => void;
   session_id: SessionId | null;
 }>) {
-  const [preview, setPreview] = useState<AttachmentPreview | null>(null);
+
+  const files = useResourceRoot().files;  const [preview, setPreview] = useState<AttachmentPreview | null>(null);
   const [preview_error, setPreviewError] = useState<string | null>(null);
   const [preview_fallback, setPreviewFallback] = useState<"unsupported" | "too_large" | null>(null);
 
@@ -27,8 +27,8 @@ export function AttachmentDetailDialog(props: Readonly<{
     setPreviewError(null);
     setPreviewFallback(null);
     const request = props.attachment.attachment_id && props.session_id
-      ? previewAttachment(props.session_id, props.attachment.attachment_id)
-      : previewAttachmentSelection(props.attachment.selection_id);
+      ? files.previewAttachment(props.session_id, props.attachment.attachment_id)
+      : files.previewAttachmentSelection(props.attachment.selection_id);
     void request.then((value) => active && setPreview(value)).catch((reason: unknown) => {
       if (!active) return;
       if (reason instanceof NativeResourceFailure && reason.code === "resource_not_previewable") {

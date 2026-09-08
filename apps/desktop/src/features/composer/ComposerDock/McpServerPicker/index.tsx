@@ -17,7 +17,7 @@ export const McpServerPicker = observer(function McpServerPicker(props: Readonly
   useEffect(() => {
     void load();
     return () => store.dispose();
-  }, [store]);
+  }, [store, root.projection.application]);
   return <InputContextPicker
     empty_action={{ label: "前往 MCP 设置", on_select: () => {
       props.on_close();

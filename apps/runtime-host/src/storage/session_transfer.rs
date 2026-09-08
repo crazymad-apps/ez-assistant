@@ -104,7 +104,7 @@ impl StorageEngine {
                 || activation.run_id.is_some()
                 || activation.input_id.is_some()
                 || !message_ids.contains(activation.message_id.as_str())
-                || activation.catalog_revision != fork.session.skill_catalog.revision
+                || !activation.has_valid_definition_identity()
             {
                 return Err(conflict("fork skill activation is invalid"));
             }
@@ -240,10 +240,7 @@ impl StorageEngine {
                 serde_json::to_string(&fork.session.system_prompt).map_err(|source| {
                     internal_error("fork system prompt could not be encoded", source)
                 })?;
-            let skill_catalog_json =
-                serde_json::to_string(&fork.session.skill_catalog).map_err(|source| {
-                    internal_error("fork skill catalog could not be encoded", source)
-                })?;
+            let skill_catalog_json = "{}";
             let message_count =
                 u64::try_from(forked_conversation.messages.len()).map_err(|source| {
                     StoreError::with_source(
@@ -440,7 +437,7 @@ impl StorageEngine {
                 model_key: fork.session.model_key,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
-                skill_catalog: fork.session.skill_catalog,
+
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,

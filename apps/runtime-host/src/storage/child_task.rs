@@ -250,38 +250,53 @@ impl StorageEngine {
     }
 
     pub(super) fn load_child_tasks(&self) -> StorageResult<Vec<StoredChildTask>> {
+        self.load_child_tasks_scoped(None)
+    }
+
+    pub(super) fn load_child_tasks_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredChildTask>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title,
                         system_prompt_json, agent_variant, status, cancel_requested,
                         body_generation, message_count, final_message_id, error_code,
                         error_message, created_at_ms, started_at_ms, finished_at_ms
-                 FROM child_tasks ORDER BY created_at_ms, child_task_id",
-            )
+                 FROM child_tasks WHERE {predicate} ORDER BY created_at_ms, child_task_id"
+            ))
             .map_err(|source| internal_error("child tasks could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
-                    row.get::<_, i64>(14)?,
-                    row.get::<_, Option<i64>>(15)?,
-                    row.get::<_, Option<i64>>(16)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, Option<i64>>(15)?,
+                        row.get::<_, Option<i64>>(16)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("child tasks could not be read", source))?;
 
         let mut tasks = Vec::new();
@@ -382,12 +397,21 @@ impl StorageEngine {
     }
 
     pub(super) fn interrupt_nonterminal_child_tasks(&mut self) -> StorageResult<()> {
+        self.interrupt_nonterminal_child_tasks_scoped(None)
+    }
+    pub(super) fn interrupt_nonterminal_child_tasks_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<()> {
         self.connection
             .execute(
                 "UPDATE child_tasks
                  SET status = 'interrupted', finished_at_ms = ?1
-                 WHERE status IN ('accepted', 'running')",
-                [super::run_state::system_time_ms()?],
+                 WHERE status IN ('accepted', 'running') AND (?2 IS NULL OR session_id = ?2)",
+                params![
+                    super::run_state::system_time_ms()?,
+                    scope.map(assistant_protocol::SessionId::as_str)
+                ],
             )
             .map_err(|source| {
                 database_write_error("non-terminal child tasks could not be interrupted", source)

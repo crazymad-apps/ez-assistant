@@ -1,3 +1,5 @@
+import { copyText } from "../../../platform/clipboard";
+import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   RecallNavigationTarget,
@@ -13,7 +15,6 @@ import { Dialog } from "../../../components/Dialog";
 import {
   NativeResourceFailure,
   openToolFileInSystem,
-  previewToolFile,
   revealToolFileInDirectory,
   type AttachmentPreview,
 } from "../../../native-bridge/nativeResource";
@@ -61,6 +62,8 @@ export function ToolDetailDialog({
   on_file_open,
   on_recall_navigate,
 }: ToolDetailDialogProps) {
+  const files = useResourceRoot().files;
+
   const [selected_file, setSelectedFile] = useState<ToolFileReference | null>(null);
   const [file_preview, setFilePreview] = useState<AttachmentPreview | null>(null);
   const [file_error, setFileError] = useState<string | null>(null);
@@ -101,7 +104,7 @@ export function ToolDetailDialog({
     setFileError(null);
     setFilePreviewFallback(null);
     setFileLoading(true);
-    void previewToolFile(owner, detail.message_id, selected_file.resource_ref_id)
+    void files.previewToolFile(owner, detail.message_id, selected_file.resource_ref_id)
       .then((value) => {
         if (!active) {
           return;
@@ -159,7 +162,7 @@ export function ToolDetailDialog({
       return;
     }
     try {
-      await navigator.clipboard.writeText(selected_file.display_path);
+      await copyText(selected_file.display_path);
     } catch {
       setFileError("无法复制文件路径。");
     }
@@ -283,7 +286,8 @@ export function ToolDetailDialog({
                 <DetailSection title="文件预览">
                   <div className={styles.file_preview_header}>
                     <strong>{selected_file.display_name}</strong>
-                    {selected_file.origin !== "session_tool_image" && (
+                    <button type="button" disabled={!owner || !detail?.message_id} onClick={() => { if (owner && detail?.message_id) runFileAction(files.downloadToolFile(owner, detail.message_id, selected_file.resource_ref_id, selected_file.display_name), "下载失败。"); }}>下载文件</button>
+                    {files.native_host && selected_file.origin !== "session_tool_image" && (
                       <div>
                         {selected_file.display_path && (
                           <button onClick={() => void copyDisplayPath()} type="button">复制路径</button>
@@ -298,8 +302,8 @@ export function ToolDetailDialog({
                   {file_preview_fallback && (
                     <p className={styles.muted}>
                       {file_preview_fallback === "too_large"
-                        ? "文件较大，无法在应用内预览。可以使用系统应用打开或在目录中查看。"
-                        : "此文件暂不支持应用内预览。可以使用系统应用打开或在目录中查看。"}
+                        ? "文件较大，无法在应用内预览。可下载后查看。"
+                        : "此文件暂不支持应用内预览。可下载后查看。"}
                     </p>
                   )}
                   {file_preview?.kind === "text" && <pre className={styles.file_preview_text}>{file_preview.text}</pre>}
@@ -334,6 +338,8 @@ export function ToolDetailDialog({
                 label: "在资源栏打开",
                 on_select: () => on_file_open?.(file_menu.file),
               },
+              {label:"下载文件",on_select:()=>runFileAction(files.downloadToolFile(owner,detail.message_id!,file_menu.file.resource_ref_id,file_menu.file.display_name),"下载失败。")},
+              ...(files.native_host ? [
               {
                 disabled: file_menu.file.origin === "session_tool_image",
                 label: "使用系统应用打开",
@@ -349,7 +355,7 @@ export function ToolDetailDialog({
                   revealToolFileInDirectory(owner, detail.message_id!, file_menu.file.resource_ref_id),
                   "无法在 Finder 中显示。",
                 ),
-              },
+              }              ] : []),
             ]}
             location={file_menu.location}
             on_close={() => setFileMenu(null)}

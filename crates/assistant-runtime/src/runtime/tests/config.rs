@@ -256,6 +256,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             .get_session(GetSessionRequest {
                 session_id: second.session.session_id.clone(),
             })
+            .await
             .expect("session after rejected input")
             .session
             .queued_input_count,
@@ -585,6 +586,7 @@ async fn deleting_an_idle_session_model_preserves_history_and_requires_reselecti
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone(),
             })
+            .await
             .expect("session after rejected input")
             .session
             .queued_input_count,

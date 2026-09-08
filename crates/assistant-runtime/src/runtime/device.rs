@@ -116,7 +116,7 @@ impl AssistantRuntime {
             })?
             .insert(device_id, result.device.clone());
         for session_id in &result.cleared_session_ids {
-            let session = self.session(session_id)?;
+            let session = self.session(session_id).await?;
             session.lock_state()?.pc_output_hosting = None;
             self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
                 session_id: session_id.clone(),
@@ -173,7 +173,8 @@ impl AssistantRuntime {
         let _device_mutation = self.device_mutation_gate.lock().await;
         self.ensure_running()?;
         let controller = self
-            .controller_sessions()?
+            .controller_sessions()
+            .await?
             .into_iter()
             .next()
             .ok_or(RuntimeError::ControllerUnavailable)?;

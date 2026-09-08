@@ -1,4 +1,5 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invokeRuntime as invoke } from "./runtimeConnection";
+import { isTauri } from "@tauri-apps/api/core";
 
 type WorkspaceDirectoryFailure = {
   readonly code: string;

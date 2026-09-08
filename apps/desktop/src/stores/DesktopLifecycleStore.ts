@@ -1,5 +1,4 @@
 import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
-import { shutdownUserTerminals, resumeUserTerminals } from "../native-bridge/userTerminal";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import type { ApplicationSnapshot } from "../generated/assistant-protocol";
 import {
@@ -20,6 +19,7 @@ import type { RuntimeConnectionState } from "./ConnectionStore";
 
 type Dependencies = Readonly<{
   resources: ResourceWorkspaceStore;
+  is_local_target?: () => boolean;
   get_application: () => ApplicationSnapshot | null;
   prepare_runtime_mutation: (kind: "stop" | "restart") => void;
   reconnect_runtime: (bootstrap?: RuntimeBootstrap) => Promise<void>;
@@ -40,6 +40,7 @@ export class DesktopLifecycleStore {
   stop_runtime_on_quit = false;
   error_message: string | null = null;
   close_behavior: DesktopCloseBehavior = "hide_to_tray";
+  #disposed = false;
   #unlisten: (() => void) | null = null;
   #unlisten_runtime_mutation: (() => void) | null = null;
   readonly #claim_pending_intent = () => {
@@ -49,6 +50,7 @@ export class DesktopLifecycleStore {
     if (document.visibilityState === "visible") void this.#claimPendingIntent();
   };
   readonly #handle_native_runtime_mutation = (event: NativeRuntimeMutationEvent) => {
+    if (this.#disposed || this.dependencies.is_local_target?.() === false) return;
     if (event.phase === "preparing") {
       this.dependencies.prepare_runtime_mutation(event.kind);
       return;
@@ -68,6 +70,7 @@ export class DesktopLifecycleStore {
       error_message: observable,
       close_behavior: observable,
       impact: computed,
+      local_impact_known: computed,
       terminal_count: computed,
       applyPreferences: action,
       request: action,
@@ -78,6 +81,8 @@ export class DesktopLifecycleStore {
       dispose: action,
     });
   }
+
+  get local_impact_known(): boolean { return this.dependencies.is_local_target?.() !== false; }
 
   get terminal_count(): number { return this.dependencies.resources.runningTerminalCount(); }
 
@@ -91,22 +96,23 @@ export class DesktopLifecycleStore {
   }
 
   start(): void {
+    this.#disposed = false;
     window.addEventListener("focus", this.#claim_pending_intent);
     document.addEventListener("visibilitychange", this.#claim_visible_intent);
     void listenDesktopLifecycleIntents(this.#claim_pending_intent).then((unlisten) => {
-      if (this.#unlisten) unlisten();
+      if (this.#disposed || this.#unlisten) unlisten();
       else this.#unlisten = unlisten;
       void this.#claimPendingIntent();
     });
     void listenNativeRuntimeMutations(this.#handle_native_runtime_mutation).then((unlisten) => {
-      if (this.#unlisten_runtime_mutation) unlisten();
+      if (this.#disposed || this.#unlisten_runtime_mutation) unlisten();
       else this.#unlisten_runtime_mutation = unlisten;
     });
   }
 
   async #claimPendingIntent(): Promise<void> {
     const intent = await takePendingDesktopLifecycleIntent().catch(() => null);
-    if (intent) this.request(intent);
+    if (intent && !this.#disposed) this.request(intent);
   }
 
   applyPreferences(preferences: DesktopPreferences): void {
@@ -146,24 +152,23 @@ export class DesktopLifecycleStore {
       if (intent === "quit_desktop") {
         if (this.dependencies.flush_preferences) await this.dependencies.flush_preferences();
         await this.dependencies.resources.shutdownTerminals();
-        // 原生 gate 接住仍在创建的 PTY，停止 Runtime 前保证全部进程已回收。
-        await shutdownUserTerminals();
       }
       if (intent === "quit_desktop" && !this.stop_runtime_on_quit) {
         await quitDesktopClient();
         return;
       }
       runtime_mutating = true;
+      const local = this.dependencies.is_local_target?.() !== false;
       if (intent === "restart_runtime") {
-        this.dependencies.prepare_runtime_mutation("restart");
+        if (local) this.dependencies.prepare_runtime_mutation("restart");
         await updateNativeRuntimeState("restarting", this.impact);
         const bootstrap = await restartNativeRuntime();
-        await this.dependencies.reconnect_runtime(bootstrap ?? undefined);
+        if (local) await this.dependencies.reconnect_runtime(bootstrap ?? undefined);
       } else {
-        this.dependencies.prepare_runtime_mutation("stop");
+        if (local) this.dependencies.prepare_runtime_mutation("stop");
         await updateNativeRuntimeState("stopping", this.impact);
         await stopNativeRuntime();
-        this.dependencies.mark_runtime_stopped();
+        if (local) this.dependencies.mark_runtime_stopped();
         await updateNativeRuntimeState("stopped", this.impact);
       }
       if (intent === "quit_desktop") {
@@ -178,7 +183,6 @@ export class DesktopLifecycleStore {
       let message = error instanceof Error ? error.message : "桌面生命周期操作失败。";
       if (intent === "quit_desktop") {
         try {
-          await resumeUserTerminals();
           this.dependencies.resources.resumeCreation();
         } catch {
           message += " 终端服务尚未恢复，请重试退出或重启客户端。";
@@ -193,6 +197,7 @@ export class DesktopLifecycleStore {
   }
 
   syncRuntimeState(state: RuntimeConnectionState): void {
+    if (this.dependencies.is_local_target?.() === false) return;
     const native_state: NativeRuntimeState = ({
       booting: "connecting",
       starting_runtime: "connecting",
@@ -209,6 +214,7 @@ export class DesktopLifecycleStore {
   }
 
   dispose(): void {
+    this.#disposed = true;
     window.removeEventListener("focus", this.#claim_pending_intent);
     document.removeEventListener("visibilitychange", this.#claim_visible_intent);
     this.#unlisten?.();

@@ -1,10 +1,11 @@
+import { copyText } from "../../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import type { McpServerDraft, McpServerSnapshot, McpTransportKind } from "../../../../generated/assistant-protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "../SettingsPageContainer";
-import { SettingsMessages } from "../RuntimeSettingsPage";
+import { SettingsMessages } from "../SettingsMessages";
 import { ArgsFields, ConnectionField, SecretFields, type SecretRow } from "./ConnectionFields";
 import { emptyTransport, serverDraft, validateMcpDraft } from "./draft";
 import shared from "../index.module.scss";
@@ -52,7 +53,7 @@ export const ServerEditor = observer(function ServerEditor(props: Readonly<{
   async function copy() {
     const server = candidate();
     if (!server) return;
-    try { await navigator.clipboard.writeText(JSON.stringify(server, null, 2)); setNotice("已复制当前草稿（含本次输入的新值），请妥善保管。"); }
+    try { await copyText(JSON.stringify(server, null, 2)); setNotice("已复制当前草稿（含本次输入的新值），请妥善保管。"); }
     catch { setError("无法复制，请检查剪贴板权限。"); }
   }
   const transport = draft.transport;

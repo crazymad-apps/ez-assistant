@@ -1,12 +1,12 @@
 //! 有界 JSON Command ingress 与 Runtime 薄 dispatch。
 
 use assistant_protocol::{
-    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayMutationResult, RuntimeCommand,
-    RuntimeCommandResult, RuntimeErrorInfo,
+    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayMutationResult,
+    HostAccessCommand, HostAccessStatus, RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo,
 };
 use assistant_runtime::RuntimeError;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -14,6 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{HttpState, error::runtime_status};
+use crate::access::AccessPermit;
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -32,6 +33,7 @@ pub(crate) struct CommandRequest {
 pub(crate) enum HostCommand {
     Runtime(RuntimeCommand),
     DeviceGateway(DeviceGatewayCommand),
+    HostAccess(HostAccessCommand),
 }
 
 /// Host Command 成功后的关联响应。
@@ -47,6 +49,7 @@ pub(crate) struct CommandResponse {
 pub(crate) enum HostCommandResult {
     Runtime(Box<RuntimeCommandResult>),
     DeviceGateway(DeviceGatewayCommandResult),
+    HostAccess(HostAccessStatus),
 }
 
 /// Command 失败时返回的脱敏响应体。
@@ -58,6 +61,7 @@ struct CommandErrorBody {
 
 pub(super) async fn handle_command(
     State(state): State<HttpState>,
+    Extension(permit): Extension<AccessPermit>,
     payload: Result<Json<CommandRequest>, JsonRejection>,
 ) -> Response {
     let Json(request) = match payload {
@@ -82,7 +86,29 @@ pub(super) async fn handle_command(
         );
     }
 
-    match dispatch(&state, request.command).await {
+    if let Err(error) = permit.check() {
+        return command_error(Some(request.request_id), error.protocol_info());
+    }
+    if matches!(
+        request.command,
+        HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
+    ) && !permit.native
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": {"message": "只能通过本机原生入口停止 Runtime。"}})),
+        )
+            .into_response();
+    }
+    if matches!(
+        request.command,
+        HostCommand::Runtime(RuntimeCommand::ReloadConfig(_))
+    ) && let Err(error) = state.access.command(None, permit.clone()).await
+    {
+        return command_error(Some(request.request_id), error.protocol_info());
+    }
+    let dispatched = dispatch(&state, request.command, permit).await;
+    match dispatched {
         Ok((result, shutdown_requested)) => {
             let response = (
                 StatusCode::OK,
@@ -109,12 +135,19 @@ fn command_error(request_id: Option<String>, error: RuntimeErrorInfo) -> Respons
 async fn dispatch(
     state: &HttpState,
     command: HostCommand,
+    permit: AccessPermit,
 ) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
     match command {
         HostCommand::Runtime(command) => dispatch_runtime(state, command)
             .await
             .map_err(|error| error.to_protocol_info()),
         HostCommand::DeviceGateway(command) => dispatch_device_gateway(state, command).await,
+        HostCommand::HostAccess(command) => state
+            .access
+            .command(Some(command), permit)
+            .await
+            .map(|status| (HostCommandResult::HostAccess(status), false))
+            .map_err(|error| error.protocol_info()),
     }
 }
 
@@ -325,7 +358,9 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::ListMcpServerOptions(request) => (
-            RuntimeCommandResult::ListMcpServerOptions(runtime.list_mcp_server_options(request)?),
+            RuntimeCommandResult::ListMcpServerOptions(
+                runtime.list_mcp_server_options(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::SubmitSessionCommand(request) => (
@@ -425,7 +460,9 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::ListPendingApprovals(request) => (
-            RuntimeCommandResult::ListPendingApprovals(runtime.list_pending_approvals(request)?),
+            RuntimeCommandResult::ListPendingApprovals(
+                runtime.list_pending_approvals(request).await?,
+            ),
             false,
         ),
         RuntimeCommand::DecideApproval(request) => (
@@ -454,16 +491,19 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ListWorkspaces(runtime.list_workspaces(request)?),
             false,
         ),
-        RuntimeCommand::RemoveWorkspace(request) => (
-            RuntimeCommandResult::RemoveWorkspace(runtime.remove_workspace(request).await?),
-            false,
-        ),
+        RuntimeCommand::RemoveWorkspace(request) => {
+            let _gate = state.terminals.source_gate.lock().await;
+            let id = request.workspace_id.clone();
+            let result = runtime.remove_workspace(request).await?;
+            state.terminals.source_removed(None, Some(&id)).await;
+            (RuntimeCommandResult::RemoveWorkspace(result), false)
+        }
         RuntimeCommand::GetAttachment(request) => (
-            RuntimeCommandResult::GetAttachment(runtime.get_attachment(request)?),
+            RuntimeCommandResult::GetAttachment(runtime.get_attachment(request).await?),
             false,
         ),
         RuntimeCommand::ListAttachments(request) => (
-            RuntimeCommandResult::ListAttachments(runtime.list_attachments(request)?),
+            RuntimeCommandResult::ListAttachments(runtime.list_attachments(request).await?),
             false,
         ),
         RuntimeCommand::CreateSession(request) => (
@@ -480,10 +520,13 @@ async fn dispatch_runtime(
             ),
             false,
         ),
-        RuntimeCommand::DeleteSession(request) => (
-            RuntimeCommandResult::DeleteSession(runtime.delete_session(request).await?),
-            false,
-        ),
+        RuntimeCommand::DeleteSession(request) => {
+            let _gate = state.terminals.source_gate.lock().await;
+            let id = request.session_id.clone();
+            let result = runtime.delete_session(request).await?;
+            state.terminals.source_removed(Some(&id), None).await;
+            (RuntimeCommandResult::DeleteSession(result), false)
+        }
         RuntimeCommand::ClearSession(request) => (
             RuntimeCommandResult::ClearSession(runtime.clear_session(request).await?),
             false,
@@ -499,7 +542,7 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::ListSessions(request) => (
-            RuntimeCommandResult::ListSessions(runtime.list_sessions(request)?),
+            RuntimeCommandResult::ListSessions(runtime.list_sessions(request).await?),
             false,
         ),
         RuntimeCommand::ListSkills(request) => (
@@ -515,7 +558,7 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::GetSession(request) => (
-            RuntimeCommandResult::GetSession(runtime.get_session(request)?),
+            RuntimeCommandResult::GetSession(runtime.get_session(request).await?),
             false,
         ),
         RuntimeCommand::SubmitInput(request) => (

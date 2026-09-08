@@ -40,7 +40,7 @@ use crate::{
 
 #[derive(Clone)]
 struct QueueDriverContext {
-    sessions: Arc<RwLock<BTreeMap<assistant_protocol::SessionId, Arc<SessionController>>>>,
+    session_loader: Arc<super::session_loading::SessionLoader>,
     workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
@@ -51,6 +51,7 @@ struct QueueDriverContext {
     child_tasks: Arc<crate::delegation::ChildTaskRegistry>,
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
+    skill_package_source: Arc<dyn crate::SkillPackageSource>,
     output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     mcp_registry: Arc<crate::mcp::McpRegistry>,
@@ -86,7 +87,7 @@ impl AssistantRuntime {
 
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
-            sessions: self.sessions.clone(),
+            session_loader: self.session_loader.clone(),
             workspaces: self.workspaces.clone(),
             config_registry: self.config_registry.clone(),
             permission_coordinator: self.permission_coordinator.clone(),
@@ -97,6 +98,7 @@ impl AssistantRuntime {
             child_tasks: self.child_tasks.clone(),
             context_window: self.context_window.clone(),
             store: self.store.clone(),
+            skill_package_source: self.skill_package_source.clone(),
             output_dispatcher: self.output_dispatcher.clone(),
             recall_reference_codec: self.recall_reference_codec.clone(),
             mcp_registry: self.mcp_service.registry.clone(),
@@ -128,7 +130,7 @@ fn controller_tool_coordinator_from(
     let wake_context = context.clone();
     let tasks = context.tasks.clone();
     Arc::new(super::controller::ControllerToolCoordinator::new(
-        context.sessions.clone(),
+        context.session_loader.clone(),
         context.workspaces.clone(),
         context.config_registry.clone(),
         context.store.clone(),
@@ -288,12 +290,20 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             context.events.clone(),
         ));
         let run_cancellation = context.root_cancellation.child_token();
+        let skill_catalog = super::skills::prepare_current_catalog(
+            context.store.as_ref(),
+            context.skill_package_source.as_ref(),
+            &context.workspaces,
+            session.environment().workspace_id.as_ref(),
+        )
+        .await;
         let start_error = match context.config_registry.snapshot().and_then(|config| {
             let controller_tools = controller_tool_coordinator_from(&context);
             compile_run_agent(
                 session.clone(),
                 &config,
                 RunCompilationResources {
+                    skill_catalog: skill_catalog?,
                     model_factory: context.model_factory.as_ref(),
                     context_window: context.context_window.clone(),
                     run_tool_factory: context.run_tool_factory.as_ref(),
@@ -900,48 +910,51 @@ async fn fail_before_start(
         return;
     };
     let controller = controller_tool_coordinator_from(context);
-    let proxy_report = session
-        .lock_state()
-        .ok()
-        .and_then(|state| {
-            let source_input = state
-                .runs
-                .get(run_id)
-                .and_then(|run| state.inputs.get(run.input_id()).map(|input| (run, input)))?;
-            let queue_empty_after_settlement = !state.inputs.values().any(|input| {
-                input.stored.state == StoredInputState::Queued
-                    && input.stored.input_id != source_input.1.stored.input_id
-            });
-            (state.role == crate::SessionRole::Standard && queue_empty_after_settlement)
-                .then(|| {
-                    state
-                        .proxy
-                        .as_ref()
-                        .map(|proxy| super::controller::ProxyReportDraft {
-                            source_session_id: session.id().clone(),
-                            source_title: state.title.clone(),
-                            source_run_id: run_id.clone(),
-                            source_goal_id: source_input
-                                .1
-                                .stored
-                                .goal_binding
-                                .as_ref()
-                                .map(|binding| binding.goal_id.clone()),
-                            goal_summary: None,
-                            source_run_status: RunStatus::Failed,
-                            controller_session_id: proxy.controller_session_id.clone(),
-                            final_text: None,
-                            error: Some(error.clone()),
-                            accepted_at_ms: finished_at,
-                            reply_route: super::controller::reply_route_for_input(
-                                &source_input.1.stored,
-                            ),
-                        })
-                })
-                .flatten()
-        })
-        .map(|draft| controller.prepare_proxy_report(draft).map(Box::new))
-        .transpose();
+    let proxy_report_draft = session.lock_state().ok().and_then(|state| {
+        let source_input = state
+            .runs
+            .get(run_id)
+            .and_then(|run| state.inputs.get(run.input_id()).map(|input| (run, input)))?;
+        let queue_empty_after_settlement = !state.inputs.values().any(|input| {
+            input.stored.state == StoredInputState::Queued
+                && input.stored.input_id != source_input.1.stored.input_id
+        });
+        (state.role == crate::SessionRole::Standard && queue_empty_after_settlement)
+            .then(|| {
+                state
+                    .proxy
+                    .as_ref()
+                    .map(|proxy| super::controller::ProxyReportDraft {
+                        source_session_id: session.id().clone(),
+                        source_title: state.title.clone(),
+                        source_run_id: run_id.clone(),
+                        source_goal_id: source_input
+                            .1
+                            .stored
+                            .goal_binding
+                            .as_ref()
+                            .map(|binding| binding.goal_id.clone()),
+                        goal_summary: None,
+                        source_run_status: RunStatus::Failed,
+                        controller_session_id: proxy.controller_session_id.clone(),
+                        final_text: None,
+                        error: Some(error.clone()),
+                        accepted_at_ms: finished_at,
+                        reply_route: super::controller::reply_route_for_input(
+                            &source_input.1.stored,
+                        ),
+                    })
+            })
+            .flatten()
+    });
+    let proxy_report = if let Some(draft) = proxy_report_draft {
+        controller
+            .prepare_proxy_report(draft)
+            .await
+            .map(|input| Some(Box::new(input)))
+    } else {
+        Ok(None)
+    };
     let Ok(proxy_report) = proxy_report else {
         fault_driver(session);
         return;

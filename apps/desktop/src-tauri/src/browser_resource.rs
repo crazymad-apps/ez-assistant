@@ -1,10 +1,13 @@
 //! Desktop 持有的子 WebView；外部网页不获得应用能力。
 
+#[path = "browser_resource/platform.rs"]
+mod platform;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -19,6 +22,7 @@ pub struct BrowserResourceManager {
     views: Mutex<HashMap<String, Webview>>,
     next_id: AtomicU64,
     user_agent: Option<String>,
+    capture_gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for BrowserResourceManager {
@@ -27,6 +31,7 @@ impl Default for BrowserResourceManager {
             views: Mutex::default(),
             next_id: AtomicU64::default(),
             user_agent: desktop_user_agent(),
+            capture_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 }
@@ -165,7 +170,7 @@ impl BrowserResourceManager {
             Err(_) => return,
         };
         for view in views.into_values() {
-            if let Err(error) = view.close() {
+            if let Err(error) = platform::close(&view) {
                 eprintln!("failed to close browser: {error}");
             }
         }
@@ -228,11 +233,9 @@ pub async fn create_resource_browser(
                     .collect();
                 let _ = title_events.send(BrowserEvent::Title { title });
             })
-            .on_page_load(move |view, payload| {
-                let url = view
-                    .url()
-                    .unwrap_or_else(|_| payload.url().clone())
-                    .to_string();
+            .on_page_load(move |_, payload| {
+                // 使用本次页面事件的地址；失败导航时 WKWebView 当前 URL 可能尚为空。
+                let url = payload.url().to_string();
                 let event = match payload.event() {
                     PageLoadEvent::Started => BrowserEvent::LoadStarted { url },
                     PageLoadEvent::Finished => BrowserEvent::Loaded { url },
@@ -275,7 +278,7 @@ pub async fn create_resource_browser(
             )
             .map_err(|error| error.to_string())?;
         if let Err(error) = view.hide() {
-            let _ = view.close();
+            let _ = platform::close(&view);
             return Err(error.to_string());
         }
         match manager.views.lock() {
@@ -283,7 +286,7 @@ pub async fn create_resource_browser(
                 views.insert(id.clone(), view);
             }
             Err(_) => {
-                let _ = view.close();
+                let _ = platform::close(&view);
                 return Err("browser_state_unavailable".into());
             }
         }
@@ -381,6 +384,35 @@ pub async fn layout_resource_browser(
     .await
 }
 
+#[derive(Serialize)]
+pub struct BrowserPreview {
+    url: String,
+    image: String,
+}
+
+/// 只截取受管网页自身；内存快照供浮层占位，不写盘、不注入网页脚本、不开放屏幕录制能力。
+/// 快照不可用不影响浏览。原生回调持有 permit，超时后也不会叠加第二个截图任务。
+#[tauri::command]
+pub async fn capture_resource_browser(
+    caller: Webview,
+    browser_id: String,
+) -> Result<Option<BrowserPreview>, String> {
+    require_main(&caller)?;
+    let manager = caller.state::<BrowserResourceManager>();
+    let view = manager.get(&browser_id)?;
+    let Ok(permit) = manager.capture_gate.clone().try_acquire_owned() else {
+        return Ok(None);
+    };
+    let Some(url) = platform::current_url(&view).await? else {
+        return Ok(None);
+    };
+    let image = platform::preview(&view, permit).await;
+    if platform::current_url(&view).await?.as_ref() != Some(&url) {
+        return Ok(None);
+    }
+    Ok(image.map(|image| BrowserPreview { url, image }))
+}
+
 impl BrowserBounds {
     fn in_native_viewport(
         self,
@@ -421,16 +453,13 @@ impl BrowserBounds {
 }
 
 #[tauri::command]
-pub async fn resource_browser_url(caller: Webview, browser_id: String) -> Result<String, String> {
+pub async fn resource_browser_url(
+    caller: Webview,
+    browser_id: String,
+) -> Result<Option<String>, String> {
     require_main(&caller)?;
-    on_main(caller.app_handle().clone(), move |app| {
-        app.state::<BrowserResourceManager>()
-            .get(&browser_id)?
-            .url()
-            .map(|url| url.to_string())
-            .map_err(|error| error.to_string())
-    })
-    .await
+    let view = caller.state::<BrowserResourceManager>().get(&browser_id)?;
+    platform::current_url(&view).await
 }
 
 #[tauri::command]
@@ -439,7 +468,7 @@ pub async fn close_resource_browser(caller: Webview, browser_id: String) -> Resu
     on_main(caller.app_handle().clone(), move |app| {
         let manager = app.state::<BrowserResourceManager>();
         let view = manager.get(&browser_id)?;
-        view.close().map_err(|error| error.to_string())?;
+        platform::close(&view)?;
         manager
             .views
             .lock()

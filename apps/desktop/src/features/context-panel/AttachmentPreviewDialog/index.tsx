@@ -1,9 +1,9 @@
+import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import { useEffect, useState } from "react";
 import type { AttachmentSummary } from "../../../generated/assistant-protocol";
 import {
   NativeResourceFailure,
   openAttachmentInSystem,
-  previewAttachment,
   revealAttachmentInDirectory,
   type AttachmentPreview,
 } from "../../../native-bridge/nativeResource";
@@ -16,7 +16,8 @@ export function AttachmentPreviewDialog(props: Readonly<{
   attachment: AttachmentSummary;
   on_close: () => void;
 }>) {
-  const [preview, setPreview] = useState<AttachmentPreview | null>(null);
+
+  const files = useResourceRoot().files;  const [preview, setPreview] = useState<AttachmentPreview | null>(null);
   const [preview_error, setPreviewError] = useState<string | null>(null);
   const [preview_fallback, setPreviewFallback] = useState<"unsupported" | "too_large" | null>(null);
   const [action_error, setActionError] = useState<string | null>(null);
@@ -27,7 +28,7 @@ export function AttachmentPreviewDialog(props: Readonly<{
     setPreview(null);
     setPreviewError(null);
     setPreviewFallback(null);
-    void previewAttachment(props.attachment.session_id, props.attachment.attachment_id)
+    void files.previewAttachment(props.attachment.session_id, props.attachment.attachment_id)
       .then((value) => active && setPreview(value))
       .catch((reason: unknown) => {
         if (!active) {
@@ -107,12 +108,13 @@ export function AttachmentPreviewDialog(props: Readonly<{
           {action_error && <p className={styles.error}>{action_error}</p>}
         </main>
         <footer>
-          <button disabled={action !== null} onClick={() => void revealInDirectory()} type="button">
+          {files.native_host && <button disabled={action !== null} onClick={() => void revealInDirectory()} type="button">
             {action === "reveal" ? "正在定位…" : "在目录中打开"}
-          </button>
-          <button disabled={action !== null} onClick={() => void openInSystem()} type="button">
+          </button>}
+          {files.native_host && <button disabled={action !== null} onClick={() => void openInSystem()} type="button">
             {action === "open" ? "正在打开…" : "使用系统应用打开"}
-          </button>
+          </button>}
+          <button onClick={() => { void files.downloadAttachment(props.attachment.session_id, props.attachment.attachment_id, props.attachment.original_name).catch((error: unknown) => setActionError(error instanceof Error ? error.message : "下载失败。")); }} type="button">下载文件</button>
           <button onClick={props.on_close} type="button">关闭</button>
         </footer>
     </Dialog>

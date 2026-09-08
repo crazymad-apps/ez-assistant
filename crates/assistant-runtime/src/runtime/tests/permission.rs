@@ -304,6 +304,7 @@ async fn wait_for_pending_count(
                 .list_pending_approvals(ListPendingApprovalsRequest {
                     session_id: session_id.clone(),
                 })
+                .await
                 .expect("list pending approvals")
                 .approvals;
             if approvals.len() == count {
@@ -628,6 +629,7 @@ async fn saving_an_exact_file_rule_drains_matching_approvals_from_the_queue_head
     assert!(
         runtime
             .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
             .expect("list approvals")
             .approvals
             .is_empty()
@@ -703,6 +705,7 @@ async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
         .list_pending_approvals(ListPendingApprovalsRequest {
             session_id: session_id.clone(),
         })
+        .await
         .expect("list approvals after save")
         .approvals;
     assert_eq!(approvals.len(), 1);

@@ -1,10 +1,18 @@
 # runtime-host 模块约束
 
+> 在途演进：[v0.25.0 功能设计](../versions/v0.25.0/功能设计.md)与
+> [技术方案](../versions/v0.25.0/技术方案.md)均已确认并定稿。M0 已实现访问配置、密码、普通登录及 HTTP／HTTPS 接入（M2 反馈统一为同一端口），已完成验证；M1 已完成正式 Web 内嵌、登录与访问设置；M3 文件读取与目录接口已实现并完成本轮验证；M4 Host PTY 已接入并完成本轮验证、待用户确认；
+> 历史版本中的纯 loopback／进程 token 规则由文末 M0 说明覆盖，后续方案不能当作已交付能力。
+
 ## 模块定位
 
 `apps/runtime-host` 是 EZ Assistant 正式产品的 Runtime Host 进程入口。它装配
 `assistant-runtime`、具体 Agent/Provider/Tool 能力和 HTTP 应用协议，但不持有 Session、Run 或
 Conversation 的第二份权威状态。
+
+已确认的产品组成：桌面级为 Desktop + Host + Client，服务器级为 Host + Client。Host 是
+两类应用共有的运行组件，随所属应用交付，不作为独立产品分发；其独立进程和业务职责不变。
+具体 Client 装配按对应版本设计，不从组件列表推导额外进程或 Runtime 实例。
 
 本模块不是 `tools/*` 验证宿主，也不因独立进程形态自动成为系统 daemon、LaunchAgent 或常驻
 Worker 池。
@@ -38,9 +46,9 @@ Worker 池。
 
 ## 传输与并发
 
-- 当前产品通信统一为 HTTP：默认只启用本地 Host，并只绑定 IPv4 loopback 动态端口。
-  后续可选远程 Host 默认关闭；如显式启用，必须使用 HTTPS 并复用同一组
-  Command、SSE、Streaming Upload 路由与业务 DTO。
+- 当前产品通信统一为 HTTP：默认唯一 IPv4 监听端口 7240，非本地访问默认关闭。
+  v0.25.0 已确认外部访问默认关闭，显式启用后支持 HTTP／HTTPS，HTTPS 可选；两种模式
+  均须认证，并复用同一组 Command、SSE、Streaming Upload 路由与业务 DTO。M0 已实现该能力，验证结果见本地开发进度。
 - 传输任务使用有界队列并明确背压；慢客户端不得反压 Provider、AgentExecution 或 Runtime
   supervisor。
 - SSE 订阅者落后于有界 Runtime 广播时，Host 必须显式发送 `stream_gap` 控制事件并关闭
@@ -55,9 +63,7 @@ Worker 池。
 ## 安全与日志
 
 - credential 只用于构造具体 Provider，不进入应用协议、普通日志、Demo 输出或子进程环境。
-- 本地 HTTP 请求必须通过每进程高强度 Bearer Token、Host/Origin 校验和精确
-  CORS 白名单收窄边界。Tauri Rust 可将 Token 注入受信任 WebView，由 WebView Runtime Client
-  直连 Host；Token 不进入 URL、持久前端存储、事件或日志。
+- HTTP 请求必须通过登录凭据、Host/Origin 校验和精确 CORS 白名单。原生本机入口还接受每进程 bootstrap token，由 Tauri 注入受信任 WebView；bootstrap 不进入 URL、持久前端存储、事件或日志。普通登录 token 可用于已确认的 Web 快捷入口 fragment，页面立即移除后按登录规则兑换 Cookie。
 - 普通日志不得记录完整 prompt、模型响应、文件内容、Shell 输出或工具参数。
 - Host 通过 `RunToolFactory` 为每个 Run 同时冻结工具集和 Authorizer；未知或未匹配能力不得
   隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
@@ -589,13 +595,10 @@ S3.2 联调的内部播放接纳与诊断约束：
   候选项只保留源目录，不枚举或读取普通资源，Root 不可完整遍历令整次投影不可用。
 - SQLite `skill_name_states` 只保存通过校验的名称、布尔开关和更新时间；单行 upsert 使用
   Immediate transaction。测试只打开 `TempDir` 或内存数据库，不访问用户实际 Runtime Home。
-- 新 Session 的 `skill_catalog_json` 保存 Runtime 编译出的精确 `SKILL.md` 正文、definition digest 和
-  共享源目录；普通资源树不枚举、不复制、不建立索引，Runtime Home 与 Session 目录均不创建
-  Skill 暂存或私有副本。
+- v0.25.0 起不持久化 Session 技能目录。旧 `skill_catalog_json` 列仅为既有 SQLite 结构保留，新记录写空占位，恢复不读取它；不批量清理安装版数据。精确已激活正文继续保存在对应消息中。
 - 普通资源按 Skill 指令通过既有文件/Shell 工具读取共享 Root 中的当前文件，并继续服从具体
   工具的路径与权限规则；Host 不增加 Skill 级权限门禁。
-- SQLite 迁移给旧 Session 写入 `legacy_unavailable` 缺省；恢复只校验 Catalog 结构与 revision，
-  不因共享资源变化拒绝恢复。Fork 只复制 SQLite 中的 Catalog 事实，Session 删除不触碰共享源文件。
+- 系统提示词保持既有冻结值；恢复与 Fork 根据消息和 Activation 账本保留历史，不扫描当前文件修补历史。
 
 ## v0.19.0 用户 Skill Activation 持久化
 
@@ -605,7 +608,7 @@ S3.2 联调的内部播放接纳与诊断约束：
 - Host 校验 user Activation 的 Session/Input/Run/Message、owner、trigger 和 `skill:<name>` retention
   关系，但不执行 Skill 级权限判断；真实工具调用继续进入既有 Authorizer 与审批链。
 - 启动恢复同时读取 Input 关联与 ledger；Runtime 还会按 activation id 核对两份结构完全一致，并验证
-  Catalog revision、名称和 definition digest。旧 Input 缘由缺少字段时按无 Activation 读取。
+  目录 revision 与 definition digest 格式及消息、归属关系，不要求历史定义存在于当前目录。旧 Input 缘由缺少字段时按无 Activation 读取。
 - Queue 取消、Goal 清理、历史尾段替换和 Session 删除同步删除不再属于规范 Conversation 的 ledger；
   Fork 事务只插入前缀内已改绑目标 Session 的 Activation，不建立 Skill 目录或复制共享文件。
 - `list_skills`/`set_skill_enabled` 通过正式 HTTP Command 调用 Runtime；SSE 只发布
@@ -648,3 +651,69 @@ S3.2 联调的内部播放接纳与诊断约束：
 - 未知扩展名经过内容检查可作为普通文本预览；二进制不得因改后缀被当作文本。图片与 PDF 必须通过类型校验和字节上限，不返回任意本地路径给网页。
 - 新建/清空 Session 冻结一次 file URI 交付约定；继续使用原 System Prompt，Fork 复用冻结指令并重建目标 Session 目录部分。模型请求捕获测试覆盖这些边界，不以静态 Prompt 断言替代真实 Provider 文件交付验收。
 - 浏览器、用户终端、页面 LRU 和右栏快照属于 Desktop，不进入 Host 的 Session/Run/Conversation 或 Agent 工具定义。
+
+## v0.25.0 M0：Host 访问控制
+
+- `access/` 拥有有界配置命令队列、Argon2id 密码计算、64 项内存登录表与远程访问策略；由 HostSupervisor 作为可降级子系统监督。唯一 HTTP 服务仍为关键子系统。
+- 本机与远程共用唯一端口、Runtime 和处理函数。非本机来源永不接受进程 bootstrap；所有 Web 使用普通登录。`/auth/login`、`/auth/logout` 和 Command 的 `host_access` 分支不进入设备配对或 Runtime 会话领域。
+- `[host_access]` 与模型、语音配置共用 `LocalConfigSource`；同源写入锁覆盖阻塞 CAS 全过程，避免并发覆写。配置已保存后刷新 Runtime 配置 revision，密码哈希不进入业务投影。
+- 访问开关先 CAS 再发布策略；关闭只停止远程请求的所属连接，已接纳的 Run 继续。普通登录在改密、退出、到期、Host 重启时失效；SSE 正常结束，上传中断并清理暂存，提交前再次校验登录。
+- Cookie 为 Host-only / HttpOnly / SameSite=Strict；名称区分协议和 Host 端口，避免同一 IP 不同 Host 进程的 Cookie 相互覆盖，HTTPS 才标记 Secure。Cookie 写请求需要同源 Origin。Bootstrap 仅接受精确本机 authority 与原生来源。
+- `serve --password-stdin` 在持有实例锁后读取至多 1027 字节，移除一组行结束符并校验 1—1024 字节密码；不提供命令行明文密码或找回密码命令。
+
+
+## v0.25.0 M1：包内 Web
+
+- `build.rs` 只在 OUT_DIR 生成静态文件索引与嵌入代码；显式 `EZ_ASSISTANT_WEB_DIST` 必须为绝对路径且版本一致。Release 缺少页面拒绝构建，调试缺少页面明确返回 503；排除 source map、源文件和配置凭据，拒绝符号链接。
+- `http/web.rs` 服务同一前端构建，API 路径不落入 SPA fallback，保留 CSP、禁止 MIME 嗅探、referrer 与缓存规则。构建顺序为前端 → Host → sidecar／Tauri，Host 随桌面级或服务器级应用交付。
+- `/auth/session` 提供当前普通登录的脱敏状态；Web Cookie 请求与既有 Command／Snapshot／fetch-SSE 共用同一权限检查。退出、改密和失效触发客户端清除旧业务投影，不新增会话状态或登录刷新体系。
+
+
+## v0.25.0 M2：统一端口反馈
+
+- 取消第二监听，默认 7240，配置使用 port／server_names。IP 直接访问；域名精确允许，Host 端口与
+  实际监听一致。真实 TCP peer 和本机 authority 同时成立才走本机路径；bootstrap 再校验原生 Origin／token。
+- 开关及域名更新即时生效，端口／协议／证书启动时冻结；设置返回 restart_required，复用显式重启。
+- 同一 HTTPS 证书需覆盖 loopback IP 与外部访问名；不提供额外 HTTP 救援监听，不自动降级或随机换端口。
+- 端口探测及真实监听由 server 负责；macOS 对 wildcard／loopback 的重用行为需显式检查本机端口冲突。
+
+
+## v0.25.0 M3：Host 目录与文件
+
+- `http/resources/files.rs` 是现有资源路由共用的私有文件读取基础，Host 任意绝对路径与 Session locator 分别准入；Session 的根来自 Runtime，不因增加任意目录入口而放宽原有边界。没有增加文件管理进程或第二份 Runtime 状态。
+- 路径先解析规范目标，再通过 rustix 安全 API 逐级 `openat`／`NOFOLLOW` 打开；普通文件与目录类型从同一描述符核验，`NONBLOCK` 避免 FIFO 替换阻塞。链接替换不允许切换到未经校验的路径。本版仍以现有 Unix Host 平台为实现范围。
+- 新增 Host 列目录、选择、预览与下载，以及 Session／附件／工具资源下载；都走同一认证中间件。单层最多扫描 2000 项，UTF-8 无法表示的条目计入 `skipped_entries`，不伪造可操作路径。
+- 新的目录／预览与下载请求最多 8 个并发；阻塞任务持有 permit 到闭包结束，下载持有到响应流结束。下载按 64 KiB chunk、初始长度发送，增长部分不追加，缩短报错，设置 attachment／nosniff 与安全文件名；不存在巨型 base64 下载路径。
+- 文本 4 MiB、图片／PDF 16 MiB 按实际读取限制；媒体按内容识别并沿用图片解码预算。附件与 tool-file 保留 Runtime 身份解析，工具图片下载继续校验冻结内容哈希。
+- 既有 streaming upload／materialization 与 Session 持久语义不变；本里程碑不新增数据库表或数据迁移。
+
+
+## v0.25.0 M4：用户终端所有权
+
+- 私有 `user_terminal` 子系统归 Host Supervisor，单 socket 单 PTY；不进入 assistant-runtime、Agent Shell、Store 或会话 SSE。连接控制 DTO 在 assistant-protocol，字节 I/O 走二进制帧。
+- `GET /user-terminals/socket` 复用真实来源、Host、Origin 和 Cookie／Bearer 校验。首帧 5 秒认证，未认证不创建 Shell；普通登录失效取消对应连接，原生凭据同样受限额约束。
+- Host 总计 32 PTY、单登录 8、未认证握手 32、全部 socket 64；输出每块最多 32 KiB 且等待 ACK，输入每块最多 16 KiB 且写完才 ACK。控制和心跳不等待 PTY 输出 ACK；10 秒心跳、30 秒失联、3 秒写入与清理预算。
+- 关闭、断线、来源删除、登录撤销与 Host shutdown 都结束所属 PTY。创建来源查询／启动与既有删除命令共用短期 gate；删除成功后取消匹配来源，不复制业务权威状态。失败保留受控进程句柄和脱敏诊断，不能跳过 Runtime 最终 flush。
+
+- HTTP/2 `:authority` 与 HTTP/1 Host 头统一后再进入同一鉴权；拒绝相互矛盾或重复的 Host，Cookie 端口隔离与 Web CSP 使用统一后的地址。
+
+## v0.25.0 M5 会话 refresh 存储补充
+
+Session Command 接纳、结果提交与恢复不限制 Standard/Controller。Skill 刷新沿用输入结果与 Conversation 提交事务，仅保存控制结果与消息，不写系统提示词或目录。
+旧目录列不读取，新写入为空占位；不增加目录历史、SQL 表或迁移清理。测试仅使用临时 Runtime Home／Store。
+
+
+## v0.25.0 启动读取范围
+
+本节取代上文存储恢复条目中的全局“启动”触发时机，不改变既有事务和数据校验规则。
+生产启动使用 load_runtime_globals，只加载全局事实；Session 目录、附件和工具图片的扫描／
+恢复，以及 Input、Run、命令、Goal、子任务和 Activation 装配均按目标会话进行。
+列表直接查有界元信息，不解析历史正文或 Input／Run JSON。会话详情读取不执行写入恢复；
+prepare_session_execution 在手动操作前处理目标已记录提交，不重放工具，不恢复旧审批。
+全量 load_runtime 只留给已有存储验证，不得用作生产加载失败后的回退。全局孤儿文件清理
+不再属于 Host 就绪路径；测试数据只在隔离目录中构造，生产历史数据修复需独立授权。
+
+
+MCP 连接与工具发现不再阻塞监听发布。Host Supervisor 管理可降级的 mcp_startup 子系统；
+初始化结束后等待 Host 关闭，初始化中收到关闭则取消，连接资源仍由既有 factory 统一回收。
+基本配置／Store 故障仍阻止启动；不得把它们随 MCP 一起后台化或忽略。启动分段日志不含凭据。

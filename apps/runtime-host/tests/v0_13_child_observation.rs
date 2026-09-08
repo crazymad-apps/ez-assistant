@@ -180,6 +180,8 @@ fn killed_host_interrupts_child_and_repairs_the_parent_delegate_result_without_r
     )["run"]
         .clone();
     assert_eq!(parent["status"], "interrupted");
+    // 查询不修复旧轮次。只有显式继续才结算已记录的委派交换，且不重放子任务。
+    second.runtime("resume_session", json!({ "session_id": session_id }));
     let conversation = second.conversation(&session_id);
     let messages = conversation["items"]
         .as_array()

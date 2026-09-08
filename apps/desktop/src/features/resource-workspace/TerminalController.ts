@@ -1,8 +1,6 @@
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-import {
-  acknowledgeUserTerminal, closeUserTerminal, createUserTerminal, resizeUserTerminal,
-  restartUserTerminal, writeUserTerminal, type TerminalEvent, type TerminalSize, type TerminalSource,
-} from "../../native-bridge/userTerminal";
+import type { TerminalEvent, TerminalSize, TerminalSource, TerminalSocket } from "../../runtime-client/TerminalSocket";
+import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { createTerminalEmulator, type TerminalEmulator } from "./terminalEmulator";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited" | "error" | "closing" | "closed";
@@ -14,10 +12,11 @@ export class TerminalController {
   status: TerminalStatus = "starting";
   error: string | null = null;
   exit_code: number | null = null;
-  native_id: string | null = null;
+  terminal_id: string | null = null;
   ready = false;
   readonly source: TerminalSource;
   readonly title = "终端";
+  #socket: TerminalSocket | null = null;
   #emulator: TerminalEmulator | null = null;
   #container: HTMLElement | null = null;
   #pending: Promise<void> = Promise.resolve();
@@ -31,11 +30,11 @@ export class TerminalController {
   #last_size = "";
   readonly #on_exit: () => void;
 
-  constructor(source: TerminalSource, onExit: () => void, deferred = false) {
+  constructor(source: TerminalSource, onExit: () => void, deferred = false, private readonly getClient: () => RuntimeClient | null = () => null) {
     this.source = source;
     this.#on_exit = onExit;
     makeObservable(this, {
-      status: observable, error: observable, exit_code: observable, native_id: observable,
+      status: observable, error: observable, exit_code: observable, terminal_id: observable,
       ready: observable, needs_close_confirmation: computed,
       start: action, restart: action, reportError: action,
     });
@@ -57,6 +56,8 @@ export class TerminalController {
     this.fit();
   }
 
+  disconnect(): void { this.#socket?.disconnect(); }
+
   unmount(): void { this.#container = null; }
   focus(): void { this.#emulator?.terminal.focus(); }
 
@@ -74,7 +75,7 @@ export class TerminalController {
       if (this.status !== "running" || key === this.#last_size) return;
       this.#last_size = key;
       this.#resizing = this.#resizing.then(async () => {
-        if (this.native_id && this.status === "running") await resizeUserTerminal(this.native_id, bounded);
+        if (this.terminal_id && this.status === "running") this.#socket?.resize(bounded);
       }).catch((failure: unknown) => { if (!this.#closing) this.reportError(failure); });
     }, 50);
   }
@@ -100,12 +101,12 @@ export class TerminalController {
     this.#input = [];
     this.#input_bytes = 0;
     this.#closing = this.#pending.then(async () => {
-      // 创建过程中关闭也必须接住原生句柄；只有回收成功才移除标签与模拟器。
-      if (this.native_id) await closeUserTerminal(this.native_id);
+      // 创建过程中关闭也必须接住Host 连接；只有回收成功才移除标签与模拟器。
+      await this.#socket?.close();
       this.#emulator?.terminal.dispose();
       this.#emulator?.host.remove();
       this.#emulator = null;
-      runInAction(() => { this.status = "closed"; this.native_id = null; this.ready = false; });
+      runInAction(() => { this.status = "closed"; this.terminal_id = null; this.ready = false; });
     }).catch((failure: unknown) => {
       this.#closing = null;
       this.reportError(failure);
@@ -133,23 +134,25 @@ export class TerminalController {
       }
       if (this.status === "closing") return;
       const size = this.#size();
-      if (this.native_id) await restartUserTerminal(this.native_id, size, (event) => this.#receive(event));
-      else {
-        const created = await createUserTerminal(this.source, size, (event) => this.#receive(event));
-        runInAction(() => { this.native_id = created.terminal_id; });
-      }
+      await this.#socket?.close();
+      const client = this.getClient();
+      if (!client) throw new Error("Host 尚未连接。");
+      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); });
+      this.#socket = socket;
+      const created = await socket.created;
+      runInAction(() => { this.terminal_id = created.terminal_id; });
       runInAction(() => { if (this.status === "starting") this.status = "running"; });
       this.fit();
       void this.#flushInput();
     } catch (failure) { if (this.status !== "closing") this.reportError(failure); }
   }
 
-  #receive(event: TerminalEvent): void {
+  #receive(event: TerminalEvent, socket: TerminalSocket): void {
     if (event.type === "output") {
       // write 的解析回调独立于可见区域渲染；不能在隐藏标签时暂停 ack。
       this.#emulator?.terminal.write(new Uint8Array(event.bytes), () => {
         void this.#pending.then(async () => {
-          if (this.native_id && !this.#closing) await acknowledgeUserTerminal(this.native_id);
+          if (socket === this.#socket && !this.#closing) socket.acknowledge();
         }).catch((failure: unknown) => { if (!this.#closing) this.reportError(failure); });
       });
     } else if (!this.#closing) {
@@ -157,7 +160,7 @@ export class TerminalController {
         if (event.type === "exited") { this.status = "exited"; this.exit_code = event.code; }
         else this.reportError(event.message);
       });
-      // 只由原生 Shell 退出事实通知标签 owner；Ctrl+D 也可能只是前台程序的 EOF。
+      // 只由Host Shell 退出事实通知标签 owner；Ctrl+D 也可能只是前台程序的 EOF。
       if (event.type === "exited") this.#on_exit();
     }
   }
@@ -178,7 +181,7 @@ export class TerminalController {
     if (this.#writing) return;
     this.#writing = true;
     try {
-      while (this.#input_bytes && this.status === "running" && this.native_id) {
+      while (this.#input_bytes && this.status === "running" && this.terminal_id) {
         const block = new Uint8Array(Math.min(INPUT_BLOCK, this.#input_bytes));
         let offset = 0;
         while (offset < block.length) {
@@ -189,7 +192,7 @@ export class TerminalController {
           if (count === first.length) this.#input.shift(); else this.#input[0] = first.subarray(count);
         }
         this.#input_bytes -= block.length;
-        await writeUserTerminal(this.native_id, block);
+        await this.#socket?.write(block);
       }
     } catch (failure) { if (!this.#closing) this.reportError(failure); }
     finally { this.#writing = false; }

@@ -62,6 +62,7 @@ export async function expectMcpAcceptance(page: Page): Promise<void> {
   await expect(result).toContainText("已刷新 · 2 个工具");
   await expectCleanPage(page, secret);
   await page.reload();
+  await page.getByRole("button", { name: "进入工作空间" }).click();
   await expect(page.getByRole("article", { name: "MCP 刷新完成" })).toBeVisible();
   await expectCleanPage(page, secret);
 }

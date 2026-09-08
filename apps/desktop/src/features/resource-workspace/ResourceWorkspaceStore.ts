@@ -1,6 +1,7 @@
+import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { TerminalController } from "./TerminalController";
-import type { TerminalSource } from "../../native-bridge/userTerminal";
+import type { TerminalSource } from "../../runtime-client/TerminalSocket";
 import { BrowserController } from "./BrowserController";
 import type { ResourceViewState } from "./resourceViewState";
 import type {
@@ -26,6 +27,7 @@ export type ResourceHandle = Readonly<{
       session_id: SessionId;
       locator: SessionResourceLocator;
     }
+    | { type: "host_file"; path: string }
     | {
       type: "local_file";
       path_segments: readonly string[];
@@ -97,7 +99,7 @@ export class ResourceWorkspaceStore {
   #next_resource_key = 1;
   readonly #resource_keys = new Map<string, string>();
 
-  constructor() {
+  constructor(private readonly getClient: () => RuntimeClient | null = () => null) {
     makeObservable(this, {
       current_scope_key: observable, shutting_down: observable,
       tabs: computed, active_group: computed, mounted_pages: computed,
@@ -115,6 +117,7 @@ export class ResourceWorkspaceStore {
       openWorkspace: action,
       openSessionResource: action,
       openLocalResource: action,
+      openHostFile: action,
       openAttachment: action,
       openToolResource: action,
       setWorkspaceLocation: action,
@@ -158,7 +161,7 @@ export class ResourceWorkspaceStore {
       // Ctrl+D 退出也会继承上条命令的非零状态，不能据退出码决定是否关页。
       // 复用显式关闭的回收顺序，接住创建早于响应的退出事件；后台退出不抢占当前标签。
       void this.closeTerminalTab(terminalId).catch((failure: unknown) => controller.reportError(failure));
-    }, deferred);
+    }, deferred, this.getClient);
     this.terminals.set(terminalId, controller);
     this.openTab({ type: "terminal", terminalId }, owner);
   }
@@ -186,6 +189,18 @@ export class ResourceWorkspaceStore {
     if (!group || group.closing || this.shutting_down) return;
     if (locator) this.workspace_locations.set(scopeKey, locator);
     this.openTab({ type: "workspace", scopeKey }, group);
+  }
+
+  openHostFile(scope_key: ResourceScopeKey, path: string): void {
+    const group = this.groups.get(scope_key);
+    if (!group || group.closing || this.shutting_down) return;
+    const source = { type: "host_file" as const, path };
+    const identity = resourceIdentity(group, source);
+    let resource_key = this.#resource_keys.get(identity);
+    if (!resource_key) { resource_key = `resource-${this.#next_resource_key++}`; this.#resource_keys.set(identity, resource_key); }
+    const resource: ResourceHandle = { resource_key, display_name: path.split("/").at(-1) || path, scope_key, source };
+    const type = resourceType(resource.display_name);
+    this.openTab(type === "text" ? {type, resource, line: null} : {type, resource}, group);
   }
 
   openSessionResource(
@@ -514,7 +529,10 @@ export class ResourceWorkspaceStore {
     return this.focused_tab_key;
   }
 
+  disconnectTerminals = (): void => { for (const terminal of this.terminals.values()) terminal.disconnect(); };
+
   dispose(): void {
+    this.disconnectTerminals();
     this.#generation += 1;
     for (const browser of this.browsers.values()) browser.dispose();
     this.browsers.clear();

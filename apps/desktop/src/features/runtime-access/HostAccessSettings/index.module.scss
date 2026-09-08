@@ -1,0 +1,20 @@
+@use "../../../styles/fields";
+
+.settings { display: grid; gap: 18px; }
+.card { display: grid; gap: 12px; padding: 18px; border: 1px solid var(--ez-border); border-radius: var(--ez-radius-medium); }
+.card h4, .card p { margin: 0; }
+.card p { color: var(--ez-text-secondary); font-size: 13px; line-height: 1.6; }
+.card label { font-size: 13px; color: var(--ez-text-secondary); }
+.card input:not([type="checkbox"]), .card textarea { width: 100%; min-width: 0; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); padding: 8px 10px; background: var(--ez-surface); color: var(--ez-text); font: inherit; }
+.card input:not([type="checkbox"]) { height: var(--ez-control-height-default); }
+.card input:not([type="checkbox"]):focus, .card textarea:focus { @include fields.focus-border; }
+.card fieldset { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.card fieldset:disabled { opacity: .65; }
+.password_row { display: flex; gap: 10px; align-items: center; }
+.password_row input { flex: 1; }
+.heading { display: flex; align-items: center; justify-content: space-between; }
+.heading span { color: var(--ez-text-muted); font-size: 12px; }
+.toggle { display: flex; gap: 8px; align-items: center; }
+.toggle input { accent-color: var(--ez-primary); }
+.error { color: var(--ez-danger); }
+.card .warning { color: var(--ez-warning-text); }

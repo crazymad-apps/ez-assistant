@@ -1,7 +1,13 @@
 //! 受控附件预览与 Session Markdown 导出资源路由。
 
+mod files;
+mod host;
+pub(super) use host::{
+    download_attachment, download_child_tool_file, download_host_file, download_session_file,
+    download_tool_file, list_host_files, preview_host_file, select_host_directory,
+};
+
 use std::{
-    cmp::Ordering,
     io,
     path::{Component, Path, PathBuf},
     str::FromStr,
@@ -10,10 +16,8 @@ use std::{
 use assistant_protocol::{
     AttachmentId, AttachmentState, ConversationOwner, GetAttachmentRequest,
     ListSessionResourceFilesRequest, ListSessionResourceFilesResult, MessageId,
-    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, ResourceRefId,
-    RuntimeErrorCode, RuntimeErrorInfo, SessionId, SessionResourceEntry, SessionResourceEntryKind,
-    SessionResourceEntryState, SessionResourceLocator, SessionResourcePreviewKind,
-    ToolFileResourceOrigin,
+    PreviewSessionResourceFileRequest, ResourceRefId, RuntimeErrorCode, RuntimeErrorInfo,
+    SessionId, SessionResourceEntry, SessionResourceLocator, ToolFileResourceOrigin,
 };
 use axum::{
     Json,
@@ -22,30 +26,26 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+#[cfg(test)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+#[cfg(test)]
+use {
+    assistant_protocol::{
+        PreviewSessionResourceFileResult, SessionResourceEntryKind, SessionResourceEntryState,
+        SessionResourcePreviewKind,
+    },
+    std::cmp::Ordering,
+};
 
 use super::{HttpState, error::runtime_status};
 
 const MAX_TEXT_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_PDF_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 2_000;
-const MAX_IMAGE_EDGE: u32 = 16_384;
-const MAX_IMAGE_PIXELS: u64 = 40_000_000;
-
-const GENERATED_DIRECTORIES: &[&str] = &[
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".build",
-    "DerivedData",
-    "coverage",
-];
-
+#[cfg(test)]
+use files::MAX_DIRECTORY_ENTRIES;
 #[derive(Serialize)]
 struct ResourceErrorBody {
     error: RuntimeErrorInfo,
@@ -69,6 +69,7 @@ pub(super) async fn list_session_resource_files(
     let root = match state
         .runtime
         .resolve_session_resource_root(&session_id, &request.locator.root)
+        .await
     {
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
@@ -81,12 +82,17 @@ pub(super) async fn list_session_resource_files(
     if !directory.is_dir() {
         return resource_error(invalid_request("resource locator is not a directory"));
     }
+    let permit = match state.file_reads.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return resource_error(invalid_request("文件读取繁忙，请稍后重试。")),
+    };
     match read_directory_entries(
         &canonical_root,
         &directory,
         &request.locator,
         request.include_hidden,
         request.include_generated,
+        Some(permit),
     )
     .await
     {
@@ -107,6 +113,7 @@ pub(super) async fn preview_session_resource_file(
     let root = match state
         .runtime
         .resolve_session_resource_root(&session_id, &request.locator.root)
+        .await
     {
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
@@ -115,7 +122,16 @@ pub(super) async fn preview_session_resource_file(
         Ok(value) => value,
         Err(error) => return resource_error(error),
     };
-    match read_session_resource_preview(&path).await {
+    let permit = match state.file_reads.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return resource_error(invalid_request("文件读取繁忙，请稍后重试。")),
+    };
+    match host::read(move || {
+        let _permit = permit;
+        files::preview(&path)
+    })
+    .await
+    {
         Ok(result) => Json(result).into_response(),
         Err(error) => resource_error(error),
     }
@@ -133,6 +149,7 @@ pub(super) async fn resolve_session_resource_native_path(
     let root = match state
         .runtime
         .resolve_session_resource_root(&session_id, &locator.root)
+        .await
     {
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
@@ -153,7 +170,7 @@ pub(super) async fn resolve_session_resource_native_path(
     .into_response()
 }
 
-async fn resolve_session_resource_path(
+pub(super) async fn resolve_session_resource_path(
     root: &str,
     locator: &SessionResourceLocator,
 ) -> Result<(PathBuf, PathBuf), RuntimeErrorInfo> {
@@ -201,102 +218,45 @@ async fn read_directory_entries(
     parent: &SessionResourceLocator,
     include_hidden: bool,
     include_generated: bool,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<ListSessionResourceFilesResult, RuntimeErrorInfo> {
-    let mut reader = tokio::fs::read_dir(directory)
-        .await
-        .map_err(|_| resource_unavailable())?;
-    let mut entries = Vec::new();
-    let mut truncated = false;
-    while let Some(entry) = reader
-        .next_entry()
-        .await
-        .map_err(|_| resource_unavailable())?
-    {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let hidden = name.starts_with('.');
-        let generated = GENERATED_DIRECTORIES.contains(&name.as_str());
-        if (!include_hidden && hidden) || (!include_generated && generated) {
-            continue;
-        }
-        if entries.len() == MAX_DIRECTORY_ENTRIES {
-            truncated = true;
-            break;
-        }
-        entries.push(inspect_directory_entry(canonical_root, entry.path(), parent, name).await);
-    }
-    entries.sort_by(compare_resource_entries);
-    Ok(ListSessionResourceFilesResult { entries, truncated })
+    let root = canonical_root.to_owned();
+    let directory = directory.to_owned();
+    let parent = parent.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        files::list(&directory, Some(&root), include_hidden, include_generated)
+    })
+    .await
+    .map_err(|_| resource_unavailable())??;
+    Ok(ListSessionResourceFilesResult {
+        entries: result
+            .entries
+            .into_iter()
+            .map(|entry| SessionResourceEntry {
+                locator: SessionResourceLocator {
+                    root: parent.root.clone(),
+                    relative_path: if parent.relative_path.is_empty() {
+                        entry.display_name.clone()
+                    } else {
+                        format!("{}/{}", parent.relative_path, entry.display_name)
+                    },
+                },
+                is_hidden: entry.display_name.starts_with('.'),
+                is_generated: files::is_generated(&entry.display_name),
+                display_name: entry.display_name,
+                kind: entry.kind,
+                state: entry.state,
+                size_bytes: entry.size_bytes,
+                is_symbolic_link: entry.is_symbolic_link,
+            })
+            .collect(),
+        truncated: result.truncated,
+        skipped_entries: result.skipped_entries,
+    })
 }
 
-async fn inspect_directory_entry(
-    canonical_root: &Path,
-    path: PathBuf,
-    parent: &SessionResourceLocator,
-    display_name: String,
-) -> SessionResourceEntry {
-    let relative_path = if parent.relative_path.is_empty() {
-        display_name.clone()
-    } else {
-        format!(
-            "{}/{}",
-            parent.relative_path.trim_end_matches('/'),
-            display_name
-        )
-    };
-    let locator = SessionResourceLocator {
-        root: parent.root.clone(),
-        relative_path,
-    };
-    let hidden = display_name.starts_with('.');
-    let generated = GENERATED_DIRECTORIES.contains(&display_name.as_str());
-    let link_metadata = tokio::fs::symlink_metadata(&path).await;
-    let is_symbolic_link = link_metadata
-        .as_ref()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink());
-    let resolved = tokio::fs::canonicalize(&path).await;
-    let (kind, state, size_bytes) = match resolved {
-        Ok(resolved) if !resolved.starts_with(canonical_root) => (
-            SessionResourceEntryKind::File,
-            SessionResourceEntryState::OutsideRoot,
-            None,
-        ),
-        Ok(resolved) => match tokio::fs::metadata(resolved).await {
-            Ok(metadata) if metadata.is_dir() => (
-                SessionResourceEntryKind::Directory,
-                SessionResourceEntryState::Available,
-                None,
-            ),
-            Ok(metadata) if metadata.is_file() => (
-                SessionResourceEntryKind::File,
-                SessionResourceEntryState::Available,
-                Some(metadata.len()),
-            ),
-            _ => (
-                SessionResourceEntryKind::File,
-                SessionResourceEntryState::Unsupported,
-                None,
-            ),
-        },
-        Err(_) => (
-            SessionResourceEntryKind::File,
-            SessionResourceEntryState::Unsupported,
-            None,
-        ),
-    };
-    SessionResourceEntry {
-        locator,
-        display_name,
-        kind,
-        state,
-        is_symbolic_link,
-        is_hidden: hidden,
-        is_generated: generated,
-        size_bytes,
-    }
-}
-
+#[cfg(test)]
 fn compare_resource_entries(left: &SessionResourceEntry, right: &SessionResourceEntry) -> Ordering {
     let left_directory = left.kind == SessionResourceEntryKind::Directory;
     let right_directory = right.kind == SessionResourceEntryKind::Directory;
@@ -310,99 +270,14 @@ fn compare_resource_entries(left: &SessionResourceEntry, right: &SessionResource
         .then_with(|| left.display_name.cmp(&right.display_name))
 }
 
+#[cfg(test)]
 async fn read_session_resource_preview(
     path: &Path,
 ) -> Result<PreviewSessionResourceFileResult, RuntimeErrorInfo> {
-    let metadata = tokio::fs::metadata(path)
+    let path = tokio::fs::canonicalize(path).await.map_err(files::error)?;
+    tokio::task::spawn_blocking(move || files::preview(&path))
         .await
-        .map_err(|_| resource_unavailable())?;
-    if !metadata.is_file() {
-        return Err(RuntimeErrorInfo::new(
-            RuntimeErrorCode::ResourceNotPreviewable,
-            "resource is not a regular file",
-        ));
-    }
-    let media_type = crate::image::sniff_media_type(path).map_err(|_| resource_unavailable())?;
-    let image = matches!(
-        media_type.as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    );
-    let pdf = media_type == "application/pdf";
-    let limit = if image {
-        MAX_IMAGE_PREVIEW_BYTES
-    } else if pdf {
-        MAX_PDF_PREVIEW_BYTES
-    } else {
-        MAX_TEXT_PREVIEW_BYTES
-    };
-    if metadata.len() > limit {
-        return Err(RuntimeErrorInfo::new(
-            RuntimeErrorCode::ResourceTooLarge,
-            "resource exceeds the preview size limit",
-        ));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| resource_unavailable())?;
-    if image {
-        let decoded = image::load_from_memory(&bytes).map_err(|_| {
-            RuntimeErrorInfo::new(
-                RuntimeErrorCode::ResourceNotPreviewable,
-                "resource is not a supported image",
-            )
-        })?;
-        if decoded.width() > MAX_IMAGE_EDGE
-            || decoded.height() > MAX_IMAGE_EDGE
-            || u64::from(decoded.width()) * u64::from(decoded.height()) > MAX_IMAGE_PIXELS
-        {
-            return Err(RuntimeErrorInfo::new(
-                RuntimeErrorCode::ResourceTooLarge,
-                "image dimensions exceed the preview limit",
-            ));
-        }
-        return Ok(PreviewSessionResourceFileResult {
-            kind: SessionResourcePreviewKind::Image,
-            media_type,
-            size_bytes: metadata.len(),
-            text: None,
-            data_base64: Some(STANDARD.encode(bytes)),
-        });
-    }
-    if pdf {
-        return Ok(PreviewSessionResourceFileResult {
-            kind: SessionResourcePreviewKind::Pdf,
-            media_type,
-            size_bytes: metadata.len(),
-            text: None,
-            data_base64: Some(STANDARD.encode(bytes)),
-        });
-    }
-    if bytes.contains(&0) {
-        return Err(RuntimeErrorInfo::new(
-            RuntimeErrorCode::ResourceNotPreviewable,
-            "resource is not valid text",
-        ));
-    }
-    let text = String::from_utf8(bytes).map_err(|_| {
-        RuntimeErrorInfo::new(
-            RuntimeErrorCode::ResourceNotPreviewable,
-            "resource is not valid UTF-8 text",
-        )
-    })?;
-    let media_type = preview_media_type(
-        path.file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or(""),
-    )
-    .filter(|value| value.starts_with("text/") || value.starts_with("application/json"))
-    .unwrap_or("text/plain; charset=utf-8");
-    Ok(PreviewSessionResourceFileResult {
-        kind: SessionResourcePreviewKind::Text,
-        media_type: media_type.to_owned(),
-        size_bytes: metadata.len(),
-        text: Some(text),
-        data_base64: None,
-    })
+        .map_err(|_| resource_unavailable())?
 }
 
 fn resource_unavailable() -> RuntimeErrorInfo {
@@ -425,10 +300,14 @@ pub(super) async fn preview_attachment(
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("attachment id is invalid")),
     };
-    let attachment = match state.runtime.get_attachment(GetAttachmentRequest {
-        session_id,
-        attachment_id,
-    }) {
+    let attachment = match state
+        .runtime
+        .get_attachment(GetAttachmentRequest {
+            session_id,
+            attachment_id,
+        })
+        .await
+    {
         Ok(result) => result.attachment,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
@@ -460,10 +339,14 @@ pub(super) async fn thumbnail_attachment(
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("attachment id is invalid")),
     };
-    let attachment = match state.runtime.get_attachment(GetAttachmentRequest {
-        session_id,
-        attachment_id,
-    }) {
+    let attachment = match state
+        .runtime
+        .get_attachment(GetAttachmentRequest {
+            session_id,
+            attachment_id,
+        })
+        .await
+    {
         Ok(result) => result.attachment,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
@@ -722,16 +605,14 @@ async fn preview_path(
         Ok(value) => value,
         Err(error) => return resource_error(error),
     };
-    let metadata = match tokio::fs::metadata(&resolved_path).await {
-        Ok(value) => value,
-        Err(_) => {
-            return resource_error(RuntimeErrorInfo::new(
-                RuntimeErrorCode::AttachmentUnavailable,
-                "resource is unavailable",
-            ));
-        }
+    let file = match host::read(move || files::open_resolved(&resolved_path, false)).await {
+        Ok(file) => file,
+        Err(error) => return resource_error(error),
     };
-    let size = metadata.len();
+    let size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => return resource_error(files::error(error)),
+    };
     let max_size = if media_type.starts_with("image/") || media_type == "application/pdf" {
         MAX_IMAGE_PREVIEW_BYTES
     } else {
@@ -752,15 +633,7 @@ async fn preview_path(
         }
     };
     let length = if size == 0 { 0 } else { end - start + 1 };
-    let mut file = match tokio::fs::File::open(&resolved_path).await {
-        Ok(value) => value,
-        Err(_) => {
-            return resource_error(RuntimeErrorInfo::new(
-                RuntimeErrorCode::AttachmentUnavailable,
-                "attachment is unavailable",
-            ));
-        }
-    };
+    let mut file = tokio::fs::File::from_std(file);
     if start > 0 && file.seek(io::SeekFrom::Start(start)).await.is_err() {
         return resource_error(RuntimeErrorInfo::new(
             RuntimeErrorCode::AttachmentUnavailable,
@@ -781,6 +654,7 @@ async fn preview_path(
                 }
             };
             if read == 0 {
+                yield Err(io::Error::new(io::ErrorKind::UnexpectedEof, "resource shortened during preview"));
                 break;
             }
             remaining -= read as u64;
@@ -1012,10 +886,16 @@ mod tests {
             root: SessionResourceRoot::WorkspacePrimary,
             relative_path: String::new(),
         };
-        let result =
-            read_directory_entries(&canonical_root, &canonical_root, &locator, false, false)
-                .await
-                .expect("directory listing");
+        let result = read_directory_entries(
+            &canonical_root,
+            &canonical_root,
+            &locator,
+            false,
+            false,
+            None,
+        )
+        .await
+        .expect("directory listing");
         assert_eq!(
             result
                 .entries
@@ -1106,9 +986,10 @@ mod tests {
             root: SessionResourceRoot::WorkspacePrimary,
             relative_path: String::new(),
         };
-        let result = read_directory_entries(&canonical_root, &canonical_root, &locator, true, true)
-            .await
-            .expect("directory listing");
+        let result =
+            read_directory_entries(&canonical_root, &canonical_root, &locator, true, true, None)
+                .await
+                .expect("directory listing");
 
         assert_eq!(result.entries.len(), MAX_DIRECTORY_ENTRIES);
         assert!(result.truncated);

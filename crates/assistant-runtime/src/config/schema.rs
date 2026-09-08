@@ -36,6 +36,9 @@ pub(super) struct RawConfig {
     /// 不编译、保存或投影其中的 Provider 与 credential。
     #[serde(default, rename = "speech")]
     pub(super) _host_speech: Option<toml::Value>,
+    /// Host 自行解释访问控制；密码哈希不进入 Runtime 配置投影。
+    #[serde(default, rename = "host_access")]
+    pub(super) _host_access: Option<toml::Value>,
 }
 
 /// Runtime 统一拥有的模型传输与建立重试配置。

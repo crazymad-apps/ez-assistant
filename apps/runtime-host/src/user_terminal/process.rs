@@ -18,7 +18,6 @@ const OUTPUT_BYTES: usize = 32 * 1024;
 const IO_WAIT: Duration = Duration::from_millis(10);
 
 pub(super) struct TerminalProcess {
-    pub(super) directory: PathBuf,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     cancel: CancellationToken,
@@ -78,7 +77,6 @@ impl TerminalProcess {
         .map_err(|_| failure("终端创建任务异常。"))??;
         drop(pair.slave);
         let process = Arc::new(Self {
-            directory,
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
             cancel: CancellationToken::new(),

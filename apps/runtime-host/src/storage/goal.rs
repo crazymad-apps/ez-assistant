@@ -15,6 +15,12 @@ use super::{
 
 impl StorageEngine {
     pub(super) fn pause_running_goals_for_recovery(&mut self) -> StorageResult<()> {
+        self.pause_running_goals_for_recovery_scoped(None)
+    }
+    pub(super) fn pause_running_goals_for_recovery_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<()> {
         let reason =
             serde_json::to_string(&StoredGoalPauseReason::RecoveryRequired).map_err(|source| {
                 internal_error("goal recovery reason could not be encoded", source)
@@ -29,14 +35,14 @@ impl StorageEngine {
             .execute(
                 "UPDATE session_goals
                  SET state = 'paused', pause_reason_json = ?1, generation = generation + 1
-                 WHERE state = 'running' AND generation < 9223372036854775807",
-                [reason],
+                 WHERE (?2 IS NULL OR session_id = ?2) AND state = 'running' AND generation < 9223372036854775807",
+                params![reason, scope.map(assistant_protocol::SessionId::as_str)],
             )
             .map_err(|source| database_write_error("running goals could not be paused", source))?;
         let exhausted = transaction
             .query_row(
-                "SELECT 1 FROM session_goals WHERE state = 'running' LIMIT 1",
-                [],
+                "SELECT 1 FROM session_goals WHERE (?1 IS NULL OR session_id = ?1) AND state = 'running' LIMIT 1",
+                [scope.map(assistant_protocol::SessionId::as_str)],
                 |_| Ok(()),
             )
             .optional()
@@ -47,14 +53,14 @@ impl StorageEngine {
         transaction
             .execute(
                 "DELETE FROM inputs
-                 WHERE state = 'queued' AND origin = 'runtime' AND goal_id IS NOT NULL
+                 WHERE (?1 IS NULL OR session_id = ?1) AND state = 'queued' AND origin = 'runtime' AND goal_id IS NOT NULL
                    AND EXISTS (
                        SELECT 1 FROM session_goals
                        WHERE session_goals.session_id = inputs.session_id
                          AND session_goals.goal_id = inputs.goal_id
                          AND inputs.goal_generation < session_goals.generation
                    )",
-                [],
+                [scope.map(assistant_protocol::SessionId::as_str)],
             )
             .map_err(|source| {
                 database_write_error("stale Goal continuations could not be removed", source)
@@ -66,42 +72,55 @@ impl StorageEngine {
     }
 
     pub(super) fn load_all_goals(&self) -> StorageResult<Vec<StoredGoal>> {
+        self.load_all_goals_scoped(None)
+    }
+
+    pub(super) fn load_all_goals_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredGoal>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT goal_id, session_id, objective_message_id, objective_payload_json,
+            .prepare(&format!("SELECT goal_id, session_id, objective_message_id, objective_payload_json,
                         objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs,
                         max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens,
                         usage_complete, consecutive_failures, created_at_ms, updated_at_ms,
                         completed_at_ms
-                 FROM session_goals ORDER BY session_id",
-            )
+                 FROM session_goals WHERE {predicate} ORDER BY session_id"))
             .map_err(|source| internal_error("goals could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, i64>(14)?,
-                    row.get::<_, i64>(15)?,
-                    row.get::<_, i64>(16)?,
-                    row.get::<_, i64>(17)?,
-                    row.get::<_, i64>(18)?,
-                    row.get::<_, Option<i64>>(19)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, i64>(15)?,
+                        row.get::<_, i64>(16)?,
+                        row.get::<_, i64>(17)?,
+                        row.get::<_, i64>(18)?,
+                        row.get::<_, Option<i64>>(19)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("goals could not be read", source))?;
         rows.map(|row| {
             let row = row.map_err(|source| internal_error("goal row could not be read", source))?;

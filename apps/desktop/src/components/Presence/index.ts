@@ -42,9 +42,17 @@ export function usePresenceBoundary(): Presence | null {
 
 /**
  * 让视觉退出和业务 open 状态解耦；timer 是 transitionend 未到达时的必达清理路径。
+ * animate_initial 仅控制挂载时已显示的内容；之后 present 切换仍正常过渡。
  */
-export function usePresence(present: boolean, exit_duration_ms: number): Presence {
-  const [state, setState] = useState<PresenceState | null>(present ? "entering" : null);
+export function usePresence(
+  present: boolean,
+  exit_duration_ms: number,
+  options: Readonly<{ animate_initial?: boolean }> = {},
+): Presence {
+  const [state, setState] = useState<PresenceState | null>(() => {
+    if (!present) return null;
+    return options.animate_initial === false ? "entered" : "entering";
+  });
   const state_ref = useRef(state);
   state_ref.current = state;
 
@@ -52,6 +60,8 @@ export function usePresence(present: boolean, exit_duration_ms: number): Presenc
     let frame = 0;
     let fallback = 0;
     if (present) {
+      // 默认展开直接呈现最终状态，StrictMode 重放 effect 也不补播入场动画。
+      if (state_ref.current === "entered") return;
       setState("entering");
       frame = requestAnimationFrame(() => setState("entered"));
     } else if (state_ref.current !== null) {

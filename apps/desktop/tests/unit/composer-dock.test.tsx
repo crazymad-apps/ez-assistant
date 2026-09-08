@@ -8,6 +8,7 @@ import type {
   QueueSnapshot,
   SessionSummary,
   SessionViewSnapshot,
+  SkillManagementSnapshot,
   ChildTaskTreeItemSnapshot,
   WorkPlanSnapshot,
 } from "../../src/generated/assistant-protocol";
@@ -186,6 +187,27 @@ describe("ComposerDock", () => {
     expect(screen.getByText('{"readOnlyHint":true}')).toBeVisible();
   });
 
+  it.each(["/mcp refresh", "/skill refresh"])("allows %s in a controller with no selected model", async (text) => {
+    const store = renderComposer();
+    act(() => {
+      const view = store.projection.session_views.get("session-1")!;
+      store.projection.session_views.set("session-1", { ...view,
+        session: { ...view.session, role: "controller" },
+        composer_capabilities: { ...view.composer_capabilities, selected_model_key: null },
+      });
+    });
+    const submit = vi.spyOn(store, "submitInput");
+    const command = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: text } });
+    expect(screen.getByRole("option", { name: new RegExp(text) })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("session-1", text.startsWith("/skill")
+      ? { type: "skill_refresh" } : { type: "mcp_refresh", payload: {} }));
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("submits MCP refresh as a command and keeps failed commands in the draft", async () => {
     const store = renderComposer();
     const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
@@ -206,7 +228,7 @@ describe("ComposerDock", () => {
       submitted_at_ms: 1, position: 1, is_prioritized: false,
     } }] } });
     expect(screen.getByText("MCP 刷新：全部")).toBeVisible();
-    expect(screen.getByRole("status", { name: "正在刷新 MCP" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "正在执行MCP 刷新：全部" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "移除" })).not.toBeInTheDocument();
   });
   afterEach(() => {
@@ -503,8 +525,8 @@ describe("ComposerDock", () => {
 
   it("selects exactly one skill, replaces it and clears it only after accepted submit", async () => {
     const user = userEvent.setup();
-    const skill_catalog: SessionViewSnapshot["skill_catalog"] = {
-      status: "ready",
+    const skill_catalog: SkillManagementSnapshot = {
+      available: true,
       diagnostics: [],
       skills: [
         { name: "review", description: "检查代码", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" },
@@ -517,12 +539,12 @@ describe("ComposerDock", () => {
 
     await user.type(input, "/skill");
     fireEvent.keyDown(input, { key: "Enter" });
-    await user.click(screen.getByRole("option", { name: /review/ }));
+    await user.click(await screen.findByRole("option", { name: /review/ }));
     expect(screen.getByRole("button", { name: "移除技能 review" })).toBeVisible();
 
     await user.type(input, "/skill");
     fireEvent.keyDown(input, { key: "Enter" });
-    await user.click(screen.getByRole("option", { name: /release/ }));
+    await user.click(await screen.findByRole("option", { name: /release/ }));
     expect(screen.queryByRole("button", { name: "移除技能 review" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "移除技能 release" })).toBeVisible();
 
@@ -855,8 +877,10 @@ describe("ComposerDock", () => {
     const set_model = vi.spyOn(store, "setSessionModel").mockResolvedValue(true);
     const input = screen.getByRole("textbox", { name: "输入消息" });
 
-    expect(input).toBeDisabled();
-    expect(input).toHaveAttribute("placeholder", "请先选择一个可用模型");
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute("placeholder", "选择模型后开始对话，或输入 / 使用控制指令");
+    await user.type(input, "普通消息");
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "模型设置" })).toHaveTextContent("未选择模型");
 
     await user.click(screen.getByRole("button", { name: "模型设置" }));
@@ -1146,10 +1170,11 @@ function renderComposer(overrides: Readonly<{
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
-  skill_catalog?: SessionViewSnapshot["skill_catalog"];
+  skill_catalog?: SkillManagementSnapshot;
   session?: Partial<SessionSummary>;
 }> = {}): RootStore {
   const store = new RootStore();
+  vi.spyOn(store, "listSkills").mockResolvedValue(overrides.skill_catalog ?? { available: true, skills: [], diagnostics: [] });
   store.connection.markConnected("instance-1", {
     protocol_version: 1,
     runtime_version: "test",
@@ -1187,6 +1212,8 @@ async function expectPositionedOverlay(label: string): Promise<void> {
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
+    active_sessions_next_offset: null,
+    archived_sessions_next_offset: null,
     configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, default_model: "fixture", auxiliary_vision_model: null, issues: [] },
     models: [
       model("fixture", "本地模型（7B）", true),
@@ -1242,7 +1269,7 @@ function sessionView(overrides: Readonly<{
   composer_capabilities?: SessionViewSnapshot["composer_capabilities"];
   goal?: GoalSnapshot | null;
   work_plan?: WorkPlanSnapshot | null;
-  skill_catalog?: SessionViewSnapshot["skill_catalog"];
+  skill_catalog?: SkillManagementSnapshot;
   session?: Partial<SessionSummary>;
 }> = {}): SessionViewSnapshot {
   return {
@@ -1270,11 +1297,6 @@ function sessionView(overrides: Readonly<{
       context: overrides.context_usage ?? null,
     },
     child_tasks: [...(overrides.child_tasks ?? [])],
-    skill_catalog: overrides.skill_catalog ?? {
-      status: "empty",
-      skills: [],
-      diagnostics: [],
-    },
     active_skills: [],
     conversation: {
       owner: { type: "main_session", session_id: "session-1" },
@@ -1428,3 +1450,8 @@ function domRect(left: number, top: number, width: number, height: number): DOMR
     toJSON: () => ({}),
   };
 }
+
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+});

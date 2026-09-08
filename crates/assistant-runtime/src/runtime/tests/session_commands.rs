@@ -51,7 +51,7 @@ async fn wait_for_command(
 ) -> crate::StoredSessionCommand {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let session = runtime.session_for_test(session_id);
+            let session = runtime.session_for_test(session_id).await;
             let command = session
                 .lock_state()
                 .expect("state")
@@ -94,13 +94,17 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
         .accepted;
     let command = wait_for_command(&runtime, &session_id, &accepted.input_id).await;
     assert_eq!(
-        command.result.as_ref().expect("result").outcome,
+        match command.result.as_ref().expect("result") {
+            crate::StoredSessionCommandResult::Mcp(result) => result.outcome,
+            _ => panic!("MCP result"),
+        },
         McpRefreshOutcome::Success
     );
     assert!(model.take_requests().is_empty());
     assert!(
         runtime
             .session_for_test(&session_id)
+            .await
             .run_snapshots()
             .expect("runs")
             .is_empty()
@@ -302,7 +306,7 @@ async fn executing_mcp_refresh_keeps_new_input_acceptance_live_but_blocks_consum
     .await
     .expect("acceptance is not blocked")
     .expect("input");
-    let controller = runtime.session_for_test(&session_id);
+    let controller = runtime.session_for_test(&session_id).await;
     let queue =
         crate::runtime::product::queue_snapshot(&controller, &Default::default()).expect("queue");
     assert_eq!(queue.items.len(), 2);
@@ -347,6 +351,7 @@ async fn mixed_mcp_command_queue_recovers_paused_and_preserves_reordered_fifo() 
         .session_id;
     first
         .session_for_test(&session_id)
+        .await
         .lock_state()
         .expect("state")
         .resume_required = true;
@@ -372,7 +377,7 @@ async fn mixed_mcp_command_queue_recovers_paused_and_preserves_reordered_fifo() 
         )
         .await,
     );
-    let controller = recovered.session_for_test(&session_id);
+    let controller = recovered.session_for_test(&session_id).await;
     let queue =
         crate::runtime::product::queue_snapshot(&controller, &Default::default()).expect("queue");
     assert_eq!(
@@ -715,4 +720,334 @@ async fn mcp_management_test_cancellation_closes_candidate_and_handles_early_can
         assistant_protocol::McpConnectionTestOutcome::Cancelled
     );
     assert_eq!(factory.connects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn controller_can_refresh_mcp_and_skills_without_creating_runs() {
+    let model = empty_model();
+    let mut runtime = with_mcp(runtime(model));
+    runtime.skill_package_source = Arc::new(super::sessions::StaticSkillPackageSource);
+    let session_id = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "主控会话",
+        )
+        .await
+        .expect("controller")
+        .session
+        .session_id;
+    for command in [
+        SessionCommand::McpRefresh { server: None },
+        SessionCommand::SkillRefresh,
+    ] {
+        let accepted = runtime
+            .submit_session_command(SubmitSessionCommandRequest {
+                session_id: session_id.clone(),
+                command,
+                idempotency_key: None,
+            })
+            .await
+            .expect("controller accepts command")
+            .accepted;
+        wait_for_command(&runtime, &session_id, &accepted.input_id).await;
+    }
+    let stored = runtime.store.load_runtime().await.expect("facts");
+    assert!(stored.runs.is_empty());
+    assert_eq!(stored.session_commands.len(), 2);
+    let messages = runtime
+        .session_for_test(&session_id)
+        .await
+        .conversation_snapshot()
+        .expect("refresh history")
+        .messages;
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages
+            .iter()
+            .all(|message| matches!(message, agent_types::ConversationMessage::User(_))),
+        "refresh inserts user-role messages only"
+    );
+    assert!(
+        serde_json::to_string(&messages[1])
+            .expect("skill refresh message")
+            .contains("available-skills")
+    );
+    let store = runtime.store.clone();
+    drop(runtime);
+    let recovered = runtime_with_store(
+        empty_model(),
+        store,
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let view = recovered
+        .get_session_view(GetSessionViewRequest { session_id })
+        .await
+        .expect("controller recovery")
+        .snapshot
+        .value;
+    assert_eq!(
+        view.session.role,
+        assistant_protocol::SessionRoleSnapshot::Controller
+    );
+    assert!(matches!(
+        view.conversation.items.last(),
+        Some(ConversationItem::SkillRefreshResult {
+            success: true,
+            skill_count: 1,
+            ..
+        })
+    ));
+}
+
+/// 可切换的文件事实；测试只操作内存，不访问任何用户 Skill Root。
+struct ChangingSkills {
+    version: AtomicUsize,
+}
+
+impl crate::SkillPackageSource for ChangingSkills {
+    fn scan(&self, request: crate::SkillScanRequest) -> crate::SkillScanFuture<'_> {
+        Box::pin(async move {
+            let mut scan = crate::SkillPackageSource::scan(
+                &super::sessions::StaticSkillPackageSource,
+                request,
+            )
+            .await?;
+            let version = self.version.load(Ordering::SeqCst);
+            if version == 2 {
+                scan.complete = false;
+            } else if version == 1 {
+                scan.candidates[0].body = "Use the updated review procedure.".to_owned();
+                scan.candidates[0].description = "Updated review".to_owned();
+                scan.candidates[0].definition_digest = format!("sha256-v1:{}", "2".repeat(64));
+            }
+            Ok(scan)
+        })
+    }
+}
+
+#[tokio::test]
+async fn skill_refresh_preserves_prompt_and_history_while_new_inputs_read_current_files() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("old-skill-answer", "old"))),
+            ModelScript::Events(message_events(&assistant_text("new-skill-answer", "new"))),
+        ],
+    ));
+    let source = Arc::new(ChangingSkills {
+        version: AtomicUsize::new(0),
+    });
+    let mut runtime = runtime(model.clone()); // no MCP service is needed for Skill refresh
+    runtime.skill_package_source = source.clone();
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    let mut before = input_request(&session_id, "old review");
+    before.skill_name = Some("review".to_owned());
+    let accepted = runtime.submit_input(before).await.expect("old input");
+    wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    source.version.store(1, Ordering::SeqCst);
+    let request = SubmitSessionCommandRequest {
+        session_id: session_id.clone(),
+        command: SessionCommand::SkillRefresh,
+        idempotency_key: Some(IdempotencyKey::new("refresh-skill").expect("key")),
+    };
+    let command = runtime
+        .submit_session_command(request.clone())
+        .await
+        .expect("refresh")
+        .accepted;
+    wait_for_command(&runtime, &session_id, &command.input_id).await;
+    assert!(
+        runtime
+            .submit_session_command(request)
+            .await
+            .expect("duplicate")
+            .accepted
+            .is_duplicate
+    );
+    let mut after = input_request(&session_id, "new review");
+    after.skill_name = Some("review".to_owned());
+    let accepted = runtime.submit_input(after).await.expect("new input");
+    wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 2);
+    let new_request = serde_json::to_string(&requests[1].conversation).expect("conversation");
+    assert!(new_request.contains("Review carefully."));
+    assert!(new_request.contains("Use the updated review procedure."));
+    let prompt = runtime
+        .session_for_test(&session_id)
+        .await
+        .current_system_prompt()
+        .expect("prompt");
+    assert!(
+        prompt
+            .parts()
+            .iter()
+            .any(|part| part.contains("Review changes"))
+    );
+    assert!(
+        !prompt
+            .parts()
+            .iter()
+            .any(|part| part.contains("Updated review"))
+    );
+    let catalog = runtime
+        .current_skill_catalog(runtime.session_for_test(&session_id).await.as_ref())
+        .await
+        .expect("current catalog");
+    assert_eq!(catalog.definitions[0].description, "Updated review");
+    source.version.store(2, Ordering::SeqCst);
+    let failed = runtime
+        .submit_session_command(SubmitSessionCommandRequest {
+            session_id: session_id.clone(),
+            command: SessionCommand::SkillRefresh,
+            idempotency_key: None,
+        })
+        .await
+        .expect("failed scan is a visible result")
+        .accepted;
+    let result = wait_for_command(&runtime, &session_id, &failed.input_id).await;
+    assert!(matches!(
+        result.result,
+        Some(crate::StoredSessionCommandResult::SkillRefresh { success: false, .. })
+    ));
+    assert_eq!(
+        runtime
+            .current_skill_catalog(runtime.session_for_test(&session_id).await.as_ref())
+            .await
+            .expect("failed scan")
+            .status,
+        crate::SkillCatalogStatus::Unavailable
+    );
+    assert_eq!(
+        runtime
+            .session_for_test(&session_id)
+            .await
+            .current_system_prompt()
+            .expect("unchanged"),
+        prompt
+    );
+    let forked = runtime
+        .fork_session(assistant_protocol::ForkSessionRequest {
+            session_id: session_id.clone(),
+            fork_point: assistant_protocol::MessageId::new("new-skill-answer").expect("point"),
+            expected_generation: 3,
+        })
+        .await
+        .expect("fork retains old and new skill activations");
+    assert!(
+        runtime
+            .session_for_test(&forked.session.session_id)
+            .await
+            .current_system_prompt()
+            .expect("fork prompt")
+            .parts()
+            .iter()
+            .any(|part| part.contains("Review changes"))
+    );
+    let store = runtime.store.clone();
+    drop(runtime);
+    let recovered = runtime_with_store(
+        empty_model(),
+        store,
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    assert_eq!(
+        recovered
+            .session_for_test(&session_id)
+            .await
+            .current_system_prompt()
+            .expect("recovered prompt"),
+        prompt
+    );
+    let facts = recovered.store.load_runtime().await.expect("facts");
+    assert_eq!(facts.skill_activations.len(), 4);
+    let revisions = facts
+        .skill_activations
+        .iter()
+        .map(|activation| &activation.catalog_revision)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        revisions.len(),
+        2,
+        "parent and fork both retain the two historical definitions"
+    );
+}
+
+#[tokio::test]
+async fn model_loads_current_definition_without_refresh_or_rewriting_prompt() {
+    let mut scripts = Vec::new();
+    for index in 0..3 {
+        let turn = AssistantMessage {
+            id: MessageId::new(format!("load-skill-{index}")).expect("message"),
+            model: ModelIdentity::new(
+                ProviderId::new("fixture").expect("provider"),
+                "fixture-model",
+            ),
+            parts: vec![AssistantPart::ToolCall(ToolCall {
+                id: ToolCallId::new(format!("load-skill-call-{index}")).expect("call"),
+                name: ToolName::new("load_skill").expect("tool"),
+                arguments: json!({"name": "review"}),
+            })],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        };
+        scripts.push(ModelScript::Events(message_events(&turn)));
+        scripts.push(ModelScript::Events(message_events(&assistant_text(
+            &format!("reviewed-{index}"),
+            "done",
+        ))));
+    }
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        scripts,
+    ));
+    let source = Arc::new(ChangingSkills {
+        version: AtomicUsize::new(0),
+    });
+    let mut runtime = runtime(model.clone());
+    runtime.skill_package_source = source.clone();
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    for index in 0..3 {
+        source
+            .version
+            .store(usize::from(index == 1), Ordering::SeqCst);
+        let submitted = runtime
+            .submit_input(input_request(&session_id, "use review skill"))
+            .await
+            .expect("input");
+        assert_eq!(
+            wait_for_terminal(&runtime, &session_id, &submitted.run.run_id)
+                .await
+                .status,
+            assistant_protocol::RunStatus::Completed
+        );
+    }
+    let facts = runtime.store.load_runtime().await.expect("facts");
+    assert_eq!(
+        facts.skill_activations.len(),
+        3,
+        "same name must activate after edit and after reverting to an older definition"
+    );
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 6);
+    assert!(
+        serde_json::to_string(&requests[3].conversation)
+            .expect("model context")
+            .contains("Use the updated review procedure.")
+    );
 }

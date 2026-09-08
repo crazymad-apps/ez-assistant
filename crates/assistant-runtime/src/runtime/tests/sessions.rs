@@ -217,11 +217,15 @@ async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
 
     let first_prompt = runtime
         .session_for_test(&first.session.session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .clone();
     let second_prompt = runtime
         .session_for_test(&second.session.session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .clone();
     assert_ne!(first_prompt, second_prompt);
     assert_eq!(first.session.model_key.as_str(), "fixture");
@@ -242,7 +246,9 @@ async fn clear_session_rebuilds_context_and_replaces_the_in_memory_generation() 
         .expect("create clear session");
     let original_prompt = runtime
         .session_for_test(&created.session.session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .clone();
 
     let request = assistant_protocol::ClearSessionRequest {
@@ -265,11 +271,15 @@ async fn clear_session_rebuilds_context_and_replaces_the_in_memory_generation() 
     );
     assert_eq!(cleared.session.message_count, 0);
     assert_eq!(cleared.session.title, "New Session");
-    let replacement = runtime.session_for_test(&created.session.session_id);
-    assert_ne!(replacement.system_prompt(), &original_prompt);
+    let replacement = runtime.session_for_test(&created.session.session_id).await;
+    assert_ne!(
+        replacement.current_system_prompt().expect("system prompt"),
+        original_prompt
+    );
     assert_eq!(
         replacement
-            .system_prompt()
+            .current_system_prompt()
+            .expect("system prompt")
             .parts()
             .last()
             .map(String::as_str),
@@ -343,7 +353,14 @@ async fn controller_session_can_be_cleared_without_changing_its_role() {
         cleared.session.role,
         assistant_protocol::SessionRoleSnapshot::Controller
     );
-    assert_eq!(runtime.controller_sessions().expect("controllers").len(), 1);
+    assert_eq!(
+        runtime
+            .controller_sessions()
+            .await
+            .expect("controllers")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -360,7 +377,9 @@ async fn clear_context_preparation_failure_preserves_the_existing_generation() {
         .expect("create clear preparation fixture");
     let original_prompt = runtime
         .session_for_test(&created.session.session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .clone();
     let error = runtime
         .clear_session(assistant_protocol::ClearSessionRequest {
@@ -391,8 +410,10 @@ async fn clear_context_preparation_failure_preserves_the_existing_generation() {
     assert_eq!(
         runtime
             .session_for_test(&created.session.session_id)
-            .system_prompt(),
-        &original_prompt
+            .await
+            .current_system_prompt()
+            .expect("system prompt"),
+        original_prompt
     );
 }
 
@@ -417,23 +438,30 @@ async fn skill_management_detail_reads_only_the_selected_current_body() {
 }
 
 #[tokio::test]
-async fn skill_catalog_is_frozen_per_session_and_name_switch_only_affects_new_sessions() {
+async fn current_skills_change_without_rewriting_frozen_system_prompt() {
     let mut runtime = runtime(empty_model());
     runtime.skill_package_source = Arc::new(StaticSkillPackageSource);
     let first = runtime
         .create_session(CreateSessionRequest::default())
         .await
         .expect("first session");
-    let first_controller = runtime.session_for_test(&first.session.session_id);
+    let first_controller = runtime.session_for_test(&first.session.session_id).await;
+    let prompt = first_controller
+        .current_system_prompt()
+        .expect("frozen prompt");
     assert_eq!(
-        first_controller.skill_catalog().definitions[0]
-            .name
-            .as_str(),
-        "review"
+        runtime
+            .current_skill_catalog(&first_controller)
+            .await
+            .expect("current catalog")
+            .definitions
+            .len(),
+        1
     );
     assert!(
         first_controller
-            .system_prompt()
+            .current_system_prompt()
+            .expect("system prompt")
             .parts()
             .iter()
             .any(|part| part.contains("SKILL_CATALOG_V1") && part.contains("name=\"review\""))
@@ -454,18 +482,30 @@ async fn skill_catalog_is_frozen_per_session_and_name_switch_only_affects_new_se
         .expect("second session");
     assert!(
         runtime
-            .session_for_test(&second.session.session_id)
-            .skill_catalog()
+            .current_skill_catalog(
+                runtime
+                    .session_for_test(&second.session.session_id)
+                    .await
+                    .as_ref()
+            )
+            .await
+            .expect("second catalog")
+            .definitions
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .current_skill_catalog(&first_controller)
+            .await
+            .expect("current catalog")
             .definitions
             .is_empty()
     );
     assert_eq!(
-        runtime
-            .session_for_test(&first.session.session_id)
-            .skill_catalog()
-            .definitions
-            .len(),
-        1
+        first_controller
+            .current_system_prompt()
+            .expect("unchanged prompt"),
+        prompt
     );
 }
 
@@ -487,7 +527,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .expect("session")
         .session
         .session_id;
-    let controller = runtime.session_for_test(&session_id);
+    let controller = runtime.session_for_test(&session_id).await;
     controller.lock_state().expect("state").queue_paused_by_user = true;
 
     let submitted = runtime
@@ -585,7 +625,16 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
     ));
     assert_eq!(view.active_skills.len(), 1);
     assert_eq!(view.active_skills[0].tag.name, "review");
-    assert_eq!(view.skill_catalog.skills[0].name, "review");
+    assert_eq!(
+        runtime
+            .list_skills(assistant_protocol::ListSkillsRequest::default())
+            .await
+            .expect("live list")
+            .snapshot
+            .skills[0]
+            .name,
+        "review"
+    );
     let forked = runtime
         .fork_session(assistant_protocol::ForkSessionRequest {
             session_id,
@@ -698,7 +747,7 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
         conversation.messages.last(),
         Some(ConversationMessage::Assistant(message)) if message.id == final_message.id
     ));
-    let controller = runtime.session_for_test(&session_id);
+    let controller = runtime.session_for_test(&session_id).await;
     let state = controller.lock_state().expect("state");
     assert_eq!(state.skill_activations.len(), 1);
     assert_eq!(
@@ -731,7 +780,7 @@ async fn goal_and_skill_keep_objective_clean_and_internal_boundaries_ordered() {
         .expect("session")
         .session
         .session_id;
-    let controller = runtime.session_for_test(&session_id);
+    let controller = runtime.session_for_test(&session_id).await;
     controller.lock_state().expect("state").queue_paused_by_user = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
@@ -783,6 +832,7 @@ async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
 
     let listed = runtime
         .list_sessions(ListSessionsRequest::default())
+        .await
         .expect("list sessions");
     let listed_ids = listed
         .sessions
@@ -807,6 +857,7 @@ async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
             .get_session(GetSessionRequest {
                 session_id: second.session.session_id.clone(),
             })
+            .await
             .expect("get session")
             .session,
         second.session
@@ -816,7 +867,7 @@ async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
     assert!(matches!(
         runtime.get_session(GetSessionRequest {
             session_id: missing.clone()
-        }),
+        }).await,
         Err(RuntimeError::SessionNotFound { session_id }) if session_id == missing
     ));
 }
@@ -866,6 +917,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id
             })
+            .await
             .expect("session")
             .session
             .queued_input_count,

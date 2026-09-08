@@ -301,8 +301,7 @@ impl StorageEngine {
 
         let prompt_json = serde_json::to_string(&materialization.session.system_prompt)
             .map_err(|source| internal_error("system prompt could not be encoded", source))?;
-        let skill_catalog_json = serde_json::to_string(&materialization.session.skill_catalog)
-            .map_err(|source| internal_error("skill catalog could not be encoded", source))?;
+        let skill_catalog_json = "{}";
         let message_json = serde_json::to_string(&materialization.input.message)
             .map_err(|source| internal_error("queued user message could not be encoded", source))?;
         let skill_activation_json = materialization
@@ -334,7 +333,7 @@ impl StorageEngine {
                 &transaction,
                 &materialization.session,
                 &prompt_json,
-                &skill_catalog_json,
+                skill_catalog_json,
             )?;
             Self::insert_session_resources(&transaction, &materialization.session)?;
             transaction
@@ -674,7 +673,7 @@ fn stored_session(session: NewStoredSession) -> StoredSession {
         model_key: session.model_key,
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt,
-        skill_catalog: session.skill_catalog,
+
         environment: session.environment,
         lifecycle: StoredSessionLifecycle::Active,
         current_variant: session.current_variant,

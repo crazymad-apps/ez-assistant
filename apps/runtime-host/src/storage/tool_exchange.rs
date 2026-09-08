@@ -191,13 +191,25 @@ impl StorageEngine {
     }
 
     pub(super) fn recover_pending_tool_exchanges(&mut self) -> StorageResult<HashSet<String>> {
-        self.recover_pending_exchanges(PendingTable::Run)
+        self.recover_pending_tool_exchanges_scoped(None)
+    }
+    pub(super) fn recover_pending_tool_exchanges_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<HashSet<String>> {
+        self.recover_pending_exchanges(PendingTable::Run, scope)
     }
 
     pub(super) fn recover_pending_child_tool_exchanges(
         &mut self,
     ) -> StorageResult<HashSet<String>> {
-        self.recover_pending_exchanges(PendingTable::ChildTask)
+        self.recover_pending_child_tool_exchanges_scoped(None)
+    }
+    pub(super) fn recover_pending_child_tool_exchanges_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<HashSet<String>> {
+        self.recover_pending_exchanges(PendingTable::ChildTask, scope)
     }
 
     fn begin_exchange(
@@ -309,14 +321,18 @@ impl StorageEngine {
         )
     }
 
-    fn recover_pending_exchanges(&mut self, table: PendingTable) -> StorageResult<HashSet<String>> {
+    fn recover_pending_exchanges(
+        &mut self,
+        table: PendingTable,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<HashSet<String>> {
         let query = match table {
             PendingTable::Run => {
-                "SELECT receipt_id, session_id FROM pending_tool_exchanges
+                "SELECT receipt_id, session_id FROM pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
                  ORDER BY created_at_ms, receipt_id"
             }
             PendingTable::ChildTask => {
-                "SELECT receipt_id, child_task_id FROM child_pending_tool_exchanges
+                "SELECT receipt_id, child_task_id FROM child_pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
                  ORDER BY created_at_ms, receipt_id"
             }
         };
@@ -325,7 +341,7 @@ impl StorageEngine {
                 internal_error("pending tool exchanges could not be queried", source)
             })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|source| {

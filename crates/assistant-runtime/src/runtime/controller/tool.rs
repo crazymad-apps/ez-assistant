@@ -117,6 +117,7 @@ impl Tool for ListManagedSessionsTool {
         Box::pin(async move {
             self.coordinator
                 .list_managed_sessions(&self.controller_session_id)
+                .await
                 .map(|sessions| ListManagedSessionsOutput { sessions })
                 .map_err(|_| ToolError::execution("managed sessions are unavailable"))
         })

@@ -44,7 +44,7 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -191,7 +191,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<CancelSessionCompactionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let cancellation = {
             let state = session.lock_state()?;
             state

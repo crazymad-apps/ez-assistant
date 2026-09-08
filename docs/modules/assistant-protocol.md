@@ -1,5 +1,8 @@
 # assistant-protocol 模块约束
 
+> 在途演进：[v0.25.0 技术方案](../versions/v0.25.0/技术方案.md)已确认并定稿。本版 Host/Desktop 同版本
+> 调整，不要求兼容旧 Desktop；M0 已新增 Host 访问设置／登录 DTO 并将 PROTOCOL_VERSION 调整为 2，轻量依赖与业务归属约束保持。
+
 ## 模块定位
 
 `crates/assistant-protocol` 定义 UI 与 Assistant Runtime 之间，以及确有跨层消费者的稳定应用契约。Agent Core 内部的模型事件、规范对话、执行状态和能力 trait 不因复用方便而进入本 crate。
@@ -263,3 +266,43 @@ cargo clippy -p assistant-protocol --all-targets --all-features -- -D warnings
   Provider、模型、声音、密钥或内部错误。M4 尚未装配语音服务，因此 Host 明确投影 unavailable。
 - Gateway Command 是用户管理设备接入的 Host 交互意图，不属于 Agent 指令；配对码继续使用脱敏
   类型并只出现在确认请求中，不进入快照、事件或 TypeScript 调试输出。
+
+
+## v0.25.0 M2：同端口访问设置
+
+- HostAccessConfiguration 使用 port（默认 7240）和可选 server_names，直接移除本版未发布的
+  listen_address／public_origins 中间字段，不增加别名或迁移。HostAccessStatus.restart_required
+  仅投影持久配置与当前监听是否不同，不增加持久化状态；Host、Desktop 和生成 TypeScript 同步调整。
+
+
+## v0.25.0 M3：Host 文件契约
+
+- `HostFileRequest`、`ListHostFilesRequest`、`HostFileEntry`、`ListHostFilesResult` 承载已登录所有者的 Host 路径读取；不包含文件句柄、认证凭据或 Runtime 实现类型。Host 路径与 Session locator 保持独立入口和校验语义。
+- 既有 `ListSessionResourceFilesResult` 增加 `skipped_entries`，Host 生产者、Desktop／Web 消费者、TypeScript 生成与测试夹具同步更新；字段不进入 Session／Conversation 持久化，无数据迁移。
+- 预览沿用 `PreviewSessionResourceFileResult`，下载为受认证字节响应；上传、首次 materialization、Command／Snapshot／SSE 基线不变。
+
+
+## v0.25.0 M4：用户终端连接载荷
+
+- `UserTerminalSource/Size/Control/Notice` 定义单 socket 的创建来源、认证、resize、输入／输出确认、退出和关闭；TypeScript 同步生成。terminal ID 只用于当前连接显示与关联，不是跨连接接管能力。
+- 不增加 RuntimeCommand、RuntimeEvent 或持久终端表；Shell 路径、进程句柄与监督任务不进入协议。Host 声明 `user_terminals` feature，本版 Host/Desktop 同版本交付。
+
+## v0.25.0 M5 Skill refresh
+
+`SessionCommand::SkillRefresh` 与 `ConversationItem::SkillRefreshResult` 分别承载刷新意图和成功／失败、
+技能数量的可靠结果；不暴露技能正文或存储历史。既有 `McpRefresh` 与 `ControlResult` wire 形状不变。
+`session_commands` 表示通用控制指令能力，普通及主控会话都可调用，不依赖模型或 MCP 工具启用状态。
+
+`SessionViewSnapshot` 移除 `skill_catalog` 及专属冻结目录 DTO；技能列表统一复用 `ListSkills` 的当前管理投影，已激活标签仍由 `active_skills` 表达。Host/Desktop 在本版同步调整，无旧 Desktop 兼容层。
+
+
+## v0.25.0 会话摘要分页
+
+ListSessionsRequest 增加 offset、limit、query；默认 100 条、最大 200 条，query 只匹配标题。
+ListSessionsResult 提供 has_more；ApplicationSnapshot 分别提供活动／归档的下一页 offset。
+主控固定入口可额外出现在首页摘要中，分页位置仍按 Store 页计算，客户端按 SessionId 去重。
+Desktop/Web 与 Host 同版更新；分页字段不进入会话持久化，不另建摘要数据库或全量客户端缓存。
+
+
+`McpRegistryChanged` 表示进程内 MCP 活动目录已发布；Desktop/Web 据此刷新服务列表与
+ApplicationSnapshot 能力。它不是配置写入、会话消息或执行授权，不写入历史 Conversation。

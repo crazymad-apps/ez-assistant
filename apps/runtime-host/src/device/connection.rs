@@ -1567,7 +1567,7 @@ async fn settle_recognition_outcome(
 async fn cancel_active_controller_run(
     runtime: &assistant_runtime::AssistantRuntime,
 ) -> Result<bool, assistant_runtime::RuntimeError> {
-    let session = route_device_channel(runtime)?;
+    let session = route_device_channel(runtime).await?;
     let session_id = session.session_id;
     let Some(run_id) = session.active_run_id else {
         return Ok(false);
@@ -1585,7 +1585,7 @@ async fn submit_speech_input(
     transcript: String,
     output_preference: OutputPreferenceSnapshot,
 ) -> Result<InputAccepted, assistant_runtime::RuntimeError> {
-    let target = route_device_channel(runtime)?;
+    let target = route_device_channel(runtime).await?;
     let session_id = target.session_id;
     let variant = target.current_variant;
     let result = runtime
@@ -1694,7 +1694,7 @@ async fn submit_text_input(
     device_id: &DeviceId,
     request: TextInput,
 ) -> Result<InputAccepted, assistant_runtime::RuntimeError> {
-    let target = route_device_channel(shared.runtime.as_ref())?;
+    let target = route_device_channel(shared.runtime.as_ref()).await?;
     let session_id = target.session_id;
     let variant = target.current_variant;
     let result = shared
@@ -1730,11 +1730,12 @@ async fn submit_text_input(
 /// 本版本 Device Channel 的 Host 路由策略：选择当前活动 Controller Session。
 ///
 /// Router 每次读取 Runtime 权威 Session 投影，不在 Gateway 内缓存 Session ID 或角色状态。
-fn route_device_channel(
+async fn route_device_channel(
     runtime: &assistant_runtime::AssistantRuntime,
 ) -> Result<assistant_protocol::SessionSummary, assistant_runtime::RuntimeError> {
     runtime
-        .list_sessions(assistant_protocol::ListSessionsRequest::default())?
+        .list_sessions(assistant_protocol::ListSessionsRequest::default())
+        .await?
         .sessions
         .into_iter()
         .find(|session| session.role == assistant_protocol::SessionRoleSnapshot::Controller)

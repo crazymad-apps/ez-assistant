@@ -26,6 +26,12 @@ pub(super) struct PreparedSessionDirectories {
 impl StorageEngine {
     /// 为 v0.10.0 Session 幂等补建 unbound 资源行，不改写 Prompt 或 Conversation。
     pub(super) fn repair_session_resources(&mut self) -> StorageResult<()> {
+        self.repair_session_resources_scoped(None)
+    }
+    pub(super) fn repair_session_resources_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<()> {
         let missing = {
             let mut statement = self
                 .connection
@@ -33,14 +39,14 @@ impl StorageEngine {
                     "SELECT s.session_id, s.created_at_ms
                      FROM sessions s
                      LEFT JOIN session_resources r ON r.session_id = s.session_id
-                     WHERE r.session_id IS NULL
+                     WHERE r.session_id IS NULL AND (?1 IS NULL OR s.session_id = ?1)
                      ORDER BY s.session_id",
                 )
                 .map_err(|source| {
                     internal_error("session resources could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 })
                 .map_err(|source| internal_error("session resources could not be read", source))?;
@@ -68,24 +74,24 @@ impl StorageEngine {
                     super::database_write_error("session resources could not be repaired", source)
                 })?;
         }
-        self.rebase_moved_session_resources()?;
-        self.recover_session_resource_directories()
+        self.rebase_moved_session_resources(scope)?;
+        self.recover_session_resource_directories(scope)
     }
 
-    fn rebase_moved_session_resources(&mut self) -> StorageResult<()> {
+    fn rebase_moved_session_resources(&mut self, scope: Option<&SessionId>) -> StorageResult<()> {
         let rows = {
             let mut statement = self
                 .connection
                 .prepare(
                     "SELECT session_id, workspace_id, working_directory,
                             attachment_directory, private_directory
-                     FROM session_resources ORDER BY session_id",
+                     FROM session_resources WHERE (?1 IS NULL OR session_id = ?1) ORDER BY session_id",
                 )
                 .map_err(|source| {
                     internal_error("session resources could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -359,16 +365,18 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn recover_session_resource_directories(&self) -> StorageResult<()> {
+    fn recover_session_resource_directories(&self, scope: Option<&SessionId>) -> StorageResult<()> {
         let session_ids = {
             let mut statement = self
                 .connection
-                .prepare("SELECT session_id FROM sessions ORDER BY session_id")
+                .prepare("SELECT session_id FROM sessions WHERE (?1 IS NULL OR session_id = ?1) ORDER BY session_id")
                 .map_err(|source| {
                     internal_error("session resources could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
+                    row.get::<_, String>(0)
+                })
                 .map_err(|source| internal_error("session resources could not be read", source))?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|source| {
                 internal_error("session resource row could not be read", source)

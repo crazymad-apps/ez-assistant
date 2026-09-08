@@ -7,7 +7,6 @@ vi.mock("../../src/native-bridge/nativeResource", () => ({ registerLocalFileUri:
 vi.mock("../../src/native-bridge/resourceBrowser", () => ({
   createResourceBrowser: native.createBrowser, closeResourceBrowser: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../../src/native-bridge/userTerminal", () => ({ createUserTerminal: native.createTerminal }));
 const stores: ResourceWorkspaceStore[] = [];
 function store() { const value = new ResourceWorkspaceStore(); stores.push(value); return value; }
 afterEach(() => { for (const value of stores.splice(0)) value.dispose(); vi.clearAllMocks(); });

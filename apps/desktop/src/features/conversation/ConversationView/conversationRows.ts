@@ -18,7 +18,7 @@ import type {
 export type ConversationRow =
   | { type: "user"; message: UserMessageSnapshot }
   | { type: "context_summary"; message: Extract<ConversationItem, { type: "context_summary" }> }
-  | { type: "control_result"; message: Extract<ConversationItem, { type: "control_result" }> }
+  | { type: "control_result"; message: Extract<ConversationItem, { type: "control_result" | "skill_refresh_result" }> }
   | { type: "assistant_turn"; key: string; run_id: string | null; messages: AssistantMessageSnapshot[] };
 
 export function groupConversationTurns(
@@ -27,7 +27,7 @@ export function groupConversationTurns(
 ): ConversationRow[] {
   const rows: ConversationRow[] = [];
   for (const item of items) {
-    if (item.type === "control_result") {
+    if (item.type === "control_result" || item.type === "skill_refresh_result") {
       rows.push({ type: "control_result", message: item });
       continue;
     }

@@ -1,4 +1,4 @@
-//! 单个 Session 的可切换模型 key、冻结 System Prompt 与短临界区状态。
+//! 单个 Session 的可切换模型、按执行边界冻结的系统上下文与短临界区状态。
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     PcOutputHosting, RuntimeError, RuntimeResult, RuntimeStore, SessionExecutionEnvironment,
-    SessionProxyState, SessionRole, SessionSkillCatalog, StoredConversationState, StoredInput,
-    StoredInputState, StoredRun, StoredSession, StoredSessionCommand, StoredSessionCommandState,
+    SessionProxyState, SessionRole, StoredConversationState, StoredInput, StoredInputState,
+    StoredRun, StoredSession, StoredSessionCommand, StoredSessionCommandState,
     goal::{GoalControl, GoalState},
     id,
     journal::InMemoryJournal,
@@ -34,7 +34,6 @@ pub(crate) struct SessionController {
     id: SessionId,
     created_at_ms: i64,
     system_prompt: SystemPromptSnapshot,
-    skill_catalog: SessionSkillCatalog,
     environment: SessionExecutionEnvironment,
     mutation_gate: AsyncMutex<()>,
     state: Mutex<SessionState>,
@@ -44,6 +43,7 @@ pub(crate) struct SessionController {
 ///
 /// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
+    pub(crate) execution_prepared: bool,
     pub(crate) title: String,
     pub(crate) is_pinned: bool,
     pub(crate) title_origin: SessionTitleOrigin,
@@ -188,10 +188,10 @@ impl SessionController {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
-            skill_catalog: stored.skill_catalog,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                execution_prepared: true,
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
@@ -234,7 +234,7 @@ impl SessionController {
         }
     }
 
-    // 启动与 Fork 共用的恢复装配入口；各字段已有权威持久化类型，不再引入一层恢复实体。
+    // 按需读取与 Fork 共用的恢复装配入口；各字段已有权威持久化类型，不再引入一层恢复实体。
     #[expect(
         clippy::too_many_arguments,
         reason = "汇总已有持久化事实的恢复装配入口"
@@ -251,9 +251,27 @@ impl SessionController {
     ) -> Self {
         let is_conversation_available =
             stored.conversation_state == StoredConversationState::Available;
+        let committed_inputs = inputs
+            .iter()
+            .filter(|input| input.state == StoredInputState::Committed)
+            .map(|input| &input.input_id)
+            .collect::<std::collections::BTreeSet<_>>();
         let run_records = runs
             .into_iter()
-            .map(|run| (run.run_id.clone(), RunRecord::recovered(run)))
+            .map(|mut run| {
+                // 原始持久记录保持不动；旧进程的 Run 只展示为中断。
+                // 显式操作前再按会话完成结算，不恢复旧执行句柄。
+                if matches!(
+                    run.status,
+                    assistant_protocol::RunStatus::Running
+                        | assistant_protocol::RunStatus::Cancelling
+                ) || run.status == assistant_protocol::RunStatus::Accepted
+                    && committed_inputs.contains(&run.input_id)
+                {
+                    run.status = assistant_protocol::RunStatus::Interrupted;
+                }
+                (run.run_id.clone(), RunRecord::recovered(run))
+            })
             .collect::<BTreeMap<_, _>>();
         let mut input_records = BTreeMap::new();
         let mut queue_item_ids = Vec::new();
@@ -300,10 +318,10 @@ impl SessionController {
             id: stored.session_id,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
-            skill_catalog: stored.skill_catalog,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                execution_prepared: false,
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
@@ -336,7 +354,7 @@ impl SessionController {
                 active_compaction: None,
                 automatic_title_pending: stored.automatic_title_pending,
                 active_title_generation: None,
-                is_faulted: false,
+                is_faulted: !is_conversation_available,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
                 work_plan,
@@ -344,6 +362,27 @@ impl SessionController {
                 skill_activations,
             }),
         }
+    }
+
+    pub(crate) fn install_prepared_state(&self, prepared: Self) -> RuntimeResult<()> {
+        if self.id != prepared.id
+            || self.system_prompt != prepared.system_prompt
+            || self.environment != prepared.environment
+        {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "prepared session identity",
+            });
+        }
+        let mut state =
+            prepared
+                .state
+                .into_inner()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "prepared session state",
+                })?;
+        state.execution_prepared = true;
+        *self.lock_state()? = state;
+        Ok(())
     }
 
     pub(crate) fn summary(&self) -> RuntimeResult<SessionSummary> {
@@ -554,20 +593,12 @@ impl SessionController {
         &self.id
     }
 
-    pub(crate) fn created_at_ms(&self) -> i64 {
-        self.created_at_ms
-    }
-
     pub(crate) fn model_key(&self) -> RuntimeResult<ModelKey> {
         Ok(self.lock_state()?.model_key.clone())
     }
 
-    pub(crate) fn system_prompt(&self) -> &SystemPromptSnapshot {
-        &self.system_prompt
-    }
-
-    pub(crate) fn skill_catalog(&self) -> &SessionSkillCatalog {
-        &self.skill_catalog
+    pub(crate) fn current_system_prompt(&self) -> RuntimeResult<SystemPromptSnapshot> {
+        Ok(self.system_prompt.clone())
     }
 
     pub(crate) fn environment(&self) -> &SessionExecutionEnvironment {

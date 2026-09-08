@@ -123,6 +123,7 @@ export function Dialog(props: DialogProps) {
     <div
       className={props.backdrop_class_name}
       data-ez-dialog-backdrop
+      data-overlay-region="modal"
       data-presence={presence_state}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && dismissible_ref.current) {

@@ -16,36 +16,49 @@ use super::{
 impl StorageEngine {
     /// 加载全部 Run，并在进入 Runtime 恢复投影前校验数据库原始值。
     pub(super) fn load_runs(&self) -> StorageResult<Vec<StoredRun>> {
+        self.load_runs_scoped(None)
+    }
+
+    pub(super) fn load_runs_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredRun>> {
+        let predicate = if session_id.is_some() {
+            "runs.session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
+            .prepare(&format!("SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
                         runs.cancel_requested, inputs.agent_variant, runs.approval_mode, runs.reasoning_effort,
                         runs.error_code, runs.error_message, runs.created_at_ms,
                         runs.started_at_ms, runs.finished_at_ms
                  FROM runs JOIN inputs ON inputs.input_id = runs.input_id
-                 ORDER BY runs.created_at_ms, runs.run_id",
-            )
+                 WHERE {predicate} ORDER BY runs.created_at_ms, runs.run_id"))
             .map_err(|source| internal_error("runtime runs could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, Option<i64>>(13)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, Option<i64>>(12)?,
+                        row.get::<_, Option<i64>>(13)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("runtime runs could not be read", source))?;
         let mut runs = Vec::new();
         for row in rows {

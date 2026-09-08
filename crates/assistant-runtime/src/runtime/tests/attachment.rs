@@ -59,6 +59,7 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
                 session_id: first_session.session_id.clone(),
                 attachment_id: uploaded.attachment_id.clone(),
             })
+            .await
             .expect("get attachment")
             .attachment,
         uploaded
@@ -68,15 +69,18 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
             .list_attachments(ListAttachmentsRequest {
                 session_id: first_session.session_id.clone(),
             })
+            .await
             .expect("list attachments")
             .attachments,
         vec![uploaded.clone()]
     );
     assert!(matches!(
-        runtime.get_attachment(GetAttachmentRequest {
-            session_id: second_session.session_id,
-            attachment_id: uploaded.attachment_id,
-        }),
+        runtime
+            .get_attachment(GetAttachmentRequest {
+                session_id: second_session.session_id,
+                attachment_id: uploaded.attachment_id,
+            })
+            .await,
         Err(RuntimeError::AttachmentNotFound { .. })
     ));
 

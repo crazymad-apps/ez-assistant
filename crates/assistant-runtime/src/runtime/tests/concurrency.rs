@@ -243,6 +243,7 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
                 .get_session(GetSessionRequest {
                     session_id: session_id.clone(),
                 })
+                .await
                 .expect("session")
                 .session
                 .active_run_id
@@ -330,6 +331,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id,
             })
+            .await
             .expect("session snapshot")
             .session
             .active_run_id
@@ -486,6 +488,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id,
             })
+            .await
             .expect("session")
             .session
             .active_run_id

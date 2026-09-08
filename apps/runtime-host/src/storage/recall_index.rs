@@ -765,7 +765,22 @@ impl StorageEngine {
                             ));
                         }
                     };
+                    let child_task_title = match &owner {
+                        ConversationOwner::MainSession { .. } => None,
+                        ConversationOwner::ChildTask { child_task_id, .. } => self
+                            .connection
+                            .query_row(
+                                "SELECT title FROM child_tasks WHERE child_task_id = ?1",
+                                [child_task_id.as_str()],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(|e| {
+                                internal_error("recall child title could not be read", e)
+                            })?,
+                    };
                     Ok(ConversationSearchHit {
+                        child_task_title,
                         owner,
                         generation: non_negative_u64(
                             generation,

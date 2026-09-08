@@ -8,7 +8,7 @@ export function Collapse(props: Readonly<{
   id?: string;
   open: boolean;
 }>) {
-  const presence = usePresence(props.open, 120);
+  const presence = usePresence(props.open, 120, { animate_initial: false });
   const retained_children_ref = useRef(props.children);
   if (props.open) retained_children_ref.current = props.children;
 

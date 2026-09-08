@@ -1,3 +1,4 @@
+import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import {
   useEffect,
   useLayoutEffect,
@@ -19,7 +20,6 @@ import type {
 } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
-import { thumbnailAttachment } from "../../../native-bridge/nativeResource";
 import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import {
   collapsedSummary,
@@ -225,10 +225,12 @@ function MessageImage(props: Readonly<{
   on_click: () => void;
   on_menu: (location: ResourceMenuLocation) => void;
 }>) {
+
+  const files = useResourceRoot().files;
   const [source, setSource] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    void thumbnailAttachment(props.attachment.session_id, props.attachment.attachment_id)
+    void files.thumbnailAttachment(props.attachment.session_id, props.attachment.attachment_id)
       .then((value) => { if (active) setSource(value); })
       .catch(() => undefined);
     return () => { active = false; };

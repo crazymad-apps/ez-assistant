@@ -2,9 +2,9 @@ use super::*;
 use agent_tools::{Tool, ToolContext};
 use agent_types::ToolCallId;
 
-fn catalog_with(mut skill: SkillCandidate) -> SessionSkillCatalog {
+fn catalog_with(mut skill: SkillCandidate) -> SkillCatalog {
     skill.definition_digest = format!("sha256-v1:{}", "1".repeat(64));
-    SessionSkillCatalog::from_discovery(SkillDiscovery {
+    SkillCatalog::from_discovery(SkillDiscovery {
         status: SkillDiscoveryStatus::Available,
         candidates: vec![skill.clone()],
         winners: vec![skill],
@@ -143,10 +143,10 @@ fn frozen_catalog_revision_ignores_shared_source_paths_and_prompt_is_safe_and_de
         },
         &[],
     );
-    let catalog = SessionSkillCatalog::from_discovery(discovery).expect("catalog");
+    let catalog = SkillCatalog::from_discovery(discovery).expect("catalog");
     catalog.validate_structure().expect("valid catalog");
     assert_eq!(catalog.definitions[0].source_path, "/workspace/skill");
-    let relocated = SessionSkillCatalog::from_discovery(compile_skill_discovery(
+    let relocated = SkillCatalog::from_discovery(compile_skill_discovery(
         SkillScanResult {
             candidates: vec![SkillCandidate {
                 description: "Review <carefully> & report".to_owned(),
@@ -171,8 +171,8 @@ fn frozen_catalog_revision_ignores_shared_source_paths_and_prompt_is_safe_and_de
 
 #[test]
 fn legacy_and_empty_catalogs_have_a_stable_empty_revision() {
-    let legacy = SessionSkillCatalog::legacy_unavailable();
-    let empty = SessionSkillCatalog::from_discovery(SkillDiscovery {
+    let legacy = SkillCatalog::legacy_unavailable();
+    let empty = SkillCatalog::from_discovery(SkillDiscovery {
         status: SkillDiscoveryStatus::Available,
         candidates: Vec::new(),
         winners: Vec::new(),
@@ -183,12 +183,10 @@ fn legacy_and_empty_catalogs_have_a_stable_empty_revision() {
     assert_eq!(empty.status, SkillCatalogStatus::Empty);
     assert_eq!(legacy.status, SkillCatalogStatus::LegacyUnavailable);
     assert!(
-        serde_json::from_str::<SessionSkillCatalog>(
-            &serde_json::to_string(&legacy).expect("serialize")
-        )
-        .expect("deserialize")
-        .validate_structure()
-        .is_ok()
+        serde_json::from_str::<SkillCatalog>(&serde_json::to_string(&legacy).expect("serialize"))
+            .expect("deserialize")
+            .validate_structure()
+            .is_ok()
     );
 }
 
@@ -264,7 +262,7 @@ async fn load_skill_reports_staged_already_active_and_stable_failures() {
     );
 
     let unavailable = LoadSkillTool::new(
-        SessionSkillCatalog::legacy_unavailable(),
+        SkillCatalog::legacy_unavailable(),
         std::sync::Arc::new(SkillActivationLatch::new(Vec::new())),
     );
     let resolved = unavailable
@@ -288,7 +286,7 @@ async fn load_skill_reports_staged_already_active_and_stable_failures() {
 #[test]
 fn load_skill_definition_is_stable_and_uses_a_plain_string_name() {
     let tool = LoadSkillTool::new(
-        SessionSkillCatalog::legacy_unavailable(),
+        SkillCatalog::legacy_unavailable(),
         std::sync::Arc::new(SkillActivationLatch::new(Vec::new())),
     );
     let mut registry = agent_tools::ToolRegistry::new();
@@ -322,12 +320,17 @@ fn parent_and_child_activation_latches_do_not_share_active_state() {
             .stage(
                 ToolCallId::new("parent-call").expect("call id"),
                 definition.clone(),
+                catalog.revision.clone(),
             )
             .expect("stage parent")
     );
     assert!(
         child
-            .stage(ToolCallId::new("child-call").expect("call id"), definition,)
+            .stage(
+                ToolCallId::new("child-call").expect("call id"),
+                definition,
+                catalog.revision.clone()
+            )
             .expect("stage child")
     );
 }

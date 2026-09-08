@@ -250,7 +250,7 @@ pub enum SkillDiscoveryStatus {
     Unavailable,
 }
 
-/// 当前文件投影与名称开关归并后的确定性结果；还不是 Session 冻结 Catalog。
+/// 当前文件投影与名称开关归并后的确定性扫描结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillDiscovery {
     /// 当前投影的整体可用性。

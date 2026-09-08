@@ -84,6 +84,7 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
     let host = HostProcess::start(runtime_home.path());
     let events = EventCapture::start(&host);
     let mut client = host.connect();
+    wait_for_mcp(&mut client);
     let config = client.runtime("get_mcp_configuration", json!({}));
     assert_clean(config.to_string().as_bytes());
     assert_eq!(
@@ -331,5 +332,20 @@ fn scan_data(path: &Path) {
         } else if kind.is_file() {
             assert_clean(&fs::read(entry.path()).expect("read isolated data"));
         }
+    }
+}
+
+fn wait_for_mcp(client: &mut Client) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let config = client.runtime("get_mcp_configuration", json!({}));
+        if config["snapshot"]["servers"][0]["runtime_state"] == "connected" {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture MCP initialization did not complete: {config}"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }

@@ -38,6 +38,29 @@ pub(super) enum Command {
     PanicForTest {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    SearchConversationTitles {
+        request: ConversationSearchRequest,
+        reply: oneshot::Sender<Result<Vec<assistant_protocol::ConversationHistoryHit>, StoreError>>,
+    },
+    LoadRuntimeGlobals {
+        reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,
+    },
+    PrepareSessionExecution {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<assistant_runtime::LoadedSession, StoreError>>,
+    },
+    LoadSessionEnvironment {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<assistant_runtime::SessionExecutionEnvironment, StoreError>>,
+    },
+    LoadSessionState {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<assistant_runtime::LoadedSession, StoreError>>,
+    },
+    QuerySessionSummaries {
+        query: assistant_runtime::SessionSummaryQuery,
+        reply: oneshot::Sender<Result<Vec<assistant_protocol::SessionSummary>, StoreError>>,
+    },
     LoadRuntime {
         reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,
     },

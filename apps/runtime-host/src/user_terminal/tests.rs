@@ -1,4 +1,4 @@
-use super::{TerminalEvent, TerminalSize, process::TerminalProcess};
+use super::{TerminalEvent, process::TerminalProcess};
 use portable_pty::CommandBuilder;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -10,9 +10,7 @@ async fn spawn(script: &str) -> (Arc<TerminalProcess>, mpsc::UnboundedReceiver<T
     command.env("EZ_ASSISTANT_TEST_TOKEN", "must-not-reach-shell");
     let process = TerminalProcess::spawn_command(
         std::env::temp_dir(),
-        TerminalSize { cols: 80, rows: 24 }
-            .validate()
-            .expect("size"),
+        super::pty_size(assistant_protocol::UserTerminalSize { cols: 80, rows: 24 }).expect("size"),
         command,
         move |event| {
             tx.send(event)
@@ -106,9 +104,7 @@ async fn closing_idle_terminal_cancels_nonblocking_reader() {
 async fn invalid_shell_does_not_create_a_terminal() {
     let result = TerminalProcess::spawn_command(
         std::env::temp_dir(),
-        TerminalSize { cols: 80, rows: 24 }
-            .validate()
-            .expect("size"),
+        super::pty_size(assistant_protocol::UserTerminalSize { cols: 80, rows: 24 }).expect("size"),
         CommandBuilder::new("/nonexistent/ez-test-shell"),
         |_| Ok(()),
     )
@@ -132,55 +128,4 @@ async fn closing_does_not_submit_unfinished_input() {
         !marker.exists(),
         "closing must not execute the incomplete command"
     );
-}
-
-#[tokio::test]
-async fn reload_cleanup_cancels_all_unacknowledged_terminals() {
-    let manager = super::UserTerminalManager::default();
-    let (first, mut first_events) = spawn("yes first").await;
-    let (second, mut second_events) = spawn("yes second").await;
-    first_events.recv().await.expect("first output");
-    second_events.recv().await.expect("second output");
-    manager.terminals.lock().await.insert("first".into(), first);
-    manager
-        .terminals
-        .lock()
-        .await
-        .insert("second".into(), second);
-    manager
-        .close_all()
-        .await
-        .expect("all PTYs reclaimed despite missing ack");
-    assert!(manager.terminals.lock().await.is_empty());
-}
-
-#[tokio::test]
-async fn shutdown_waits_for_creation_then_blocks_new_terminals_until_resumed() {
-    let manager = Arc::new(super::UserTerminalManager::default());
-    let creation_gate = manager.lifecycle.lock().await;
-    let (process, mut events) = spawn("yes shutdown-pending").await;
-    events.recv().await.expect("unacknowledged output");
-    let owner = manager.clone();
-    let shutdown = tokio::spawn(async move { owner.shutdown().await });
-    manager
-        .terminals
-        .lock()
-        .await
-        .insert("creating".into(), process.clone());
-    drop(creation_gate);
-    tokio::time::timeout(Duration::from_secs(3), shutdown)
-        .await
-        .expect("bounded shutdown")
-        .expect("shutdown task")
-        .expect("PTY reclaimed");
-    assert!(manager.terminals.lock().await.is_empty());
-    assert!(super::ensure_accepting(*manager.lifecycle.lock().await).is_err());
-    manager
-        .close_all()
-        .await
-        .expect("reload cannot reopen a shutdown owner");
-    assert!(super::ensure_accepting(*manager.lifecycle.lock().await).is_err());
-    manager.resume().await;
-    assert!(super::ensure_accepting(*manager.lifecycle.lock().await).is_ok());
-    process.close().await.expect("idempotent cleanup");
 }

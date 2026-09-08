@@ -189,9 +189,17 @@ pub struct StoredSessionCommand {
     pub user_message_id: MessageId,
     pub agent_variant: AgentVariant,
     pub command: SessionCommand,
-    pub result: Option<McpRefreshControlResultSnapshot>,
+    pub result: Option<StoredSessionCommandResult>,
     pub state: StoredSessionCommandState,
     pub accepted_at_ms: i64,
+}
+
+/// 可靠控制结果。MCP 保留已发布 JSON 形状；Skill 使用互斥的 skill_count/success 字段。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum StoredSessionCommandResult {
+    Mcp(McpRefreshControlResultSnapshot),
+    SkillRefresh { success: bool, skill_count: u32 },
 }
 
 /// 同一可靠队列中的互斥载荷；Message 有首次 Run，Command 永远没有 Run。
@@ -226,9 +234,20 @@ pub struct SessionCommandCommit {
     pub operation_id: String,
     pub input_id: InputId,
     pub session_id: SessionId,
-    pub result: McpRefreshControlResultSnapshot,
+    pub result: StoredSessionCommandResult,
     pub message: UserMessage,
     pub committed_at_ms: i64,
+}
+
+impl StoredSessionCommandResult {
+    /// 防止恢复或提交把另一类控制结果归到本指令。
+    pub fn matches_command(&self, command: &SessionCommand) -> bool {
+        matches!(
+            (self, command),
+            (Self::Mcp(_), SessionCommand::McpRefresh { .. })
+                | (Self::SkillRefresh { .. }, SessionCommand::SkillRefresh)
+        )
+    }
 }
 
 /// 原子接受 Input 及其首次 Run 所需的完整事实。
@@ -503,15 +522,17 @@ mod tests {
             command: SessionCommand::McpRefresh {
                 server: Some(McpServerKey::new("github").expect("server")),
             },
-            result: Some(McpRefreshControlResultSnapshot {
-                outcome: McpRefreshOutcome::Success,
-                servers: vec![assistant_protocol::McpServerRefreshResultSnapshot {
-                    server_key: McpServerKey::new("github").expect("server"),
-                    outcome: McpServerRefreshOutcome::Refreshed,
-                    tool_count: 12,
-                    diagnostic: None,
-                }],
-            }),
+            result: Some(StoredSessionCommandResult::Mcp(
+                McpRefreshControlResultSnapshot {
+                    outcome: McpRefreshOutcome::Success,
+                    servers: vec![assistant_protocol::McpServerRefreshResultSnapshot {
+                        server_key: McpServerKey::new("github").expect("server"),
+                        outcome: McpServerRefreshOutcome::Refreshed,
+                        tool_count: 12,
+                        diagnostic: None,
+                    }],
+                },
+            )),
             state: StoredSessionCommandState::Committed,
             accepted_at_ms: 10,
         };

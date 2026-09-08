@@ -1,0 +1,92 @@
+@use "../../../styles/fields";
+.backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  background: rgb(20 24 32 / 34%);
+}
+.dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--ez-border);
+  border-radius: 16px;
+  background: var(--ez-surface);
+  color: var(--ez-text);
+  min-height: 0;
+  header,
+  footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  h3 {
+    margin: 0 0 4px;
+    font-size: var(--ez-font-large);
+  }
+  small {
+    color: var(--ez-text-muted);
+  }
+  footer {
+    justify-content: flex-end;
+  }
+}
+.path {
+  display: flex;
+  gap: 8px;
+  input {
+    border: 1px solid var(--ez-border-strong);
+    border-radius: 8px;
+    padding: 0 10px;
+    min-height: var(--ez-control-height);
+    background: var(--ez-surface);
+    color: var(--ez-text);
+    &:focus {
+      @include fields.focus-border;
+    }
+    flex: 1;
+    min-width: 0;
+  }
+}
+.hidden {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ez-text-muted);
+}
+.entries {
+  flex: 1;
+  min-height: 180px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  button {
+    width: 100%;
+    height: auto;
+    min-height: var(--ez-control-height-large);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    border-radius: 6px;
+  }
+  button:hover {
+    background: var(--ez-surface-muted);
+  }
+  span {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  p {
+    color: var(--ez-text-muted);
+  }
+}

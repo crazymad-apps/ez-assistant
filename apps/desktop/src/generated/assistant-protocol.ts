@@ -40,7 +40,7 @@ export type ApplicationSnapshot = { runtime_lifecycle: RuntimeLifecycle, configu
 /**
  * 活动 Workspace，以及仍被当前 Session 绑定的已移除 Workspace。
  */
-workspaces: Array<WorkspaceSummary>, active_sessions: Array<SessionSummary>, archived_sessions: Array<SessionSummary>,
+workspaces: Array<WorkspaceSummary>, active_sessions: Array<SessionSummary>, archived_sessions: Array<SessionSummary>, active_sessions_next_offset: number | null, archived_sessions_next_offset: number | null,
 /**
  * 当前按稳定顺序选定的主控；创建失败或配置不可用时为 unavailable。
  */
@@ -436,7 +436,7 @@ export type ConversationInputSourceSnapshot = { "type": "user" } | { "type": "de
 /**
  * Conversation 中的用户消息、助手消息或已有 Context Summary 分割项。
  */
-export type ConversationItem = { "type": "user" } & UserMessageSnapshot | { "type": "assistant" } & AssistantMessageSnapshot | { "type": "control_result", message_id: MessageId, result: McpRefreshControlResultSnapshot, } | { "type": "context_summary", message_id: MessageId, text: string, };
+export type ConversationItem = { "type": "user" } & UserMessageSnapshot | { "type": "assistant" } & AssistantMessageSnapshot | { "type": "skill_refresh_result", message_id: MessageId, success: boolean, skill_count: number, } | { "type": "control_result", message_id: MessageId, result: McpRefreshControlResultSnapshot, } | { "type": "context_summary", message_id: MessageId, text: string, };
 
 /**
  * Conversation 的业务所有者。
@@ -823,6 +823,41 @@ export type GuardrailKind = "repeated_invocation" | "consecutive_failures";
  */
 export type GuardrailMode = "observe" | "enforce";
 
+export type HostAccessCommand = { "type": "get_status" } | { "type": "set_password", "payload": { expected_revision: string | null, password: string, } } | { "type": "configure", "payload": { expected_revision: string | null, configuration: HostAccessConfiguration, } };
+
+/**
+ * 公开给已登录所有者的监听配置；证书字段是 Host 路径，不含文件内容。
+ */
+export type HostAccessConfiguration = { remote_enabled: boolean, scheme: HostAccessScheme, port: number,
+/**
+ * 可选域名白名单；IP 地址和本机 localhost 不需要重复登记。
+ */
+server_names: Array<string>, tls_certificate: string | null, tls_private_key: string | null, };
+
+export type HostAccessScheme = "http" | "https";
+
+export type HostAccessStatus = { revision: string | null, password_configured: boolean, configuration: HostAccessConfiguration, listener_state: HostListenerState,
+/**
+ * 保存的端口、协议或证书与当前监听不一致，需要显式重启 Host。
+ */
+restart_required: boolean, error: string | null, };
+
+export type HostFileEntry = { path: string, display_name: string, kind: SessionResourceEntryKind, state: SessionResourceEntryState, is_symbolic_link: boolean, size_bytes: number | null, };
+
+/**
+ * Host 上的绝对路径或本机 file URI；不授予会话资源接口任何额外范围。
+ */
+export type HostFileRequest = { path: string, };
+
+export type HostListenerState = "closed" | "listening" | "failed";
+
+/**
+ * Web 只接收 Cookie；原生客户端显式选择 token 响应。
+ */
+export type HostLoginRequest = { "method": "password", password: string, native: boolean, } | { "method": "token", token: string, } | { "method": "desktop" };
+
+export type HostLoginResult = { token: string | null, expires_at_ms: number, instance_id: string, };
+
 /**
  * 客户端提交输入时使用的不透明请求身份；只在同一 Session 内比较。
  */
@@ -863,6 +898,16 @@ export type ListChildTasksResult = { tasks: Array<ChildTaskSnapshot>, };
 export type ListConversationPageRequest = { owner: ConversationOwner, cursor: string | null, limit: number, };
 
 export type ListConversationPageResult = { snapshot: ObservedSnapshot<ConversationPage>, };
+
+/**
+ * 已登录所有者浏览 Host 目录；空路径表示 Host 用户主目录，不表示客户端目录。
+ */
+export type ListHostFilesRequest = { path: string | null, include_hidden: boolean, };
+
+/**
+ * 一层 Host 目录投影，未登记目录同样可访问；失败不自动改为其他位置。
+ */
+export type ListHostFilesResult = { path: string, parent_path: string | null, entries: Array<HostFileEntry>, truncated: boolean, skipped_entries: number, };
 
 export type ListMcpServerOptionsRequest = { context: McpServerOptionsContext, variant: AgentVariant, };
 
@@ -911,17 +956,21 @@ export type ListRunsResult = { runs: Array<RunSnapshot>, };
 
 export type ListSessionResourceFilesRequest = { locator: SessionResourceLocator, include_hidden: boolean, include_generated: boolean, };
 
-export type ListSessionResourceFilesResult = { entries: Array<SessionResourceEntry>, truncated: boolean, };
+export type ListSessionResourceFilesResult = { entries: Array<SessionResourceEntry>, truncated: boolean, skipped_entries: number, };
 
 /**
  * 按生命周期列出 Session；缺省只返回活动 Session。
  */
-export type ListSessionsRequest = { filter: SessionListFilter, };
+export type ListSessionsRequest = { filter: SessionListFilter, offset: number,
+/**
+ * 缺省 100，最大 200。
+ */
+limit: number | null, query: string | null, };
 
 /**
  * 列出 Session 的成功结果。
  */
-export type ListSessionsResult = {
+export type ListSessionsResult = { has_more: boolean,
 /**
  * 按 Runtime 确定性顺序返回的 Session 摘要。
  */
@@ -1601,7 +1650,7 @@ message: string, };
  *
  * 事件允许因背压或断线丢失，客户端必须用 Session/Run 快照重新对齐。
  */
-export type RuntimeEvent = { "type": "runtime_shutting_down" } | { "type": "config_changed" } | { "type": "skill_settings_changed", name: string, enabled: boolean, } | { "type": "workspace_changed", workspace_id: WorkspaceId, } | { "type": "session_changed", session_id: SessionId, } | { "type": "session_compaction_started", session_id: SessionId, compaction: SessionCompactionSnapshot, } | { "type": "session_compaction_finished", session_id: SessionId, compaction_id: string, outcome: SessionCompactionFinishedOutcome, } | { "type": "session_title_generation_started", session_id: SessionId, generation: SessionTitleGenerationSnapshot, } | { "type": "session_title_generation_finished", session_id: SessionId, trigger: SessionTitleGenerationTriggerSnapshot, outcome: SessionTitleGenerationFinishedOutcome, } | { "type": "queue_changed", session_id: SessionId, revision: number, } | { "type": "work_plan_changed", session_id: SessionId, revision: number, } | { "type": "goal_changed", session_id: SessionId, goal_id: GoalId, generation: number, } | { "type": "conversation_committed", owner: ConversationOwner, generation: number, } | { "type": "step_committed", owner: ConversationOwner, step: number, generation: number, } | { "type": "permission_changed" } | { "type": "session_created",
+export type RuntimeEvent = { "type": "runtime_shutting_down" } | { "type": "config_changed" } | { "type": "mcp_registry_changed" } | { "type": "skill_settings_changed", name: string, enabled: boolean, } | { "type": "workspace_changed", workspace_id: WorkspaceId, } | { "type": "session_changed", session_id: SessionId, } | { "type": "session_compaction_started", session_id: SessionId, compaction: SessionCompactionSnapshot, } | { "type": "session_compaction_finished", session_id: SessionId, compaction_id: string, outcome: SessionCompactionFinishedOutcome, } | { "type": "session_title_generation_started", session_id: SessionId, generation: SessionTitleGenerationSnapshot, } | { "type": "session_title_generation_finished", session_id: SessionId, trigger: SessionTitleGenerationTriggerSnapshot, outcome: SessionTitleGenerationFinishedOutcome, } | { "type": "queue_changed", session_id: SessionId, revision: number, } | { "type": "work_plan_changed", session_id: SessionId, revision: number, } | { "type": "goal_changed", session_id: SessionId, goal_id: GoalId, generation: number, } | { "type": "conversation_committed", owner: ConversationOwner, generation: number, } | { "type": "step_committed", owner: ConversationOwner, step: number, generation: number, } | { "type": "permission_changed" } | { "type": "session_created",
 /**
  * 新 Session 的稳定摘要。
  */
@@ -1810,7 +1859,7 @@ features?: Array<RuntimeHostFeature>, };
 /**
  * Host 可以逐项声明的产品能力；Desktop 只检查当前页面实际依赖的项目。
  */
-export type RuntimeHostFeature = "event_envelopes" | "application_snapshot" | "session_view" | "child_task_view" | "conversation_paging" | "tool_detail" | "queue_control" | "approval_queue" | "session_management" | "session_materialization" | "session_resource_files";
+export type RuntimeHostFeature = "event_envelopes" | "application_snapshot" | "session_view" | "child_task_view" | "conversation_paging" | "tool_detail" | "queue_control" | "approval_queue" | "session_management" | "session_materialization" | "session_resource_files" | "host_access" | "web_login" | "user_terminals";
 
 /**
  * Host 已完成 Runtime 恢复并可以接受已授权请求。
@@ -1849,7 +1898,7 @@ export type SearchConversationHistoryResult = { items: Array<ConversationHistory
  */
 partial: boolean, failed_owners: Array<ConversationOwner>, };
 
-export type SessionCommand = { "type": "mcp_refresh", "payload": { server?: McpServerKey, } };
+export type SessionCommand = { "type": "skill_refresh" } | { "type": "mcp_refresh", "payload": { server?: McpServerKey, } };
 
 export type SessionCommandQueueState = "queued" | "executing";
 
@@ -1938,16 +1987,6 @@ export type SessionResourceRoot = { "type": "workspace_primary" } | { "type": "w
  * Session 在产品中的稳定职责。
  */
 export type SessionRoleSnapshot = "standard" | "controller";
-
-/**
- * Session 页面和 Composer 使用的冻结 Catalog 投影。
- */
-export type SessionSkillCatalogSnapshot = { status: SessionSkillCatalogStatusSnapshot, skills: Array<SkillSummarySnapshot>, diagnostics: Array<SkillDiagnosticSnapshot>, };
-
-/**
- * Session Catalog 的冻结状态。
- */
-export type SessionSkillCatalogStatusSnapshot = "ready" | "empty" | "unavailable" | "legacy_unavailable";
 
 /**
  * 一个 Session 的稳定摘要。
@@ -2075,7 +2114,7 @@ title_generation?: SessionTitleGenerationSnapshot, workspace?: SessionWorkspaceS
 /**
  * 发起 clear/compact 时使用的当前权威 Conversation generation。
  */
-conversation_generation: number, composer_capabilities: ComposerCapabilitiesSnapshot, work_plan: WorkPlanSnapshot | null, goal: GoalSnapshot | null, active_run: RunSnapshot | null, queue: QueueSnapshot, approvals: ApprovalQueueSnapshot, attachments: Array<AttachmentSummary>, file_references: Array<ConversationFileReference>, runs: Array<RunSnapshot>, usage: SessionUsageSnapshot, child_tasks: Array<ChildTaskTreeItemSnapshot>, skill_catalog: SessionSkillCatalogSnapshot, active_skills: Array<ActiveSkillSnapshot>, conversation: ConversationPage, };
+conversation_generation: number, composer_capabilities: ComposerCapabilitiesSnapshot, work_plan: WorkPlanSnapshot | null, goal: GoalSnapshot | null, active_run: RunSnapshot | null, queue: QueueSnapshot, approvals: ApprovalQueueSnapshot, attachments: Array<AttachmentSummary>, file_references: Array<ConversationFileReference>, runs: Array<RunSnapshot>, usage: SessionUsageSnapshot, child_tasks: Array<ChildTaskTreeItemSnapshot>, active_skills: Array<ActiveSkillSnapshot>, conversation: ConversationPage, };
 
 /**
  * 正式 Session 的 Workspace 当前名称与创建时冻结目录。
@@ -2244,7 +2283,7 @@ export type SkillManagementSnapshot = { available: boolean, skills: Array<SkillS
 export type SkillSourceSnapshot = "workspace_ez_assistant" | "workspace_agents" | "user_ez_assistant" | "user_agents";
 
 /**
- * 设置页或 Session Catalog 使用的一项脱敏 Skill 摘要。
+ * 当前技能列表使用的一项脱敏 Skill 摘要。
  */
 export type SkillSummarySnapshot = { name: string, description: string, source: SkillSourceSnapshot, model_invocable: boolean, user_invocable: boolean, enabled: boolean, health: SkillHealthSnapshot, };
 
@@ -2495,6 +2534,26 @@ skill?: SkillActivationTagSnapshot,
  * 用户随本条 Input 冻结的 MCP Server 标签。
  */
 mcp_selection?: McpSelectionTagSnapshot, created_at_ms: number | null, };
+
+/**
+ * 每个连接只能 Open 一次；ACK 只确认当前一个输出块，不累积未来额度。
+ */
+export type UserTerminalControl = { "type": "open", bearer: string | null, source: UserTerminalSource, size: UserTerminalSize, } | { "type": "resize", size: UserTerminalSize, } | { "type": "ack" } | { "type": "close" };
+
+/**
+ * 只对所属连接可见。Closed 表示 PTY 已完成清理，Error 不假称回收成功。
+ */
+export type UserTerminalNotice = { "type": "created", terminal_id: string, directory_name: string, } | { "type": "exited", code: number, } | { "type": "error", message: string, } | { "type": "input_ack" } | { "type": "closed" };
+
+/**
+ * 字符网格尺寸，Host 校验 cols 2—1000、rows 1—500。
+ */
+export type UserTerminalSize = { cols: number, rows: number, };
+
+/**
+ * 启动目录由 Host 根据已登记来源重新解析，客户端不指定 Shell 或裸目录。
+ */
+export type UserTerminalSource = { "type": "session", session_id: SessionId, locator: SessionResourceLocator, } | { "type": "workspace", workspace_id: WorkspaceId, };
 
 /**
  * 显式验证一个已配置模型的基本连接与协议响应。

@@ -1,7 +1,8 @@
 export const SLASH_COMMANDS = [
   { name: "/skill", description: "为下一条输入选择一个技能", picker: "skill" as const },
   { name: "/mcp", description: "为下一条输入选择一个 MCP 服务", picker: null },
-  { name: "/mcp refresh", description: "刷新全部 MCP", picker: null },
+  { name: "/mcp refresh", description: "重新加载 MCP 服务", picker: null },
+  { name: "/skill refresh", description: "重新加载当前会话的技能目录", picker: null },
   { name: "/goal", description: "将下一次完整输入标记为自动续跑目标", picker: null },
   { name: "/model", description: "切换本会话模型", picker: "model" as const },
   { name: "/mode", description: "切换构建或规划模式", picker: "variant" as const },

@@ -70,10 +70,10 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
                   <em className={styles.draft_indicator}>有草稿</em>
                 )}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void store.openWorkspace(props.workspace.workspace_id)}>
+              {store.files.native_host && <DropdownMenuItem onSelect={() => void store.openWorkspace(props.workspace.workspace_id)}>
                 <Icon name="folder" size={15} />
                 <span>打开工作目录</span>
-              </DropdownMenuItem>
+              </DropdownMenuItem>}
               <DropdownMenuItem onSelect={() => void store.copyWorkspacePath(props.workspace.user_directory)}>
                 <Icon name="copy" size={15} />
                 <span>复制目录路径</span>

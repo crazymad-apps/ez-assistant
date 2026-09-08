@@ -60,6 +60,13 @@ export const WorkspaceEditorDialog = observer(function WorkspaceEditorDialog(pro
     setDirectories((current) => [...current, { path }]);
   }
 
+  async function replaceDirectory(index: number) {
+    const path = await store.chooseWorkspaceDirectory(directories[index].path);
+    if (!path || store.workspace_editor !== editor) return;
+    if (directories.some((directory, i) => i !== index && directory.path === path)) { setError("该目录已经在当前工作空间中。"); return; }
+    setError(null); setDirectories((current) => current.map((entry, i) => i === index ? {path} : entry));
+  }
+
   function makePrimary(index: number) {
     setDirectories((current) => [current[index], ...current.filter((_, item_index) => item_index !== index)]);
   }
@@ -122,6 +129,7 @@ export const WorkspaceEditorDialog = observer(function WorkspaceEditorDialog(pro
                   <span className={styles.order_handle} aria-hidden="true">⋮⋮</span>
                   <Icon name="folder" size={16} />
                   <span className={styles.directory_text}><strong>{basename(directory.path)}</strong><small title={directory.path}>{directory.path}</small></span>
+                  <button type="button" aria-label={`更换 ${basename(directory.path)}`} onClick={() => void replaceDirectory(index)}>更换</button>
                   {index === 0 ? <em>主要</em> : (
                     <span className={styles.directory_actions}>
                       <button aria-label={`上移 ${basename(directory.path)}`} disabled={index === 1} onClick={() => move(index, -1)} type="button"><Icon name="chevron-up" size={14} /></button>

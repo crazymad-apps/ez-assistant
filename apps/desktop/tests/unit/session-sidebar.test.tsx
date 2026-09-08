@@ -14,6 +14,23 @@ afterEach(() => {
 });
 
 describe("SessionSidebar grouping", () => {
+  it("loads another summary page only when requested and keeps existing rows", async () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    snapshot.active_sessions_next_offset = 100;
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+    const page = vi.spyOn(store, "loadMoreSessions").mockImplementation(async (filter) => {
+      store.projection.appendSessionPage(filter, [sessionSummary("older", "更早的会话", null)], null);
+    });
+    render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
+    expect(page).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    expect(await screen.findByRole("button", { name: /^更早的会话/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^未绑定会话/ })).toBeInTheDocument();
+    expect(page).toHaveBeenCalledWith("active");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument());
+  });
+
   it("keeps the controller fixed in the active list and hides it from archived sessions", () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
@@ -34,9 +51,12 @@ describe("SessionSidebar grouping", () => {
     expect(screen.queryByRole("region", { name: "主控会话" })).not.toBeInTheDocument();
   });
 
-  it("filters the current session list by title without a search scope", () => {
+  it("queries session titles without loading conversation history", async () => {
     const store = connectedStore();
     const history_search = vi.spyOn(store, "searchConversationHistory");
+    const list_page = vi.spyOn(store, "listSessionPage").mockImplementation(async (_filter, _offset, query) => ({
+      sessions: store.projection.application!.active_sessions.filter((session) => session.title.includes(query ?? "")), has_more: false,
+    }));
 
     render(
       <RootStoreProvider store={store}>
@@ -48,10 +68,11 @@ describe("SessionSidebar grouping", () => {
 
     expect(screen.queryByRole("button", { name: "选择历史检索范围" })).not.toBeInTheDocument();
     fireEvent.change(search_input, { target: { value: "工作区" } });
-    expect(screen.getByRole("button", { name: /^工作区会话/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^工作区会话/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^未绑定会话/ })).not.toBeInTheDocument();
     expect(screen.getByText("1 个结果")).toBeInTheDocument();
     expect(history_search).not.toHaveBeenCalled();
+    expect(list_page).toHaveBeenCalledWith("active", 0, "工作区");
 
     fireEvent.change(search_input, { target: { value: "消息正文里的词" } });
     expect(screen.getByText("没有匹配的会话名称")).toBeInTheDocument();
@@ -295,6 +316,8 @@ function connectedStore(): RootStore {
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
+    active_sessions_next_offset: null,
+    archived_sessions_next_offset: null,
     configuration: {
       config_path: null,
       revision: "fixture-revision",

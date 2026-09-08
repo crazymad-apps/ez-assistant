@@ -528,9 +528,11 @@ async fn settle_run_inner(
             proxy_report_draft,
         )
     };
-    let proxy_report = proxy_report_draft
-        .map(|draft| controller.prepare_proxy_report(draft).map(Box::new))
-        .transpose()?;
+    let proxy_report = if let Some(draft) = proxy_report_draft {
+        Some(Box::new(controller.prepare_proxy_report(draft).await?))
+    } else {
+        None
+    };
 
     // Run 正文、终态、Goal effect 与可选代理报告由一个 Store 业务操作共同提交。
     let operation_id =

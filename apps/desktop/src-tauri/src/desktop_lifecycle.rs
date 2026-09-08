@@ -1,6 +1,5 @@
 //! 原生窗口、菜单、托盘与 Desktop 退出语义的单一协调入口。
 
-use crate::user_terminal::{TerminalError, UserTerminalManager};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
@@ -499,30 +498,12 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
     }
 }
 
-// 托盘/原生确认路径没有前端编排，仍须等 PTY 回收后才放行退出。
+// 原生退出销毁主 WebView，关闭本客户端的 socket；PTY 清理由 Host owner 完成。
 fn spawn_quit<R: Runtime>(app: AppHandle<R>) {
-    tauri::async_runtime::spawn(async move {
-        match app.state::<UserTerminalManager>().shutdown().await {
-            Ok(()) => {
-                let coordinator = app.state::<DesktopLifecycleCoordinator>();
-                coordinator.finish_native_action();
-                coordinator.allow_exit();
-                app.exit(0);
-            }
-            Err(error) => report_quit_failure(&app, error),
-        }
-    });
-}
-
-fn report_quit_failure<R: Runtime>(app: &AppHandle<R>, error: TerminalError) {
-    app.state::<DesktopLifecycleCoordinator>()
-        .finish_native_action();
-    app.dialog()
-        .message(error.to_string())
-        .title("终端清理失败，尚未退出")
-        .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::Ok)
-        .show(|_| {});
+    let coordinator = app.state::<DesktopLifecycleCoordinator>();
+    coordinator.finish_native_action();
+    coordinator.allow_exit();
+    app.exit(0);
 }
 
 fn runtime_impact_message(impact: NativeRuntimeImpact, consequence: &str) -> String {
@@ -538,12 +519,6 @@ fn spawn_runtime_action<R: Runtime>(
     quit_after_success: bool,
 ) {
     tauri::async_runtime::spawn(async move {
-        if quit_after_success
-            && let Err(error) = app.state::<UserTerminalManager>().shutdown().await
-        {
-            report_quit_failure(&app, error);
-            return;
-        }
         let runtime = app.state::<RuntimeBootstrapCoordinator>().inner().clone();
         let mutation_kind = match intent {
             DesktopLifecycleIntent::StopRuntime => NativeRuntimeMutationKind::Stop,
@@ -593,9 +568,6 @@ fn spawn_runtime_action<R: Runtime>(
                 }
             }
             Err(error) => {
-                if quit_after_success {
-                    app.state::<UserTerminalManager>().resume().await;
-                }
                 coordinator.update_runtime_state(NativeRuntimeState::Disconnected);
                 let action = match intent {
                     DesktopLifecycleIntent::StopRuntime => "停止 Runtime",
@@ -717,8 +689,7 @@ pub(crate) fn request_desktop_close(app: AppHandle) -> Result<(), DesktopLifecyc
 }
 
 #[tauri::command]
-pub(crate) async fn quit_desktop(app: AppHandle) -> Result<(), TerminalError> {
-    app.state::<UserTerminalManager>().shutdown().await?;
+pub(crate) fn quit_desktop(app: AppHandle) -> Result<(), DesktopLifecycleError> {
     app.state::<DesktopLifecycleCoordinator>().allow_exit();
     app.exit(0);
     Ok(())

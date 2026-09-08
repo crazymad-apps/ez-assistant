@@ -170,6 +170,8 @@ pub struct ApplicationSnapshot {
     pub workspaces: Vec<WorkspaceSummary>,
     pub active_sessions: Vec<SessionSummary>,
     pub archived_sessions: Vec<SessionSummary>,
+    pub active_sessions_next_offset: Option<u32>,
+    pub archived_sessions_next_offset: Option<u32>,
     /// 当前按稳定顺序选定的主控；创建失败或配置不可用时为 unavailable。
     #[serde(default)]
     pub controller_availability: crate::ControllerAvailabilitySnapshot,
@@ -215,6 +217,11 @@ pub enum ConversationItem {
     User(UserMessageSnapshot),
     Assistant(AssistantMessageSnapshot),
     /// Runtime 控制指令的可靠结算，不渲染为普通用户气泡。
+    SkillRefreshResult {
+        message_id: MessageId,
+        success: bool,
+        skill_count: u32,
+    },
     ControlResult {
         message_id: MessageId,
         result: crate::McpRefreshControlResultSnapshot,
@@ -715,8 +722,6 @@ pub struct SessionViewSnapshot {
     pub runs: Vec<RunSnapshot>,
     pub usage: SessionUsageSnapshot,
     pub child_tasks: Vec<ChildTaskTreeItemSnapshot>,
-    #[serde(default)]
-    pub skill_catalog: crate::SessionSkillCatalogSnapshot,
     #[serde(default)]
     pub active_skills: Vec<crate::ActiveSkillSnapshot>,
     pub conversation: ConversationPage,

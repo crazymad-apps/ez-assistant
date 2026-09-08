@@ -1,6 +1,6 @@
 import type { ResourceHandle, ResourceTab } from "./ResourceWorkspaceStore";
 import type { ResourceViewState } from "./resourceViewState";
-import type { TerminalSource } from "../../native-bridge/userTerminal";
+import type { TerminalSource } from "../../runtime-client/TerminalSocket";
 import type { SessionResourceLocator } from "../../generated/assistant-protocol";
 
 /** 只保存重建描述，不保存 controller、原生句柄、文件内容或终端命令/输出。 */
@@ -39,6 +39,7 @@ export function resourceIdentity(group: { id: string; scope_key: string }, sourc
       const key = owner.type === "child_task" ? `${owner.session_id}:child:${owner.child_task_id}` : `${owner.session_id}:main`;
       return `${group.scope_key}:tool:${key}:${source.message_id}:${source.resource_ref_id}`;
     }
+    case "host_file": return `host:${source.path}`;
     case "local_file": return localFileUri(source.path_segments);
   }
 }
@@ -77,6 +78,7 @@ function locator(value: unknown): boolean {
 function source(value: unknown): boolean {
   if (!record(value)) return false;
   if (value.type === "session_file") return text(value.session_id) && locator(value.locator);
+  if (value.type === "host_file") return text(value.path) && value.path.startsWith("/") && !value.path.includes("\0");
   if (value.type === "local_file") return Array.isArray(value.path_segments) && value.path_segments.length > 1
     && value.path_segments[0] === "/" && value.path_segments.slice(1).every((part: unknown) => text(part) && part !== ".." && !part.includes("/"));
   if (value.type === "attachment") return text(value.session_id) && text(value.attachment_id) && Array.isArray(value.siblings)

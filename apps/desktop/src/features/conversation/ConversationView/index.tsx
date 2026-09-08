@@ -70,6 +70,7 @@ export const ConversationView = observer(function ConversationView() {
     x: number;
     y: number;
   } | null>(null);
+  const quote_bubble_ref = useRef<HTMLDivElement>(null);
   const selection_presence = usePresence(selection_action !== null, 90);
   const retained_selection_action_ref = useRef(selection_action);
   if (selection_action) retained_selection_action_ref.current = selection_action;
@@ -309,6 +310,43 @@ export const ConversationView = observer(function ConversationView() {
     store.transient_focus.clear();
     if (store.navigation.selected_child_task_id) store.closeChildTask();
   }, [selection_action, session_id, store]);
+
+  useEffect(() => {
+    const ownsSelection = (selection: Selection) => (
+      scroll_ref.current?.contains(selection.anchorNode) || scroll_ref.current?.contains(selection.focusNode)
+    );
+    function dismissSelection(event: PointerEvent) {
+      // 保留右键复制、Shift 扩选和引用按钮；普通空白/控件点击结束会话选区。
+      if (event.button !== 0 || event.ctrlKey || event.shiftKey) return;
+      const target = event.target;
+      if (!(target instanceof Element) || quote_bubble_ref.current?.contains(target)) return;
+      setSelectionAction(null);
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !ownsSelection(selection)) return;
+      const style = getComputedStyle(target);
+      // user-select:none 不会触发浏览器原生的选区折叠，必须在新手势开始前清除旧锚点。
+      if (!scroll_ref.current?.contains(target)
+        || style.userSelect === "none"
+        || style.getPropertyValue("-webkit-user-select") === "none") {
+        selection.removeAllRanges();
+      }
+    }
+    function dismissCollapsedSelection() {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !ownsSelection(selection)) {
+        setSelectionAction(null);
+      }
+    }
+    document.addEventListener("pointerdown", dismissSelection, true);
+    document.addEventListener("selectionchange", dismissCollapsedSelection);
+    return () => {
+      document.removeEventListener("pointerdown", dismissSelection, true);
+      document.removeEventListener("selectionchange", dismissCollapsedSelection);
+      const selection = window.getSelection();
+      if (selection && ownsSelection(selection)) selection.removeAllRanges();
+      setSelectionAction(null);
+    };
+  }, [session_id, child_task_id]);
 
   useEffect(() => {
     if (store.composer_pending) {
@@ -554,7 +592,9 @@ export const ConversationView = observer(function ConversationView() {
       <div
         aria-label="消息列表"
         className={styles.scroll}
-        onMouseUp={() => requestAnimationFrame(captureSelection)}
+        onMouseUp={(event) => {
+          if (event.button === 0 && !event.ctrlKey) captureSelection();
+        }}
         onScroll={handleScroll}
         ref={scroll_ref}
       >
@@ -591,6 +631,7 @@ export const ConversationView = observer(function ConversationView() {
           data-presence={selection_presence.state}
           inert={selection_presence.state === "exiting" ? true : undefined}
           onTransitionEnd={selection_presence.onTransitionEnd}
+          ref={quote_bubble_ref}
           role="toolbar"
           style={{ left: retained_selection_action_ref.current.x, top: retained_selection_action_ref.current.y }}
         >
@@ -620,6 +661,8 @@ export const ConversationView = observer(function ConversationView() {
               label: "在资源栏打开",
               on_select: () => openAttachment(attachment_menu.attachment),
             },
+            {label:"下载文件",on_select:()=>runAttachmentAction(store.files.downloadAttachment(attachment_menu.attachment.session_id, attachment_menu.attachment.attachment_id, attachment_menu.attachment.original_name),"下载失败。")},
+            ...(store.files.native_host ? [
             {
               label: "使用系统应用打开",
               on_select: () => runAttachmentAction(
@@ -639,7 +682,7 @@ export const ConversationView = observer(function ConversationView() {
                 ),
                 "无法在 Finder 中显示。",
               ),
-            },
+            }            ] : []),
           ]}
           location={attachment_menu.location}
           on_close={() => setAttachmentMenu(null)}

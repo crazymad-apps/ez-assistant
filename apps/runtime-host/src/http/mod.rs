@@ -5,8 +5,11 @@ mod auth;
 mod commands;
 mod error;
 mod events;
+mod login;
 mod materializations;
 mod resources;
+pub(crate) mod terminals;
+mod web;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -36,7 +39,7 @@ use self::{
         resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
-use crate::{device::DeviceGatewayHandle, speech::SpeechServiceHandle};
+use crate::{access::HostAccessHandle, device::DeviceGatewayHandle, speech::SpeechServiceHandle};
 
 pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -49,11 +52,17 @@ pub(crate) struct HttpState {
     runtime: Arc<AssistantRuntime>,
     access_token: Arc<str>,
     authority: Arc<str>,
-    base_url: Arc<str>,
     upload_staging_directory: Arc<PathBuf>,
     device_gateway: DeviceGatewayHandle,
     speech: SpeechServiceHandle,
     shutdown: CancellationToken,
+    pub(crate) access: HostAccessHandle,
+    instance_id: Arc<str>,
+    port: u16,
+    secure: bool,
+    connections: CancellationToken,
+    file_reads: Arc<tokio::sync::Semaphore>,
+    pub(crate) terminals: Arc<crate::user_terminal::UserTerminals>,
 }
 
 /// HTTP listener 建立前即可冻结的端点与认证配置。
@@ -64,6 +73,7 @@ pub(crate) struct HttpEndpointState {
     access_token: Arc<str>,
     authority: Arc<str>,
     base_url: Arc<str>,
+    instance_id: Arc<str>,
     upload_staging_directory: Arc<PathBuf>,
 }
 
@@ -73,39 +83,65 @@ impl HttpEndpointState {
         authority: String,
         base_url: String,
         runtime_home: PathBuf,
+        instance_id: String,
     ) -> Self {
         Self {
             access_token: Arc::from(access_token),
             authority: Arc::from(authority),
             base_url: Arc::from(base_url),
+            instance_id: Arc::from(instance_id),
             upload_staging_directory: Arc::new(runtime_home.join("data/staging/uploads")),
         }
     }
 }
 
 impl HttpState {
+    /// Host 设置与 Runtime 模型设置共用文件，提交后刷新唯一配置投影的 revision。
+    pub(crate) async fn refresh_configuration_projection(
+        &self,
+    ) -> Result<(), crate::access::AccessError> {
+        self.runtime
+            .reload_config(assistant_protocol::ReloadConfigRequest::default())
+            .await
+            .map(|_| ())
+            .map_err(|_| crate::access::AccessError::Unavailable)
+    }
+
     pub(crate) fn new(
         runtime: Arc<AssistantRuntime>,
         endpoint: HttpEndpointState,
         device_gateway: DeviceGatewayHandle,
         speech: SpeechServiceHandle,
         shutdown: CancellationToken,
+        access: HostAccessHandle,
+        terminals: Arc<crate::user_terminal::UserTerminals>,
     ) -> Self {
         let HttpEndpointState {
             access_token,
             authority,
             base_url,
+            instance_id,
             upload_staging_directory,
         } = endpoint;
         Self {
+            terminals,
+            file_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             runtime,
             access_token,
             authority,
-            base_url,
+            port: base_url
+                .parse::<reqwest::Url>()
+                .ok()
+                .and_then(|url| url.port_or_known_default())
+                .expect("published endpoint has a port"),
             upload_staging_directory,
             device_gateway,
             speech,
+            connections: shutdown.child_token(),
             shutdown,
+            access,
+            instance_id,
+            secure: base_url.starts_with("https://"),
         }
     }
 }
@@ -115,7 +151,18 @@ pub(crate) fn router(state: HttpState) -> Router {
     let attachment_route = post(upload_attachment).layer(DefaultBodyLimit::disable());
     let materialization_route = post(materialize_session).layer(DefaultBodyLimit::disable());
     let api = Router::new()
+        .route("/auth/login", post(login::login).layer(DefaultBodyLimit::max(4096)))
+        .route("/auth/logout", post(login::logout))
+        .route("/auth/session", get(login::session))
         .route("/commands", command_route)
+        .route("/sessions/{session_id}/attachments/{attachment_id}/download", get(resources::download_attachment))
+        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_tool_file))
+        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_child_tool_file))
+        .route("/host-files/list", post(resources::list_host_files))
+        .route("/host-files/select-directory", post(resources::select_host_directory))
+        .route("/host-files/preview", post(resources::preview_host_file))
+        .route("/host-files/download", post(resources::download_host_file))
+        .route("/sessions/{session_id}/resource-files/download", post(resources::download_session_file))
         .route("/session-materializations", materialization_route)
         .route("/sessions/{session_id}/attachments", attachment_route)
         .route(
@@ -158,12 +205,19 @@ pub(crate) fn router(state: HttpState) -> Router {
             "/sessions/{session_id}/resource-files/native-path",
             post(resolve_session_resource_native_path),
         )
+        .route("/user-terminals/socket", get(terminals::upgrade))
         .route("/events", get(stream_events))
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
         .layer(middleware::from_fn_with_state(state.clone(), authorize));
 
-    api.with_state(state)
+    let pages = Router::new()
+        .fallback(web::serve)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::authorize_page,
+        ));
+    api.merge(pages).with_state(state)
 }
 
 async fn health() -> Json<RuntimeHostHealth> {
@@ -192,6 +246,9 @@ async fn capabilities() -> Json<RuntimeHostCapabilities> {
             RuntimeHostFeature::SessionManagement,
             RuntimeHostFeature::SessionMaterialization,
             RuntimeHostFeature::SessionResourceFiles,
+            RuntimeHostFeature::HostAccess,
+            RuntimeHostFeature::WebLogin,
+            RuntimeHostFeature::UserTerminals,
         ],
     })
 }

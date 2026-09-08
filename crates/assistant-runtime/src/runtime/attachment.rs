@@ -40,7 +40,7 @@ impl AssistantRuntime {
     pub async fn begin_attachment_upload(&self, session_id: &SessionId) -> RuntimeResult<()> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(session_id)?;
+        let session = self.session(session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -54,7 +54,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<UploadAttachmentResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&upload.session_id)?;
+        let session = self.session(&upload.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -90,11 +90,11 @@ impl AssistantRuntime {
         })
     }
 
-    pub fn get_attachment(
+    pub async fn get_attachment(
         &self,
         request: GetAttachmentRequest,
     ) -> RuntimeResult<GetAttachmentResult> {
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         let attachment = self
             .attachments
             .read()
@@ -113,11 +113,11 @@ impl AssistantRuntime {
         })
     }
 
-    pub fn list_attachments(
+    pub async fn list_attachments(
         &self,
         request: ListAttachmentsRequest,
     ) -> RuntimeResult<ListAttachmentsResult> {
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         let mut attachments = self
             .attachments
             .read()

@@ -1,10 +1,12 @@
 //! 设备级桌面展示偏好；不承载 Runtime 业务状态。
 
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager as _};
 use thiserror::Error;
+
+static PREFERENCES_WRITE: Mutex<()> = Mutex::new(());
 
 const PREFERENCES_FILE: &str = "desktop-preferences.json";
 const PREFERENCES_STAGING_FILE: &str = ".desktop-preferences.tmp";
@@ -31,6 +33,14 @@ pub(crate) struct DesktopPreferences {
     /// WebView 拥有的轻量恢复索引；原生层只限界并原子保存，不装配 Runtime 业务状态。
     #[serde(default)]
     resource_workspace: Option<serde_json::Value>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct PreferencesDocument {
+    #[serde(flatten)]
+    local: DesktopPreferences,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hosts: BTreeMap<String, DesktopPreferences>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -78,27 +88,42 @@ pub(crate) enum DesktopPreferencesError {
 #[tauri::command]
 pub(crate) fn load_desktop_preferences(
     app: AppHandle,
+    namespace: Option<String>,
 ) -> Result<DesktopPreferences, DesktopPreferencesError> {
     let directory = app
         .path()
         .app_config_dir()
         .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
-    load_from_directory(&directory)
+    match namespace {
+        None => load_from_directory(&directory),
+        Some(namespace) => {
+            validate_namespace(&namespace)?;
+            Ok(load_document(&directory)?
+                .hosts
+                .remove(&namespace)
+                .unwrap_or_default())
+        }
+    }
 }
 
 #[tauri::command]
 pub(crate) fn save_desktop_preferences(
     app: AppHandle,
     preferences: DesktopPreferences,
+    namespace: Option<String>,
 ) -> Result<(), DesktopPreferencesError> {
     let directory = app
         .path()
         .app_config_dir()
         .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
-    save_to_directory(&directory, preferences)
+    save_namespace(&directory, preferences, namespace.as_deref())
 }
 
 fn load_from_directory(directory: &Path) -> Result<DesktopPreferences, DesktopPreferencesError> {
+    Ok(load_document(directory)?.local)
+}
+
+fn load_document(directory: &Path) -> Result<PreferencesDocument, DesktopPreferencesError> {
     let path = directory.join(PREFERENCES_FILE);
     if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_PREFERENCES_BYTES) {
         return Err(DesktopPreferencesError::Invalid);
@@ -106,25 +131,62 @@ fn load_from_directory(directory: &Path) -> Result<DesktopPreferences, DesktopPr
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DesktopPreferences::default());
+            return Ok(PreferencesDocument::default());
         }
         Err(_) => return Err(DesktopPreferencesError::Invalid),
     };
-    let preferences: DesktopPreferences =
+    let mut document: PreferencesDocument =
         serde_json::from_slice(&bytes).map_err(|_| DesktopPreferencesError::Invalid)?;
-    validate(preferences)
+    document.local = validate(document.local)?;
+    if document.hosts.len() > 64 {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    for (namespace, preferences) in &mut document.hosts {
+        validate_namespace(namespace)?;
+        *preferences = validate(preferences.clone())?;
+    }
+    Ok(document)
 }
 
+#[cfg(test)]
 fn save_to_directory(
     directory: &Path,
     preferences: DesktopPreferences,
 ) -> Result<(), DesktopPreferencesError> {
+    save_namespace(directory, preferences, None)
+}
+
+fn validate_namespace(value: &str) -> Result<(), DesktopPreferencesError> {
+    let url = reqwest::Url::parse(value).map_err(|_| DesktopPreferencesError::Invalid)?;
+    if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != value {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    Ok(())
+}
+fn save_namespace(
+    directory: &Path,
+    preferences: DesktopPreferences,
+    namespace: Option<&str>,
+) -> Result<(), DesktopPreferencesError> {
+    let _guard = PREFERENCES_WRITE
+        .lock()
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
     let preferences = validate(preferences)?;
+    let mut document = load_document(directory)?;
+    if let Some(namespace) = namespace {
+        validate_namespace(namespace)?;
+        if document.hosts.len() >= 64 && !document.hosts.contains_key(namespace) {
+            return Err(DesktopPreferencesError::Invalid);
+        }
+        document.hosts.insert(namespace.to_owned(), preferences);
+    } else {
+        document.local = preferences;
+    }
     fs::create_dir_all(directory).map_err(|_| DesktopPreferencesError::SaveFailed)?;
     let staging = directory.join(PREFERENCES_STAGING_FILE);
     let destination = directory.join(PREFERENCES_FILE);
     let bytes =
-        serde_json::to_vec_pretty(&preferences).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+        serde_json::to_vec_pretty(&document).map_err(|_| DesktopPreferencesError::SaveFailed)?;
     if bytes.len() as u64 > MAX_PREFERENCES_BYTES {
         return Err(DesktopPreferencesError::Invalid);
     }
@@ -187,6 +249,43 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls() {
+        let directory = tempdir().unwrap();
+        let local = DesktopPreferences {
+            left_sidebar_width: 300,
+            ..DesktopPreferences::default()
+        };
+        save_to_directory(directory.path(), local.clone()).unwrap();
+        let remote = DesktopPreferences {
+            left_sidebar_width: 400,
+            resource_workspace: Some(
+                serde_json::json!({"current_scope_key":"session:remote","groups":[]}),
+            ),
+            ..DesktopPreferences::default()
+        };
+        save_namespace(
+            directory.path(),
+            remote.clone(),
+            Some("http://host.test:7240"),
+        )
+        .unwrap();
+        let document = load_document(directory.path()).unwrap();
+        assert_eq!(document.local, local);
+        assert_eq!(document.hosts.get("http://host.test:7240"), Some(&remote));
+        save_to_directory(directory.path(), DesktopPreferences::default()).unwrap();
+        assert_eq!(
+            load_document(directory.path())
+                .unwrap()
+                .hosts
+                .get("http://host.test:7240"),
+            Some(&remote)
+        );
+        assert!(validate_namespace("http://user:password@host.test:7240").is_err());
+        assert!(validate_namespace("http://host.test:7240/#token=x").is_err());
+        assert!(validate_namespace("file:///tmp").is_err());
+    }
 
     #[test]
     fn preferences_round_trip_without_runtime_state() {

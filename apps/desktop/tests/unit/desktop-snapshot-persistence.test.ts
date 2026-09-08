@@ -3,7 +3,7 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
 import type { DesktopPreferences } from "../../src/native-bridge/desktopPreferences";
 const bridge = vi.hoisted(() => ({ load: vi.fn(), save: vi.fn() }));
-vi.mock("../../src/native-bridge/desktopPreferences", () => ({ loadDesktopPreferences: bridge.load, saveDesktopPreferences: bridge.save }));
+vi.mock("../../src/native-bridge/desktopPreferences", async (original) => ({...await original<typeof import("../../src/native-bridge/desktopPreferences")>(), loadDesktopPreferences: bridge.load, saveDesktopPreferences: bridge.save }));
 const stores: RootStore[] = [];
 const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: [], close_behavior: "hide_to_tray" };
 beforeEach(() => { vi.spyOn(RuntimeLifecycleCoordinator.prototype, "connect").mockResolvedValue(); bridge.load.mockResolvedValue(defaults); bridge.save.mockResolvedValue(undefined); });
@@ -45,4 +45,9 @@ it("serializes disk writes and freezes the final snapshot before terminal shutdo
   await store.flushPreferences();
   expect(bridge.save).toHaveBeenCalledTimes(2);
   expect(persisted.resource_workspace.groups.find((group: { scope_key: string }) => group.scope_key === "session:a").tabs.map((tab: { page: { type: string } }) => tab.page.type)).toEqual(["context", "terminal", "workspace"]);
+});
+
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
 });

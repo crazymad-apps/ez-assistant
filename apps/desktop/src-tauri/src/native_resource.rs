@@ -31,7 +31,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
-use crate::runtime_bootstrap::RuntimeBootstrapCoordinator;
+use crate::runtime_connection::RuntimeTarget;
 
 const MAX_SELECTIONS: usize = 256;
 const MAX_SELECTIONS_PER_SEND: usize = 32;
@@ -193,7 +193,25 @@ impl NativeResourceBridge {
             operations: Mutex::new(HashMap::new()),
             resource_handles: Mutex::new(ResourceHandleRegistry::default()),
             next_id: AtomicU64::new(1),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("native resource HTTP client"),
+        }
+    }
+
+    pub(crate) fn clear_target_resources(&self) {
+        if let Ok(mut operations) = self.operations.lock() {
+            for token in operations.values() {
+                token.cancel();
+            }
+            operations.clear();
+        }
+        if let Ok(mut selections) = self.selections.lock() {
+            selections.clear();
+        }
+        if let Ok(mut handles) = self.resource_handles.lock() {
+            *handles = ResourceHandleRegistry::default();
         }
     }
 
@@ -222,6 +240,7 @@ impl NativeResourceBridge {
     fn register_operation(
         &self,
         operation_id: &str,
+        parent: &CancellationToken,
     ) -> Result<CancellationToken, NativeResourceError> {
         if operation_id.trim().is_empty() || operation_id.len() > 128 {
             return Err(error(
@@ -239,7 +258,7 @@ impl NativeResourceBridge {
                 "资源操作标识重复。",
             ));
         }
-        let token = CancellationToken::new();
+        let token = parent.child_token();
         operations.insert(operation_id.to_owned(), token.clone());
         Ok(token)
     }
@@ -318,9 +337,11 @@ impl NativeResourceBridge {
 
 #[tauri::command]
 pub(crate) async fn register_local_file_uri(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     file_uri: String,
 ) -> Result<RegisteredLocalResource, NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let path = file_uri_path(&file_uri)?;
     let canonical = validate_local_file(path).await?;
     let navigation_root = canonical
@@ -332,10 +353,12 @@ pub(crate) async fn register_local_file_uri(
 
 #[tauri::command]
 pub(crate) async fn register_relative_local_resource(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
     reference: String,
 ) -> Result<RegisteredLocalResource, NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     if reference.trim().is_empty() || reference.contains('\0') || reference.contains('\\') {
         return Err(invalid_local_resource());
     }
@@ -354,9 +377,11 @@ pub(crate) async fn register_relative_local_resource(
 
 #[tauri::command]
 pub(crate) async fn preview_local_resource(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
 ) -> Result<LocalResourcePreview, NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let resource = bridge.local_resource(&resource_key)?;
     let canonical = validate_registered_resource(&resource).await?;
     preview_local_path(&canonical).await
@@ -364,9 +389,11 @@ pub(crate) async fn preview_local_resource(
 
 #[tauri::command]
 pub(crate) async fn list_local_resource_siblings(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
 ) -> Result<Vec<LocalResourceSibling>, NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let resource = bridge.local_resource(&resource_key)?;
     let canonical = validate_registered_resource(&resource).await?;
     let mut directory = tokio::fs::read_dir(&resource.navigation_root)
@@ -416,10 +443,12 @@ pub(crate) async fn list_local_resource_siblings(
 
 #[tauri::command]
 pub(crate) async fn register_local_resource_sibling(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
     display_name: String,
 ) -> Result<RegisteredLocalResource, NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     if display_name.is_empty()
         || display_name.contains('/')
         || display_name.contains('\\')
@@ -441,15 +470,18 @@ pub(crate) async fn register_local_resource_sibling(
 
 #[tauri::command]
 pub(crate) async fn open_local_resource_in_system(
+    target: RuntimeTarget,
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
 ) -> Result<(), NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let resource = bridge.local_resource(&resource_key)?;
     let canonical = validate_registered_resource(&resource).await?;
     let path = canonical
         .to_str()
         .ok_or_else(|| unavailable("本地资源路径不是有效文本。"))?;
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     app.opener().open_path(path, None::<&str>).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
@@ -460,12 +492,15 @@ pub(crate) async fn open_local_resource_in_system(
 
 #[tauri::command]
 pub(crate) async fn reveal_local_resource_in_directory(
+    target: RuntimeTarget,
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
 ) -> Result<(), NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let resource = bridge.local_resource(&resource_key)?;
     let canonical = validate_registered_resource(&resource).await?;
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     app.opener().reveal_item_in_dir(canonical).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
@@ -476,21 +511,24 @@ pub(crate) async fn reveal_local_resource_in_directory(
 
 #[tauri::command]
 pub(crate) async fn copy_local_resource_path(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     resource_key: String,
 ) -> Result<(), NativeResourceError> {
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     let resource = bridge.local_resource(&resource_key)?;
     let canonical = validate_registered_resource(&resource).await?;
     let path = canonical
         .to_str()
         .ok_or_else(|| unavailable("本地资源路径不是有效文本。"))?;
+    target.ensure_local().map_err(|_| runtime_unavailable())?;
     copy_path_to_clipboard(path)
 }
 
 #[tauri::command]
 pub(crate) async fn list_session_resource_files(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     request: ListSessionResourceFilesRequest,
 ) -> Result<ListSessionResourceFilesResult, NativeResourceError> {
@@ -501,7 +539,7 @@ pub(crate) async fn list_session_resource_files(
 #[tauri::command]
 pub(crate) async fn preview_session_resource_file(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     request: PreviewSessionResourceFileRequest,
 ) -> Result<PreviewSessionResourceFileResult, NativeResourceError> {
@@ -514,11 +552,17 @@ pub(crate) async fn preview_session_resource_file(
 pub(crate) async fn open_session_resource_in_system(
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     locator: SessionResourceLocator,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener().open_path(path, None::<&str>).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
@@ -530,11 +574,17 @@ pub(crate) async fn open_session_resource_in_system(
 #[tauri::command]
 pub(crate) async fn copy_session_resource_path(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     locator: SessionResourceLocator,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     copy_path_to_clipboard(&path)
 }
 
@@ -584,11 +634,17 @@ fn copy_path_to_clipboard(path: &str) -> Result<(), NativeResourceError> {
 pub(crate) async fn reveal_session_resource_in_directory(
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     locator: SessionResourceLocator,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let path = resolve_session_resource_path(&bridge, &coordinator, session_id, locator).await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener().reveal_item_in_dir(path).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
@@ -604,7 +660,7 @@ fn parse_session_id(session_id: String) -> Result<SessionId, NativeResourceError
 
 pub(crate) async fn resolve_session_resource_path(
     bridge: &NativeResourceBridge,
-    coordinator: &RuntimeBootstrapCoordinator,
+    coordinator: &RuntimeTarget,
     session_id: String,
     locator: SessionResourceLocator,
 ) -> Result<String, NativeResourceError> {
@@ -622,7 +678,7 @@ pub(crate) async fn resolve_session_resource_path(
 
 async fn send_session_resource_request<Request, ResponseBody>(
     http: &reqwest::Client,
-    coordinator: &RuntimeBootstrapCoordinator,
+    coordinator: &RuntimeTarget,
     session_id: &SessionId,
     operation: &str,
     request: &Request,
@@ -659,6 +715,7 @@ where
 
 #[tauri::command]
 pub(crate) async fn choose_attachment_files(
+    target: RuntimeTarget,
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
 ) -> Result<Vec<AttachmentSelection>, NativeResourceError> {
@@ -706,6 +763,7 @@ pub(crate) async fn choose_attachment_files(
         prepared.push((path, original_name, metadata.len()));
     }
 
+    target.ensure_active().map_err(|_| runtime_unavailable())?;
     let now = now_ms();
     let mut state = bridge
         .selections
@@ -750,9 +808,11 @@ pub(crate) async fn choose_attachment_files(
 /// 提前拒绝明显不合法的调用。匿名临时文件的最后一个句柄随 selection 释放而回收。
 #[tauri::command]
 pub(crate) fn stage_clipboard_image(
+    target: RuntimeTarget,
     bridge: State<'_, NativeResourceBridge>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<AttachmentSelection, NativeResourceError> {
+    target.ensure_active().map_err(|_| runtime_unavailable())?;
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err(error(
             NativeResourceErrorCode::InvalidRequest,
@@ -888,7 +948,7 @@ pub(crate) fn cancel_resource_operation(
 #[tauri::command]
 pub(crate) async fn upload_selected_attachment(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     selection_id: String,
     operation_id: String,
@@ -908,7 +968,10 @@ pub(crate) async fn upload_selected_attachment(
             "附件超过 Runtime 允许的单文件大小。",
         ));
     }
-    let cancellation = bridge.register_operation(&operation_id)?;
+    coordinator
+        .ensure_active()
+        .map_err(|_| runtime_unavailable())?;
+    let cancellation = bridge.register_operation(&operation_id, &coordinator.cancellation)?;
     let result = upload_selected(
         &bridge.http,
         &bootstrap.base_url,
@@ -934,7 +997,7 @@ pub(crate) async fn upload_selected_attachment(
 #[tauri::command]
 pub(crate) async fn materialize_new_session(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     manifest: SessionMaterializationManifest,
     operation_id: String,
 ) -> Result<SessionMaterializationResult, NativeResourceError> {
@@ -979,7 +1042,10 @@ pub(crate) async fn materialize_new_session(
             "附件超过 Runtime 允许的单文件大小。",
         ));
     }
-    let cancellation = bridge.register_operation(&operation_id)?;
+    coordinator
+        .ensure_active()
+        .map_err(|_| runtime_unavailable())?;
+    let cancellation = bridge.register_operation(&operation_id, &coordinator.cancellation)?;
     let result = materialize_selected(
         &bridge.http,
         &bootstrap.base_url,
@@ -1003,7 +1069,7 @@ pub(crate) async fn materialize_new_session(
 #[tauri::command]
 pub(crate) async fn preview_attachment(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     attachment_id: String,
 ) -> Result<AttachmentPreview, NativeResourceError> {
@@ -1054,7 +1120,7 @@ pub(crate) async fn preview_attachment_selection(
 #[tauri::command]
 pub(crate) async fn thumbnail_attachment(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     attachment_id: String,
 ) -> Result<String, NativeResourceError> {
@@ -1096,7 +1162,7 @@ pub(crate) async fn thumbnail_attachment(
 #[tauri::command]
 pub(crate) async fn preview_tool_file(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     child_task_id: Option<String>,
     message_id: String,
@@ -1418,10 +1484,13 @@ fn invalid_local_resource() -> NativeResourceError {
 #[tauri::command]
 pub(crate) async fn open_attachment_in_system(
     app: AppHandle,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     attachment_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let attachment_id = AttachmentId::new(attachment_id)
@@ -1433,6 +1502,9 @@ pub(crate) async fn open_attachment_in_system(
             "附件当前不可用。",
         ));
     }
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener()
         .open_path(attachment.agent_readable_path, None::<&str>)
         .map_err(|_| {
@@ -1446,10 +1518,13 @@ pub(crate) async fn open_attachment_in_system(
 #[tauri::command]
 pub(crate) async fn reveal_attachment_in_directory(
     app: AppHandle,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     attachment_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let attachment_id = AttachmentId::new(attachment_id)
@@ -1461,6 +1536,9 @@ pub(crate) async fn reveal_attachment_in_directory(
             "附件当前不可用。",
         ));
     }
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener()
         .reveal_item_in_dir(attachment.agent_readable_path)
         .map_err(|_| {
@@ -1473,10 +1551,13 @@ pub(crate) async fn reveal_attachment_in_directory(
 
 #[tauri::command]
 pub(crate) async fn copy_attachment_path(
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     attachment_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let attachment_id = AttachmentId::new(attachment_id)
@@ -1488,6 +1569,9 @@ pub(crate) async fn copy_attachment_path(
             "附件当前不可用。",
         ));
     }
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     copy_path_to_clipboard(&attachment.agent_readable_path)
 }
 
@@ -1495,12 +1579,15 @@ pub(crate) async fn copy_attachment_path(
 pub(crate) async fn open_tool_file_in_system(
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let message_id = MessageId::new(message_id)
@@ -1516,6 +1603,9 @@ pub(crate) async fn open_tool_file_in_system(
         &resource_ref_id,
     )
     .await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener()
         .open_path(resource.path, None::<&str>)
         .map_err(|_| {
@@ -1530,12 +1620,15 @@ pub(crate) async fn open_tool_file_in_system(
 pub(crate) async fn reveal_tool_file_in_directory(
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let message_id = MessageId::new(message_id)
@@ -1551,6 +1644,9 @@ pub(crate) async fn reveal_tool_file_in_directory(
         &resource_ref_id,
     )
     .await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     app.opener().reveal_item_in_dir(resource.path).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
@@ -1562,12 +1658,15 @@ pub(crate) async fn reveal_tool_file_in_directory(
 #[tauri::command]
 pub(crate) async fn copy_tool_file_path(
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     child_task_id: Option<String>,
     message_id: String,
     resource_ref_id: String,
 ) -> Result<(), NativeResourceError> {
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
     let message_id = MessageId::new(message_id)
@@ -1583,12 +1682,15 @@ pub(crate) async fn copy_tool_file_path(
         &resource_ref_id,
     )
     .await?;
+    coordinator
+        .ensure_local()
+        .map_err(|_| runtime_unavailable())?;
     copy_path_to_clipboard(&resource.path)
 }
 
 async fn get_tool_file_native_path(
     bridge: &NativeResourceBridge,
-    coordinator: &RuntimeBootstrapCoordinator,
+    coordinator: &RuntimeTarget,
     session_id: &SessionId,
     child_task_id: Option<&str>,
     message_id: &MessageId,
@@ -1630,19 +1732,65 @@ async fn get_tool_file_native_path(
 pub(crate) async fn export_session_markdown(
     app: AppHandle,
     bridge: State<'_, NativeResourceBridge>,
-    coordinator: State<'_, RuntimeBootstrapCoordinator>,
+    coordinator: RuntimeTarget,
     session_id: String,
     suggested_name: String,
 ) -> Result<ExportResult, NativeResourceError> {
     let session_id = SessionId::new(session_id)
         .map_err(|_| error(NativeResourceErrorCode::InvalidRequest, "会话标识无效。"))?;
-    let file_name = export_file_name(&suggested_name);
+    save_runtime_download(
+        app,
+        bridge,
+        coordinator,
+        format!("/sessions/{}/export.md", session_id.as_str()),
+        None,
+        export_file_name(&suggested_name),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn download_runtime_resource(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: RuntimeTarget,
+    path: String,
+    body: Option<serde_json::Value>,
+    suggested_name: String,
+) -> Result<ExportResult, NativeResourceError> {
+    // 只允许当前 Host 的文件下载路由；不能借该入口提交业务命令或跳转到另一台主机。
+    if !(path == "/host-files/download"
+        || (path.starts_with("/sessions/") && path.ends_with("/download")))
+        || path.contains(['?', '#', '\\'])
+        || path.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err(error(
+            NativeResourceErrorCode::InvalidRequest,
+            "下载资源地址无效。",
+        ));
+    }
+    let file_name = Path::new(&suggested_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .unwrap_or("download")
+        .to_owned();
+    save_runtime_download(app, bridge, coordinator, path, body, file_name).await
+}
+
+async fn save_runtime_download(
+    app: AppHandle,
+    bridge: State<'_, NativeResourceBridge>,
+    coordinator: RuntimeTarget,
+    path: String,
+    body: Option<serde_json::Value>,
+    file_name: String,
+) -> Result<ExportResult, NativeResourceError> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("导出会话 Markdown")
+        .set_title("保存文件")
         .set_file_name(&file_name)
-        .add_filter("Markdown", &["md"])
         .save_file(move |selection| {
             let _ = sender.send(selection);
         });
@@ -1666,17 +1814,16 @@ pub(crate) async fn export_session_markdown(
         .bootstrap()
         .await
         .map_err(|_| runtime_unavailable())?;
-    let mut response = bridge
-        .http
-        .get(format!(
-            "{}/sessions/{}/export.md",
-            bootstrap.base_url,
-            session_id.as_str()
-        ))
-        .bearer_auth(&bootstrap.access_token)
-        .send()
-        .await
-        .map_err(|_| runtime_unavailable())?;
+    let url = format!("{}{path}", bootstrap.base_url);
+    let request = match body {
+        Some(body) => bridge.http.post(url).json(&body),
+        None => bridge.http.get(url),
+    };
+    let mut response = tokio::select! {
+        biased;
+        () = coordinator.cancellation.cancelled() => return Err(error(NativeResourceErrorCode::Cancelled, "连接切换，下载已取消。")),
+        result = request.bearer_auth(&bootstrap.access_token).send() => result.map_err(|_| runtime_unavailable())?,
+    };
     if !response.status().is_success() {
         return Err(decode_runtime_failure(response, NativeResourceErrorCode::ExportFailed).await);
     }
@@ -1692,7 +1839,7 @@ pub(crate) async fn export_session_markdown(
                 "无法创建导出临时文件。",
             )
         })?;
-    let write_result = async {
+    let writing = async {
         while let Some(chunk) = response
             .chunk()
             .await
@@ -1709,6 +1856,9 @@ pub(crate) async fn export_session_markdown(
             .await
             .map_err(|_| error(NativeResourceErrorCode::ExportFailed, "导出文件写入失败。"))?;
         drop(file);
+        coordinator
+            .ensure_active()
+            .map_err(|_| error(NativeResourceErrorCode::Cancelled, "连接切换，导出已取消。"))?;
         tokio::fs::rename(&temporary, &target).await.map_err(|_| {
             error(
                 NativeResourceErrorCode::ExportFailed,
@@ -1716,8 +1866,12 @@ pub(crate) async fn export_session_markdown(
             )
         })?;
         Ok::<(), NativeResourceError>(())
-    }
-    .await;
+    };
+    let write_result = tokio::select! {
+        biased;
+        () = coordinator.cancellation.cancelled() => Err(error(NativeResourceErrorCode::Cancelled, "连接切换，导出已取消。")),
+        result = writing => result,
+    };
     if write_result.is_err() {
         let _ = tokio::fs::remove_file(&temporary).await;
     }
@@ -1959,7 +2113,7 @@ fn is_pdf(bytes: &[u8]) -> bool {
 }
 
 async fn get_attachment(
-    coordinator: &RuntimeBootstrapCoordinator,
+    coordinator: &RuntimeTarget,
     session_id: SessionId,
     attachment_id: AttachmentId,
 ) -> Result<assistant_protocol::AttachmentSummary, NativeResourceError> {
@@ -1987,7 +2141,10 @@ async fn get_attachment(
         .bootstrap()
         .await
         .map_err(|_| runtime_unavailable())?;
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| runtime_unavailable())?
         .post(format!("{}/commands", bootstrap.base_url))
         .bearer_auth(&bootstrap.access_token)
         .json(&CommandRequest {

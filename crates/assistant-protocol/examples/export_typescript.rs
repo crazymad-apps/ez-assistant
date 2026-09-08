@@ -7,16 +7,19 @@ use assistant_protocol::{
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
-    GetToolDetailRequest, GetToolDetailResult, GoalId, InterruptRunRequest, InterruptRunResult,
-    ListConversationPageRequest, ListConversationPageResult, ListSessionResourceFilesRequest,
-    ListSessionResourceFilesResult, PermissionMcpMatcher, PreviewSessionResourceFileRequest,
-    PreviewSessionResourceFileResult, PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult,
-    QueuedSessionItemSnapshot, QuotedTextSnapshot, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
-    RuntimeCommand, RuntimeCommandResult, RuntimeEventEnvelope, RuntimeHostCapabilities,
-    RuntimeHostHealth, SessionMaterializationManifest, SessionMaterializationResult,
-    SessionTitleGenerationSnapshot, SubmitInputMode, TodoItemId, UploadAttachmentResult,
+    GetToolDetailRequest, GetToolDetailResult, GoalId, HostAccessCommand, HostAccessStatus,
+    HostFileRequest, HostLoginRequest, HostLoginResult, InterruptRunRequest, InterruptRunResult,
+    ListConversationPageRequest, ListConversationPageResult, ListHostFilesRequest,
+    ListHostFilesResult, ListSessionResourceFilesRequest, ListSessionResourceFilesResult,
+    PermissionMcpMatcher, PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueuedSessionItemSnapshot,
+    QuotedTextSnapshot, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
+    ResumeQueuedInputRequest, ResumeQueuedInputResult, RuntimeCommand, RuntimeCommandResult,
+    RuntimeEventEnvelope, RuntimeHostCapabilities, RuntimeHostHealth,
+    SessionMaterializationManifest, SessionMaterializationResult, SessionTitleGenerationSnapshot,
+    SubmitInputMode, TodoItemId, UploadAttachmentResult,
 };
+use assistant_protocol::{UserTerminalControl, UserTerminalNotice};
 use ts_rs::{Config, TS};
 
 const OUTPUT_FILE: &str = "assistant-protocol.ts";
@@ -35,6 +38,12 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     }
 
     export_roots!(
+        UserTerminalControl,
+        UserTerminalNotice,
+        HostAccessCommand,
+        HostAccessStatus,
+        HostLoginRequest,
+        HostLoginResult,
         RuntimeHostHealth,
         RuntimeHostCapabilities,
         GoalId,
@@ -45,6 +54,9 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         SessionMaterializationManifest,
         SessionMaterializationResult,
         ListSessionResourceFilesRequest,
+        HostFileRequest,
+        ListHostFilesRequest,
+        ListHostFilesResult,
         ListSessionResourceFilesResult,
         PreviewSessionResourceFileRequest,
         PreviewSessionResourceFileResult,

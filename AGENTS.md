@@ -86,8 +86,10 @@
 
 - 正式产品采用**桌面 UI 与 Runtime 双进程、Runtime 内部模块化**的架构。Tauri 进程只承载
   WebView、桌面平台适配和 Runtime Client；独立 Runtime Host 进程承载
-  `assistant-runtime`、Agent 装配和业务权威状态。桌面客户端与 Host 统一通过本地 loopback
-  HTTP Command、SSE 和 Streaming Upload 通信；该 Host 是正式产品进程，不是 `tools/*`
+  `assistant-runtime`、Agent 装配和业务权威状态。客户端与 Host 统一通过 HTTP Command、SSE
+  和 Streaming Upload 通信；用户终端通过同一监听上的 WS／WSS，PTY 归 Host Supervisor。
+  本机与远程共用唯一 HTTP／HTTPS 监听，默认端口 7240；非本地访问默认关闭，
+  设置密码后可显式开启。本机权限同时校验真实 TCP 来源与原生凭据，所有客户端共用同一 Runtime，该 Host 是正式产品进程，不是 `tools/*`
   验证宿主，也不等同于已经实现系统 daemon 或常驻 Worker 池。
 - Session 不创建会话级操作系统子进程；不同 Session 在同一个 Runtime Host 中使用 Tokio
   异步并发，同一 Session 中改变上下文的 Run 默认串行。Shell、MCP 等工具按能力需要启动的
@@ -147,6 +149,11 @@
 - 修改协议类型时必须检查所有生产者、消费者、序列化兼容和持久化影响。
 - 禁止手改 `target/`、`dist/`、生成图标和其他构建产物；源图标为 `apps/desktop/app-icon.svg`。
 - 验证按最小有效范围执行，最终说明已执行、未执行及原因。
+- 2026-09-07 用户调整开发环境为 `~/.ez-assistant`。`npm run tauri -- dev` 默认注入该目录；
+  手动启动开发 GUI／Host 时分别显式设置 `EZ_ASSISTANT_RUNTIME_HOME`／`--runtime-home`。
+  自动化与隔离验收仍使用临时 Runtime Home，不得把测试数据或批量清理操作指向用户目录。
+  未经启动脚本或环境覆盖的 debug／Dev 二进制仍回退 `.ez-assistant-dev`；开发 GUI（含 Release 验证）
+  继续使用 `tauri.dev.conf.json` 隔离应用偏好和 WebView 存储。原有数据库操作确认规则继续适用。
 
 常用验证命令：
 

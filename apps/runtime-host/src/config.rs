@@ -15,7 +15,7 @@ const DEFAULT_EVENT_CAPACITY: usize = 256;
     name = "ez-assistant-runtime",
     version,
     about = "EZ Assistant Runtime Host",
-    after_help = "The Host listens on a dynamic IPv4 loopback HTTP port and publishes private discovery data under Runtime Home/run/runtime.json."
+    after_help = "The Host uses one HTTP/HTTPS port (default 7240). Remote access is disabled until configured. Private local discovery is published under Runtime Home/run/runtime.json."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -45,6 +45,9 @@ pub(crate) struct ServeArguments {
     /// Positive Runtime event buffer capacity; defaults to 256.
     #[arg(long, value_name = "COUNT")]
     event_capacity: Option<NonZeroUsize>,
+    /// Initialize the owner's password from bounded stdin after acquiring the instance lock.
+    #[arg(long)]
+    password_stdin: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +55,7 @@ pub(crate) struct ServeConfig {
     pub(crate) runtime_home: PathBuf,
     pub(crate) config_path: PathBuf,
     pub(crate) event_capacity: NonZeroUsize,
+    pub(crate) password_stdin: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +88,7 @@ impl ServeConfig {
         Ok(Self {
             config_path: runtime_home.join(CONFIG_FILE),
             runtime_home,
+            password_stdin: arguments.password_stdin,
             event_capacity: arguments.event_capacity.unwrap_or_else(|| {
                 NonZeroUsize::new(DEFAULT_EVENT_CAPACITY).expect("static capacity is non-zero")
             }),

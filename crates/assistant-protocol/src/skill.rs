@@ -27,7 +27,7 @@ pub enum SkillHealthSnapshot {
     Unavailable,
 }
 
-/// 设置页或 Session Catalog 使用的一项脱敏 Skill 摘要。
+/// 当前技能列表使用的一项脱敏 Skill 摘要。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SkillSummarySnapshot {
@@ -81,36 +81,6 @@ pub struct SkillDetailSnapshot {
     #[ts(optional)]
     pub body: Option<String>,
     pub diagnostics: Vec<SkillDiagnosticSnapshot>,
-}
-
-/// Session Catalog 的冻结状态。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-#[serde(rename_all = "snake_case")]
-pub enum SessionSkillCatalogStatusSnapshot {
-    Ready,
-    Empty,
-    Unavailable,
-    LegacyUnavailable,
-}
-
-/// Session 页面和 Composer 使用的冻结 Catalog 投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct SessionSkillCatalogSnapshot {
-    pub status: SessionSkillCatalogStatusSnapshot,
-    pub skills: Vec<SkillSummarySnapshot>,
-    pub diagnostics: Vec<SkillDiagnosticSnapshot>,
-}
-
-impl Default for SessionSkillCatalogSnapshot {
-    fn default() -> Self {
-        Self {
-            status: SessionSkillCatalogStatusSnapshot::LegacyUnavailable,
-            skills: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
 }
 
 /// 一次冻结 Activation 的最小审计标签。

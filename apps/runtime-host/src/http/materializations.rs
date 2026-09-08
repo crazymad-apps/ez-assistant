@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use assistant_protocol::{RuntimeErrorCode, RuntimeErrorInfo, SessionMaterializationManifest};
 use assistant_runtime::StagedSessionAttachment;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -19,7 +19,7 @@ use super::{
     attachments::{cleanup, create_staging_file, runtime_error, valid_original_name},
     error::runtime_status,
 };
-use crate::attachment_hash;
+use crate::{access::AccessPermit, attachment_hash};
 
 const MAX_MATERIALIZATION_ATTACHMENTS: usize = 32;
 
@@ -30,6 +30,7 @@ struct MaterializationErrorBody {
 
 pub(super) async fn materialize_session(
     State(state): State<HttpState>,
+    Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
     let manifest = match read_manifest(&mut multipart).await {
@@ -161,6 +162,10 @@ pub(super) async fn materialize_session(
         }
     }
 
+    if let Err(error) = permit.check() {
+        cleanup_all(&staged).await;
+        return materialization_error(error.protocol_info());
+    }
     match state
         .runtime
         .materialize_session(manifest, staged.clone())

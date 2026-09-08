@@ -98,7 +98,7 @@ impl AssistantRuntime {
                 reason: "input must contain text, attachments, or quotes",
             });
         }
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         // 先命中 Session 内已恢复的幂等事实，使合法重试不受当前配置、附件或 Skill 变化影响。
@@ -202,12 +202,12 @@ impl AssistantRuntime {
                 })
             })
             .transpose()?;
+        let skill_catalog = self.current_skill_catalog(&session).await?;
         let skill_activation = selected_skill
             .as_ref()
             .map(|name| {
                 let definition =
-                    session
-                        .skill_catalog()
+                    skill_catalog
                         .user_definition(name)
                         .map_err(|error| match error {
                             SkillActivationResolveError::CatalogUnavailable => {
@@ -228,7 +228,7 @@ impl AssistantRuntime {
                     &mut message,
                     InternalBoundaryRequest {
                         source: InternalBoundarySource::SkillActivation,
-                        text: render_user_activation(&session.skill_catalog().revision, definition),
+                        text: render_user_activation(&skill_catalog.revision, definition),
                     },
                 )?;
                 Ok(StoredSkillActivation {
@@ -243,7 +243,7 @@ impl AssistantRuntime {
                     input_id: Some(input_id.clone()),
                     message_id: message.id.clone(),
                     name: definition.name.clone(),
-                    catalog_revision: session.skill_catalog().revision.clone(),
+                    catalog_revision: skill_catalog.revision.clone(),
                     definition_digest: definition.definition_digest.clone(),
                     trigger: SkillActivationTrigger::User,
                     created_at_ms: accepted_at_ms,

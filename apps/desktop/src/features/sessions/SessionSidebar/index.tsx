@@ -1,3 +1,5 @@
+import type { SessionSummary } from "../../../generated/assistant-protocol";
+import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,13 +24,17 @@ export const SessionSidebar = observer(function SessionSidebar() {
   const [search_open, setSearchOpen] = useState(false);
   const [workspace_section_open, setWorkspaceSectionOpen] = useState(true);
   const [unbound_section_open, setUnboundSectionOpen] = useState(true);
+  const search_generation = useRef(0);
+  const [search_sessions, setSearchSessions] = useState<SessionSummary[]>([]);
+  const [search_next, setSearchNext] = useState<number | null>(null);
+  const [list_loading, setListLoading] = useState(false);
+  const [list_error, setListError] = useState<string | null>(null);
   const search_input_ref = useRef<HTMLInputElement>(null);
   const sessions =
     store.navigation.list_mode === "active"
       ? (application?.active_sessions ?? [])
       : (application?.archived_sessions ?? []);
   const query = store.navigation.search_query.trim();
-  const normalized_query = query.toLocaleLowerCase();
   const workspaces = application?.workspaces ?? [];
   const active_workspaces = workspaces.filter((workspace) => workspace.lifecycle === "active");
   const active_workspace_ids = new Set(active_workspaces.map((workspace) => workspace.workspace_id));
@@ -36,9 +42,48 @@ export const SessionSidebar = observer(function SessionSidebar() {
     session.role !== "controller"
     && (!session.workspace_id || active_workspace_ids.has(session.workspace_id))
   ));
-  const filtered_sessions = normalized_query
-    ? visible_sessions.filter((session) => session.title.toLocaleLowerCase().includes(normalized_query))
-    : [];
+  const filtered_sessions = search_sessions.filter((session) => session.role !== "controller" && (!session.workspace_id || active_workspace_ids.has(session.workspace_id)));
+  const next_offset = search_open ? search_next : store.navigation.list_mode === "active" ? application?.active_sessions_next_offset : application?.archived_sessions_next_offset;
+
+  useEffect(() => {
+    search_generation.current += 1;
+    let cancelled = false;
+    setSearchSessions([]);
+    setSearchNext(null);
+    setListError(null);
+    if (!search_open || !query) return;
+    const timer = window.setTimeout(() => {
+      setListLoading(true);
+      void store.listSessionPage(store.navigation.list_mode, 0, query).then((page) => {
+        if (cancelled) return;
+        setSearchSessions(page.sessions);
+        setSearchNext(page.has_more ? 100 : null);
+      }).catch((error: unknown) => {
+        if (!cancelled) setListError(error instanceof Error ? error.message : "加载失败");
+      }).finally(() => { if (!cancelled) setListLoading(false); });
+    }, 180);
+    return () => { cancelled = true; window.clearTimeout(timer); setListLoading(false); };
+  }, [store, search_open, query, store.navigation.list_mode]);
+
+  async function loadMore() {
+    if (list_loading || next_offset == null) return;
+    setListLoading(true);
+    setListError(null);
+    const generation = search_generation.current;
+    try {
+      if (search_open) {
+        const page = await store.listSessionPage(store.navigation.list_mode, next_offset, query);
+        if (generation !== search_generation.current) return;
+        setSearchSessions((current) => [...new Map([...current, ...page.sessions].map((session) => [session.session_id, session])).values()]);
+        setSearchNext(page.has_more ? next_offset + 100 : null);
+      } else {
+        await store.loadMoreSessions(store.navigation.list_mode);
+      }
+    } catch (error) {
+      if (generation !== search_generation.current) return;
+      setListError(error instanceof Error ? error.message : "加载失败");
+    } finally { if (generation === search_generation.current) setListLoading(false); }
+  }
   const groups = active_workspaces
     .map((workspace) => ({
       workspace,
@@ -287,6 +332,8 @@ export const SessionSidebar = observer(function SessionSidebar() {
             {sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}
           </>
         )}
+        {next_offset != null && <Button variant="text" size="small" disabled={list_loading} onClick={() => void loadMore()}>{list_loading ? "加载中…" : "加载更多"}</Button>}
+        {list_error && <p role="alert">{list_error}</p>}
       </div>
       <button className={styles.settings_button} onClick={() => store.settings.open()} type="button">
         <Icon name="settings" size={16} />

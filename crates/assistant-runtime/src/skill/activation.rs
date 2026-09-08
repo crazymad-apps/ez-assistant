@@ -13,7 +13,7 @@ use assistant_protocol::{InputId, RunId, SessionId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ModelSkillResolveError, SessionSkillCatalog, SessionSkillDefinition, SkillName};
+use super::{ModelSkillResolveError, SkillCatalog, SkillDefinition, SkillName};
 
 /// Activation 进入规范 Conversation 的触发来源。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -48,6 +48,12 @@ pub struct StoredSkillActivation {
 }
 
 impl StoredSkillActivation {
+    /// 历史身份由已提交账本保存；恢复不再依赖当前共享文件或 Session 目录副本。
+    pub fn has_valid_definition_identity(&self) -> bool {
+        super::catalog::is_sha256_v1(&self.catalog_revision)
+            && super::catalog::is_sha256_v1(&self.definition_digest)
+    }
+
     /// 生成 Queue、消息和当前上下文共用的最小产品标签。
     pub fn tag(&self) -> assistant_protocol::SkillActivationTagSnapshot {
         assistant_protocol::SkillActivationTagSnapshot {
@@ -59,7 +65,7 @@ impl StoredSkillActivation {
 /// 把冻结定义渲染为统一内部边界承载的精确模型正文。
 pub(crate) fn render_user_activation(
     catalog_revision: &str,
-    definition: &SessionSkillDefinition,
+    definition: &SkillDefinition,
 ) -> String {
     format!(
         "SKILL_ACTIVATION_V1\ntrigger: user\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\nshared_skill_root: {}\n<skill-instructions>\n{}\n</skill-instructions>",
@@ -74,7 +80,7 @@ pub(crate) fn render_user_activation(
 /// 把模型激活的冻结定义渲染为统一内部边界正文。
 pub(crate) fn render_model_activation(
     catalog_revision: &str,
-    definition: &SessionSkillDefinition,
+    definition: &SkillDefinition,
 ) -> String {
     format!(
         "SKILL_ACTIVATION_V1\ntrigger: model\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\nshared_skill_root: {}\n<skill-instructions>\n{}\n</skill-instructions>",
@@ -86,6 +92,13 @@ pub(crate) fn render_model_activation(
     )
 }
 
+/// 一次工具激活暂存的精确定义身份；提交后正文与身份分别进入消息和账本。
+#[derive(Clone)]
+pub(crate) struct StagedSkillDefinition {
+    pub(crate) catalog_revision: String,
+    pub(crate) definition: SkillDefinition,
+}
+
 /// 单个 AgentExecution 内暂存、并在 Recorder 完整提交后才生效的 Skill Activation。
 pub(crate) struct SkillActivationLatch {
     state: Mutex<SkillActivationLatchState>,
@@ -94,7 +107,7 @@ pub(crate) struct SkillActivationLatch {
 #[derive(Default)]
 struct SkillActivationLatchState {
     active: BTreeSet<SkillName>,
-    staged: BTreeMap<ToolCallId, SessionSkillDefinition>,
+    staged: BTreeMap<ToolCallId, StagedSkillDefinition>,
 }
 
 impl SkillActivationLatch {
@@ -110,7 +123,8 @@ impl SkillActivationLatch {
     pub(super) fn stage(
         &self,
         call_id: ToolCallId,
-        definition: SessionSkillDefinition,
+        definition: SkillDefinition,
+        catalog_revision: String,
     ) -> Result<bool, ToolError> {
         let mut state = self
             .state
@@ -120,11 +134,17 @@ impl SkillActivationLatch {
             || state
                 .staged
                 .values()
-                .any(|candidate| candidate.name == definition.name)
+                .any(|candidate| candidate.definition.name == definition.name)
         {
             return Ok(false);
         }
-        state.staged.insert(call_id, definition);
+        state.staged.insert(
+            call_id,
+            StagedSkillDefinition {
+                catalog_revision,
+                definition,
+            },
+        );
         Ok(true)
     }
 
@@ -132,7 +152,7 @@ impl SkillActivationLatch {
     pub(crate) fn staged_for_results(
         &self,
         results: &[ToolMessage],
-    ) -> Result<Vec<(ToolCallId, SessionSkillDefinition)>, ()> {
+    ) -> Result<Vec<(ToolCallId, StagedSkillDefinition)>, ()> {
         let state = self.state.lock().map_err(|_| ())?;
         Ok(results
             .iter()
@@ -157,11 +177,11 @@ impl SkillActivationLatch {
             return Err(());
         }
         for call_id in call_ids {
-            let definition = state
+            let staged = state
                 .staged
                 .remove(call_id)
                 .expect("all staged call ids were validated before mutation");
-            state.active.insert(definition.name);
+            state.active.insert(staged.definition.name);
         }
         Ok(())
     }
@@ -195,15 +215,12 @@ pub(crate) struct LoadSkillOutput {
 pub(crate) struct LoadSkillAuthorizationFacts;
 
 pub(crate) struct LoadSkillTool {
-    catalog: SessionSkillCatalog,
+    catalog: SkillCatalog,
     latch: std::sync::Arc<SkillActivationLatch>,
 }
 
 impl LoadSkillTool {
-    pub(crate) fn new(
-        catalog: SessionSkillCatalog,
-        latch: std::sync::Arc<SkillActivationLatch>,
-    ) -> Self {
+    pub(crate) fn new(catalog: SkillCatalog, latch: std::sync::Arc<SkillActivationLatch>) -> Self {
         Self { catalog, latch }
     }
 }
@@ -218,7 +235,7 @@ impl Tool for LoadSkillTool {
     }
 
     fn description(&self) -> String {
-        "Load one enabled skill from the frozen session catalog by its exact name. The skill becomes available after this complete tool batch is reliably committed."
+        "Load one enabled skill from the current execution catalog by its exact name. The skill becomes available after this complete tool batch is reliably committed."
             .to_owned()
     }
 
@@ -270,7 +287,10 @@ impl Tool for LoadSkillTool {
                 .call_id()
                 .cloned()
                 .ok_or_else(|| ToolError::execution("load_skill call identity is unavailable"))?;
-            if self.latch.stage(call_id, definition)? {
+            if self
+                .latch
+                .stage(call_id, definition, self.catalog.revision.clone())?
+            {
                 Ok(output(LoadSkillStatus::Staged))
             } else {
                 Ok(output(LoadSkillStatus::AlreadyActive))

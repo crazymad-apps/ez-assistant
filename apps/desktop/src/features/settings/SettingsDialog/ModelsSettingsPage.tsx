@@ -1,3 +1,4 @@
+import { copyText } from "../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import {
@@ -19,7 +20,7 @@ import type {
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { ConflictDialog, DeleteModelDialog } from "./ModelSettingsDialogs";
-import { SettingsMessages } from "./RuntimeSettingsPage";
+import { SettingsMessages } from "./SettingsMessages";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
@@ -178,7 +179,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(props: Re
   }
 
   async function copyDraft() {
-    await navigator.clipboard.writeText(JSON.stringify({
+    await copyText(JSON.stringify({
       model_key: draft.model_key,
       display_name: draft.display_name,
       protocol: draft.protocol,

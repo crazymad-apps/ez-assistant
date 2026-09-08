@@ -18,7 +18,7 @@ pub use child_task::{
     ChildTaskStart, ChildToolExecutionStart, CompletedChildToolExchange, NewStoredChildTask,
     PendingChildToolExchange, StoredChildTask, StoredChildTaskSettlement,
 };
-pub use contract::{RecoveredRuntime, RuntimeStore};
+pub use contract::{LoadedSession, RecoveredRuntime, RuntimeStore, SessionSummaryQuery};
 pub use conversation::{
     ContextReplacement, ContextReplacementResult, ContextReplacementTarget,
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
@@ -35,8 +35,9 @@ pub use execution::{
     QueuePriorityChange, SessionCommandCommit, StoredGoalSettlementEffect, StoredInput,
     StoredInputState, StoredMcpSelection, StoredQueueItem, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult,
-    StoredSessionCommand, StoredSessionCommandState, ToolExecutionStart, UserMessageCommit,
-    validate_input_message, validate_input_message_with_channel_source,
+    StoredSessionCommand, StoredSessionCommandResult, StoredSessionCommandState,
+    ToolExecutionStart, UserMessageCommit, validate_input_message,
+    validate_input_message_with_channel_source,
 };
 pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,

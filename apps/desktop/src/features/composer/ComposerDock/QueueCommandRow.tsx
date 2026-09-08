@@ -11,7 +11,9 @@ export function QueueCommandRow(props: Readonly<{
   on_resume: () => void;
 }>) {
   const executing = props.item.state === "executing";
-  const label = `MCP 刷新：${props.item.command.payload.server ?? "全部"}`;
+  const label = props.item.command.type === "skill_refresh"
+    ? "技能刷新"
+    : `MCP 刷新：${props.item.command.payload.server ?? "全部"}`;
   let action_label = props.item.is_prioritized ? "已优先" : "优先";
   let on_action = props.on_prioritize;
   if (props.needs_resume && !props.held_by_goal) {
@@ -25,7 +27,7 @@ export function QueueCommandRow(props: Readonly<{
       <small>{props.held_by_goal ? "等待目标结束" : "控制指令"}</small>
       <div className={styles.queue_actions}>
         {executing
-          ? <span aria-label="正在刷新 MCP" className={styles.loading_ring} role="status" />
+          ? <span aria-label={`正在执行${label}`} className={styles.loading_ring} role="status" />
           : <button disabled={props.disabled || (props.item.is_prioritized && !props.needs_resume)} onClick={on_action} type="button">{action_label}</button>}
       </div>
     </div>

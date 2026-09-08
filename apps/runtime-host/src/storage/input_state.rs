@@ -595,7 +595,7 @@ impl StorageEngine {
                 return Err(invalid_data("stored input kind is invalid"));
             }
             if let Some(existing) = self
-                .query_session_commands(Some((&command.session_id, key)))?
+                .query_session_commands(Some(&command.session_id), Some(key))?
                 .into_iter()
                 .next()
             {
@@ -621,7 +621,7 @@ impl StorageEngine {
         let target_valid = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions
-                 WHERE session_id = ?1 AND lifecycle = 'active' AND role = 'standard')",
+                 WHERE session_id = ?1 AND lifecycle = 'active')",
                 [command.session_id.as_str()],
                 |row| row.get::<_, bool>(0),
             )
@@ -693,16 +693,26 @@ impl StorageEngine {
     }
 
     pub(super) fn load_session_commands(&self) -> StorageResult<Vec<StoredSessionCommand>> {
-        self.query_session_commands(None)
+        self.query_session_commands(None, None)
+    }
+
+    pub(super) fn load_session_commands_scoped(
+        &self,
+        session_id: &SessionId,
+    ) -> StorageResult<Vec<StoredSessionCommand>> {
+        self.query_session_commands(Some(session_id), None)
     }
 
     // 全量恢复与精确幂等查询共享行解码/Run 归属校验，但在线请求只读取目标唯一键。
     fn query_session_commands(
         &self,
-        filter: Option<(&SessionId, &IdempotencyKey)>,
+        session_id: Option<&SessionId>,
+        key: Option<&IdempotencyKey>,
     ) -> StorageResult<Vec<StoredSessionCommand>> {
-        let predicate = if filter.is_some() {
+        let predicate = if key.is_some() {
             "AND session_id = ?1 AND idempotency_key = ?2"
+        } else if session_id.is_some() {
+            "AND session_id = ?1"
         } else {
             ""
         };
@@ -719,9 +729,10 @@ impl StorageEngine {
         let rows = statement
             .query_map(
                 rusqlite::params_from_iter(
-                    filter
+                    session_id
+                        .map(SessionId::as_str)
                         .into_iter()
-                        .flat_map(|(session, key)| [session.as_str(), key.as_str()]),
+                        .chain(key.map(IdempotencyKey::as_str)),
                 ),
                 |row| {
                     Ok((
@@ -820,29 +831,44 @@ impl StorageEngine {
 
     /// 从稳定存储重建 Input 队列投影，并严格校验组合字段是否自洽。
     pub(super) fn load_inputs(&self) -> StorageResult<Vec<StoredInput>> {
-        let mut statement = self.connection.prepare("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs WHERE input_kind = 'message' ORDER BY COALESCE(priority_order, queue_order), queue_order").map_err(|source| internal_error("runtime inputs could not be queried", source))?;
+        self.load_inputs_scoped(None)
+    }
+
+    pub(super) fn load_inputs_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredInput>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
+        let mut statement = self.connection.prepare(&format!("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs WHERE input_kind = 'message' AND {predicate} ORDER BY COALESCE(priority_order, queue_order), queue_order")).map_err(|source| internal_error("runtime inputs could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
-                    row.get::<_, Option<String>>(14)?,
-                    row.get::<_, Option<String>>(15)?,
-                    row.get::<_, Option<String>>(16)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<i64>>(11)?,
+                        row.get::<_, Option<i64>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<String>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("runtime inputs could not be read", source))?;
         rows.map(|row| {
             let (
@@ -1001,29 +1027,44 @@ impl StorageEngine {
 
     /// 加载 Input/Conversation 标签恢复所需的 MCP Selection 小型关系事实。
     pub(super) fn load_mcp_input_selections(&self) -> StorageResult<Vec<StoredMcpSelection>> {
+        self.load_mcp_input_selections_scoped(None)
+    }
+
+    pub(super) fn load_mcp_input_selections_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredMcpSelection>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT selection_id, session_id, input_id, message_id, server_key,
                         display_name, created_at_ms
                  FROM mcp_input_selections
-                 ORDER BY session_id, created_at_ms, selection_id",
-            )
+                 WHERE {predicate} ORDER BY session_id, created_at_ms, selection_id"
+            ))
             .map_err(|source| {
                 internal_error("MCP input selections could not be queried", source)
             })?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("MCP input selections could not be read", source))?;
         rows.map(|row| {
             let (

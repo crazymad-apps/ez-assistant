@@ -151,16 +151,19 @@ Runtime Host 进程
 - 产品 Conversation 投影、Around 定位、Markdown 导出和 Conversation Recall 必须排除
   `TranscriptVisibility::Hidden` 的 Runtime User Message；规范快照、Context Layout、重放、Fork
   和物理 `message_count` 仍保留它，不能把产品可见数冒充正文物理数量。
-- Runtime 通过异步 `open` 在进入 Running 前恢复 Session 与 Run registry；Conversation 只在首次
-  查询或执行时读取并缓存，单 Session 正文不可用不得回退成第二份空状态。
+- v0.25.0 M6 用户确认改为历史会话按需加载：启动只准备服务，列表分页查询摘要，详情按目标
+  Session 加载；启动、重连和查询均不得自动续跑或补做历史标题任务。单 Session 不可用不能
+  阻止整个 Host 就绪，也不得回退成第二份空状态。既有 `open` 全量恢复路径尚待按
+  [技术方案补充](../versions/v0.25.0/技术方案.md)调整，不能将目标约束表述为已实现。
 - 创建 Session、提交 User Message 与 Run 起始、结算 Run 终态均先完成 Store，再更新内存投影和
   发布事实事件；`message_count` 是列表派生投影，不替代正文物理顺序。
 - 输入提交先由 Store 原子创建持久 Input 与首次 `Accepted` Run，再更新内存投影、发布事件并唤醒
   Session 队列；同一 Session 的幂等 key 只返回首次 Input/Run，不比较重复请求正文。
 - queue order 只属于结构化输入状态，不进入 Message 正文。每个 Session 至多存在一个队列执行器，
   同 Session 按接收顺序领取，不同 Session 可并发。
-- 启动恢复时，尚未开始的 queued Input 保持 `Accepted` 并令 Session 进入 `resume_required`，不自动
-  调用 Provider；已提交 User Message 但未可靠终结的 Run 转为 `Interrupted`。`ResumeSession` 恢复
+- 恢复状态时，尚未开始的 queued Input 保持 `Accepted` 并令 Session 进入 `resume_required`，不自动
+  调用 Provider；已提交 User Message 但未可靠终结的 Run 按中断语义处理，必要的单会话可靠结算
+  不再作为全局启动前提。`ResumeSession` 恢复
   整个队列，`RetryRun` 只放行目标 Input 的新 attempt，不隐式恢复其后的排队输入。
 - M3 由绑定当前 Run 的 Runtime Recorder 在工具副作用前持久化 begun，结果齐备后先转 ready，
   再把 Assistant Tool Call 与全部 Tool Result 整批提交正文并清除 pending；任一 Store 失败均令
@@ -475,7 +478,7 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 - 内部上下文与普通用户正文共同归属于所在 User Turn；压缩不再根据内部类别建立额外保留集合，
   Runtime 统一只原样保留最近一个 Turn。
 
-## v0.19.0 Skill 发现与 Session Catalog 边界
+## Skill 发现与激活边界（v0.25.0 调整）
 
 - Runtime 定义通过格式校验的 `SkillName`、四级 `SkillSource`、只保留源目录的候选项、诊断、
   名称开关和文件实现无关 `SkillPackageSource`；Runtime 不解析 YAML、枚举用户 Home 或读取文件。
@@ -483,15 +486,9 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
   `.agents`”固定顺序选 Winner；同来源同名冲突不任选，扫描不完整时不暴露部分 Winner。
 - 名称开关只以 `SkillName` 为键；没有 Store 记录表示启用，禁用屏蔽全部同名候选且不回退下层。
   Skill 启用与 `allowed-tools` 均不形成 Authorizer 规则。
-- 新 Session 创建时，Runtime 读取名称开关、扫描并编译 Winner；扫描整体不可用时冻结
-  `unavailable` 空 Catalog，不把部分 Winner 当作可调用事实。
-- `SessionSkillCatalog` 保存完整 `SKILL.md` 定义、definition digest、共享源目录、确定性 revision、
-  状态和诊断，不保存普通资源索引或字节；模型目录作为独立 `SystemPromptSnapshot` Part 冻结，
-  绝对源路径不进入模型文本或 revision。
-- Catalog 随正式/易失 Session Store 持久化并由 `SessionController` 只读持有。Runtime 重启、归档恢复
-  和后续执行只消费该快照；Fork 原样继承相同内容身份和共享源目录，不重扫、不改写路径或复制文件。
-- 用户显式激活只接收一个 `skill_name`，并只查询目标 Session 的冻结 Catalog；当前 Root 文件和
-  名称开关的变化不能替换已接受 Input。用户激活直接随 Input 落账，不额外执行 `load_skill`。
+- 新 Session 创建时只把当前目录渲染为独立 `SystemPromptSnapshot` Part 并冻结。`SkillCatalog` 是一次扫描的临时结果，Session 与 Store 不保存它或其历史副本。
+- `/skill`、右侧技能栏和设置列表复用 `ListSkills` 读取当前文件；用户新激活在接纳时扫描，Run 在装配时扫描供 `load_skill` 使用。运行中保持本次装配一致，模型系统提示词不被替换。
+- 用户显式激活只接收一个 `skill_name`，当前名称开关和文件决定本次定义；已接受 Input 中的精确正文不被后续文件修改影响。用户激活直接随 Input 落账，不额外执行 `load_skill`。
 - 用户 Activation 与可见 UserMessage 的 `InternalContext` Part、queued Input、首次 Run 和 ledger
   由同一 Store 操作原子保存。Queue、Conversation 和 Active Skill 投影都读取结构化 Activation，
   不解析内部正文；取消、held Goal 恢复、历史重入和 Session 删除同步维护 ledger 所有权。
@@ -500,7 +497,7 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 - Fork 只复制 Conversation 前缀内的 Activation，分配新的 ledger 身份并改绑目标 Session；历史消息 ID、
   Catalog revision、definition digest 和触发来源保持不变，Input/Run 归属置空表示继承历史。
 - `ListSkills` 每次显式调用都重新扫描当前管理范围；`SetSkillEnabled` 只按名称保存全局开关并发布失效
-  事件，不刷新既有 Session Catalog 或 Activation。
+  事件，客户端重新查询当前列表；不改写系统提示词或历史 Activation。
 
 ## v0.21.0 M1 设备与 Channel 领域边界
 
@@ -588,7 +585,7 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 
 - Runtime 对支持 Tool Call 的模型始终注册稳定 `load_skill`；`name` 是普通字符串且不生成动态 enum，
   空或不可用 Catalog 也由执行结果表达，不因扫描变化替换 ToolSet 定义。
-- 工具只读取 Session 冻结 Catalog 并校验 `model_invocable`。Skill 启用状态不形成额外权限审批；
+- 工具读取本次 Run 装配时的当前目录并校验 `model_invocable`。Skill 启用状态不形成额外权限审批；
   `load_skill` 自身直接放行，激活后执行的文件、Shell 等真实工具继续走各自 Authorizer。
 - 每个主 Run 和每个 child execution 都持有独立 `SkillActivationLatch`。成功调用先按 ToolCallId 暂存，
   同批重复或历史已激活名称返回 `already_active`，不会提前修改 Session/child 的权威 ledger。
@@ -615,7 +612,7 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 - Runtime 校验 Workspace 完整表单并维护当前 label、主目录和有序附加目录；label 允许重复，目录总数
   最多 16。恢复同一主目录的已移除 Workspace 时复用原 ID，并以本次完整表单更新当前事实。
 - Session 创建时一次性冻结主目录与附加目录。Workspace 后续编辑只改变当前 Workspace 投影；既有
-  Session 的 `SessionExecutionEnvironment`、System Prompt、Skill Catalog 与权限上下文保持不变，
+  Session 的 `SessionExecutionEnvironment`、System Prompt 与权限上下文保持不变，
   Clear 也只能用原冻结目录重建。
 - Workspace 缺省文件能力同样只读取这份冻结目录：Plan/Build 默认可读，Build 默认可变更；显式
   Ask/Deny 优先。新增、删除、排序或切换 Workspace 目录不维护权限文件，新 Session 使用更新后的目录，
@@ -644,3 +641,22 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 - 引用按提交顺序保存为 `UserPart::QuotedText`，不建立 Quote 表、不签发 HMAC、不拼接用户 Markdown，
   也不增加引用专属 Recall 工具或 prepare/resolve command。现有 Conversation Recall 独立保留。
 - Runtime 不持有 Composer 引用草稿、详情弹窗、DOM range 或高亮状态。
+
+## v0.25.0 M5 会话 refresh 补充
+
+普通和主控 Session 均可接纳 Skill/MCP 控制指令，不要求模型；执行沿用可靠队列与当前 Run 边界。
+Skill refresh 只扫描并提交结果，不修改系统提示词或维护会话目录；扫描失败显示失败，不回退旧目录。
+列表读取与新激活不依赖 refresh。历史正文及 Activation 账本负责恢复与 Fork，目录内容不进入 Session。
+Run 按当前定义 digest 判定是否已激活；细节见 v0.25.0 技术方案第十三节。
+
+refresh 沿用已约定机制：插入一条 `user` role 消息，不触发 Run，不修改冻结系统提示词。普通目录查询不插入消息。
+
+
+## v0.25.0 历史会话按需装配与手动执行
+
+本节取代上文涉及“全局启动恢复全部会话”的触发时机，旧可靠提交和校验规则继续适用。
+启动只读全局事实；列表走 Store 有界摘要，不能为了摘要装配所有 Session/Input/Run。
+单会话首次读取由 SessionLoader 去重并发布只读执行投影；未被引用的纯历史缓存允许回收。
+只有显式业务操作前执行目标存储恢复和结算，不启动历史队列、Goal、子任务或标题生成。
+审批 Registry 仅属当前进程，退出后直接丢弃，不恢复轮内执行。旧 Run 查询可返回中断元信息，
+不以正文可恢复为前提；异常正文仍不得进入执行。恢复不得改写冻结系统提示词和工作空间环境。

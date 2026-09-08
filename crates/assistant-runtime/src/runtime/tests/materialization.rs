@@ -88,6 +88,7 @@ async fn text_only_materialization_creates_no_provisional_attachment_or_session(
     assert!(
         runtime
             .list_sessions(assistant_protocol::ListSessionsRequest::default())
+            .await
             .expect("invalid materialization leaves no session")
             .sessions
             .is_empty()
@@ -115,6 +116,7 @@ async fn text_only_materialization_creates_no_provisional_attachment_or_session(
     assert_eq!(
         runtime
             .list_sessions(assistant_protocol::ListSessionsRequest::default())
+            .await
             .expect("list text-only session")
             .sessions
             .len(),
@@ -141,6 +143,7 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     assert_eq!(
         runtime
             .list_sessions(assistant_protocol::ListSessionsRequest::default())
+            .await
             .expect("list sessions")
             .sessions
             .len(),
@@ -201,6 +204,7 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     assert_eq!(
         runtime
             .list_sessions(assistant_protocol::ListSessionsRequest::default())
+            .await
             .expect("list sessions after retry")
             .sessions
             .len(),
@@ -218,6 +222,7 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     let (goal_id, generation) = {
         let session = runtime
             .session(&first.session.session_id)
+            .await
             .expect("materialized session");
         let state = session.lock_state().expect("session state");
         let goal = state.goal.as_ref().expect("materialized Goal");

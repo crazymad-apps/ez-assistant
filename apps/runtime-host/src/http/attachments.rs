@@ -5,7 +5,7 @@ use std::{io, path::PathBuf};
 use assistant_protocol::{RuntimeErrorCode, RuntimeErrorInfo, SessionId};
 use assistant_runtime::{RuntimeError, StagedAttachmentUpload};
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Multipart, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -16,7 +16,7 @@ use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
 use super::{HttpState, MAX_ATTACHMENT_BYTES, error::runtime_status};
-use crate::attachment_hash;
+use crate::{access::AccessPermit, attachment_hash};
 
 const RANDOM_NAME_BYTES: usize = 16;
 
@@ -28,6 +28,7 @@ struct UploadErrorBody {
 pub(super) async fn upload_attachment(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
+    Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
     let session_id = match SessionId::new(session_id) {
@@ -116,6 +117,10 @@ pub(super) async fn upload_attachment(
         }
     };
 
+    if let Err(error) = permit.check() {
+        cleanup(&staging_path).await;
+        return upload_error(error.protocol_info());
+    }
     let result = state
         .runtime
         .finalize_attachment_upload(StagedAttachmentUpload {

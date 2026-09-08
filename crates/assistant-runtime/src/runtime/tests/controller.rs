@@ -231,7 +231,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         })
         .await
         .expect("enable proxy");
-    let target_controller = runtime.session_for_test(&target.session.session_id);
+    let target_controller = runtime.session_for_test(&target.session.session_id).await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -385,7 +385,7 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
         })
         .await
         .expect("enable proxy");
-    let target_controller = runtime.session_for_test(&target.session.session_id);
+    let target_controller = runtime.session_for_test(&target.session.session_id).await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -481,7 +481,9 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
                 .all(|binding| { binding.reply_route == Some(crate::ReplyRoute::SessionDefault) })
         );
     }
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let report_route = controller_session
@@ -541,7 +543,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
         .create_session(assistant_protocol::CreateSessionRequest::default())
         .await
         .expect("target");
-    let target_controller = runtime.session_for_test(&target.session.session_id);
+    let target_controller = runtime.session_for_test(&target.session.session_id).await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -601,7 +603,9 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
             .status,
         assistant_protocol::RunStatus::Completed
     );
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     let report_run_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let Some(run_id) = controller_session
@@ -669,7 +673,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
 }
 
 #[tokio::test]
-async fn recovery_interrupts_source_and_accepts_proxy_report_before_registry_publish() {
+async fn recovery_interrupts_source_without_creating_proxy_report() {
     let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
     let first_runtime = runtime_with_store(
         empty_model(),
@@ -689,7 +693,9 @@ async fn recovery_interrupts_source_and_accepts_proxy_report_before_registry_pub
         .create_session(assistant_protocol::CreateSessionRequest::default())
         .await
         .expect("target");
-    let target_controller = first_runtime.session_for_test(&target.session.session_id);
+    let target_controller = first_runtime
+        .session_for_test(&target.session.session_id)
+        .await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -755,30 +761,16 @@ async fn recovery_interrupts_source_and_accepts_proxy_report_before_registry_pub
             .status,
         assistant_protocol::RunStatus::Interrupted
     );
-    let recovered_controller = recovered_runtime.session_for_test(&controller.session.session_id);
-    let report = recovered_controller
-        .lock_state()
-        .expect("controller state")
-        .inputs
-        .values()
-        .find_map(|input| {
-            match input
-                .stored
-                .cross_session
-                .as_ref()
-                .map(|envelope| &envelope.binding)
-            {
-                Some(crate::CrossSessionInputBinding::ProxyReport {
-                    source_run_id,
-                    source_run_status,
-                    ..
-                }) => Some((source_run_id.clone(), *source_run_status)),
-                _ => None,
-            }
-        })
-        .expect("recovery proxy report");
-    assert_eq!(report.0, accepted.run.run_id);
-    assert_eq!(report.1, assistant_protocol::RunStatus::Interrupted);
+    let recovered_controller = recovered_runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
+    assert!(
+        recovered_controller
+            .lock_state()
+            .expect("controller state")
+            .inputs
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -834,7 +826,9 @@ async fn enabling_proxy_during_an_active_run_reports_that_run_at_settlement() {
             .status,
         assistant_protocol::RunStatus::Completed
     );
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if controller_session
@@ -884,7 +878,7 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
         .create_session(assistant_protocol::CreateSessionRequest::default())
         .await
         .expect("target");
-    let target_controller = runtime.session_for_test(&target.session.session_id);
+    let target_controller = runtime.session_for_test(&target.session.session_id).await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -921,7 +915,9 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
             .status,
         assistant_protocol::RunStatus::Failed
     );
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     let (status, report_run_id) =
         wait_for_proxy_report_status(&controller_session, &source.run.run_id).await;
     assert_eq!(status, assistant_protocol::RunStatus::Failed);
@@ -1082,7 +1078,9 @@ async fn cancelled_run_reports_cancelled_after_proxy_is_enabled_mid_run() {
             .status,
         assistant_protocol::RunStatus::Cancelled
     );
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     let (status, _) = wait_for_proxy_report_status(&controller_session, &source.run.run_id).await;
     assert_eq!(status, assistant_protocol::RunStatus::Cancelled);
     runtime

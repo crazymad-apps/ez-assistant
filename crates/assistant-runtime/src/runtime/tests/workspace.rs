@@ -72,6 +72,7 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
             .get_session(assistant_protocol::GetSessionRequest {
                 session_id: bound.session_id.clone(),
             })
+            .await
             .expect("get bound session")
             .session
             .workspace_id,
@@ -245,9 +246,12 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
         .await
         .expect("create existing session")
         .session;
-    let existing_controller = runtime.session_for_test(&existing.session_id);
+    let existing_controller = runtime.session_for_test(&existing.session_id).await;
     let frozen_environment = existing_controller.environment().clone();
-    let frozen_prompt = existing_controller.system_prompt().clone();
+    let frozen_prompt = existing_controller
+        .current_system_prompt()
+        .expect("system prompt")
+        .clone();
 
     let updated = runtime
         .update_workspace(UpdateWorkspaceRequest {
@@ -264,7 +268,12 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
         .workspace;
     assert_eq!(updated.label, "Renamed");
     assert_eq!(existing_controller.environment(), &frozen_environment);
-    assert_eq!(existing_controller.system_prompt(), &frozen_prompt);
+    assert_eq!(
+        existing_controller
+            .current_system_prompt()
+            .expect("system prompt"),
+        frozen_prompt
+    );
 
     let view = runtime
         .get_session_view(assistant_protocol::GetSessionViewRequest {
@@ -293,6 +302,7 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
     let managed = runtime
         .controller_tool_coordinator()
         .list_managed_sessions(&controller_session_id)
+        .await
         .expect("managed sessions");
     let managed_existing = managed
         .iter()
@@ -317,7 +327,7 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
         .await
         .expect("create updated session")
         .session;
-    let new_controller = runtime.session_for_test(&new_session.session_id);
+    let new_controller = runtime.session_for_test(&new_session.session_id).await;
     assert_eq!(
         new_controller.environment().working_directory,
         "/workspace/new-primary"
@@ -330,7 +340,8 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
     );
     assert!(
         new_controller
-            .system_prompt()
+            .current_system_prompt()
+            .expect("system prompt")
             .parts()
             .iter()
             .any(|part| part.contains("Renamed"))

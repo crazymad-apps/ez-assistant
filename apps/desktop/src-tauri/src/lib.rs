@@ -9,7 +9,7 @@ mod desktop_preferences;
 mod external_link;
 mod native_resource;
 mod runtime_bootstrap;
-mod user_terminal;
+mod runtime_connection;
 mod workspace_directory;
 
 use tauri::Manager as _;
@@ -21,7 +21,10 @@ fn health() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let runtime_bootstrap = runtime_bootstrap::RuntimeBootstrapCoordinator::for_application();
+    let context = tauri::generate_context!();
+    let development = context.config().identifier == "com.ez-assistant.desktop.dev";
+    let runtime_bootstrap =
+        runtime_bootstrap::RuntimeBootstrapCoordinator::for_application(development);
     let native_resources = native_resource::NativeResourceBridge::new();
     let desktop_lifecycle = desktop_lifecycle::DesktopLifecycleCoordinator::new();
     let app = tauri::Builder::default()
@@ -29,9 +32,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(runtime_bootstrap)
+        .manage(runtime_connection::RuntimeConnection::default())
         .manage(native_resources)
         .manage(browser_resource::BrowserResourceManager::default())
-        .manage(user_terminal::UserTerminalManager::default())
         .manage(desktop_lifecycle)
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -45,16 +48,6 @@ pub fn run() {
             {
                 view.state::<browser_resource::BrowserResourceManager>()
                     .close_all();
-                let app = view.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = app
-                        .state::<user_terminal::UserTerminalManager>()
-                        .close_all()
-                        .await
-                    {
-                        eprintln!("用户终端重载清理失败：{error}");
-                    }
-                });
             }
         })
         .on_window_event(|window, event| {
@@ -83,16 +76,9 @@ pub fn run() {
                 browser_resource::navigate_resource_browser,
                 browser_resource::act_on_resource_browser,
                 browser_resource::layout_resource_browser,
+                browser_resource::capture_resource_browser,
                 browser_resource::resource_browser_url,
                 browser_resource::close_resource_browser,
-                user_terminal::create_user_terminal,
-                user_terminal::write_user_terminal,
-                user_terminal::resize_user_terminal,
-                user_terminal::acknowledge_user_terminal,
-                user_terminal::close_user_terminal,
-                user_terminal::restart_user_terminal,
-                user_terminal::shutdown_user_terminals,
-                user_terminal::resume_user_terminals,
                 health,
                 desktop_lifecycle::desktop_platform,
                 desktop_lifecycle::is_desktop_window_maximized,
@@ -117,6 +103,7 @@ pub fn run() {
                 native_resource::copy_session_resource_path,
                 native_resource::copy_tool_file_path,
                 native_resource::export_session_markdown,
+                native_resource::download_runtime_resource,
                 native_resource::list_session_resource_files,
                 native_resource::list_local_resource_siblings,
                 native_resource::materialize_new_session,
@@ -141,6 +128,11 @@ pub fn run() {
                 native_resource::stage_clipboard_image,
                 native_resource::upload_selected_attachment,
                 runtime_bootstrap::bootstrap_runtime,
+                runtime_connection::begin_runtime_connection,
+                runtime_connection::connect_runtime_target,
+                runtime_connection::refresh_runtime_connection,
+                runtime_connection::remembered_runtime_password,
+                runtime_connection::open_runtime_web,
                 runtime_bootstrap::restart_runtime,
                 runtime_bootstrap::stop_runtime,
                 runtime_bootstrap::open_runtime_home,
@@ -148,7 +140,7 @@ pub fn run() {
             ];
             handler(invoke)
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build EZ Assistant");
     app.run(|app, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {

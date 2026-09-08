@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.24.0",
+  "version": "0.25.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,9 +15,11 @@
     "check:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript -- --check",
     "lint": "oxlint --ignore-pattern src/generated/** src tests vite.config.ts vitest.config.ts playwright.config.ts",
     "test": "npm run check:protocol && vitest run",
-    "test:e2e": "npm run cargo -- build -p assistant-runtime-host && playwright test",
+    "test:e2e": "npm run build:host && playwright test",
+    "test:e2e:web": "npm run build:host && playwright test --config playwright.web.config.ts",
     "preview": "vite preview",
-    "prepare:sidecar": "npm run cargo -- build -p assistant-runtime-host --release && node scripts/prepare-sidecar.mjs",
+    "build:host": "node scripts/build-host.mjs",
+    "prepare:sidecar": "npm run build:host -- --release && node scripts/prepare-sidecar.mjs",
     "release:macos": "node scripts/release-macos.mjs",
     "verify:macos-release": "node scripts/verify-macos-release.mjs",
     "tauri": "node scripts/run-tauri.mjs"
@@ -36,7 +38,9 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-zoom-pan-pinch": "4.2.0",
-    "streamdown": "2.5.0"
+    "streamdown": "2.5.0",
+    "three": "0.134.0",
+    "vanta": "0.5.24"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
@@ -46,6 +50,7 @@
     "@testing-library/user-event": "14.6.4",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
+    "@types/three": "0.134.0",
     "@vitejs/plugin-react": "6.0.5",
     "jsdom": "29.1.1",
     "oxlint": "1.78.0",

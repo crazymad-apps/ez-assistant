@@ -38,7 +38,7 @@ use crate::{
     },
     run::RuntimeRecorder,
     session::SessionController,
-    skill::{LoadSkillTool, SessionSkillCatalog, SkillActivationLatch},
+    skill::{LoadSkillTool, SkillActivationLatch, SkillCatalog},
 };
 
 /// 父 Run 冻结的一组子执行资源与委派配额。
@@ -59,7 +59,7 @@ pub(crate) struct ParentDelegationController {
     limits: crate::DelegationConfig,
     execution_permits: Arc<Semaphore>,
     created_tasks: Mutex<u32>,
-    skill_catalog: SessionSkillCatalog,
+    skill_catalog: SkillCatalog,
     mcp_registry: Arc<McpRegistry>,
     disclosure_context: Option<agent_types::UserMessage>,
 }
@@ -79,7 +79,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
-    pub(crate) skill_catalog: SessionSkillCatalog,
+    pub(crate) skill_catalog: SkillCatalog,
     pub(crate) mcp_registry: Arc<McpRegistry>,
     pub(crate) disclosure_context: Option<agent_types::UserMessage>,
 }

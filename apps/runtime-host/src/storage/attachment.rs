@@ -193,7 +193,13 @@ impl StorageEngine {
     }
 
     pub(super) fn recover_attachments(&mut self) -> StorageResult<()> {
-        let rows = self.load_attachments()?;
+        self.recover_attachments_scoped(None)
+    }
+    pub(super) fn recover_attachments_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<()> {
+        let rows = self.load_attachments_scoped(scope)?;
         for attachment in rows {
             let state = self.validate_or_repair_attachment(&attachment);
             let state = if state.is_ok() {
@@ -214,30 +220,45 @@ impl StorageEngine {
     }
 
     pub(super) fn load_attachments(&self) -> StorageResult<Vec<StoredAttachment>> {
+        self.load_attachments_scoped(None)
+    }
+
+    pub(super) fn load_attachments_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredAttachment>> {
+        let predicate = if session_id.is_some() {
+            "a.session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT a.attachment_id, a.session_id, a.blob_hash, a.original_name,
                         b.size_bytes, b.media_type, a.agent_readable_path, a.state, a.created_at_ms
                  FROM attachments a
                  JOIN attachment_blobs b ON b.blob_hash = a.blob_hash
-                 ORDER BY a.created_at_ms, a.attachment_id",
-            )
+                 WHERE {predicate} ORDER BY a.created_at_ms, a.attachment_id"
+            ))
             .map_err(|source| internal_error("attachments could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("attachments could not be read", source))?;
         rows.map(|row| {
             parse_attachment(

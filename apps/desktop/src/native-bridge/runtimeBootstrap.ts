@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RuntimeHostCapabilities } from "../generated/assistant-protocol";
+import { bootstrapWebRuntime } from "../runtime-client/webLogin";
 
 export type RuntimeBootstrap = {
   readonly base_url: string;
@@ -7,6 +8,9 @@ export type RuntimeBootstrap = {
   readonly access_token: string;
   readonly capabilities: RuntimeHostCapabilities;
   readonly started_runtime: boolean;
+  readonly binding_id?: string;
+  readonly target_kind?: "local" | "remote";
+  readonly authentication?: "native" | "web";
 };
 
 export type RuntimeBootstrapFailure = {
@@ -16,10 +20,7 @@ export type RuntimeBootstrapFailure = {
 
 export async function bootstrapRuntime(): Promise<RuntimeBootstrap> {
   if (!isTauri()) {
-    throw {
-      code: "desktop_bridge_unavailable",
-      message: "浏览器预览未连接桌面 Runtime bridge。",
-    } satisfies RuntimeBootstrapFailure;
+    return bootstrapWebRuntime();
   }
   try {
     return await invoke<RuntimeBootstrap>("bootstrap_runtime");

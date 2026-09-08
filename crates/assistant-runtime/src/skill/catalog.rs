@@ -1,4 +1,4 @@
-//! 随 Session 冻结的 Skill Catalog、结构校验与模型目录渲染。
+//! 当前技能扫描结果、结构校验与模型目录渲染。
 
 use agent_model::SystemPromptSnapshot;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use super::{
     SkillPackageSourceError, SkillSource,
 };
 
-/// Session Catalog 的冻结可用性。
+/// 一次扫描的可用性。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillCatalogStatus {
@@ -19,33 +19,33 @@ pub enum SkillCatalogStatus {
     LegacyUnavailable,
 }
 
-/// Session 中一项可恢复、可激活的完整 Skill 定义快照。
+/// 一次扫描得到的完整 Skill 定义。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionSkillDefinition {
+pub struct SkillDefinition {
     pub name: SkillName,
     pub description: String,
     pub source: SkillSource,
     /// 共享 Root 中的源目录；只供 Runtime/工具按需读取，不进入模型目录或 revision。
     pub source_path: String,
     pub definition_digest: String,
-    /// 创建 Catalog 时读取到的正文；激活时从此冻结事实生成内部消息，不重新解释共享文件。
+    /// 本次扫描读取的正文；接纳输入或执行边界内使用，只有激活正文进入历史消息。
     pub body: String,
     pub metadata: SkillMetadata,
     pub model_invocable: bool,
     pub user_invocable: bool,
 }
 
-/// 随 Session 原子持久化的完整 Skill Catalog。
+/// 短生命周期的技能扫描结果，不进入 Session 或 Store。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionSkillCatalog {
+pub struct SkillCatalog {
     pub schema_version: u32,
     pub revision: String,
     pub status: SkillCatalogStatus,
-    pub definitions: Vec<SessionSkillDefinition>,
+    pub definitions: Vec<SkillDefinition>,
     pub diagnostics: Vec<SkillDiagnostic>,
 }
 
-impl SessionSkillCatalog {
+impl SkillCatalog {
     pub const SCHEMA_VERSION: u32 = 1;
 
     /// 旧 Session 的稳定缺省；恢复时不得扫描当前文件补写历史事实。
@@ -68,7 +68,7 @@ impl SessionSkillCatalog {
     pub fn from_discovery(discovery: SkillDiscovery) -> Result<Self, SkillPackageSourceError> {
         let mut definitions = Vec::with_capacity(discovery.winners.len());
         for winner in discovery.winners {
-            definitions.push(SessionSkillDefinition {
+            definitions.push(SkillDefinition {
                 name: winner.name,
                 description: winner.description,
                 source: winner.source,
@@ -98,11 +98,11 @@ impl SessionSkillCatalog {
         Ok(catalog)
     }
 
-    /// 只从当前 Session 冻结 Catalog 解析一项用户可调用定义。
+    /// 只从本次扫描目录 解析一项用户可调用定义。
     pub fn user_definition(
         &self,
         name: &SkillName,
-    ) -> Result<&SessionSkillDefinition, SkillActivationResolveError> {
+    ) -> Result<&SkillDefinition, SkillActivationResolveError> {
         if self.status != SkillCatalogStatus::Ready {
             return Err(SkillActivationResolveError::CatalogUnavailable);
         }
@@ -118,11 +118,11 @@ impl SessionSkillCatalog {
         Ok(definition)
     }
 
-    /// 只从当前 Session 冻结 Catalog 解析一项模型可调用定义。
+    /// 只从本次扫描目录 解析一项模型可调用定义。
     pub(crate) fn model_definition(
         &self,
         name: &SkillName,
-    ) -> Result<&SessionSkillDefinition, ModelSkillResolveError> {
+    ) -> Result<&SkillDefinition, ModelSkillResolveError> {
         if matches!(
             self.status,
             SkillCatalogStatus::Unavailable | SkillCatalogStatus::LegacyUnavailable
@@ -219,7 +219,7 @@ impl SessionSkillCatalog {
     }
 }
 
-/// 用户显式激活无法从冻结 Session Catalog 解析的稳定原因。
+/// 用户显式激活无法从当前技能目录 解析的稳定原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillActivationResolveError {
     CatalogUnavailable,
@@ -227,7 +227,7 @@ pub enum SkillActivationResolveError {
     NotUserInvocable,
 }
 
-/// 模型 `load_skill` 无法从冻结 Catalog 解析定义的稳定原因。
+/// 模型 `load_skill` 无法从当前执行目录 解析定义的稳定原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModelSkillResolveError {
     CatalogUnavailable,
@@ -245,9 +245,7 @@ struct CatalogRevisionEntry<'a> {
     user_invocable: bool,
 }
 
-fn catalog_revision(
-    definitions: &[SessionSkillDefinition],
-) -> Result<String, SkillPackageSourceError> {
+fn catalog_revision(definitions: &[SkillDefinition]) -> Result<String, SkillPackageSourceError> {
     let entries = definitions
         .iter()
         .map(|definition| CatalogRevisionEntry {
@@ -277,7 +275,7 @@ fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn is_sha256_v1(value: &str) -> bool {
+pub(super) fn is_sha256_v1(value: &str) -> bool {
     value.strip_prefix("sha256-v1:").is_some_and(|hex| {
         hex.len() == 64
             && hex

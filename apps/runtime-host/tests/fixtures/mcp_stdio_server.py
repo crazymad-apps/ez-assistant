@@ -3,6 +3,11 @@ import os
 import sys
 import time
 
+# 隔离启动验证可挂住外部服务，确保 Host 就绪不依赖其完成。
+startup_gate = os.environ.get("MCP_FIXTURE_START_GATE")
+while startup_gate and not os.path.exists(startup_gate):
+    time.sleep(0.02)
+
 legacy = len(sys.argv) > 1 and sys.argv[1] == "legacy"
 
 # 仅由隔离验收配置显式开启：验证 stderr 被持续排空且不会转发 credential。

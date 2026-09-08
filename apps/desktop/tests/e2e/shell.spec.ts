@@ -5,6 +5,7 @@ import { expectMcpAcceptance } from "./mcp-acceptance";
 
 test("loads real workspaces and sessions from the temporary Runtime Host", async ({ page }) => {
   test.setTimeout(60_000);
+  page.on("console", (message) => { if (message.type() === "error" || message.text().includes("DOTS")) console.log("entry-renderer:", message.text()); });
   const bootstrap = process.env.EZ_ASSISTANT_E2E_BOOTSTRAP;
   if (!bootstrap) {
     throw new Error("temporary Runtime bootstrap is missing");
@@ -41,6 +42,10 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
           if (command === "plugin:event|unlisten") {
             return Promise.resolve();
           }
+          if (command === "begin_runtime_connection") return "e2e-binding";
+          if (command === "connect_runtime_target") return { bootstrap: JSON.parse(serialized_bootstrap), warning: null };
+          if (command === "refresh_runtime_connection") return JSON.parse(serialized_bootstrap);
+          if (command === "shutdown_user_terminals" || command === "resume_user_terminals") return;
           if (command === "bootstrap_runtime") {
             return Promise.resolve(JSON.parse(serialized_bootstrap));
           }
@@ -62,6 +67,10 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
           }
           if (command === "save_desktop_preferences") {
             return Promise.resolve();
+          }
+          if (command === "layout_resource_browser") {
+            // 模拟原生 UI 线程异步完成，让错误的滚动显隐能够被页面回归检测到。
+            return new Promise<void>((resolve) => setTimeout(resolve, 40));
           }
           if (command === "choose_workspace_directory") {
             return Promise.resolve(workspace_directory);
@@ -93,11 +102,28 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
 
   await page.goto("/");
   await expect(page).toHaveTitle("EZ Assistant");
+  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await expect(page.locator("[data-dots-state='ready'] canvas")).toHaveCount(1);
+  await page.screenshot({ path: test.info().outputPath("desktop-entry.png"), animations: "disabled" });
+  await expect(page.getByText("E2E Workspace", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "进入工作空间" }).click();
+  const transition = page.locator("[data-workspace-transition]");
+  await expect(transition).toHaveAttribute("data-workspace-transition", "playing");
+  await page.waitForFunction(() => Number(document.querySelector("[data-launch-frame]")?.getAttribute("data-launch-frame")) >= 36);
+  await page.screenshot({ path: test.info().outputPath("desktop-launch.png") });
+  await page.waitForFunction(() => Number(document.querySelector("[data-launch-frame]")?.getAttribute("data-launch-frame")) >= 84);
+  await page.screenshot({ path: test.info().outputPath("desktop-workspace-reveal.png") });
+  await expect(transition).toHaveAttribute("data-workspace-transition", "complete");
+  // 素材实际解码并接近结尾，不能用媒体失败降级冒充动画接入成功。
+  expect(Number(await transition.getAttribute("data-launch-frame"))).toBeGreaterThanOrEqual(110);
+  await expect(page.getByRole("textbox", { name: "输入消息" })).toBeFocused();
+  await expect(page.locator("[data-runtime-entry]")).toHaveCount(0);
   await expect(page.getByText("ez-assistant · 本地 AI 助手")).toBeVisible();
   await expect(page.getByRole("button", { name: "新对话" })).toBeVisible();
   await expect(page.getByRole("tabpanel", { name: "当前上下文" })).toBeVisible();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
+  await expectSettingsScrollWithoutFlicker(page);
   await expectModelCatalogForm(page);
   await expectDeviceGatewayManagement(page);
   const navigation = page.getByRole("complementary", { name: "会话导航" });
@@ -267,6 +293,8 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
   await child_header.getByRole("button", { name: "返回主会话" }).click();
   await page.reload();
+  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await page.getByRole("button", { name: "进入工作空间" }).click();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
   await expect(context_panel.getByRole("button", { name: /E2E 子任务/ })).toBeVisible();
@@ -283,6 +311,8 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(navigation.getByRole("button", { name: new RegExp(renamed_title) })).toBeVisible();
 
   await page.reload();
+  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await page.getByRole("button", { name: "进入工作空间" }).click();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await navigation.getByRole("button", { name: new RegExp(renamed_title) }).click();
   await expect(session_header.getByRole("button", { name: renamed_title })).toBeVisible();
@@ -330,6 +360,54 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await page.keyboard.press("Escape");
   await expectMcpAcceptance(page);
 });
+
+async function expectSettingsScrollWithoutFlicker(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await expect(settings.getByRole("region", { name: "当前连接" })).toContainText("这台电脑");
+  await settings.screenshot({ path: test.info().outputPath("runtime-overview.png") });
+  await settings.getByRole("button", { name: "切换", exact: true }).click();
+  await expect(settings.getByRole("heading", { name: "切换 Runtime" })).toBeVisible();
+  await settings.getByRole("button", { name: "返回 Runtime" }).click();
+  await settings.getByRole("button", { name: /^本机与客户端/ }).click();
+  await expect(settings.getByRole("button", { name: "停止本机 Runtime" })).toBeVisible();
+  await settings.getByRole("button", { name: "返回 Runtime" }).hover();
+  await settings.screenshot({ path: test.info().outputPath("runtime-local.png") });
+  await settings.getByRole("button", { name: "返回 Runtime" }).click();
+  await settings.getByRole("button", { name: /^状态与诊断/ }).click();
+  await expect(settings.getByRole("button", { name: "复制诊断" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "停止本机 Runtime" })).toHaveCount(0);
+  await settings.getByRole("button", { name: "返回 Runtime" }).click();
+  await settings.getByRole("button", { name: /^访问设置/ }).click();
+  const heading = settings.getByRole("heading", { name: "访问设置" });
+  await expect(heading).toBeVisible();
+  await expect(settings.getByRole("button", { name: "保存访问设置" })).toBeVisible();
+  await settings.screenshot({ path: test.info().outputPath("runtime-access.png") });
+  const result = await settings.getByRole("button", { name: "保存访问设置" }).evaluate(async (element) => {
+    let content = element.parentElement;
+    while (content && getComputedStyle(content).overflowY !== "auto") content = content.parentElement;
+    const overlays = document.getElementById("overlay-root");
+    if (!content || !overlays) throw new Error("Settings scroll container or portal is missing");
+    let hidden = false;
+    const observer = new MutationObserver((records) => {
+      hidden ||= getComputedStyle(overlays).visibility === "hidden"
+        || records.some((record) => record.oldValue?.includes("visibility: hidden"));
+    });
+    observer.observe(overlays, { attributes: true, attributeFilter: ["style"], attributeOldValue: true });
+    let max_scroll = 0;
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        content.scrollTop = index % 2 === 0 ? content.scrollHeight : 0;
+        max_scroll = Math.max(max_scroll, content.scrollTop);
+        await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      }
+    } finally { observer.disconnect(); }
+    return { hidden, max_scroll };
+  });
+  expect(result.max_scroll).toBeGreaterThan(0);
+  expect(result.hidden).toBe(false);
+  await settings.getByRole("button", { name: "关闭设置" }).click();
+}
 
 async function expectModelCatalogForm(page: Page): Promise<void> {
   await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -410,7 +488,8 @@ async function selectMcpFixture(page: Page): Promise<void> {
 async function expectResponsiveLayouts(page: Page): Promise<void> {
   const layouts = [
     { width: 1440, height: 900, left_sidebar: true, right_sidebar: true },
-    { width: 1152, height: 720, left_sidebar: true, right_sidebar: true },
+    // 既有布局以 286 + 380 + 500 为双栏阈值；1152 下保留左栏。
+    { width: 1152, height: 720, left_sidebar: true, right_sidebar: false },
     { width: 960, height: 640, left_sidebar: true, right_sidebar: false },
     { width: 720, height: 720, left_sidebar: false, right_sidebar: false },
   ] as const;

@@ -7,10 +7,56 @@ vi.mock("../../src/native-bridge/resourceBrowser", () => ({
   createResourceBrowser: vi.fn(), navigateResourceBrowser: vi.fn().mockResolvedValue(undefined),
   closeResourceBrowser: vi.fn().mockResolvedValue(undefined), actOnResourceBrowser: vi.fn().mockResolvedValue(undefined),
   resourceBrowserUrl: vi.fn(),
+  captureResourceBrowser: vi.fn().mockResolvedValue(null),
 }));
 afterEach(() => { vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("Desktop browser lifetime", () => {
+  it("preserves the requested address when the native page has no committed URL yet", async () => {
+    vi.mocked(bridge.createResourceBrowser).mockResolvedValueOnce("native-uncommitted");
+    const browser = new BrowserController(vi.fn(), vi.fn());
+    browser.navigate("https://example.com/");
+    await vi.waitFor(() => expect(browser.native_id).toBe("native-uncommitted"));
+    vi.mocked(bridge.createResourceBrowser).mock.calls[0]![1]({ type: "load_started", url: "https://example.com/" });
+    vi.mocked(bridge.resourceBrowserUrl).mockResolvedValueOnce(null);
+    await browser.refreshUrl();
+    expect(browser.url).toBe("https://example.com/");
+    expect(browser.error).toBeNull();
+    browser.dispose();
+  });
+
+  it.each(["navigate", "switch", "dispose"] as const)("discards an in-flight preview after %s", async (change) => {
+    vi.mocked(bridge.createResourceBrowser).mockResolvedValueOnce("native-preview");
+    const browser = new BrowserController(vi.fn(), vi.fn());
+    browser.navigate("https://example.com/");
+    await vi.waitFor(() => expect(browser.native_id).toBe("native-preview"));
+    vi.mocked(bridge.createResourceBrowser).mock.calls[0]![1]({ type: "loaded", url: "https://example.com/" });
+    let complete!: (preview: bridge.BrowserPreview | null) => void;
+    vi.mocked(bridge.captureResourceBrowser).mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    const pending = browser.capturePreview();
+    if (change === "navigate") browser.navigate("https://example.com/"); // 同 URL 刷新同样拒绝旧截图。
+    if (change === "switch") browser.clearPreview();
+    if (change === "dispose") browser.dispose();
+    complete({ url: "https://example.com/", image: "data:image/png;base64,old" });
+    await pending;
+    expect(browser.preview).toBeNull();
+    browser.dispose();
+  });
+
+  it("does not break the page when native capture is unavailable or fails", async () => {
+    vi.mocked(bridge.createResourceBrowser).mockResolvedValueOnce("native-preview");
+    const browser = new BrowserController(vi.fn(), vi.fn());
+    browser.navigate("https://example.com/");
+    await vi.waitFor(() => expect(browser.native_id).toBe("native-preview"));
+    vi.mocked(bridge.createResourceBrowser).mock.calls[0]![1]({ type: "loaded", url: "https://example.com/" });
+    vi.mocked(bridge.captureResourceBrowser).mockRejectedValueOnce(new Error("unavailable"));
+    await browser.capturePreview();
+    expect(browser.error).toBeNull();
+    expect(browser.url).toBe("https://example.com/");
+    expect(browser.preview).toBeNull();
+    browser.dispose();
+  });
+
   it("releases a native view whose creation finishes after its tab closes", async () => {
     let finish!: (id: string) => void;
     vi.mocked(bridge.createResourceBrowser).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));

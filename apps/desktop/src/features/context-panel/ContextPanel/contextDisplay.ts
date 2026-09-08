@@ -1,20 +1,17 @@
-import type { RunStatus, SessionViewSnapshot } from "../../../generated/assistant-protocol";
+import type { RunStatus, SessionViewSnapshot, SkillManagementSnapshot } from "../../../generated/assistant-protocol";
 
-/** 只组合会话冻结目录与激活投影；可用不等于已加载，不触发扫描或修改激活状态。 */
-export function sessionSkillRows(view: SessionViewSnapshot | undefined) {
-  const active = (view?.active_skills ?? []).map((skill) => ({
-    name: skill.tag.name,
-    status_label: skill.trigger === "user" ? "用户激活" : "智能体激活",
-  }));
-  const active_names = new Set(active.map((skill) => skill.name));
-  const catalog = view?.skill_catalog;
-  const available = catalog?.status === "ready" ? catalog.skills : [];
-  return [
-    ...active,
-    ...available
-      .filter((skill) => skill.enabled && skill.health === "ready" && !active_names.has(skill.name))
-      .map((skill) => ({ name: skill.name, status_label: "可用" })),
-  ];
+/** 当前目录决定列表；激活标签只说明已进入历史的正文，不补回已删除技能。 */
+export function sessionSkillRows(view: SessionViewSnapshot | undefined, catalog: SkillManagementSnapshot | null) {
+  const active = new Map((view?.active_skills ?? []).map((skill) => [skill.tag.name, skill.trigger]));
+  return (catalog?.available ? catalog.skills : [])
+    .filter((skill) => skill.enabled && skill.health === "ready")
+    .map((skill) => {
+      const trigger = active.get(skill.name);
+      let status_label = "可用";
+      if (trigger === "user") status_label = "用户激活";
+      if (trigger === "model") status_label = "智能体激活";
+      return { name: skill.name, status_label };
+    });
 }
 
 export function formatNullableTokens(value: number | null): string {

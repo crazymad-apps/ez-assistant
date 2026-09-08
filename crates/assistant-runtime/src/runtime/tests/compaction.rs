@@ -342,6 +342,7 @@ async fn manual_compaction_rejects_a_session_with_an_active_run() {
             .get_session(GetSessionRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("session")
             .session
             .active_compaction
@@ -488,6 +489,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
         .get_session(GetSessionRequest {
             session_id: session_id.clone(),
         })
+        .await
         .expect("session")
         .session
         .active_compaction
@@ -532,6 +534,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
                 .get_session(GetSessionRequest {
                     session_id: session_id.clone(),
                 })
+                .await
                 .expect("session")
                 .session
                 .active_compaction

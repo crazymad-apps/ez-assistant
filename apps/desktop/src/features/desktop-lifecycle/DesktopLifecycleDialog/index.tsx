@@ -9,18 +9,18 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
 
   const stops_runtime = intent !== "quit_desktop" || lifecycle.stop_runtime_on_quit;
   const title = intent === "restart_runtime"
-    ? "重启 Runtime？"
+    ? "重启本机 Runtime？"
     : intent === "stop_runtime"
-      ? "停止 Runtime？"
+      ? "停止本机 Runtime？"
       : lifecycle.stop_runtime_on_quit
-        ? "退出并停止 Runtime？"
+        ? "退出并停止本机 Runtime？"
         : "退出桌面客户端？";
   const confirm_label = intent === "restart_runtime"
-    ? "重启 Runtime"
+    ? "重启本机 Runtime"
     : intent === "stop_runtime"
-      ? "停止 Runtime"
+      ? "停止本机 Runtime"
       : lifecycle.stop_runtime_on_quit
-        ? "退出并停止 Runtime"
+        ? "退出并停止本机 Runtime"
         : "退出客户端";
 
   return (
@@ -47,13 +47,14 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
                   onChange={(event) => lifecycle.setStopRuntimeOnQuit(event.currentTarget.checked)}
                   type="checkbox"
                 />
-                同时停止 Runtime
+                同时停止本机 Runtime
               </label>
             </>
           ) : (
-            <p>{intent === "restart_runtime" ? "Runtime 将受控停止并启动新实例。" : "桌面客户端会保留，你可以稍后重新启动 Runtime。"}</p>
+            <p>{intent === "restart_runtime" ? "本机 Runtime 将受控停止并启动新实例。" : "桌面客户端会保留，你可以稍后重新启动 Runtime。"}</p>
           )}
-          {stops_runtime && (
+          {stops_runtime && !lifecycle.local_impact_known && <p>当前连接为其他 Runtime；本机任务数量未载入。本次操作只影响本机 Runtime。</p>}
+          {stops_runtime && lifecycle.local_impact_known && (
             <div className={styles.impact}>
               <strong>本次操作影响</strong>
               <dl>

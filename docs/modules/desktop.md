@@ -1,5 +1,9 @@
 # desktop 模块约束
 
+> 在途演进：[v0.25.0 功能设计](../versions/v0.25.0/功能设计.md)与
+> [技术方案](../versions/v0.25.0/技术方案.md)均已确认并定稿。M1 Web 登录与设置、M2 入口和远端连接已实现；
+> M3 Host 文件兼容已获确认；M4 已迁出 PTY、接入当前 Host WebSocket，本轮验证完成、待用户确认。文末说明覆盖连接与原生资源目标约束。
+
 ## 模块定位
 
 `apps/desktop` 是 Tauri 2 桌面应用，负责 WebView UI 与 macOS/桌面系统能力，并通过
@@ -32,9 +36,10 @@
 - Tauri Rust 启动层从 Runtime Home 私有发现文件取得 loopback 地址和进程级
   Token，将它们作为启动配置注入受信任 WebView。WebView 内的 HTTP Runtime Client 可
   直接调用 Runtime Command、Upload 和事件流，不要求每个请求都经 Tauri command 代理。
-- 远程连接是默认关闭的可选能力；后续如显式启用，同一 WebView Runtime Client 改用
-  HTTPS 地址和远程身份，不另造命令、事件或上传客户端。
-- WebView 中的 Runtime Token 只存内存，不进入 URL、`localStorage`、日志或普通前端事件；
+- 远程连接是默认关闭的可选能力；v0.25.0 已确认支持 HTTP／HTTPS 地址和远程身份，
+  HTTPS 可选。M2 已实现同一 WebView Runtime Client 复用命令、事件和上传契约的目标连接。
+- WebView 中的连接 Token 只存内存，不进入 `localStorage`、日志或普通前端事件；进程 bootstrap 不进入 URL。
+  打开 Web 快捷入口仅使用独立普通登录 token fragment，页面立即移除后建立 Cookie 登录态；
   配套 CSP、受控导航和精确 WebView Origin 白名单。
 - xterm DOM renderer 会动态生成字体、ANSI 色、光标样式表及 truecolor/对比度内联样式，因此主窗口
   CSP 的 `style-src` 允许 `'unsafe-inline'`，并仅对 `style-src` 关闭 Tauri 的自动 hash/nonce 注入，
@@ -44,7 +49,7 @@
 - 事件订阅使用能携带 Authorization header 的 `fetch` streaming SSE，不在 URL 中传 Token。
 - 纯浏览器直连本地 Runtime 保留为未来显式开放的可选模式，默认关闭；它可通过
   独立的 Origin 白名单和授权边界直连，不强制引入 companion bridge。
-- WebView 不直接访问文件系统、模型 API、数据库或 Shell；必须通过受控 Tauri command。
+- WebView 不直接访问文件系统、模型 API、数据库或 Shell；Host 文件与终端通过受认证 HTTP／WebSocket，客户端 OS 能力通过受控 Tauri command。
 - 关闭主窗口或退出桌面客户端不得默认终止 Runtime；只有明确执行“停止 Runtime”，或在当次退出
   确认中选择“同时停止 Runtime”，才触发受控关闭流程。“退出 Assistant”不作为独立动作。
 - 桌面专属数据（窗口大小、悬浮球位置、快捷键）不进入 Agent 会话模型。
@@ -170,6 +175,9 @@
 - Conversation 以可靠消息正文根为边界，Selection 两端在同一根即可跨文本节点、行内代码、链接和
   强调；跨消息、工具块、交互控件和流式未可靠正文直接拒绝。浮动气泡执行纯前端冻结动作，不发送
   Runtime command；右键和 `Shift+F10` 保持 WebView 原生行为。
+- 消息结构的 `user-select: none` 只用于防止误拖选，不能依赖它清除已有选区。鼠标左键点击空白、
+  控件或会话外部时清除属于当前消息列表的选区；保留右键复制、Shift 扩选与引用按钮操作，
+  选区折叠后同步隐藏引用气泡。不得通过默认选中或重建 Range 来维持引用入口。
 - `QuoteTextProjection` 用 TreeWalker 连接可引用文本节点，生成 UTF-16 range、exact 与 Unicode 有界
   prefix/suffix；prefix/suffix 每侧最多 128 个 Unicode 字符，链接、代码和强调等渲染结构统一冻结为
   可见纯文本，不反向转换或匹配 raw Markdown。
@@ -205,6 +213,79 @@ npm run tauri -- build --no-bundle
 - 跨客户端重启重新登记本地文件句柄、加载最后 URL；终端标签首次激活才按原启动来源创建新 Shell。它与同一客户端内保留 PTY/xterm 的会话切回不同，不宣称恢复旧进程或运行中命令。
 - 本地文件链接只在受信任 Assistant 消息正文启用，使用显式绝对 file URI，经原生校验和有界读取后返回受控句柄。System Context、Skill、普通路径和不受信任外部网页不获得该能力。
 - 文件类型图标与映射直接引用 Material Icon Theme；Monaco 仅按需加载只读编辑器及所需语言，Markdown 复用消息渲染器；图片缩放/拖拽直接引用 react-zoom-pan-pinch，变换保存到现有 ResourceViewState 和偏好快照。图片与 PDF 使用受控 Blob URL 并随页面释放。
+- Monaco 的 `editor.api` 按需入口必须显式加载官方 `features/codicon/register`，不依赖 JSON 等语言功能间接加载图标字体；首次打开非 JSON 文件时也需保证查找栏图标正常。
 - 外部网页是同窗口 child WebView，不共享主 WebView 的 bootstrap、command 权限或 DOM。资源 `+` 采用原生菜单；其他 HTML 遮罩按已确认方案暂时隐藏网页，不靠 CSS z-index 声称覆盖原生层。
+- 浮层原语用 `data-overlay-region` 声明实际绘制范围；浏览器只读取 Shell 的 overlay root 并做视口矩形相交判断。Dialog 的遮罩覆盖窗口，非相交菜单不隐藏网页；Tooltip 的 `pointer-events:none` 不影响视觉遮挡判断。HTML 浮层始终独立渲染，不再操作整个 portal 的 visibility；内部滚动只测量，原生显隐只随遮挡结果变化，窗口缩放／恢复另行重应用布局。
+- macOS 可见原生网页最多每秒更新一张内存截图，遮挡时停止采样并露出占位图，解除后恢复同一个 WebView；截图不入偏好或磁盘。导航、切换和关闭清理快照并拒绝迟到结果。截图失败或非 macOS 返回不可用，显示中性占位，不能使正常网页进入错误态。
+- 用户已批准仅 `browser_resource/platform.rs` 的 WKWebView FFI 局部允许 unsafe。仅主 WebView 可调用受管网页截图；复用 Wry 的 objc2/block2 版本，主线程调用，长边限制、2 MiB 编码上限与单任务门控；不引入屏幕录制权限、网页脚本截图或调试监听端口。
+- 截图校验和地址轮询共用空值安全的原生 URL 读取，避免 Wry 0.55.1 对未提交／失败页面的 nil URL 直接 unwrap。私有 bridge 返回 null 时保留请求地址；加载事件使用 payload 的地址。
+- macOS 的 `tauri-runtime-wry` 精确固定为 2.11.4。该版本 `WithWebview` 将网页、controller、window 的三个 +1 引用转成裸指针却不释放，`platform.rs` 统一用 RAII 接管并平衡，防止截图／URL 轮询后关闭网页仍播放音频。升级到包含上游 [#15224](https://github.com/tauri-apps/tauri/pull/15224) 的借用实现时，必须同时移除接管逻辑，不能直接升级依赖。
+- 真正释放网页（关闭标签、LRU 回收、主页面重载）统一经过原生清理：停止加载，macOS 12+ 禁止该页媒体继续／重新播放，卸载文档，再关闭 Tauri 子视图；较旧系统不调用不可用的媒体 API。普通切换和浮层遮挡只隐藏，不能触发此清理或影响其他网页。回归方法见 `apps/desktop/tests/native/README.md`。
 - 原生窗口操作使用 `get_window("main")`。创建 child WebView 后不得再把 `get_webview_window("main")` 当作窗口存在的依据。隐藏窗口保留 PTY；真正退出等待进程组清理，不能绑定或停止独立 Runtime 的后台任务。
 - 用户终端与 Agent Shell 完全分开，环境变量过滤私有凭据，后台输出受 ack 背压及 xterm scrollback 上限约束。Ctrl+D 只发送 EOF，收到实际 Shell 退出事件才关闭标签；Session 删除先完成所属终端回收，再提交删除意图。
+
+## 开发 Runtime 目录与验收隔离
+
+- 2026-09-07 用户指定开发环境改用 `~/.ez-assistant`：`npm run tauri -- dev` 在未设置 `EZ_ASSISTANT_RUNTIME_HOME` 时注入该绝对路径，构建子进程与 Desktop 继承同一环境。显式覆盖仍优先；空值或相对路径由原生校验拒绝，不静默回退。手动开发 GUI／Host 也显式传入该目录。
+- 自动化与隔离验收继续显式使用临时目录。未经过启动脚本且未指定环境的 debug／Dev 二进制仍使用 `~/.ez-assistant-dev`，正式产品 Release 默认目录不变。
+- `npm run tauri -- dev` 合并 `tauri.dev.conf.json`，应用标识为 `com.ez-assistant.desktop.dev`，隔离 Desktop 偏好、窗口状态和 WebView 存储；验证 Release 时同样合并该配置。开发配置不重复定义 `app.windows` 数组，避免覆盖 macOS Overlay／隐藏标题或其他平台的窗口配置。
+- 本轮 M0—M3 使用两个独立 Runtime Home / Host 进程联调，不启动或连接用户已安装应用的 Runtime。
+- 人工开发／验收保留正常操作系统 `HOME`，确保用户终端能加载既有 Shell 配置及主题；不要复用自动化夹具的空用户目录作为人工验收环境。Runtime Home 按当前用户指定目录或显式隔离覆盖选择。
+
+
+## v0.25.0 M1/M2：Web 登录与 Desktop 目标连接
+
+- `ApplicationConnectionStore` 管理客户端入口和登录展示；每次实际切换释放旧 RootStore，创建新目标的业务投影，不复制 Runtime 权威状态。入口静默启动本机，用户手动进入；进入后仅从设置切换，失败不回到入口、不回退本机。
+- 设置侧栏统一为 Runtime，概览与切换、访问设置、状态与诊断、本机与客户端共用 `SettingsStore.page` 导航及未保存确认，不另建路由状态。访问与诊断指向当前 Host，本机页只承载本机原生操作；Web 隐藏切换和本机页，Desktop 切换成功回新目标概览。
+- 原生 `runtime_connection` 持有当前选中目标与不透明 binding ID；`RuntimeTarget` 在 Tauri 调用准入时冻结上下文。Host 字节请求、上传、临时文件与迟到返回均绑定同一目标；切换取消旧操作并释放原生资源。已有业务 HTTP／SSE 继续复用连接协调和取消机制。
+- 本机 Runtime 启停、重启和托盘属于本机进程管理，不能修改当前远端连接或把其会话计数当成本机影响范围；远端凭据失效后保留远端选择与设置错误状态。
+- 远端地址只接受 HTTP／HTTPS origin，拒绝用户信息、路径、查询和 fragment；Native 请求禁用重定向并使用正常 TLS 校验，不提供忽略证书错误选项。认证与协议／组件版本验证通过后才进入业务页面。
+- macOS 可选记住密码写入 Keychain，service 随应用标识隔离、account 使用规范化 origin；成功登录后才保存。Keychain 不可用仍可连接并提示，不写入明文偏好，不自动选择上次目标。
+- 顶栏“打开 Web 端”取得当前 Host 的独立普通登录 token，经系统浏览器打开 fragment 链接；Web 移除 fragment 后使用 Host Cookie。浏览器退出不撤销 Desktop 自己的登录。
+- DesktopEntryPage 与 WebLoginPage 通过 `RuntimeEntryLayout` 共用背景、源 Logo、标题、页脚及内容宽度；不同表单经 `children` 组合，共享层不接管连接或登录状态。DOTS 归属于共享布局，登录／连接进入工作台后统一卸载，Web 不渲染独立阴影卡片。
+- DOTS 及 Three 从固定 npm 依赖本地打包、按入口懒加载；规则稀疏网格、按时间计算的小幅波动与鼠标微动；固定高度基准避免按帧累加导致低帧率下振幅变小，点与线共用位置缓冲。离开入口销毁动画、WebGL 场景与监听；隐藏页面暂停，减少动态效果或初始化失败时显示静态背景。
+- Web 只加载可用原生能力。Host 目录选择、浏览器文件兼容和按目标保存查看状态已由文末 M3 实现覆盖；Host 文件路径不能交给客户端 OS 打开。Host PTY 现由文末 M4 实现覆盖。
+
+
+## v0.25.0 M2：统一 Host 端口
+
+- 访问设置只展示一个服务端口（默认 7240）、可选域名与所选协议；本机 discovery 支持同一监听的
+  HTTP／HTTPS，仍只接受私有发现文件中的 127.0.0.1 地址，不放宽原生证书校验或将 bootstrap 发往域名。
+- 访问开关／域名立即生效；端口／协议／证书修改后显示待重启，仅本机 Desktop 可复用现有重启确认。
+
+
+## v0.25.0 M3：文件兼容与查看状态
+
+- 每个 RootStore 拥有一个 `ClientResources`，共用当前 Runtime Client 的认证和取消域；Desktop 保留原生选择及流式上传，Web 用浏览器 File／FormData。选择、在途操作与下载 Blob URL 随 owner 释放，迟到结果不得进入新目标。
+- Web 文件选择最多每次 32 项、总暂存 128 项、单文件 1 GiB；粘贴图片沿用现有大小校验。首次发送复用 manifest 与 materialization key，网络中断返回既有“不确定结果”语义，不能通过创建新会话重试。
+- 本机 Desktop 工作目录继续使用系统选择器；Web／远端 Desktop 使用同一个 HostDirectoryDialog，支持任意 Host 目录、上级、隐藏项、手输路径及明确错误。WorkspaceEditor 复用该选择能力添加或更换目录。
+- Assistant 绝对路径／file URI 和相对引用解释为 Host 文件；独立路径使用 `host_file` 来源，不复用客户端 `local_file`。Session locator、附件和工具资源身份沿用既有协议。
+- Web 下载认证 fetch 的 Blob 后交给浏览器保存，URL 由当前 owner 有界释放；Desktop 通过已有原生保存流程流式写入临时文件，当前目标变更时取消，成功后发布目标文件。原生系统打开、Finder 及技能源目录入口仅在本机 Desktop 提供。
+- 同一原生偏好文件保留本机顶层字段，远端按规范化 HTTP／HTTPS origin 放入有界 `hosts` 映射；写入串行合并，不能覆盖本机或其他目标。Web 继续使用当前 origin 的轻量查看存储；不保存正文、File／Blob、密码或 token，存储不可用时降级。Web 不恢复 browser／terminal，远端不恢复 `local_file`。
+- 复制功能共用 Clipboard API 与普通 HTTP 下的用户触发复制回退；失败给出可手动复制的内容。M3 不启用 Web 内嵌浏览器；远端终端现由文末 M4 实现覆盖。
+
+
+## v0.25.0 M4：Host 终端客户端
+
+- `runtime-client/TerminalSocket` 由当前 RuntimeClient 绑定 origin、凭据与取消域；Web 沿用同源 Cookie，Desktop 首帧 Bearer。凭据不进入 query/subprotocol，不自动重连终端。
+- `TerminalController` 继续持有 xterm 展示和标签状态，写入按 Host `input_ack` 保序，输出在 xterm 解析后 ACK。重开创建新 socket；Web pagehide 直接断开所属连接，查看偏好不恢复 Web 终端。
+- 删除 Tauri user_terminal manager、PTY 和进程组清理依赖；正常前端退出等待连接清理，原生退出销毁 WebView 后由 Host 回收断开的 socket。隐藏窗口不会关闭 socket。
+- CSP 允许当前 Host 的 WS／WSS，HTTP 与 HTTPS 地址推导一致；切换或 RuntimeClient dispose 只关闭自身连接，不发送清理全 Host 终端的命令。
+
+## v0.25.0 M5：首次工作台转场
+
+- `WorkspaceTransition` 只组合入口和实际 `AppShell`。Desktop 首次连接或 Web 登录及初始快照就绪后才开始播放，不新增业务连接状态；Desktop 设置切换 Host 不重播。Web 密码、token 快捷登录和 Cookie 恢复共用转场，退出或登录失效时销毁本轮视图，重新登录重播。
+- 火箭使用用户委托动画任务的透明图集，播放器懒加载且仅保留当前／下一张解码图，完成、卸载或失败时释放图像、请求、rAF 和监听。素材说明见 `apps/desktop/src/features/runtime-access/WorkspaceTransition/README.md`；视觉认可状态记录在版本计划。
+- 转场期间工作台 inert，入口上移淡出；结束后聚焦可用输入框，否则聚焦工作台容器。减少动态效果、后台切换或媒体失败直接进入已就绪的工作台。
+- Desktop CSP 的 `connect-src 'self'` 用于读取包内协议图集，不能仅凭 HTTP Vite 测试判断原生资源可加载；xterm 所需样式策略保持。Vanta／Three 许可证随 `licenses/entry-visual.txt` 打包。
+- Web 登录沿用连接代次，在登录、bootstrap、退出的异步边界丢弃旧结果；迟到响应不能恢复已经退出的 UI 投影。
+
+### v0.25.0 当前 Skill/MCP 列表
+
+`/skill` 每次呼出、新草稿选择与右侧上下文技能栏复用 `ListSkills`，不读取 Session 目录字段。右栏进入／展开、技能设置或刷新事件、窗口重新激活时查询；列表只有视图生命周期的加载／错误状态，关闭或换 owner 丢弃旧响应。当前列表不补回已删除的历史激活名称。
+`/mcp` 每次呼出查询 Runtime 当前服务 Registry；选择标签和已冻结上下文不作为可选目录来源。系统提示词保持冻结。
+
+
+开发构建复用本机 Host 时，在 bootstrap 返回就绪前使用 Vite 的精确 Origin 执行预检；原生
+健康检查成功不等于 WebView 具备 CORS 访问能力。安装版 Host 拒绝开发来源时明确提示版本／
+来源不匹配，不自动停止既有进程或放宽 Release 来源策略；原生停止／重启通道不受此预检限制。

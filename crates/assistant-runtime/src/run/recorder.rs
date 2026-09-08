@@ -232,7 +232,7 @@ impl ExecutionRecorder for RuntimeRecorder {
 
 fn prepare_skill_activations(
     target: &RecorderTarget,
-    staged: Vec<(ToolCallId, crate::SessionSkillDefinition)>,
+    staged: Vec<(ToolCallId, crate::skill::StagedSkillDefinition)>,
     created_at_ms: i64,
 ) -> Result<PreparedSkillActivations, RecordError> {
     if staged.is_empty() {
@@ -242,26 +242,27 @@ fn prepare_skill_activations(
             call_ids: Vec::new(),
         });
     }
-    let (session_id, owner, run_id, catalog_revision) = target.skill_activation_context();
+    let (session_id, owner, run_id) = target.skill_activation_context()?;
     let first = &staged[0].1;
     let (mut message, _) = InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
         source: InternalBoundarySource::SkillActivation,
-        text: render_model_activation(&catalog_revision, first),
+        text: render_model_activation(&first.catalog_revision, &first.definition),
     })
     .map_err(|_| record_error("skill activation boundary could not be constructed"))?;
-    for (_, definition) in staged.iter().skip(1) {
+    for (_, staged) in staged.iter().skip(1) {
         InternalBoundaryCoordinator::append(
             &mut message,
             InternalBoundaryRequest {
                 source: InternalBoundarySource::SkillActivation,
-                text: render_model_activation(&catalog_revision, definition),
+                text: render_model_activation(&staged.catalog_revision, &staged.definition),
             },
         )
         .map_err(|_| record_error("skill activation boundary could not be constructed"))?;
     }
     let activations = staged
         .iter()
-        .map(|(_, definition)| {
+        .map(|(_, staged)| {
+            let definition = &staged.definition;
             Ok(StoredSkillActivation {
                 activation_id: id::generate("activation")
                     .map_err(|_| record_error("skill activation id could not be allocated"))?,
@@ -271,7 +272,7 @@ fn prepare_skill_activations(
                 input_id: None,
                 message_id: message.id.clone(),
                 name: definition.name.clone(),
-                catalog_revision: catalog_revision.clone(),
+                catalog_revision: staged.catalog_revision.clone(),
                 definition_digest: definition.definition_digest.clone(),
                 trigger: SkillActivationTrigger::Model,
                 created_at_ms,
@@ -325,7 +326,7 @@ mod tests {
                 model_key: ModelKey::new("fixture").expect("model key"),
                 reasoning_effort: None,
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
-                skill_catalog: crate::SessionSkillCatalog::legacy_unavailable(),
+
                 environment: SessionExecutionEnvironment {
                     workspace_id: None,
                     working_directory: "/volatile/session/private".to_owned(),

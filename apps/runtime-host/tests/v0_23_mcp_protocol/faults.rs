@@ -16,6 +16,7 @@ fn formal_host_mcp_disconnect_timeout_and_cancel_never_replay() {
             configure(home.path(), &fixture, "openai_chat_completions", transport);
             let host = HostProcess::start(home.path());
             let mut client = host.connect();
+            wait_for_mcp(&mut client);
             let session = client.runtime(
                 "create_session",
                 json!({"title":"MCP fault","model_key":"fixture"}),

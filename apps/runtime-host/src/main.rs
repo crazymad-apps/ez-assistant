@@ -1,6 +1,8 @@
 //! EZ Assistant 正式 Runtime Host 进程入口。
 
 #[cfg(unix)]
+mod access;
+#[cfg(unix)]
 mod attachment_hash;
 mod config;
 #[cfg(unix)]
@@ -14,6 +16,8 @@ mod http;
 mod image;
 #[cfg(unix)]
 mod mcp;
+#[cfg(unix)]
+mod mcp_startup;
 mod media_diagnostics;
 #[cfg(unix)]
 mod platform;
@@ -28,6 +32,7 @@ mod speech;
 mod storage;
 #[cfg(unix)]
 mod supervisor;
+mod user_terminal;
 
 use std::error::Error;
 #[cfg(unix)]
@@ -93,10 +98,35 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
         CliAction::Serve(arguments) => {
             #[cfg(unix)]
             {
+                let startup = std::time::Instant::now();
                 let config = ServeConfig::resolve(arguments)?;
                 prepare_runtime_home(&config.runtime_home)?;
                 // 单实例锁必须先于 Store；HTTP 端口与发现文件在 Runtime 恢复后才发布。
                 let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
+                let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
+                let (mut access_service, access_handle) =
+                    access::HostAccessService::new(config_source.clone());
+                if config.password_stdin {
+                    use tokio::io::AsyncReadExt as _;
+                    let mut bytes = Vec::new();
+                    tokio::io::stdin()
+                        .take(1027)
+                        .read_to_end(&mut bytes)
+                        .await?;
+                    if bytes.ends_with(b"\n") {
+                        bytes.pop();
+                        if bytes.ends_with(b"\r") {
+                            bytes.pop();
+                        }
+                    }
+                    let password = String::from_utf8(bytes)
+                        .map_err(|_| access::AccessError::Invalid("密码必须为 UTF-8。"))?;
+                    access_service
+                        .initialize_password(assistant_protocol::SecretValue::new(password))
+                        .await?;
+                }
+                let access_configuration = access_service.prepare().await?;
+                let access_ready = startup.elapsed();
                 let resources = HostResources::new(&config.runtime_home)?;
                 let model_catalog = Arc::new(ModelCatalog::from_json(MODEL_CATALOG_JSON)?);
                 let recall_reference_key =
@@ -104,8 +134,8 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                 let store = Arc::new(
                     LocalRuntimeStore::open(&config.runtime_home, STORAGE_QUEUE_CAPACITY).await?,
                 );
+                let store_ready = startup.elapsed();
                 let device_output_dispatcher = Arc::new(DeviceChannelOutputDispatcher::new());
-                let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
                 let mcp_config_source =
                     Arc::new(LocalMcpConfigSource::new(config.runtime_home.clone()));
                 let mcp_connection_factory =
@@ -146,12 +176,8 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     }
                     return Err(Box::new(error));
                 }
-                // MCP 是可降级的外部能力。bootstrap 必须在监听端点发布前完成，但配置或
-                // Server 故障不能阻止其余 Runtime 能力启动。
-                if runtime.bootstrap_mcp().await.is_err() {
-                    eprintln!("runtime-host: MCP bootstrap is unavailable");
-                }
-                let endpoint = match instance.bind_and_publish().await {
+                let runtime_ready = startup.elapsed();
+                let endpoint = match instance.bind_and_publish(&access_configuration).await {
                     Ok(endpoint) => endpoint,
                     Err(error) => {
                         let _ = runtime.shutdown(ShutdownRuntimeRequest::default()).await;
@@ -166,6 +192,14 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     endpoint.base_url(),
                     endpoint.discovery_path().display()
                 );
+                eprintln!(
+                    "runtime-host: startup ready_ms={} access_ms={} resources_store_ms={} runtime_config_ms={} bind_ms={}",
+                    startup.elapsed().as_millis(),
+                    access_ready.as_millis(),
+                    (store_ready - access_ready).as_millis(),
+                    (runtime_ready - store_ready).as_millis(),
+                    (startup.elapsed() - runtime_ready).as_millis()
+                );
                 let (speech_service, speech_handle) = SpeechService::new(config_source);
                 let (device_gateway, device_gateway_handle) = DeviceGatewayService::new(
                     config.runtime_home.clone(),
@@ -173,22 +207,39 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     device_output_dispatcher.as_ref(),
                     speech_handle.clone(),
                 );
-                let server = RuntimeServer::new(
-                    endpoint,
-                    runtime.clone(),
-                    config.runtime_home,
-                    device_gateway_handle,
-                    speech_handle,
-                );
                 let mut supervisor = HostSupervisor::new(HOST_SUBSYSTEM_SHUTDOWN_TIMEOUT);
                 let host_shutdown = supervisor.shutdown_handle();
-                let command_shutdown = host_shutdown.clone();
+                let terminals = user_terminal::UserTerminalService::new();
+                let state = http::HttpState::new(
+                    runtime.clone(),
+                    http::HttpEndpointState::new(
+                        endpoint.access_token(),
+                        endpoint.authority(),
+                        endpoint.base_url(),
+                        config.runtime_home,
+                        endpoint.instance_id().to_owned(),
+                    ),
+                    device_gateway_handle,
+                    speech_handle,
+                    host_shutdown.clone(),
+                    access_handle,
+                    terminals.handle.clone(),
+                );
                 supervisor.spawn_subsystem(
-                    "desktop_http",
+                    "user_terminals",
+                    FailurePolicy::Degrade,
+                    move |shutdown| terminals.run_until(shutdown),
+                );
+                let server = RuntimeServer::new(endpoint, state.clone());
+                supervisor.spawn_subsystem(
+                    "host_access",
+                    FailurePolicy::Degrade,
+                    move |subsystem_shutdown| access_service.run_until(state, subsystem_shutdown),
+                );
+                supervisor.spawn_subsystem(
+                    "host_http",
                     FailurePolicy::ShutdownHost,
-                    move |subsystem_shutdown| {
-                        server.serve_until(subsystem_shutdown, command_shutdown)
-                    },
+                    move |subsystem_shutdown| server.serve_until(subsystem_shutdown),
                 );
                 supervisor.spawn_subsystem(
                     "speech_service",
@@ -199,6 +250,13 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
                     "device_gateway",
                     FailurePolicy::Degrade,
                     move |subsystem_shutdown| device_gateway.run_until(subsystem_shutdown),
+                );
+
+                let mcp_runtime = runtime.clone();
+                supervisor.spawn_subsystem(
+                    "mcp_startup",
+                    FailurePolicy::Degrade,
+                    move |shutdown| mcp_startup::run(mcp_runtime, shutdown),
                 );
 
                 let supervisor_result = supervisor

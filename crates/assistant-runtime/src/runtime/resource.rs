@@ -8,12 +8,12 @@ impl AssistantRuntime {
     /// 将协议中的根身份解析为 Session 创建时冻结的物理根。
     ///
     /// 返回值仅供同进程 Host 在执行路径校验和 I/O 时使用，不进入 Session View 或 Desktop WebView。
-    pub fn resolve_session_resource_root(
+    pub async fn resolve_session_resource_root(
         &self,
         session_id: &SessionId,
         root: &SessionResourceRoot,
     ) -> RuntimeResult<String> {
-        let session = self.session(session_id)?;
+        let session = self.session(session_id).await?;
         resolve_root_from_environment(session.environment(), root)
     }
 }

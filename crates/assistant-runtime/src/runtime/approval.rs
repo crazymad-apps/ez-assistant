@@ -75,7 +75,7 @@ impl AssistantRuntime {
             })
             .await?
             .run;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         {
             let _mutation = session.mutation().await;
             let mut state = session.lock_state()?;
@@ -122,11 +122,11 @@ impl AssistantRuntime {
         Ok(())
     }
 
-    pub fn list_pending_approvals(
+    pub async fn list_pending_approvals(
         &self,
         request: ListPendingApprovalsRequest,
     ) -> RuntimeResult<ListPendingApprovalsResult> {
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         Ok(ListPendingApprovalsResult {
             approvals: self.approval_registry.list(&request.session_id)?,
         })
@@ -138,7 +138,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<DecideApprovalResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let snapshot = self
             .approval_registry
             .begin_resolution(&request.session_id, &request.approval_id)?;
@@ -302,7 +302,7 @@ impl AssistantRuntime {
         variant: assistant_protocol::AgentVariant,
         invocation: &agent_tools::ResolvedToolInvocation,
     ) -> bool {
-        let Ok(session) = self.session(session_id) else {
+        let Ok(Some(session)) = self.session_loader.cached(session_id) else {
             return false;
         };
         let Ok(loads) = self

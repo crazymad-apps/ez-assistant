@@ -27,76 +27,46 @@ describe("ContextPanel", () => {
     });
   });
 
-  it("shows the three session skills even before any activation", () => {
+  it("reads current skills before activation and reloads when the section opens", async () => {
     const store = contextStore();
-    const view = store.projection.session_views.get("session-1")!;
-    const names = ["skill-creator", "weather-query", "zhihu"];
-    store.projection.applySessionSnapshot({
-      observed_sequence: 2,
-      value: {
-        ...view,
-        skill_catalog: {
-          ...view.skill_catalog,
-          skills: names.map((name) => ({ ...view.skill_catalog.skills[0]!, name })),
-        },
-        active_skills: [],
-      },
-    });
+    const load = vi.mocked(store.listSkills);
+    load.mockResolvedValue(skillList(["skill-creator", "weather-query", "zhihu"]));
     renderPanel(store);
-
-    for (const name of names) expect(screen.getByText(name)).toBeVisible();
+    expect(await screen.findByText("zhihu")).toBeVisible();
     expect(screen.getAllByText("可用")).toHaveLength(3);
-    expect(screen.queryByText("当前还没有已激活技能")).not.toBeInTheDocument();
-    expect(screen.queryByText("用户激活")).not.toBeInTheDocument();
-    expect(screen.queryByText("智能体激活")).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledWith("workspace-1");
+    fireEvent.click(screen.getByRole("button", { name: "技能" }));
+    load.mockResolvedValue(skillList(["new-skill"]));
+    fireEvent.click(screen.getByRole("button", { name: "技能" }));
+    expect(await screen.findByText("new-skill")).toBeVisible();
+    expect(screen.queryByText("zhihu")).not.toBeInTheDocument();
   });
 
-  it("updates activation labels without duplicating available skills or losing inherited activations", () => {
+  it("annotates current skills without adding removed historical activations to the list", async () => {
     const store = contextStore();
     const view = store.projection.session_views.get("session-1")!;
+    vi.mocked(store.listSkills).mockResolvedValue(skillList(["review-skill", "weather-query"]));
     renderPanel(store);
-    expect(screen.getByText("用户激活")).toBeVisible();
-
+    expect(await screen.findByText("用户激活")).toBeVisible();
     act(() => store.projection.applySessionSnapshot({
       observed_sequence: 2,
-      value: {
-        ...view,
-        skill_catalog: {
-          ...view.skill_catalog,
-          skills: [
-            ...view.skill_catalog.skills,
-            { ...view.skill_catalog.skills[0]!, name: "weather-query" },
-          ],
-        },
-        active_skills: [
-          { ...view.active_skills[0]!, trigger: "model" },
-          { ...view.active_skills[0]!, tag: { name: "inherited-skill" }, message_id: "inherited-message" },
-        ],
-      },
+      value: { ...view, active_skills: [
+        { ...view.active_skills[0]!, trigger: "model" },
+        { ...view.active_skills[0]!, tag: { name: "removed-skill" }, message_id: "old-message" },
+      ] },
     }));
-
     expect(screen.getAllByText("review-skill")).toHaveLength(1);
     expect(screen.getByText("智能体激活")).toBeVisible();
-    expect(screen.getByText("inherited-skill")).toBeVisible();
-    expect(screen.getByText("用户激活")).toBeVisible();
+    expect(screen.queryByText("removed-skill")).not.toBeInTheDocument();
     expect(screen.getByText("weather-query")).toBeVisible();
-    expect(screen.getAllByText("可用")).toHaveLength(1);
   });
 
-  it.each([
-    ["legacy_unavailable", "此历史会话没有可展示的技能信息"],
-    ["unavailable", "当前会话的技能信息不可用"],
-    ["empty", "当前会话没有可用技能"],
-  ] as const)("preserves the %s catalog empty state", (status, message) => {
+  it.each([true, false])("shows a current empty/unavailable result (%s)", async (available) => {
     const store = contextStore();
-    const view = store.projection.session_views.get("session-1")!;
-    store.projection.applySessionSnapshot({
-      observed_sequence: 2,
-      value: { ...view, skill_catalog: { status, skills: [], diagnostics: [] }, active_skills: [] },
-    });
+    vi.mocked(store.listSkills).mockResolvedValue({ available, skills: [], diagnostics: [] });
     renderPanel(store);
-    expect(screen.getByText(message)).toBeVisible();
-    expect(screen.queryByText("可用")).not.toBeInTheDocument();
+    expect(await screen.findByText(available ? "当前没有可用技能" : "当前技能列表不可用，请重试")).toBeVisible();
+    expect(screen.queryByText("review-skill")).not.toBeInTheDocument();
   });
 
   it("stacks wide context sections in two independent vertical columns", () => {
@@ -309,10 +279,13 @@ function renderPanel(store: RootStore) {
 
 function contextStore(): RootStore {
   const store = new RootStore();
+  vi.spyOn(store, "listSkills").mockResolvedValue(skillList(["review-skill"]));
   store.projection.applyApplicationSnapshot({
     observed_sequence: 1,
     value: {
       runtime_lifecycle: "running",
+      active_sessions_next_offset: null,
+      archived_sessions_next_offset: null,
       configuration: { state: "ready" },
       models: [{ model_key: "fixture", display_name: "Fixture Model" }],
       workspaces: [{
@@ -400,19 +373,6 @@ function contextStore(): RootStore {
         context: null,
       },
       child_tasks: [],
-      skill_catalog: {
-        status: "ready",
-        skills: [{
-          name: "review-skill",
-          description: "检查实现",
-          source: "workspace_ez_assistant",
-          model_invocable: true,
-          user_invocable: true,
-          enabled: true,
-          health: "ready",
-        }],
-        diagnostics: [],
-      },
       active_skills: [{
         tag: { name: "review-skill" },
         trigger: "user",
@@ -430,4 +390,15 @@ function contextStore(): RootStore {
   } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
   store.navigation.selectSession("session-1");
   return store;
+}
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+});
+
+function skillList(names: string[]): Awaited<ReturnType<RootStore["listSkills"]>> {
+  return { available: true, diagnostics: [], skills: names.map((name) => ({
+    name, description: "技能说明", source: "workspace_agents", enabled: true,
+    user_invocable: true, model_invocable: true, health: "ready",
+  })) };
 }

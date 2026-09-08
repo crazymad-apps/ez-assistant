@@ -7,7 +7,7 @@ import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 afterEach(cleanup);
 
 describe("ResourceWorkspace", () => {
-  it("renders the fixed context tab and available resource entries", () => {
+  it("renders the fixed context tab and hides the desktop browser entry on Web", () => {
     renderWorkspace(new RootStore());
 
     expect(screen.getByRole("tab", { name: "当前上下文" })).toHaveAttribute("aria-selected", "true");
@@ -17,10 +17,9 @@ describe("ResourceWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建资源标签" }));
     const menu = screen.getByRole("menu", { name: "新建资源标签" });
     const workspace = within(menu).getByRole("menuitem", { name: /工作空间/ });
-    const browser = within(menu).getByRole("menuitem", { name: /浏览器/ });
+    expect(within(menu).queryByRole("menuitem", { name: /浏览器/ })).not.toBeInTheDocument();
     const terminal = within(menu).getByRole("menuitem", { name: /终端/ });
     expect(workspace).toBeDisabled();
-    expect(browser).toBeEnabled();
     expect(terminal).toBeDisabled();
     expect(workspace).toHaveTextContent("工作空间");
     expect(workspace).not.toHaveTextContent("将在文件浏览里程碑启用");

@@ -5,7 +5,7 @@ import type { McpServerSnapshot } from "../../../../generated/assistant-protocol
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "../SettingsPageContainer";
-import { SettingsMessages } from "../RuntimeSettingsPage";
+import { SettingsMessages } from "../SettingsMessages";
 import { ImportDialog } from "./ImportDialog";
 import { ServerEditor } from "./ServerEditor";
 import shared from "../index.module.scss";

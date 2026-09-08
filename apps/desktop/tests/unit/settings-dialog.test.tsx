@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runInAction } from "mobx";
+import * as nativeCore from "@tauri-apps/api/core";
 import { SettingsDialog } from "../../src/features/settings/SettingsDialog";
 import type {
   ApplicationSnapshot,
@@ -15,10 +16,17 @@ import type {
 } from "../../src/generated/assistant-protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
+import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  ...await vi.importActual<typeof import("@tauri-apps/api/core")>("@tauri-apps/api/core"),
+  isTauri: vi.fn(() => false),
+}));
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.mocked(nativeCore.isTauri).mockReturnValue(false);
 });
 
 describe("SettingsDialog model management", () => {
@@ -212,17 +220,96 @@ describe("SettingsDialog model management", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "MCP" })).toBeVisible());
     expect(cancel).toHaveBeenCalled();
   });
-  it("keeps Runtime diagnostics and lifecycle controls compact", () => {
+  it("groups Runtime pages under one sidebar entry and separates diagnostics from local controls", () => {
     const store = settingsStore();
+    vi.mocked(nativeCore.isTauri).mockReturnValue(true);
     store.settings.page = "runtime";
     renderDialog(store);
-
+    const navigation = screen.getByRole("navigation", { name: "设置页面" });
+    expect(within(navigation).getByRole("button", { name: "Runtime" })).toHaveAttribute("aria-current", "page");
+    expect(within(navigation).queryByRole("button", { name: "Host 访问" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "当前连接" })).toHaveTextContent("这台电脑");
+    expect(screen.queryByRole("button", { name: "停止本机 Runtime" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^状态与诊断/ }));
     const diagnostic_heading = screen.getByRole("heading", { name: "诊断信息" });
     expect(diagnostic_heading.parentElement).toHaveTextContent(
       "诊断信息/private/runtime/config.toml",
     );
-    expect(screen.queryByText("关闭窗口不会默认停止运行时。")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "桌面生命周期" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "停止本机 Runtime" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: "Runtime" })).toHaveAttribute("aria-current", "page");
+    fireEvent.click(screen.getByRole("button", { name: "返回 Runtime" }));
+    fireEvent.click(screen.getByRole("button", { name: /^本机与客户端/ }));
+    expect(screen.getByRole("button", { name: "停止本机 Runtime" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "关闭主窗口时" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "复制诊断" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回 Runtime" }));
+    expect(screen.getByRole("region", { name: "当前连接" })).toBeVisible();
+  });
+
+  it("hides desktop process controls in the Web settings", () => {
+    const store = settingsStore();
+    store.settings.page = "runtime";
+    renderDialog(store);
+    expect(screen.queryByRole("button", { name: /^本机与客户端/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "切换" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^访问设置/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /^状态与诊断/ }));
+    expect(screen.getByRole("button", { name: "复制诊断" })).toBeVisible();
+  });
+
+  it("labels remote Host pages and preserves dirty access settings until navigation is confirmed", async () => {
+    const store = new RootStore({ target_kind: "remote" });
+    vi.mocked(nativeCore.isTauri).mockReturnValue(true);
+    store.settings.is_open = true;
+    store.settings.page = "runtime";
+    store.connection.address = "http://remote.example:9000";
+    store.connection.state = "connected";
+    const hostAccessCommand = vi.fn().mockResolvedValue({
+      revision: "access-1", password_configured: true, listener_state: "listening", restart_required: false, error: null,
+      configuration: { remote_enabled: true, scheme: "http", port: 9000, server_names: ["remote.example"], tls_certificate: null, tls_private_key: null },
+    });
+    vi.spyOn(store, "runtime_client", "get").mockReturnValue({ hostAccessCommand } as unknown as RuntimeClient);
+    renderDialog(store);
+    expect(screen.getByRole("region", { name: "当前连接" })).toHaveTextContent("http://remote.example:9000");
+    fireEvent.click(screen.getByRole("button", { name: /^访问设置/ }));
+    fireEvent.change(await screen.findByLabelText("新密码"), { target: { value: "pending-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "返回 Runtime" }));
+    const confirmation = screen.getByRole("dialog", { name: "放弃未保存的修改？" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "取消" }));
+    expect(screen.getByLabelText("新密码")).toHaveValue("pending-password");
+    fireEvent.click(screen.getByRole("button", { name: "返回 Runtime" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换页面" }));
+    expect(await screen.findByRole("region", { name: "当前连接" })).toHaveTextContent("http://remote.example:9000");
+    fireEvent.click(screen.getByRole("button", { name: /^本机与客户端/ }));
+    expect(screen.getByText(/以下操作作用于这台电脑/)).toBeVisible();
+    expect(hostAccessCommand.mock.calls.every(([command]) => command.type === "get_status")).toBe(true);
+  });
+
+  it("saves a single port and requires explicit restart before remote access", async () => {
+    const store = new RootStore({ target_kind: "local" });
+    vi.mocked(nativeCore.isTauri).mockReturnValue(true);
+    store.settings.is_open = true;
+    store.settings.page = "host_access";
+    store.connection.address = "http://127.0.0.1:7240";
+    store.connection.state = "connected";
+    const configuration = { remote_enabled: false, scheme: "http", port: 7240, server_names: [], tls_certificate: null, tls_private_key: null };
+    const status = { revision: "one-port", password_configured: true, listener_state: "closed", restart_required: false, error: null, configuration };
+    const hostAccessCommand = vi.fn().mockResolvedValueOnce(status).mockResolvedValueOnce({ ...status, revision: "new-port", restart_required: true, configuration: { ...configuration, port: 7241 } });
+    const restart = vi.spyOn(store.desktop_lifecycle, "request").mockImplementation(() => {});
+    vi.spyOn(store, "runtime_client", "get").mockReturnValue({ address: "http://127.0.0.1:7240", hostAccessCommand } as unknown as RuntimeClient);
+    renderDialog(store);
+    expect(await screen.findByLabelText("端口")).toHaveValue(7240);
+    expect(screen.queryByLabelText("监听地址")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("端口"), { target: { value: "0" } });
+    expect(screen.getByRole("button", { name: "保存访问设置" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("端口"), { target: { value: "7241" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存访问设置" }));
+    expect(await screen.findByRole("button", { name: "重启本机 Runtime" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "允许其他设备连接" })).toBeDisabled();
+    expect(hostAccessCommand).toHaveBeenLastCalledWith({ type: "configure", payload: { expected_revision: "one-port", configuration: { ...configuration, port: 7241 } } });
+    expect(restart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重启本机 Runtime" }));
+    expect(restart).toHaveBeenCalledWith("restart_runtime");
   });
 
   it("manages Gateway access and confirms a visible device candidate without CLI state", async () => {
@@ -338,7 +425,7 @@ describe("SettingsDialog model management", () => {
     const toggle = vi.spyOn(store.settings, "setSkillEnabled").mockResolvedValue(true);
     renderDialog(store);
 
-    expect(screen.getByRole("button", { name: /运行时/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Runtime" })).toBeVisible();
     expect(screen.queryByText("文件与启停变更仅对新会话生效。")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "技能工作区范围" })).toHaveTextContent("仅用户根目录");
     expect(screen.getByText("检查实现")).toBeVisible();
@@ -698,6 +785,8 @@ function model(model_key: string, is_default: boolean): ModelConfiguration {
 function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
+    active_sessions_next_offset: null,
+    archived_sessions_next_offset: null,
     configuration: {
       config_path: null,
       revision: "revision-1",

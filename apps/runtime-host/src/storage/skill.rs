@@ -102,35 +102,50 @@ impl StorageEngine {
 
     /// 按规范 Conversation 顺序恢复全部 Session Activation 事实。
     pub(super) fn load_skill_activations(&self) -> StorageResult<Vec<StoredSkillActivation>> {
+        self.load_skill_activations_scoped(None)
+    }
+
+    pub(super) fn load_skill_activations_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredSkillActivation>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id,
                         message_id, name, catalog_revision, definition_digest, trigger,
                         created_at_ms
                  FROM skill_activations
-                 ORDER BY created_at_ms, activation_id",
-            )
+                 WHERE {predicate} ORDER BY created_at_ms, activation_id"
+            ))
             .map_err(|source| {
                 invalid_data_with_source("skill activations could not be loaded", source)
             })?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, i64>(11)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, i64>(11)?,
+                    ))
+                },
+            )
             .map_err(|source| {
                 invalid_data_with_source("skill activations could not be loaded", source)
             })?;

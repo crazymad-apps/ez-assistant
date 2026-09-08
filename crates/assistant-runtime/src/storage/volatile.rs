@@ -114,6 +114,280 @@ pub(crate) struct VolatileRuntimeStore {
 }
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn search_conversation_titles(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let query = request.query.to_lowercase();
+            let mut hits = Vec::new();
+            for session in state.sessions.values() {
+                let included = match &request.scope {
+                    ConversationSearchScope::Global => true,
+                    ConversationSearchScope::Session { session_id } => {
+                        &session.session_id == session_id
+                    }
+                    ConversationSearchScope::Workspace { workspace_id } => {
+                        session.environment.workspace_id.as_ref() == Some(workspace_id)
+                    }
+                };
+                if !included {
+                    continue;
+                }
+                let lifecycle = match session.lifecycle {
+                    StoredSessionLifecycle::Active => assistant_protocol::SessionLifecycle::Active,
+                    StoredSessionLifecycle::Archived => {
+                        assistant_protocol::SessionLifecycle::Archived
+                    }
+                };
+                if session.title.to_lowercase().contains(&query) {
+                    hits.push(assistant_protocol::ConversationHistoryHit {
+                        owner: ConversationOwner::MainSession {
+                            session_id: session.session_id.clone(),
+                        },
+                        session_title: session.title.clone(),
+                        child_task_title: None,
+                        message_id: None,
+                        created_at_ms: Some(session.updated_at_ms),
+                        snippet: session.title.clone(),
+                        match_kind: assistant_protocol::ConversationHistoryMatchKind::Title,
+                        lifecycle,
+                    });
+                }
+                for child in state.child_tasks.values().filter(|c| {
+                    c.session_id == session.session_id && c.title.to_lowercase().contains(&query)
+                }) {
+                    hits.push(assistant_protocol::ConversationHistoryHit {
+                        owner: ConversationOwner::ChildTask {
+                            session_id: session.session_id.clone(),
+                            child_task_id: child.child_task_id.clone(),
+                        },
+                        session_title: session.title.clone(),
+                        child_task_title: Some(child.title.clone()),
+                        message_id: None,
+                        created_at_ms: Some(child.finished_at_ms.unwrap_or(child.created_at_ms)),
+                        snippet: child.title.clone(),
+                        match_kind: assistant_protocol::ConversationHistoryMatchKind::Title,
+                        lifecycle,
+                    });
+                }
+            }
+            hits.sort_by_key(|hit| std::cmp::Reverse(hit.created_at_ms));
+            hits.truncate(request.limit.min(200));
+            Ok(hits)
+        })
+    }
+    fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            Ok(RecoveredRuntime {
+                devices: state.devices.values().cloned().collect(),
+                workspaces: state.workspaces.values().cloned().collect(),
+                ..Default::default()
+            })
+        })
+    }
+    fn prepare_session_execution(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            {
+                let mut state = self.lock()?;
+                let mut goals = BTreeMap::new();
+                if let Some(goal) = state.goals.get(&session_id) {
+                    goals.insert(session_id.clone(), goal.clone());
+                }
+                pause_running_goals_for_recovery(&mut goals)?;
+                state.goals.extend(goals);
+                let generation = state.goals.get(&session_id).map(|g| g.generation);
+                let stale = state
+                    .inputs
+                    .values()
+                    .filter(|i| {
+                        i.session_id == session_id
+                            && i.state == StoredInputState::Queued
+                            && i.origin == InputOrigin::Runtime
+                            && i.goal_binding
+                                .as_ref()
+                                .is_some_and(|b| generation.is_some_and(|g| b.generation < g))
+                    })
+                    .map(|i| i.input_id.clone())
+                    .collect::<BTreeSet<_>>();
+                state.inputs.retain(|id, _| !stale.contains(id));
+                state.runs.retain(|_, r| !stale.contains(&r.input_id));
+                state
+                    .skill_activations
+                    .retain(|_, a| a.input_id.as_ref().is_none_or(|id| !stale.contains(id)));
+                state
+                    .mcp_input_selections
+                    .retain(|_, a| a.input_id.as_ref().is_none_or(|id| !stale.contains(id)));
+            }
+            self.load_session_state(&session_id).await
+        })
+    }
+    fn load_session_environment(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::SessionExecutionEnvironment> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.lock()?
+                .sessions
+                .get(&session_id)
+                .map(|s| s.environment.clone())
+                .ok_or_else(|| conflict("session does not exist"))
+        })
+    }
+    fn load_session_state(&self, session_id: &SessionId) -> StoreFuture<'_, crate::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            Ok(crate::LoadedSession {
+                identities: state
+                    .sessions
+                    .values()
+                    .map(|s| (s.session_id.clone(), s.role, s.lifecycle))
+                    .collect(),
+                state: RecoveredRuntime {
+                    devices: state.devices.values().cloned().collect(),
+                    workspaces: state.workspaces.values().cloned().collect(),
+                    attachments: state
+                        .attachments
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    sessions: state
+                        .sessions
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    inputs: state
+                        .inputs
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    session_commands: state
+                        .session_commands
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    mcp_input_selections: state
+                        .mcp_input_selections
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    runs: state
+                        .runs
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    child_tasks: state
+                        .child_tasks
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    work_plans: state
+                        .work_plans
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    goals: state
+                        .goals
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                    skill_activations: state
+                        .skill_activations
+                        .values()
+                        .filter(|row| row.session_id == session_id)
+                        .cloned()
+                        .collect(),
+                },
+            })
+        })
+    }
+    fn query_session_summaries(
+        &self,
+        query: crate::SessionSummaryQuery,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let mut rows = Vec::new();
+            for stored in state.sessions.values() {
+                if query
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| id != &stored.session_id)
+                {
+                    continue;
+                }
+                let mut row = crate::session::SessionController::new(stored.clone())
+                    .summary()
+                    .map_err(|_| conflict("session summary unavailable"))?;
+                if query
+                    .query
+                    .as_ref()
+                    .is_some_and(|q| !row.title.to_lowercase().contains(&q.to_lowercase()))
+                {
+                    continue;
+                }
+                if query.role.is_some_and(|role| role != row.role) {
+                    continue;
+                }
+                if !match query.filter {
+                    assistant_protocol::SessionListFilter::All => true,
+                    assistant_protocol::SessionListFilter::Active => {
+                        row.lifecycle == assistant_protocol::SessionLifecycle::Active
+                    }
+                    assistant_protocol::SessionListFilter::Archived => {
+                        row.lifecycle == assistant_protocol::SessionLifecycle::Archived
+                    }
+                } {
+                    continue;
+                }
+                row.queued_input_count = state
+                    .inputs
+                    .values()
+                    .filter(|i| {
+                        i.session_id == row.session_id
+                            && i.state == StoredInputState::Queued
+                            && i.origin == InputOrigin::User
+                            && i.goal_binding.is_none()
+                    })
+                    .count() as u64;
+                row.resume_required = row.queued_input_count > 0
+                    || state.session_commands.values().any(|c| {
+                        c.session_id == row.session_id
+                            && c.state == super::StoredSessionCommandState::Queued
+                    });
+                rows.push(row);
+            }
+            rows.sort_by(|a, b| {
+                b.is_pinned
+                    .cmp(&a.is_pinned)
+                    .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
+            Ok(rows
+                .into_iter()
+                .skip(query.offset as usize)
+                .take(query.limit.clamp(1, 201) as usize)
+                .collect())
+        })
+    }
+
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         Box::pin(async move {
             let mut state = self.lock()?;
@@ -1008,7 +1282,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get(&command.session_id)
                 .ok_or_else(|| conflict("session command target does not exist"))?;
             if session.lifecycle != StoredSessionLifecycle::Active
-                || session.role != SessionRole::Standard
                 || state.inputs.contains_key(&command.input_id)
                 || state.session_commands.contains_key(&command.input_id)
                 || state
@@ -1197,7 +1470,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 model_key: session.model_key,
                 reasoning_effort: session.reasoning_effort,
                 system_prompt: session.system_prompt,
-                skill_catalog: session.skill_catalog,
+
                 environment: session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: session.current_variant,
@@ -1554,7 +1827,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                     || activation.run_id.is_some()
                     || activation.input_id.is_some()
                     || !message_ids.contains(activation.message_id.as_str())
-                    || activation.catalog_revision != fork.session.skill_catalog.revision
+                    || !activation.has_valid_definition_identity()
                 {
                     return Err(conflict("fork skill activation is invalid"));
                 }
@@ -1644,7 +1917,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 model_key: fork.session.model_key,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
-                skill_catalog: fork.session.skill_catalog,
+
                 environment: fork.session.environment,
                 lifecycle: StoredSessionLifecycle::Active,
                 current_variant: fork.session.current_variant,
@@ -1900,7 +2173,6 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .ok_or_else(|| conflict("clear session generation exhausted"))?;
             let mut cleared = current;
             cleared.system_prompt = clear.system_prompt;
-            cleared.skill_catalog = clear.skill_catalog;
             cleared.environment = clear.environment;
             cleared.body_generation = result_generation;
             cleared.message_count = 0;
@@ -2619,7 +2891,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .get(&commit.input_id)
                 .cloned()
                 .ok_or_else(|| conflict("session command does not exist"))?;
-            if existing.session_id != commit.session_id
+            if !commit.result.matches_command(&existing.command)
+                || existing.session_id != commit.session_id
                 || existing.user_message_id != commit.message.id
             {
                 return Err(conflict("session command belongs to another session"));
@@ -2682,6 +2955,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             session.message_count = u64::try_from(message_count)
                 .map_err(|_| conflict("session message count exceeds storage range"))?;
             session.updated_at_ms = commit.committed_at_ms;
+
             let stored = state
                 .session_commands
                 .get_mut(&commit.input_id)
@@ -3372,6 +3646,14 @@ impl RuntimeStore for VolatileRuntimeStore {
                             &query,
                         );
                     }
+                }
+            }
+            for hit in &mut hits {
+                if let ConversationOwner::ChildTask { child_task_id, .. } = &hit.owner {
+                    hit.child_task_title = state
+                        .child_tasks
+                        .get(child_task_id)
+                        .map(|task| task.title.clone());
                 }
             }
             hits.sort_by(|left, right| {
@@ -4399,6 +4681,7 @@ fn collect_volatile_hits(
             continue;
         }
         hits.push(ConversationSearchHit {
+            child_task_title: None,
             owner: owner.clone(),
             generation,
             message_id: message_id.clone(),
@@ -4496,7 +4779,7 @@ fn stored_session(session: NewStoredSession) -> StoredSession {
         model_key: session.model_key,
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt,
-        skill_catalog: session.skill_catalog,
+
         environment: session.environment,
         lifecycle: StoredSessionLifecycle::Active,
         current_variant: session.current_variant,

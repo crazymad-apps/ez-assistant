@@ -42,15 +42,16 @@ use assistant_runtime::{
     PinnedMemoryCreatedBy, PinnedMemoryMutation, QueuePriorityChange, RuntimeStore,
     SessionDeletion, SessionExecutionEnvironment, SessionFork, SessionHistoryClear,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionRole, SessionSkillCatalog, SessionTitleChange,
-    SessionTitleGenerationCommit, SkillCandidate, SkillDiscovery, SkillDiscoveryStatus,
-    SkillMetadata, SkillName, SkillNameState, SkillNameStateChange, SkillSource, StoreErrorKind,
-    StoredAttachmentState, StoredChildTaskSettlement, StoredConversationState, StoredGoal,
-    StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredMcpSelection, StoredRunSettlement,
-    StoredSession, StoredSessionLifecycle, StoredTodoItemStatus, StoredWorkPlanItem,
-    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkspaceRemoval, WorkspaceUpdate,
+    SessionPinnedChange, SessionProxyChange, SessionRole, SessionTitleChange,
+    SessionTitleGenerationCommit, SkillCandidate, SkillCatalog, SkillDiscovery,
+    SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameState, SkillNameStateChange,
+    SkillSource, StoreErrorKind, StoredAttachmentState, StoredChildTaskSettlement,
+    StoredConversationState, StoredGoal, StoredGoalBudget, StoredGoalObjective,
+    StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
+    StoredMcpSelection, StoredRunSettlement, StoredSession, StoredSessionLifecycle,
+    StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkspaceRemoval,
+    WorkspaceUpdate,
 };
 use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
@@ -99,7 +100,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         model_key: ModelKey::new("fixture-model").expect("model key"),
         reasoning_effort: None,
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
-        skill_catalog: assistant_runtime::SessionSkillCatalog::legacy_unavailable(),
+
         environment: SessionExecutionEnvironment {
             workspace_id: None,
             working_directory: private_directory.to_string_lossy().into_owned(),
@@ -868,7 +869,7 @@ async fn skill_name_state_is_durable_and_uses_one_validated_name_key() {
 }
 
 #[test]
-fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies() {
+fn session_persists_only_frozen_prompt_not_skill_catalog() {
     let temporary = TempDir::new().expect("tempdir");
     let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
     let shared_skill = temporary.path().join("workspace/.agents/skills/review");
@@ -896,12 +897,20 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
         }],
         diagnostics: Vec::new(),
     };
-    let source_catalog = SessionSkillCatalog::from_discovery(discovery).expect("source catalog");
+    let source_catalog = SkillCatalog::from_discovery(discovery).expect("source catalog");
     let mut source = new_session(source_id.as_str(), &engine.sessions_directory);
     source.system_prompt = source_catalog.augment_system_prompt(source.system_prompt);
-    source.skill_catalog = source_catalog.clone();
+
     let stored = engine.create_session(source).expect("create skill session");
-    assert_eq!(stored.skill_catalog, source_catalog);
+    let retired: String = engine
+        .connection
+        .query_row(
+            "SELECT skill_catalog_json FROM sessions WHERE session_id = ?1",
+            [source_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("retired catalog column");
+    assert_eq!(retired, "{}");
     assert!(
         !engine
             .sessions_directory
@@ -913,7 +922,7 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
 
     let target_id = session_id("s-skill-fork");
     let mut target = new_session(target_id.as_str(), &engine.sessions_directory);
-    target.skill_catalog = source_catalog.clone();
+
     target.system_prompt = stored.system_prompt.clone();
     let forked = engine
         .fork_session(SessionFork {
@@ -930,11 +939,7 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
             goal: None,
         })
         .expect("fork skill session");
-    assert_eq!(
-        forked.session.skill_catalog.revision,
-        source_catalog.revision
-    );
-    assert_eq!(forked.session.skill_catalog, source_catalog);
+    assert_eq!(forked.session.system_prompt, stored.system_prompt);
     assert!(
         !engine
             .sessions_directory
@@ -954,7 +959,7 @@ fn session_skill_catalog_is_recovered_and_forked_without_private_package_copies(
         recovered
             .sessions
             .iter()
-            .all(|session| session.skill_catalog.revision == source_catalog.revision)
+            .all(|session| session.system_prompt == stored.system_prompt)
     );
     assert!(shared_skill.join("SKILL.md").exists());
 }
@@ -964,7 +969,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
     let temporary = TempDir::new().expect("tempdir");
     let mut engine = StorageEngine::open(temporary.path()).expect("open engine");
     let source_id = session_id("s-skill-activation-source");
-    let catalog = SessionSkillCatalog::from_discovery(SkillDiscovery {
+    let catalog = SkillCatalog::from_discovery(SkillDiscovery {
         status: SkillDiscoveryStatus::Available,
         candidates: Vec::new(),
         winners: vec![SkillCandidate {
@@ -982,8 +987,8 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
         diagnostics: Vec::new(),
     })
     .expect("catalog");
-    let mut session = new_session(source_id.as_str(), &engine.sessions_directory);
-    session.skill_catalog = catalog.clone();
+    let session = new_session(source_id.as_str(), &engine.sessions_directory);
+
     engine.create_session(session).expect("create source");
 
     let input_id = InputId::new("input-skill-activation").expect("input id");
@@ -1064,8 +1069,8 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
     );
 
     let target_id = session_id("s-skill-activation-fork");
-    let mut target = new_session(target_id.as_str(), &engine.sessions_directory);
-    target.skill_catalog = catalog;
+    let target = new_session(target_id.as_str(), &engine.sessions_directory);
+
     let conversation = engine.load_conversation(&source_id).expect("conversation");
     let fork_activation = StoredSkillActivation {
         activation_id: "activation-fork".to_owned(),
@@ -2116,10 +2121,13 @@ fn mcp_command_is_durable_without_run_and_commit_is_idempotent() {
         operation_id: "command-commit".to_owned(),
         input_id: request.input_id,
         session_id: session.clone(),
-        result: McpRefreshControlResultSnapshot {
-            outcome: McpRefreshOutcome::Success,
-            servers: Vec::new(),
-        },
+        result: assistant_runtime::StoredSessionCommandResult::Mcp(
+            McpRefreshControlResultSnapshot {
+                outcome: McpRefreshOutcome::Success,
+                servers: Vec::new(),
+            },
+        ),
+
         message,
         committed_at_ms: 3000,
     };
@@ -4672,7 +4680,11 @@ fn runtime_recovery_backfills_only_missing_session_permission_files() {
     fs::write(&second_path, custom).expect("custom permissions");
     drop(engine);
 
-    let _recovered = open_engine(&root);
+    let mut recovered = open_engine(&root);
+    assert!(!first_path.exists());
+    recovered
+        .prepare_session_execution(&first.session_id)
+        .expect("prepare selected session resources");
 
     assert_default_session_permissions(&first);
     assert_eq!(fs::read(second_path).expect("custom file remains"), custom);
@@ -7232,7 +7244,13 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
     let orphan_staging = engine.upload_staging_directory.join("orphan.part");
     fs::write(&orphan_staging, b"orphan").expect("write orphan staging");
     drop(engine);
-    let reopened = open_engine(&root);
+    let mut reopened = open_engine(&root);
+    assert!(orphan_session.exists());
+    assert!(orphan_blob.exists());
+    assert!(orphan_staging.exists());
+    reopened
+        .recover_materialization_orphans()
+        .expect("explicit orphan maintenance");
     assert!(!orphan_session.exists());
     assert!(!orphan_blob.exists());
     assert!(!orphan_staging.exists());
@@ -7291,7 +7309,11 @@ fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
     .expect("restore legacy stable view");
     drop(engine);
 
-    let reopened = open_engine(&root);
+    let mut reopened = open_engine(&root);
+    assert!(data_directory.join(&legacy_relative).exists());
+    reopened
+        .prepare_session_execution(&attachment.session_id)
+        .expect("explicit attachment maintenance");
     assert!(!data_directory.join(&legacy_relative).exists());
     assert_eq!(
         fs::read(data_directory.join(&current_relative)).expect("read migrated blob"),
@@ -8347,7 +8369,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             session_id: target_session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["rebuilt prompt".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment: stored.environment.clone(),
             expected_role: SessionRole::Standard,
             changed_at_ms: 4_000,
@@ -8407,7 +8429,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             session_id: target_session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["ignored retry prompt".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment: stored.environment,
             expected_role: SessionRole::Standard,
             changed_at_ms: 5_000,
@@ -8460,7 +8482,7 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
             session_id: session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["new prompt".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment: stored.environment,
             expected_role: SessionRole::Standard,
             changed_at_ms: 3_000,
@@ -8488,7 +8510,7 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
             session_id: session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["new prompt".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment,
             expected_role: SessionRole::Standard,
             changed_at_ms: 4_000,
@@ -8517,7 +8539,7 @@ fn clear_cleanup_pending_keeps_new_history_authoritative_and_recovers() {
             session_id: session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["recovered prompt".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment: stored.environment,
             expected_role: SessionRole::Standard,
             changed_at_ms: 3_000,
@@ -8659,7 +8681,7 @@ fn clear_switch_transaction_failure_keeps_old_history_and_removes_new_file() {
             session_id: session_id.clone(),
             expected_generation: 1,
             system_prompt: SystemPromptSnapshot::new(vec!["must not commit".to_owned()]),
-            skill_catalog: SessionSkillCatalog::legacy_unavailable(),
+
             environment: stored.environment,
             expected_role: SessionRole::Standard,
             changed_at_ms: 3_000,
@@ -8857,4 +8879,257 @@ fn mcp_selection_and_goal_identity_recover_without_a_catalog_copy() {
             .map(McpServerKey::as_str),
         Some("github")
     );
+}
+
+#[test]
+fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
+    use assistant_protocol::{McpRefreshControlResultSnapshot, McpRefreshOutcome, SessionCommand};
+    use assistant_runtime::{
+        NewStoredSessionCommand, SessionCommandCommit, StoredSessionCommandResult,
+    };
+    let root = TempDir::new().expect("isolated controller refresh store");
+    let mut engine = open_engine(&root);
+    let mut session = new_session("refresh-controller", &engine.sessions_directory);
+    session.role = assistant_runtime::SessionRole::Controller;
+    let session_id = session.session_id.clone();
+    let prompt = session.system_prompt.clone();
+    engine.create_session(session).expect("controller");
+    for (index, command) in [
+        SessionCommand::McpRefresh { server: None },
+        SessionCommand::SkillRefresh,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input_id = InputId::new(format!("controller-refresh-{index}")).expect("id");
+        let message_id = format!("controller-refresh-message-{index}");
+        engine
+            .accept_session_command(NewStoredSessionCommand {
+                input_id: input_id.clone(),
+                session_id: session_id.clone(),
+                idempotency_key: None,
+                user_message_id: MessageId::new(&message_id).expect("message"),
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                command,
+                accepted_at_ms: 2000,
+            })
+            .expect("controller command accepted");
+        let ConversationMessage::User(mut message) = user_message(&message_id, "refresh result")
+        else {
+            panic!("user message")
+        };
+        message.origin = UserMessageOrigin::Runtime;
+        let result = if index == 0 {
+            StoredSessionCommandResult::Mcp(McpRefreshControlResultSnapshot {
+                outcome: McpRefreshOutcome::Success,
+                servers: Vec::new(),
+            })
+        } else {
+            StoredSessionCommandResult::SkillRefresh {
+                success: true,
+                skill_count: 0,
+            }
+        };
+        let commit = SessionCommandCommit {
+            operation_id: format!("controller-commit-{index}"),
+            input_id,
+            session_id: session_id.clone(),
+            result,
+            message,
+            committed_at_ms: 3000,
+        };
+        engine
+            .commit_session_command(commit.clone())
+            .expect("commit");
+        engine
+            .commit_session_command(commit)
+            .expect("idempotent commit");
+    }
+    drop(engine);
+    let mut engine = open_engine(&root);
+    let recovered = engine.load_runtime().expect("reopen");
+    assert_eq!(recovered.sessions[0].system_prompt, prompt);
+    assert_eq!(recovered.sessions[0].body_generation, 3);
+    assert_eq!(recovered.session_commands.len(), 2);
+    assert!(recovered.runs.is_empty());
+    assert_eq!(
+        engine
+            .load_conversation(&session_id)
+            .expect("conversation")
+            .messages
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn duplicate_call_in_ready_exchange_does_not_prevent_runtime_startup() {
+    use std::sync::Arc;
+    let root = tempfile::tempdir().expect("isolated runtime");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-isolated", "r-isolated");
+    engine
+        .create_session(new_session("s-healthy", &engine.sessions_directory))
+        .expect("healthy session");
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "existing-exchange".to_owned(),
+            session_id: session_id("s-isolated"),
+            run_id: run_id("r-isolated"),
+            messages: tool_exchange_with_ids("prior-assistant", "call-1", "prior-result"),
+            message_step: Some(1),
+            created_at_ms: 1_400,
+        })
+        .expect("valid original body");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running', started_at_ms = 1500 WHERE run_id = 'r-isolated'",
+            [],
+        )
+        .expect("running fixture");
+    let pending = pending_tool_exchange("s-isolated", "r-isolated", "receipt-isolated");
+    // 直接构造旧版本留下的 ready 记录；本测试不执行工具、不修改真实 Runtime Home。
+    engine.connection.execute("INSERT INTO pending_tool_exchanges (receipt_id, session_id, run_id, step, assistant_json, results_json, state, created_at_ms) VALUES ('receipt-isolated', 's-isolated', 'r-isolated', 2, ?1, ?2, 'ready', 2000)", params![serde_json::to_string(&pending.assistant).unwrap(), serde_json::to_string(&tool_results()).unwrap()]).expect("legacy ready fixture");
+    let body = body_path(
+        &engine.session_directory(&session_id("s-isolated")).unwrap(),
+        1,
+    );
+    let before = fs::read(&body).expect("body before startup");
+    drop(engine);
+
+    let store = Arc::new(
+        LocalRuntimeStore::open(root.path(), 32)
+            .await
+            .expect("open store"),
+    );
+    let resources = crate::resources::HostResources::new(root.path()).expect("host resources");
+    let runtime = assistant_runtime::AssistantRuntime::open_with_recall_key(
+        assistant_runtime::RuntimeConfig::new(std::num::NonZeroUsize::new(32).unwrap()),
+        Arc::new(crate::config_source::LocalConfigSource::new(
+            root.path().join("config.toml"),
+        )),
+        Arc::new(assistant_runtime::ModelCatalog::from_json(crate::MODEL_CATALOG_JSON).unwrap()),
+        resources.model_factory,
+        resources.session_environment_factory,
+        resources.skill_package_source,
+        resources.run_tool_factory,
+        resources.child_task_workspace_factory,
+        store.clone(),
+        store.clone(),
+        [17; 32],
+    )
+    .await
+    .expect("one unavailable session must not prevent startup");
+    let snapshot = runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .expect("application snapshot remains available");
+    assert_eq!(
+        runtime
+            .list_sessions(Default::default())
+            .await
+            .unwrap()
+            .sessions
+            .len(),
+        2
+    );
+    drop(snapshot);
+    assert!(
+        runtime
+            .get_session(assistant_protocol::GetSessionRequest {
+                session_id: session_id("s-healthy")
+            })
+            .await
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .resume_session(assistant_protocol::ResumeSessionRequest {
+                session_id: session_id("s-isolated")
+            })
+            .await
+            .is_err()
+    );
+    runtime
+        .shutdown(Default::default())
+        .await
+        .expect("shutdown");
+    assert_eq!(fs::read(body).expect("body after startup"), before);
+    let connection = Connection::open_with_flags(
+        root.path().join(DATA_DIRECTORY).join(DATABASE_FILE),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pending_tool_exchanges", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = 'r-isolated'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "running"
+    );
+}
+
+#[test]
+fn lazy_startup_and_summary_pages_ignore_unrelated_corrupt_details() {
+    let root = TempDir::new().expect("isolated lazy fixture");
+    let mut engine = open_engine(&root);
+    for index in 0..23 {
+        let id = format!("s-lazy-{index:03}");
+        engine
+            .create_session(new_session(&id, &engine.sessions_directory))
+            .unwrap();
+    }
+    engine.connection.execute("UPDATE sessions SET system_prompt_json = 'invalid-json' WHERE session_id = 's-lazy-022'", []).unwrap();
+    let healthy_id = session_id("s-lazy-000");
+    let body = body_path(&engine.session_directory(&healthy_id).unwrap(), 1);
+    fs::write(&body, b"invalid historical body\n").unwrap();
+    let orphan = engine
+        .session_directory(&healthy_id)
+        .unwrap()
+        .join("tool-images/keep-me.part");
+    fs::write(&orphan, b"preserve until explicit maintenance").unwrap();
+    drop(engine);
+    let reopened = open_engine(&root);
+    let globals = reopened.load_runtime_globals().unwrap();
+    assert!(globals.sessions.is_empty() && globals.inputs.is_empty() && globals.runs.is_empty());
+    let mut ids = Vec::new();
+    for offset in [0, 7, 14, 21] {
+        let page = reopened
+            .query_session_summaries(assistant_runtime::SessionSummaryQuery {
+                filter: assistant_protocol::SessionListFilter::All,
+                session_id: None,
+                role: None,
+                query: None,
+                offset,
+                limit: 7,
+            })
+            .unwrap();
+        ids.extend(page.into_iter().map(|s| s.session_id));
+    }
+    assert_eq!(ids.len(), 23);
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        23
+    );
+    let loaded = reopened.load_session_state(&healthy_id).unwrap();
+    assert_eq!(loaded.state.sessions.len(), 1);
+    assert_eq!(loaded.state.sessions[0].session_id, healthy_id);
+    assert!(
+        reopened
+            .load_session_state(&session_id("s-lazy-022"))
+            .is_err()
+    );
+    assert_eq!(fs::read(&body).unwrap(), b"invalid historical body\n");
+    assert!(orphan.exists());
 }

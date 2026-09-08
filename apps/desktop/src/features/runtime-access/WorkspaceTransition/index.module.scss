@@ -1,0 +1,27 @@
+.scene {
+  position: relative;
+  height: 100dvh;
+  overflow: clip;
+  --entry-opacity: 1;
+  --entry-offset: 0px;
+  --background-opacity: 1;
+  --workspace-opacity: 0;
+  --workspace-offset: 28px;
+}
+.workspace { height: 100%; outline: none; }
+.scene[data-workspace-transition="playing"] .workspace {
+  opacity: var(--workspace-opacity);
+  transform: translateY(var(--workspace-offset));
+}
+.entry, .rocket { position: absolute; inset: 0; width: 100%; height: 100%; }
+.entry {
+  z-index: 1;
+  overflow-y: auto;
+  opacity: var(--background-opacity);
+  :global([data-runtime-entry-content]) {
+    opacity: var(--entry-opacity);
+    transform: translateY(var(--entry-offset));
+  }
+  header, footer { opacity: var(--entry-opacity); }
+}
+.rocket { z-index: 2; pointer-events: none; object-fit: cover; }

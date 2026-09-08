@@ -31,6 +31,24 @@ pub(super) fn run_worker(
                 drop(reply);
                 panic!("private storage worker panic payload");
             }
+            Command::SearchConversationTitles { request, reply } => {
+                let _ = reply.send(engine.search_conversation_titles(request));
+            }
+            Command::LoadRuntimeGlobals { reply } => {
+                let _ = reply.send(engine.load_runtime_globals());
+            }
+            Command::PrepareSessionExecution { session_id, reply } => {
+                let _ = reply.send(engine.prepare_session_execution(&session_id));
+            }
+            Command::LoadSessionEnvironment { session_id, reply } => {
+                let _ = reply.send(engine.load_session_environment(&session_id));
+            }
+            Command::LoadSessionState { session_id, reply } => {
+                let _ = reply.send(engine.load_session_state(&session_id));
+            }
+            Command::QuerySessionSummaries { query, reply } => {
+                let _ = reply.send(engine.query_session_summaries(query));
+            }
             Command::LoadRuntime { reply } => {
                 let _ = reply.send(engine.load_runtime());
             }

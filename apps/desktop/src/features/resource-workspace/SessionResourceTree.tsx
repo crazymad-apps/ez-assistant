@@ -1,3 +1,4 @@
+import { useRootStore as useResourceRoot } from "../../stores/RootStoreContext";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   SessionId,
@@ -8,7 +9,6 @@ import type {
 import { Icon } from "../../components/Icon";
 import { InlineIconButton } from "../../components/InlineIconButton";
 import { resolveMaterialFileIcon, resolveMaterialFolderIcon } from "./materialResourceIcon";
-import { listSessionResourceFiles } from "../../native-bridge/nativeResource";
 import type { ResourceMenuLocation } from "./ResourceContextMenu";
 import type { ResourceViewState } from "./resourceViewState";
 import styles from "./ResourceWorkspace/index.module.scss";
@@ -25,6 +25,7 @@ type DirectoryState = Readonly<{
   status: "loading" | "ready" | "error";
   entries: readonly SessionResourceEntry[];
   truncated: boolean;
+  skipped_entries?: number;
   error: string | null;
 }>;
 
@@ -38,6 +39,8 @@ export function SessionResourceTree(props: Readonly<{
   on_open_file?: (entry: SessionResourceEntry) => void;
   on_open_resource_menu?: (entry: SessionResourceEntry, location: ResourceMenuLocation) => void;
 }>) {
+
+  const files = useResourceRoot().files;
   const [include_hidden, setIncludeHidden] = useState(props.view_state?.tree?.include_hidden ?? false);
   const [include_generated, setIncludeGenerated] = useState(props.view_state?.tree?.include_generated ?? false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(props.view_state?.tree?.expanded.map(locatorKey)));
@@ -61,7 +64,7 @@ export function SessionResourceTree(props: Readonly<{
       return next;
     });
     try {
-      const result = await listSessionResourceFiles(props.session_id, {
+      const result = await files.listSessionResourceFiles(props.session_id, {
         locator,
         include_hidden,
         include_generated,
@@ -72,6 +75,7 @@ export function SessionResourceTree(props: Readonly<{
           status: "ready" as const,
           entries: result.entries,
           truncated: result.truncated,
+          skipped_entries: result.skipped_entries,
           error: null,
         });
         directories_ref.current = next;
@@ -291,7 +295,7 @@ function DirectoryChildren(props: Readonly<{
       </div>
     );
   }
-  if (props.state.entries.length === 0 && !props.state.truncated) return null;
+  if (props.state.entries.length === 0 && !props.state.truncated && !props.state.skipped_entries) return null;
   return (
     <div className={styles.tree_children} role="group">
       {props.state.entries.map((entry) => (
@@ -307,7 +311,8 @@ function DirectoryChildren(props: Readonly<{
           on_toggle={props.on_toggle}
         />
       ))}
-      {props.state.truncated && <p className={styles.tree_limit}>目录内容过多，请使用 Finder 查看。</p>}
+      {!!props.state.skipped_entries && <p className={styles.tree_limit}>部分文件名无法显示，已跳过。</p>}
+      {props.state.truncated && <p className={styles.tree_limit}>仅显示部分条目，可进入子目录继续浏览。</p>}
     </div>
   );
 }

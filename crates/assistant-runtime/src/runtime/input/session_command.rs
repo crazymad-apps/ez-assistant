@@ -11,7 +11,7 @@ use assistant_protocol::{
 use super::{AssistantRuntime, QueueDriverContext};
 use crate::{
     NewStoredSessionCommand, RuntimeError, RuntimeResult, SessionCommandCommit,
-    StoredSessionCommand,
+    StoredSessionCommand, StoredSessionCommandResult,
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
@@ -30,19 +30,16 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SubmitSessionCommandResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        self.mcp_service.ensure_available()?;
-        let session = self.session(&request.session_id)?;
+        if matches!(request.command, SessionCommand::McpRefresh { .. }) {
+            self.mcp_service.ensure_available()?;
+        }
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
         session.ensure_not_compacting()?;
         let (input_id, agent_variant) = {
             let state = session.lock_state()?;
-            if state.role != crate::SessionRole::Standard {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "session commands require a standard session",
-                });
-            }
             if let Some(key) = request.idempotency_key.as_ref()
                 && let Some(existing) = state
                     .commands
@@ -117,29 +114,70 @@ pub(super) async fn execute_session_command(
     session: &SessionController,
     command: StoredSessionCommand,
 ) -> RuntimeResult<()> {
-    let SessionCommand::McpRefresh { server } = &command.command;
-    let result = match super::super::mcp::refresh_mcp_registry_with(
-        context.mcp_config_store.as_ref(),
-        context.mcp_registry.as_ref(),
-        context.config_registry.as_ref(),
-        context.approval_registry.as_ref(),
-        &context.events,
-        &context.root_cancellation,
-        server.as_ref(),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(RuntimeError::ConfigurationUnavailable | RuntimeError::McpConfigInvalid) => {
-            configuration_refresh_failure(context, server.as_ref())?
+    let (result, source, text) = match &command.command {
+        SessionCommand::McpRefresh { server } => {
+            let result = match super::super::mcp::refresh_mcp_registry_with(
+                context.mcp_config_store.as_ref(),
+                context.mcp_registry.as_ref(),
+                context.config_registry.as_ref(),
+                context.approval_registry.as_ref(),
+                &context.events,
+                &context.root_cancellation,
+                server.as_ref(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(RuntimeError::ConfigurationUnavailable | RuntimeError::McpConfigInvalid) => {
+                    configuration_refresh_failure(context, server.as_ref())?
+                }
+                Err(error) => return Err(error),
+            };
+            let text = render_model_result(&result)?;
+            (
+                StoredSessionCommandResult::Mcp(result),
+                InternalBoundarySource::McpRefreshResult,
+                text,
+            )
         }
-        Err(error) => return Err(error),
+        SessionCommand::SkillRefresh => {
+            let catalog = super::super::skills::prepare_current_catalog(
+                context.store.as_ref(),
+                context.skill_package_source.as_ref(),
+                &context.workspaces,
+                session.environment().workspace_id.as_ref(),
+            )
+            .await?;
+            let success = matches!(
+                catalog.status,
+                crate::SkillCatalogStatus::Ready | crate::SkillCatalogStatus::Empty
+            );
+            let skill_count = u32::try_from(catalog.definitions.len()).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "skill count",
+                }
+            })?;
+            let mut text = format!(
+                "{{RUNTIME_CONTROL_RESULT_V1}} skill_refresh: success={success}, skill_count={skill_count}. {}",
+                if success {
+                    "Current skill files were scanned. Subsequent activations resolve current definitions; the system prompt and prior activations remain unchanged."
+                } else {
+                    "The scan did not complete. Current skills are unavailable; retry the scan."
+                }
+            );
+            if success {
+                text.push('\n');
+                text.push_str(&catalog.render_system_prompt_part());
+            }
+            let result = StoredSessionCommandResult::SkillRefresh {
+                success,
+                skill_count,
+            };
+            (result, InternalBoundarySource::SkillRefreshResult, text)
+        }
     };
-    let mut message = InternalBoundaryCoordinator::visible_message(InternalBoundaryRequest {
-        source: InternalBoundarySource::McpRefreshResult,
-        text: render_model_result(&result)?,
-    })?
-    .0;
+    let mut message =
+        InternalBoundaryCoordinator::visible_message(InternalBoundaryRequest { source, text })?.0;
     message.id = command.user_message_id.clone();
     let _mutation = session.mutation().await;
     let committed_at_ms = super::super::now_ms()?;

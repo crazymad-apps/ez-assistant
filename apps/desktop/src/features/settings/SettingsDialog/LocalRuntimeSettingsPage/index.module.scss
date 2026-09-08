@@ -1,0 +1,8 @@
+.section { display: grid; gap: 18px; padding-block: 18px 24px; border-bottom: 1px solid var(--ez-border); }
+.section h4 { margin: 0; font-size: var(--ez-font-base); }
+.section p { margin: 0; color: var(--ez-text-muted); font-size: var(--ez-font-small); line-height: 1.6; }
+.directory, .behavior { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--ez-text-secondary); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.behavior > span { flex-shrink: 0; }
+.behavior > button[data-variant="field"] { width: 180px; flex-shrink: 0; }
+@media (max-width: 560px) { .behavior { align-items: flex-start; flex-direction: column; gap: 10px; } }

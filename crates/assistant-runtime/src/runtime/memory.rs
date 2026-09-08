@@ -171,14 +171,14 @@ impl AssistantRuntime {
     ) -> RuntimeResult<GetSystemContextResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let summary = session.summary()?;
         Ok(GetSystemContextResult {
             snapshot: SystemContextSnapshot {
                 session_id: request.session_id,
                 session_created_at_ms: summary.created_at_ms,
                 workspace: self.session_workspace_snapshot(&session)?,
-                parts: session.system_prompt().parts().to_vec(),
+                parts: session.current_system_prompt()?.parts().to_vec(),
             },
         })
     }

@@ -93,6 +93,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("list approvals")
             .approvals
             .is_empty()

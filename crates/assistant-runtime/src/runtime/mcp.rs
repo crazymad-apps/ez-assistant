@@ -18,14 +18,14 @@ use crate::{
 };
 
 impl AssistantRuntime {
-    pub fn list_mcp_server_options(
+    pub async fn list_mcp_server_options(
         &self,
         request: ListMcpServerOptionsRequest,
     ) -> RuntimeResult<ListMcpServerOptionsResult> {
         self.ensure_running()?;
         let scopes = match request.context {
             McpServerOptionsContext::Session { session_id } => {
-                let session = self.session(&session_id)?;
+                let session = self.session(&session_id).await?;
                 session.ensure_active()?;
                 session.permission_scopes()
             }
@@ -114,7 +114,7 @@ impl AssistantRuntime {
         Ok(MutateMcpConfigurationResult { snapshot })
     }
 
-    /// 在 Host 发布监听端点前，从最新 `mcp.json` 建立一次无 Conversation 副作用的活动目录。
+    /// 从最新 `mcp.json` 建立一次无 Conversation 副作用的活动目录；不阻塞 Host 监听。
     pub async fn bootstrap_mcp(&self) -> RuntimeResult<McpRefreshControlResultSnapshot> {
         self.refresh_mcp_registry(None).await
     }
@@ -387,6 +387,7 @@ pub(super) async fn refresh_mcp_registry_with(
     }
     // 发布已经完成；即使审批状态写入失败，也必须完成旧连接的显式回收。
     let result = result.finish().await;
+    let _ = events.send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
     if let Some(error) = invalidation_error {
         return Err(error);
     }

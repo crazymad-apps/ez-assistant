@@ -1,3 +1,7 @@
+import { useRootStore } from "../../stores/RootStoreContext";
+import type { ClientResources } from "../../runtime-client/ClientResources";
+import { hostFilePath, hostFileUri } from "../../runtime-client/hostFilePath";
+import { copyText } from "../../platform/clipboard";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
 import type { ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
 import { ResourceImageViewer } from "./ResourceImageViewer";
@@ -21,14 +25,10 @@ import {
   copyToolFilePath,
   openAttachmentInSystem,
   listLocalResourceSiblings,
-  listSessionResourceFiles,
   openLocalResourceInSystem,
   openSessionResourceInSystem,
   openToolFileInSystem,
-  previewAttachment,
   previewLocalResource,
-  previewSessionResourceFile,
-  previewToolFile,
   registerLocalFileUri,
   registerLocalResourceSibling,
   registerRelativeLocalResource,
@@ -73,7 +73,11 @@ export function ResourcePreview(props: Readonly<{
     siblings: readonly ToolFileReference[],
   ) => void;
 }>) {
+  const root = useRootStore();
+  const files = root.files;
   const { resource } = props.tab;
+  const openHost = (path: string) => root.resource_workspace.openHostFile(resource.scope_key, path);
+  const native_available = sourceIsNative(resource.source, files);
   const source = resource.source;
   const [revision, setRevision] = useState(0);
   const [preview, setPreview] = useState<PreviewSessionResourceFileResult | LocalResourcePreview | AttachmentPreview | null>(null);
@@ -109,7 +113,7 @@ export function ResourcePreview(props: Readonly<{
     let active = true;
     setLoading(true);
     setError(null);
-    const request = loadPreview(resource);
+    const request = loadPreview(resource, files);
     void request
       .then((result) => {
         if (active) setPreview(result);
@@ -135,6 +139,7 @@ export function ResourcePreview(props: Readonly<{
   function openInSystem() {
     switch (source.type) {
       case "session_file": return openSessionResourceInSystem(source.session_id, source.locator);
+      case "host_file": return registerLocalFileUri(hostFileUri(source.path)).then((r) => openLocalResourceInSystem(r.resource_key));
       case "local_file": return openLocalResourceInSystem(resource.resource_key);
       case "attachment": return openAttachmentInSystem(source.session_id, source.attachment_id);
       case "tool_file": return openToolFileInSystem(source.owner, source.message_id, source.resource_ref_id);
@@ -144,6 +149,7 @@ export function ResourcePreview(props: Readonly<{
   function revealInDirectory() {
     switch (source.type) {
       case "session_file": return revealSessionResourceInDirectory(source.session_id, source.locator);
+      case "host_file": return registerLocalFileUri(hostFileUri(source.path)).then((r) => revealLocalResourceInDirectory(r.resource_key));
       case "local_file": return revealLocalResourceInDirectory(resource.resource_key);
       case "attachment": return revealAttachmentInDirectory(source.session_id, source.attachment_id);
       case "tool_file": return revealToolFileInDirectory(source.owner, source.message_id, source.resource_ref_id);
@@ -153,11 +159,26 @@ export function ResourcePreview(props: Readonly<{
   function copyFullPath() {
     switch (source.type) {
       case "session_file": return copySessionResourcePath(source.session_id, source.locator);
+      case "host_file": return copyText(source.path);
       case "local_file": return copyLocalResourcePath(resource.resource_key);
       case "attachment": return copyAttachmentPath(source.session_id, source.attachment_id);
       case "tool_file": return copyToolFilePath(source.owner, source.message_id, source.resource_ref_id);
     }
   }
+
+  function download() {
+    switch (source.type) {
+      case "host_file": return files.downloadHostFile(source.path);
+      case "session_file": return files.downloadSessionFile(source.session_id, source.locator, resource.display_name);
+      case "attachment": return files.downloadAttachment(source.session_id, source.attachment_id, resource.display_name);
+      case "tool_file": return files.downloadToolFile(source.owner, source.message_id, source.resource_ref_id, resource.display_name);
+      case "local_file": return Promise.reject(new Error("请使用系统应用打开本地文件。"));
+    }
+  }
+  const actions = () => [
+    ...(native_available ? resourceActionItems(openInSystem, revealInDirectory, runAction) : []),
+    ...(source.type === "local_file" ? [] : [{label:"下载文件",on_select:()=>runAction(download(),"下载失败。")}]),
+  ];
 
   function runAction(request: Promise<void>, fallback: string) {
     setActionError(null);
@@ -170,7 +191,7 @@ export function ResourcePreview(props: Readonly<{
     event.preventDefault();
     event.currentTarget.focus();
     setContextMenu({
-      items: resourceActionItems(openInSystem, revealInDirectory, runAction),
+      items: actions(),
       location: { x: event.clientX, y: event.clientY },
     });
   }
@@ -180,7 +201,7 @@ export function ResourcePreview(props: Readonly<{
     event.preventDefault();
     const bounds = event.currentTarget.getBoundingClientRect();
     setContextMenu({
-      items: resourceActionItems(openInSystem, revealInDirectory, runAction),
+      items: actions(),
       location: { x: bounds.left + 20, y: bounds.top + 20 },
     });
   }
@@ -202,8 +223,11 @@ export function ResourcePreview(props: Readonly<{
         ],
       });
     };
-    if (isFileUri(reference)) {
-      void registerLocalFileUri(reference).then(openRegistered).catch(showResourceFailure);
+    if ((isFileUri(reference) && source.type !== "local_file") || source.type === "host_file") {
+      try {
+        const path = hostFilePath(reference, source.type === "host_file" ? source.path : undefined);
+        setContextMenu({location, items:[{label:"在资源栏打开",on_select:()=>openHost(path)},{label:"下载文件",on_select:()=>runAction(files.downloadHostFile(path),"下载失败。")}]});
+      } catch (error) { showResourceFailure(error); }
       return;
     }
     if (source.type === "local_file") {
@@ -223,14 +247,15 @@ export function ResourcePreview(props: Readonly<{
       location,
       items: [
         { label: "在资源栏打开", on_select: () => props.on_open_file(entry) },
-        {
+        {label:"下载文件",on_select:()=>runAction(files.downloadSessionFile(source.session_id, locator, entry.display_name),"下载失败。")},
+        ...(native_available ? [{
           label: "使用系统应用打开",
           on_select: () => runAction(openSessionResourceInSystem(source.session_id, locator), "无法使用系统应用打开。"),
         },
         {
           label: "在 Finder 中显示",
           on_select: () => runAction(revealSessionResourceInDirectory(source.session_id, locator), "无法在 Finder 中显示。"),
-        },
+        }] : []),
       ],
     });
   }
@@ -255,6 +280,8 @@ export function ResourcePreview(props: Readonly<{
             on_open_resource={props.on_open_local_resource}
             roots={props.roots}
           />
+        ) : source.type === "host_file" ? (
+          <nav className={styles.breadcrumb} aria-label="Host 文件路径" title={source.path}>{source.path}</nav>
         ) : (
           <OpaqueResourceBreadcrumb
             label={source.type === "attachment" ? "会话附件" : "工具产物"}
@@ -286,6 +313,9 @@ export function ResourcePreview(props: Readonly<{
         )}
         {action_error && <span className={styles.resource_action_error} role="alert">{action_error}</span>}
         <ResourceActionsMenu
+          native_available={native_available}
+          copy_available={native_available || source.type === "host_file"}
+          on_download={source.type === "local_file" ? undefined : () => runAction(download(), "下载失败。")}
           file_size={preview?.size_bytes ?? null}
           image_available={props.tab.type === "image" && preview?.kind === "image"}
           on_copy_path={() => runAction(copyFullPath(), "无法复制完整路径。")}
@@ -317,7 +347,7 @@ export function ResourcePreview(props: Readonly<{
           props.on_open_file,
           props.on_open_local_resource,
           (message) => setActionError(message),
-          showLinkedResourceMenu,
+          showLinkedResourceMenu, files, openHost,
         ) : null}
       </div>
       {props.active !== false && context_menu && (
@@ -331,17 +361,21 @@ export function ResourcePreview(props: Readonly<{
   );
 }
 
-function loadPreview(resource: ResourceHandle): Promise<PreviewSessionResourceFileResult | LocalResourcePreview | AttachmentPreview> {
+function loadPreview(resource: ResourceHandle, files: ClientResources): Promise<PreviewSessionResourceFileResult | LocalResourcePreview | AttachmentPreview> {
   const source = resource.source;
   switch (source.type) {
-    case "session_file": return previewSessionResourceFile(source.session_id, { locator: source.locator });
+    case "session_file": return files.previewSessionResourceFile(source.session_id, { locator: source.locator });
+    case "host_file": return files.previewHostFile(source.path);
     case "local_file": return previewLocalResource(resource.resource_key);
-    case "attachment": return previewAttachment(source.session_id, source.attachment_id);
-    case "tool_file": return previewToolFile(source.owner, source.message_id, source.resource_ref_id);
+    case "attachment": return files.previewAttachment(source.session_id, source.attachment_id);
+    case "tool_file": return files.previewToolFile(source.owner, source.message_id, source.resource_ref_id);
   }
 }
 
 function ResourceActionsMenu(props: Readonly<{
+  native_available: boolean;
+  copy_available: boolean;
+  on_download?: () => void;
   file_size: number | null;
   image_ref: RefObject<ReactZoomPanPinchRef | null>;
   image_available: boolean;
@@ -388,9 +422,10 @@ function ResourceActionsMenu(props: Readonly<{
           </>
         )}
         <ResourceActionMenuItem icon="refresh" label="重新加载" on_select={props.on_refresh} />
-        <ResourceActionMenuItem icon="external-link" label="使用系统应用打开" on_select={props.on_open_system} />
-        <ResourceActionMenuItem icon="folder" label="在 Finder 中显示" on_select={props.on_reveal} />
-        <ResourceActionMenuItem icon="copy" label="复制完整路径" on_select={props.on_copy_path} />
+        {props.on_download && <ResourceActionMenuItem icon="arrow-down" label="下载文件" on_select={props.on_download} />}
+        {props.native_available && <ResourceActionMenuItem icon="external-link" label="使用系统应用打开" on_select={props.on_open_system} />}
+        {props.native_available && <ResourceActionMenuItem icon="folder" label="在 Finder 中显示" on_select={props.on_reveal} />}
+        {props.copy_available && <ResourceActionMenuItem icon="copy" label="复制完整路径" on_select={props.on_copy_path} />}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -459,6 +494,8 @@ function renderPreview(
   on_open_local_resource: (resource: RegisteredLocalResource) => void,
   on_error: (message: string) => void,
   on_local_resource_menu: (reference: string, location: ResourceMenuLocation) => void,
+  files: ClientResources,
+  open_host: (path: string) => void,
 ) {
   if (preview.kind === "pdf" && "data_base64" in preview && preview.data_base64) {
     return <PdfViewer base64={preview.data_base64} title={`${tab.resource.display_name} PDF 预览`} />;
@@ -485,20 +522,22 @@ function renderPreview(
   }
   if (tab.type === "markdown") {
     const source = tab.resource.source;
-    const supports_relative_resources = source.type === "session_file" || source.type === "local_file";
+    const supports_relative_resources = source.type === "host_file" || source.type === "session_file" || source.type === "local_file";
     return (
       <div className={styles.markdown_viewer}>
         <MarkdownContent
           allow_relative_local_resources={supports_relative_resources}
           load_local_image={supports_relative_resources ? async (reference) => {
             let image: PreviewSessionResourceFileResult | LocalResourcePreview;
-            if (isFileUri(reference)) {
+            if ((isFileUri(reference) && source.type !== "local_file") || source.type === "host_file") {
+              image = await files.previewHostFile(hostFilePath(reference, source.type === "host_file" ? source.path : undefined));
+            } else if (isFileUri(reference)) {
               image = await registerLocalFileUri(reference)
                 .then((registered) => previewLocalResource(registered.resource_key));
             } else if (source.type === "session_file") {
               const locator = resolve_relative(reference);
               if (!locator) throw new Error("本地图片路径无效。");
-              image = await previewSessionResourceFile(source.session_id, { locator });
+              image = await files.previewSessionResourceFile(source.session_id, { locator });
             } else {
               image = await registerRelativeLocalResource(tab.resource.resource_key, reference)
                 .then((registered) => previewLocalResource(registered.resource_key));
@@ -507,7 +546,9 @@ function renderPreview(
             return createResourceObjectUrl(image.data_base64, image.media_type);
           } : undefined}
           on_local_resource_open={supports_relative_resources ? (reference) => {
-            if (isFileUri(reference)) {
+            if ((isFileUri(reference) && source.type !== "local_file") || source.type === "host_file") {
+              try { open_host(hostFilePath(reference, source.type === "host_file" ? source.path : undefined)); } catch (error) { on_error(error instanceof Error ? error.message : "Host 路径无效。"); }
+            } else if (isFileUri(reference)) {
               void registerLocalFileUri(reference).then(on_open_local_resource).catch((failure: unknown) => {
                 on_error(failure instanceof Error ? failure.message : "无法打开本地资源。");
               });
@@ -739,13 +780,14 @@ function BreadcrumbSiblings(props: Readonly<{
   session_id: string;
   show_arrow: boolean;
 }>) {
+  const files = useRootStore().files;
   const [entries, setEntries] = useState<readonly SessionResourceEntry[] | null>(null);
   const [error, setError] = useState(false);
   const parent_path = props.locator.relative_path.split("/").filter(Boolean).slice(0, -1).join("/");
   const parent = { ...props.locator, relative_path: parent_path };
   function load() {
     setError(false);
-    void listSessionResourceFiles(props.session_id, {
+    void files.listSessionResourceFiles(props.session_id, {
       locator: props.locator.relative_path ? parent : props.locator,
       include_hidden: false,
       include_generated: false,
@@ -854,3 +896,5 @@ function displayPathFromSegments(path_segments: readonly string[]): string {
   if (path_segments[0] === "/") return `/${path_segments.slice(1).join("/")}`;
   return path_segments.join("/");
 }
+
+function sourceIsNative(source: ResourceHandle["source"], files: ClientResources): boolean { return files.native_host || (files.desktop && source.type === "local_file"); }

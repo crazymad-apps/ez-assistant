@@ -69,6 +69,46 @@ pub struct ListSessionResourceFilesRequest {
 pub struct ListSessionResourceFilesResult {
     pub entries: Vec<SessionResourceEntry>,
     pub truncated: bool,
+    #[serde(default)]
+    pub skipped_entries: u32,
+}
+
+/// 已登录所有者浏览 Host 目录；空路径表示 Host 用户主目录，不表示客户端目录。
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListHostFilesRequest {
+    pub path: Option<String>,
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+/// Host 上的绝对路径或本机 file URI；不授予会话资源接口任何额外范围。
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostFileRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostFileEntry {
+    pub path: String,
+    pub display_name: String,
+    pub kind: SessionResourceEntryKind,
+    pub state: SessionResourceEntryState,
+    pub is_symbolic_link: bool,
+    pub size_bytes: Option<u64>,
+}
+
+/// 一层 Host 目录投影，未登记目录同样可访问；失败不自动改为其他位置。
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListHostFilesResult {
+    pub path: String,
+    pub parent_path: Option<String>,
+    pub entries: Vec<HostFileEntry>,
+    pub truncated: bool,
+    pub skipped_entries: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

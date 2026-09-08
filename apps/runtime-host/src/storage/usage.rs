@@ -37,12 +37,18 @@ impl StorageEngine {
     }
 
     pub(super) fn backfill_session_usage(&mut self) -> StorageResult<()> {
+        self.backfill_session_usage_scoped(None)
+    }
+    pub(super) fn backfill_session_usage_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<()> {
         let pending = {
             let mut statement = self
                 .connection
                 .prepare(
                     "SELECT session_id, updated_at_ms FROM session_usage
-                     WHERE backfilled = 0 ORDER BY session_id",
+                     WHERE backfilled = 0 AND (?1 IS NULL OR session_id = ?1) ORDER BY session_id",
                 )
                 .map_err(|source| {
                     internal_error(
@@ -51,7 +57,7 @@ impl StorageEngine {
                     )
                 })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 })
                 .map_err(|source| {

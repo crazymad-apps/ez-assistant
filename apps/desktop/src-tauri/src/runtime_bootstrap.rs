@@ -28,7 +28,8 @@ const DISCOVERY_RELATIVE_PATH: &str = "run/runtime.json";
 const MAX_DISCOVERY_BYTES: u64 = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+// 冷启动需要完成本地服务初始化；短连接超时与整个进程的就绪等待分别限制。
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
@@ -47,7 +48,7 @@ pub(crate) struct RuntimeBootstrapCoordinator {
     http: reqwest::Client,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RuntimeDiscovery {
     address: String,
     instance_id: String,
@@ -56,13 +57,36 @@ struct RuntimeDiscovery {
 }
 
 /// 只在 invoke 返回值和 RuntimeClient 私有闭包之间短暂存在的连接凭据。
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct RuntimeBootstrap {
     pub(crate) base_url: String,
-    instance_id: String,
+    pub(crate) instance_id: String,
     pub(crate) access_token: String,
     pub(crate) capabilities: RuntimeHostCapabilities,
-    started_runtime: bool,
+    pub(crate) started_runtime: bool,
+}
+
+impl std::fmt::Debug for RuntimeDiscovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeDiscovery")
+            .field("address", &self.address)
+            .field("instance_id", &self.instance_id)
+            .field("pid", &self.pid)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RuntimeBootstrap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeBootstrap")
+            .field("base_url", &self.base_url)
+            .field("instance_id", &self.instance_id)
+            .field("capabilities", &self.capabilities)
+            .field("started_runtime", &self.started_runtime)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -104,15 +128,18 @@ impl Serialize for RuntimeBootstrapError {
 }
 
 impl RuntimeBootstrapCoordinator {
-    pub(crate) fn for_application() -> Self {
-        let runtime_home = dirs::home_dir()
-            .map(|home| home.join(".ez-assistant"))
-            .unwrap_or_default();
+    pub(crate) fn for_application(development: bool) -> Self {
+        let runtime_home = application_runtime_home(
+            std::env::var_os("EZ_ASSISTANT_RUNTIME_HOME").map(PathBuf::from),
+            dirs::home_dir(),
+            development || cfg!(debug_assertions),
+        );
         let runtime_executable = resolve_runtime_executable().unwrap_or_default();
         Self {
             runtime_home,
             runtime_executable,
             http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(CONNECT_TIMEOUT)
                 .build()
@@ -126,6 +153,7 @@ impl RuntimeBootstrapCoordinator {
         runtime_executable: PathBuf,
     ) -> Result<Self, RuntimeBootstrapError> {
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(CONNECT_TIMEOUT)
             .build()
@@ -150,7 +178,12 @@ impl RuntimeBootstrapCoordinator {
             ));
         }
         match self.discover(false).await {
-            Ok(bootstrap) => return Ok(bootstrap),
+            Ok(bootstrap) => {
+                if cfg!(debug_assertions) {
+                    self.verify_development_origin(&bootstrap.base_url).await?;
+                }
+                return Ok(bootstrap);
+            }
             Err(error) if matches!(error.code, RuntimeBootstrapErrorCode::ComponentMismatch) => {
                 return Err(error);
             }
@@ -161,6 +194,9 @@ impl RuntimeBootstrapCoordinator {
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Ok(bootstrap) = self.discover(true).await {
+                if cfg!(debug_assertions) {
+                    self.verify_development_origin(&bootstrap.base_url).await?;
+                }
                 return Ok(bootstrap);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -398,7 +434,10 @@ impl RuntimeBootstrapCoordinator {
         let missing = REQUIRED_FEATURES
             .iter()
             .find(|feature| !capabilities.features.contains(feature));
-        if missing.is_some() || !capabilities.sse {
+        if missing.is_some()
+            || !capabilities.sse
+            || capabilities.protocol_version != assistant_protocol::PROTOCOL_VERSION
+        {
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::ComponentMismatch,
                 "随包 Runtime 缺少当前桌面端所需能力。",
@@ -411,6 +450,37 @@ impl RuntimeBootstrapCoordinator {
             capabilities,
             started_runtime,
         })
+    }
+
+    // 原生健康检查没有浏览器 Origin，不能证明 Vite 页面也能连接复用的 Host。
+    // 只探测，不放宽安装版 Host 的来源规则，也不自动停止已有进程。
+    async fn verify_development_origin(&self, address: &str) -> Result<(), RuntimeBootstrapError> {
+        const ORIGIN: &str = "http://localhost:1420";
+        let response = self
+            .http
+            .request(reqwest::Method::OPTIONS, format!("{address}/commands"))
+            .header("Origin", ORIGIN)
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                "authorization,content-type",
+            )
+            .send()
+            .await
+            .map_err(runtime_unavailable)?;
+        if !response.status().is_success()
+            || response
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .and_then(|value| value.to_str().ok())
+                != Some(ORIGIN)
+        {
+            return Err(bootstrap_error(
+                RuntimeBootstrapErrorCode::ComponentMismatch,
+                "当前 Runtime 不允许开发页面连接。请停止正在使用该目录的安装版 Runtime，再重试开发启动。",
+            ));
+        }
+        Ok(())
     }
 
     async fn verify_endpoint(
@@ -478,6 +548,29 @@ impl RuntimeBootstrapCoordinator {
             ))
         }
     }
+}
+
+/// 开发运行默认隔离；显式覆盖无效时失败关闭，绝不回退到已安装应用的数据目录。
+fn application_runtime_home(
+    override_path: Option<PathBuf>,
+    user_home: Option<PathBuf>,
+    development: bool,
+) -> PathBuf {
+    if let Some(path) = override_path {
+        return if path.is_absolute() {
+            path
+        } else {
+            PathBuf::new()
+        };
+    }
+    let directory = if development {
+        ".ez-assistant-dev"
+    } else {
+        ".ez-assistant"
+    };
+    user_home
+        .map(|home| home.join(directory))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -573,6 +666,12 @@ fn resolve_runtime_executable() -> Result<PathBuf, RuntimeBootstrapError> {
 }
 
 fn read_discovery(runtime_home: &Path) -> Result<RuntimeDiscovery, RuntimeBootstrapError> {
+    if !runtime_home.is_absolute() {
+        return Err(bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
+            "Runtime Home 必须是绝对路径。",
+        ));
+    }
     let path = runtime_home.join(DISCOVERY_RELATIVE_PATH);
     let metadata = fs::symlink_metadata(&path).map_err(|_| invalid_discovery())?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_DISCOVERY_BYTES {
@@ -613,9 +712,9 @@ fn validate_discovery(discovery: &RuntimeDiscovery) -> Result<(), RuntimeBootstr
         return Err(invalid_discovery());
     }
     let address = Url::parse(&discovery.address).map_err(|_| invalid_discovery())?;
-    let is_valid = address.scheme() == "http"
+    let is_valid = matches!(address.scheme(), "http" | "https")
         && address.host_str() == Some("127.0.0.1")
-        && address.port().is_some()
+        && address.port_or_known_default().is_some_and(|port| port > 0)
         && address.username().is_empty()
         && address.password().is_none()
         && address.path() == "/"
@@ -688,6 +787,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn application_home_isolated_in_development_and_invalid_override_never_falls_back() {
+        let home = Some(PathBuf::from("/test-user"));
+        assert_eq!(
+            application_runtime_home(None, home.clone(), true),
+            PathBuf::from("/test-user/.ez-assistant-dev")
+        );
+        assert_eq!(
+            application_runtime_home(None, home.clone(), false),
+            PathBuf::from("/test-user/.ez-assistant")
+        );
+        assert_eq!(
+            application_runtime_home(
+                Some(PathBuf::from("/tmp/isolated-host")),
+                home.clone(),
+                false
+            ),
+            PathBuf::from("/tmp/isolated-host")
+        );
+        assert!(
+            application_runtime_home(Some(PathBuf::from("relative")), home, false)
+                .as_os_str()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn discovery_requires_private_regular_loopback_data() {
         let directory = tempdir().expect("tempdir");
         let runtime_home = directory.path().join("runtime-home");
@@ -736,7 +861,58 @@ mod tests {
         };
         assert!(validate_discovery(&fixture("http://192.168.1.5:9000")).is_err());
         assert!(validate_discovery(&fixture("http://user@127.0.0.1:9000")).is_err());
-        assert!(validate_discovery(&fixture("https://127.0.0.1:9000")).is_err());
+        assert!(validate_discovery(&fixture("https://127.0.0.1:9000")).is_ok());
+        assert!(validate_discovery(&fixture("https://192.168.1.5:9000")).is_err());
+    }
+
+    #[tokio::test]
+    async fn development_preflight_rejects_release_origin_policy_before_returning_ready() {
+        use std::io::{Read as _, Write as _};
+        for (status, allow_origin, expected) in [
+            ("403 Forbidden", "", false),
+            ("204 No Content", "", false),
+            (
+                "204 No Content",
+                "Access-Control-Allow-Origin: http://localhost:1420\r\n",
+                true,
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let length = stream.read(&mut chunk).unwrap();
+                    assert!(length > 0);
+                    request.extend_from_slice(&chunk[..length]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with("options /commands"));
+                assert!(request.contains("origin: http://localhost:1420"));
+                stream.write_all(format!("HTTP/1.1 {status}\r\n{allow_origin}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+            });
+            let home = tempfile::tempdir().unwrap();
+            let coordinator = RuntimeBootstrapCoordinator::new(
+                home.path().to_owned(),
+                std::env::current_exe().unwrap(),
+            )
+            .unwrap();
+            let result = coordinator.verify_development_origin(&address).await;
+            if expected {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(
+                    result.unwrap_err().code,
+                    RuntimeBootstrapErrorCode::ComponentMismatch
+                ));
+            }
+            server.join().unwrap();
+        }
     }
 
     #[test]

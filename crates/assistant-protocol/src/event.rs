@@ -101,6 +101,8 @@ pub enum RuntimeEvent {
     RuntimeShuttingDown,
     /// 应用配置投影已经变化；客户端应重新获取 ApplicationSnapshot。
     ConfigChanged,
+    /// MCP 活动目录已发布；客户端应刷新服务选择与应用能力。
+    McpRegistryChanged,
     /// 全局 Skill 名称状态已经变化；设置页应重新读取当前管理投影。
     SkillSettingsChanged {
         name: String,

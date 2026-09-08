@@ -115,6 +115,8 @@ async function loadMonaco(): Promise<MonacoApi> {
     import("monaco-editor/basic-languages/monaco.contribution"),
     import("monaco-editor/language/json/monaco.contribution"),
     import("monaco-editor/language/json/json.worker?worker"),
+    // editor.api 不包含图标字体，不能等到 JSON 等语言功能加载时才间接取得 Codicon。
+    import("monaco-editor/features/codicon/register"),
   ]).then(([monaco, worker_module, , , , json_worker_module]) => {
     worker_constructors.set("editorWorkerService", worker_module.default);
     worker_constructors.set("json", json_worker_module.default);

@@ -37,6 +37,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
         .session;
     runtime
         .session(&session.session_id)
+        .await
         .expect("session controller")
         .lock_state()
         .expect("session state")
@@ -62,6 +63,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
                 .get_session(GetSessionRequest {
                     session_id: session.session_id.clone(),
                 })
+                .await
                 .expect("session")
                 .session
                 .title
@@ -87,6 +89,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
                 .get_session(GetSessionRequest {
                     session_id: session.session_id.clone(),
                 })
+                .await
                 .expect("session")
                 .session
                 .title
@@ -138,6 +141,7 @@ async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
         .session;
     let controller = runtime
         .session(&session.session_id)
+        .await
         .expect("session controller");
     controller
         .lock_state()
@@ -178,6 +182,7 @@ async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
             .get_session(GetSessionRequest {
                 session_id: session.session_id,
             })
+            .await
             .expect("session")
             .session
             .title,
@@ -316,9 +321,11 @@ async fn delete_requires_a_bound_one_time_confirmation_and_removes_only_the_targ
         .expect("delete target");
 
     assert!(matches!(
-        runtime.get_session(assistant_protocol::GetSessionRequest {
-            session_id: target.session_id,
-        }),
+        runtime
+            .get_session(assistant_protocol::GetSessionRequest {
+                session_id: target.session_id,
+            })
+            .await,
         Err(RuntimeError::SessionNotFound { .. })
     ));
     assert!(
@@ -326,6 +333,7 @@ async fn delete_requires_a_bound_one_time_confirmation_and_removes_only_the_targ
             .get_session(assistant_protocol::GetSessionRequest {
                 session_id: other.session_id,
             })
+            .await
             .is_ok()
     );
 }
@@ -361,6 +369,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
     wait_for_terminal(&runtime, &source.session_id, &submitted.run.run_id).await;
     runtime
         .session(&source.session_id)
+        .await
         .expect("source controller")
         .mark_faulted()
         .expect("fault source");
@@ -403,9 +412,11 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
         .await
         .expect("delete faulted source");
     assert!(matches!(
-        runtime.get_session(assistant_protocol::GetSessionRequest {
-            session_id: source.session_id,
-        }),
+        runtime
+            .get_session(assistant_protocol::GetSessionRequest {
+                session_id: source.session_id,
+            })
+            .await,
         Err(RuntimeError::SessionNotFound { .. })
     ));
 }
@@ -436,6 +447,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .get_session(assistant_protocol::GetSessionRequest {
             session_id: generated.session_id,
         })
+        .await
         .expect("generated summary")
         .session;
     assert_eq!(generated_summary.title, "首行作为会话标题");
@@ -474,6 +486,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .get_session(assistant_protocol::GetSessionRequest {
             session_id: renamed.session_id,
         })
+        .await
         .expect("renamed summary")
         .session;
     assert_eq!(renamed_summary.title, "用户标题");
@@ -505,6 +518,7 @@ async fn pinned_sessions_sort_first_and_pin_is_idempotent() {
     }
     let listed = runtime
         .list_sessions(ListSessionsRequest::default())
+        .await
         .expect("sessions")
         .sessions;
     assert_eq!(listed[0].session_id, first.session_id);
@@ -544,6 +558,7 @@ async fn faulted_session_still_allows_non_execution_metadata_changes() {
         .session;
     runtime
         .session(&created.session_id)
+        .await
         .expect("controller")
         .mark_faulted()
         .expect("fault session");
@@ -586,6 +601,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert!(
         runtime
             .list_sessions(ListSessionsRequest::default())
+            .await
             .expect("active sessions")
             .sessions
             .is_empty()
@@ -594,7 +610,9 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
         runtime
             .list_sessions(ListSessionsRequest {
                 filter: SessionListFilter::Archived,
+                ..Default::default()
             })
+            .await
             .expect("archived sessions")
             .sessions
             .len(),
@@ -645,6 +663,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert_eq!(
         runtime
             .list_sessions(ListSessionsRequest::default())
+            .await
             .expect("active sessions")
             .sessions[0]
             .session_id,
@@ -668,7 +687,9 @@ async fn model_switch_changes_only_the_key_and_requires_an_idle_active_session()
     let session_id = created.session.session_id;
     let prompt = runtime
         .session_for_test(&session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .clone();
 
     let changed = runtime
@@ -680,8 +701,12 @@ async fn model_switch_changes_only_the_key_and_requires_an_idle_active_session()
         .expect("change model");
     assert_eq!(changed.session.model_key.as_str(), "alternate");
     assert_eq!(
-        runtime.session_for_test(&session_id).system_prompt(),
-        &prompt
+        runtime
+            .session_for_test(&session_id)
+            .await
+            .current_system_prompt()
+            .expect("system prompt"),
+        prompt
     );
 
     runtime
@@ -976,6 +1001,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             .list_attachments(ListAttachmentsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("session attachments")
             .attachments
             .len(),
@@ -1001,6 +1027,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
     assert_eq!(
         runtime
             .get_session(GetSessionRequest { session_id })
+            .await
             .expect("session")
             .session
             .message_count,

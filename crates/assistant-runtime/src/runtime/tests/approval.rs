@@ -98,6 +98,7 @@ async fn allow_once_resumes_exactly_one_waiting_call_and_emits_lifecycle_events(
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("list approvals")
             .approvals
             .is_empty()
@@ -207,6 +208,7 @@ async fn session_allow_is_persisted_before_resume_and_matches_the_next_run() {
     assert!(
         runtime
             .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
             .expect("list approvals")
             .approvals
             .is_empty()
@@ -328,6 +330,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: second_session,
             })
+            .await
             .expect("list approvals")
             .approvals
             .is_empty()
@@ -380,6 +383,7 @@ async fn unavailable_workspace_scope_keeps_the_approval_pending_until_a_valid_de
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("list pending")
             .approvals[0]
             .status,
@@ -458,6 +462,7 @@ async fn permission_write_failure_keeps_the_call_pending_and_never_executes_it()
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("list pending")
             .approvals[0]
             .status,
@@ -662,6 +667,7 @@ async fn runtime_shutdown_cancels_and_removes_pending_approvals() {
     assert!(
         runtime
             .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
             .expect("list pending")
             .approvals
             .is_empty()
@@ -714,6 +720,7 @@ async fn cancelling_a_run_drops_its_pending_approval_without_executing_the_tool(
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("list pending")
             .approvals
             .is_empty()

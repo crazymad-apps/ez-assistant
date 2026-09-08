@@ -245,3 +245,74 @@ fn wait_for_refreshes(client: &mut Client, session_id: &str, count: usize) -> Va
         thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn host_is_ready_while_mcp_initializes_and_shutdown_cancels_initialization() {
+    let provider = FakeProvider::start();
+    for complete in [true, false] {
+        let home = TempDir::new().unwrap();
+        write_config(home.path(), provider.endpoint(), "startup-fixture");
+        let gate = home.path().join("mcp-start-gate");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stdio_server.py");
+        std::fs::write(
+            home.path().join("mcp.json"),
+            json!({"mcpServers":{"slow_fixture":{
+                "command":"python3", "args":["-u",fixture],
+                "env":{"MCP_FIXTURE_START_GATE":gate}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let host = HostProcess::start(home.path());
+        let mut client = host.connect();
+        let snapshot = client.runtime("get_application_snapshot", json!({}));
+        assert_eq!(
+            snapshot["snapshot"]["value"]["runtime_lifecycle"],
+            "running"
+        );
+        assert!(
+            !gate.exists(),
+            "external server is still deliberately blocked"
+        );
+        let options = json!({"context":{"type":"new_session","payload":{"workspace_id":null}},"variant":"build"});
+        assert_eq!(
+            client.runtime("list_mcp_server_options", options.clone())["servers"],
+            json!([])
+        );
+        eprintln!(
+            "MCP blocked: Host ready in {} ms",
+            started.elapsed().as_millis()
+        );
+        if complete {
+            std::fs::write(&gate, b"ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let servers =
+                    client.runtime("list_mcp_server_options", options.clone())["servers"].clone();
+                if servers
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|server| server["server_key"] == "slow_fixture")
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "MCP catalog did not become available"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                client.runtime("get_application_snapshot", json!({}))["snapshot"]["value"]["capabilities"]
+                    ["mcp_tools"],
+                true
+            );
+        }
+        client.runtime("shutdown_runtime", json!({}));
+        drop(client);
+        assert!(host.wait().status.success());
+    }
+}

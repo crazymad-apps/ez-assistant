@@ -118,14 +118,14 @@ impl StorageEngine {
             recall_index_available,
         };
         engine.recover_session_deletions()?;
-        engine.recover_materialization_orphans()?;
         engine.repair_workspace_resources()?;
-        engine.repair_session_resources()?;
-        engine.recover_attachments()?;
         Ok(engine)
     }
 
     pub(super) fn load_runtime(&mut self) -> StorageResult<RecoveredRuntime> {
+        self.recover_materialization_orphans()?;
+        self.repair_session_resources()?;
+        self.recover_attachments()?;
         let pending_clear_sessions = self.recover_session_history_operations()?;
         let mut unavailable = self.recover_body_appends()?;
         self.unavailable_child_tasks = self.recover_child_storage()?;
@@ -163,8 +163,7 @@ impl StorageEngine {
         super::filesystem::validate_session_component(&session.session_id)?;
         let prompt_json = serde_json::to_string(&session.system_prompt)
             .map_err(|source| internal_error("system prompt could not be encoded", source))?;
-        let skill_catalog_json = serde_json::to_string(&session.skill_catalog)
-            .map_err(|source| internal_error("skill catalog could not be encoded", source))?;
+        let skill_catalog_json = "{}";
         let paths = self.prepare_new_session_directories(&session)?;
         let body_path = body_path(&paths.session_directory, 1);
         create_new_private_file(&body_path)?;
@@ -245,7 +244,7 @@ impl StorageEngine {
             model_key: session.model_key,
             reasoning_effort: session.reasoning_effort,
             system_prompt: session.system_prompt,
-            skill_catalog: session.skill_catalog,
+
             environment: session.environment,
             lifecycle: StoredSessionLifecycle::Active,
             current_variant: session.current_variant,
@@ -418,10 +417,21 @@ impl StorageEngine {
     }
 
     pub(super) fn load_sessions(&self) -> StorageResult<Vec<StoredSession>> {
+        self.load_sessions_scoped(None)
+    }
+
+    pub(super) fn load_sessions_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredSession>> {
+        let predicate = if session_id.is_some() {
+            "sessions.session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
+            .prepare(&format!("SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, '{{}}', current_variant,
                         approval_mode, role, proxy_controller_session_id, proxy_changed_at_ms,
                         sessions.lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
@@ -431,37 +441,39 @@ impl StorageEngine {
                         sessions.materialization_key, sessions.automatic_title_pending
                  FROM sessions
                  LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
-                 ORDER BY created_at_ms, session_id",
-            )
+                 WHERE {predicate} ORDER BY created_at_ms, session_id"))
             .map_err(|source| internal_error("runtime sessions could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, i64>(14)?,
-                    row.get::<_, i64>(15)?,
-                    row.get::<_, Option<i64>>(16)?,
-                    row.get::<_, i64>(17)?,
-                    row.get::<_, String>(18)?,
-                    row.get::<_, Option<String>>(19)?,
-                    row.get::<_, Option<String>>(20)?,
-                    row.get::<_, Option<String>>(21)?,
-                    row.get::<_, i64>(22)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, i64>(15)?,
+                        row.get::<_, Option<i64>>(16)?,
+                        row.get::<_, i64>(17)?,
+                        row.get::<_, String>(18)?,
+                        row.get::<_, Option<String>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
+                        row.get::<_, Option<String>>(21)?,
+                        row.get::<_, i64>(22)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("runtime sessions could not be read", source))?;
 
         let mut sessions = Vec::new();
@@ -472,7 +484,7 @@ impl StorageEngine {
                 model_key,
                 reasoning_effort,
                 prompt_json,
-                skill_catalog_json,
+                _retired_skill_catalog,
                 current_variant,
                 approval_mode,
                 role,
@@ -506,13 +518,6 @@ impl StorageEngine {
                 serde_json::from_str(&prompt_json).map_err(|source| {
                     invalid_data_with_source("stored system prompt is invalid", source)
                 })?;
-            let skill_catalog: assistant_runtime::SessionSkillCatalog =
-                serde_json::from_str(&skill_catalog_json).map_err(|source| {
-                    invalid_data_with_source("stored skill catalog is invalid", source)
-                })?;
-            skill_catalog.validate_structure().map_err(|source| {
-                invalid_data_with_source("stored skill catalog structure is invalid", source)
-            })?;
             let environment = self.load_session_environment(&parsed_session_id)?;
             let lifecycle = match lifecycle.as_str() {
                 "active" => StoredSessionLifecycle::Active,
@@ -525,7 +530,6 @@ impl StorageEngine {
                 model_key: parsed_model_key,
                 reasoning_effort: parse_reasoning_effort(reasoning_effort)?,
                 system_prompt,
-                skill_catalog,
                 environment,
                 lifecycle,
                 current_variant: parse_agent_variant(&current_variant)?,

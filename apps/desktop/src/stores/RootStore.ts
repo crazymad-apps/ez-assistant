@@ -1,4 +1,5 @@
-import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
+import { ClientResources } from "../runtime-client/ClientResources";
+import type { ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 import { action, makeObservable, observable, reaction, runInAction, type IReactionDisposer } from "mobx";
 import type {
   AgentVariant,
@@ -14,6 +15,7 @@ import type {
   GoalId,
   InputId,
   ListMcpServerOptionsRequest,
+  SkillManagementSnapshot,
   McpServerKey,
   McpServerOptionSnapshot,
   MessageId,
@@ -33,15 +35,14 @@ import type {
   SubmitInputMode,
   WorkspaceId,
 } from "../generated/assistant-protocol";
-import { loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
+import { viewingSnapshot, loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import {
   copySessionResourcePath as copyNativeSessionResourcePath,
-  materializeNewSession,
   NativeResourceFailure,
   openSessionResourceInSystem as openNativeSessionResourceInSystem,
-  releaseAttachmentSelection,
 } from "../native-bridge/nativeResource";
 import { RuntimeClientError } from "../runtime-client/RuntimeClient";
+import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 import { ConnectionStore } from "./ConnectionStore";
 import { ComposerQuoteStore } from "./ComposerQuoteStore";
 import { ConversationSearchStore } from "./ConversationSearchStore";
@@ -71,7 +72,9 @@ export class RootStore {
   readonly projection = new RuntimeProjectionStore();
   readonly live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
-  readonly resource_workspace = new ResourceWorkspaceStore();
+  readonly resource_workspace = new ResourceWorkspaceStore(() => this.#runtime.client);
+  readonly files: ClientResources;
+  directory_picker: Readonly<{ initial_path: string | null; resolve: (path: string | null) => void }> | null = null;
   readonly new_session_drafts = new NewSessionDraftStore();
   readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
@@ -117,8 +120,9 @@ export class RootStore {
   #runtime_state_disposer: IReactionDisposer;
   #resource_scope_disposer: IReactionDisposer;
 
-  constructor() {
+  constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean }> = {}) {
     this.#runtime = new RuntimeLifecycleCoordinator({
+      require_selected_target: this.target_options.target_kind !== undefined,
       connection: this.connection,
       live_execution: this.live_execution,
       navigation: this.navigation,
@@ -149,13 +153,15 @@ export class RootStore {
         }
       },
     });
+    this.files = new ClientResources(() => this.#runtime.client, this.target_options.target_kind !== "remote");
     this.device_gateway = new DeviceGatewayStore({
       get_client: () => this.#runtime.client,
       refresh_application: () => this.#runtime.loadApplication(),
     });
     this.desktop_lifecycle = new DesktopLifecycleStore({
       resources: this.resource_workspace,
-      get_application: () => this.projection.application,
+      get_application: () => this.target_options.target_kind === "remote" ? null : this.projection.application,
+      is_local_target: () => this.target_options.target_kind !== "remote",
       prepare_runtime_mutation: (kind) => this.#runtime.prepareForNativeRuntimeMutation(kind),
       reconnect_runtime: (bootstrap) => this.#runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
       mark_runtime_stopped: () => this.connection.markRuntimeStopped(),
@@ -179,6 +185,7 @@ export class RootStore {
     window.addEventListener("keyup", this.#save_view_state);
     window.addEventListener("blur", this.#flush_view_state);
     window.addEventListener("pagehide", this.#flush_view_state);
+    window.addEventListener("pagehide", this.resource_workspace.disconnectTerminals);
     this.desktop_lifecycle.start();
     this.#runtime_state_disposer = reaction(
       () => this.connection.state,
@@ -204,6 +211,7 @@ export class RootStore {
     });
     this.#session_management = new SessionManagementController({
       resources: this.resource_workspace,
+      files: this.files,
       connection: this.connection,
       navigation: this.navigation,
       runtime: this.#runtime,
@@ -221,6 +229,8 @@ export class RootStore {
       pending_session_action: observable,
       pending_workspace_action: observable,
       workspace_editor: observable,
+      directory_picker: observable,
+      finishDirectorySelection: action,
       composer_pending: observable,
       interaction_error: observable,
       pending_queue_input_id: observable,
@@ -303,16 +313,19 @@ export class RootStore {
     });
   }
 
-  connect(): Promise<void> {
-    this.#initial_connection ??= this.#connectAndRestore();
+  get runtime_client() { return this.#runtime.client; }
+
+  connect(bootstrap?: RuntimeBootstrap): Promise<void> {
+    this.#initial_connection ??= this.#connectAndRestore(bootstrap);
     return this.#initial_connection;
   }
 
-  async #connectAndRestore(): Promise<void> {
+  async #connectAndRestore(bootstrap?: RuntimeBootstrap): Promise<void> {
     this.#disposed = false;
     await this.initializePreferences();
     if (this.#disposed) return;
-    await this.#runtime.connect();
+    await this.#runtime.connect(bootstrap);
+    if (this.#disposed) return;
     await this.#restoreResourceSnapshot();
   }
 
@@ -327,13 +340,13 @@ export class RootStore {
 
   async #loadPreferences(): Promise<void> {
     try {
-      const preferences = await loadDesktopPreferences();
+      const preferences = await loadDesktopPreferences(this.target_options.target_address);
       if (this.#disposed) return;
       runInAction(() => {
         this.navigation.applyPreferences(preferences);
         this.desktop_lifecycle.applyPreferences(preferences);
       });
-      this.#pending_snapshot = parseResourceSnapshot(preferences.resource_workspace);
+      this.#pending_snapshot = this.target_options.restore_resources === false ? null : viewingSnapshot(preferences.resource_workspace, this.files.desktop, this.files.native_host);
       const scope = this.navigation.selected_session_id || this.navigation.selected_draft_key
         ? null : this.#pending_snapshot?.current_scope_key;
       if (scope?.startsWith("session:")) this.navigation.selectSession(scope.slice(8), false);
@@ -575,7 +588,7 @@ export class RootStore {
 
   async clearNewSessionDraft(key: NewSessionDraftKey): Promise<void> {
     const removed = this.new_session_drafts.remove(key);
-    if (removed) await releaseDraftSelections(removed);
+    if (removed) await releaseDraftSelections(removed, this.files);
     if (this.navigation.selected_draft_key === key) {
       this.new_session_drafts.open(key, this.projection.application?.configuration.default_model ?? null);
     }
@@ -607,7 +620,7 @@ export class RootStore {
     this.interaction_error = null;
     this.new_session_drafts.setAttachmentTransferState(key, "uploading");
     try {
-      const result = await materializeNewSession(manifest, createOperationId("materialize"));
+      const result = await this.files.materializeNewSession(manifest, createOperationId("materialize"));
       runInAction(() => {
         // 物化已可靠成功，先转移标签 owner 再改导航；活跃 PTY/浏览器不重新创建。
         this.resource_workspace.transferDraft(key, result.session.session_id);
@@ -686,8 +699,8 @@ export class RootStore {
 
   async addWorkspace(): Promise<void> {
     if (this.pending_workspace_action || this.pending_session_action) return;
-    const primary_directory = await this.#session_management.chooseWorkspaceDirectory();
-    if (primary_directory) {
+    const primary_directory = await this.chooseWorkspaceDirectory();
+    if (primary_directory && !this.#disposed) {
       runInAction(() => {
         this.workspace_editor = { mode: "create", primary_directory };
       });
@@ -702,8 +715,15 @@ export class RootStore {
     if (!this.pending_workspace_action) this.workspace_editor = null;
   }
 
-  async chooseWorkspaceDirectory(): Promise<string | null> {
-    return this.#session_management.chooseWorkspaceDirectory();
+  async chooseWorkspaceDirectory(initial_path: string | null = null): Promise<string | null> {
+    if (this.files.native_host) return this.#session_management.chooseWorkspaceDirectory();
+    if (this.directory_picker || this.#disposed) return null;
+    return new Promise((resolve) => runInAction(() => { this.directory_picker = {initial_path, resolve}; }));
+  }
+
+  finishDirectorySelection(path: string | null): void {
+    const picker = this.directory_picker; this.directory_picker = null;
+    picker?.resolve(path);
   }
 
   async saveWorkspaceEditor(input: Readonly<{
@@ -728,7 +748,7 @@ export class RootStore {
     const removed = await this.#session_management.removeWorkspace(workspace_id);
     if (removed) {
       const draft = this.new_session_drafts.remove(draftKeyForWorkspace(workspace_id));
-      if (draft) await releaseDraftSelections(draft);
+      if (draft) await releaseDraftSelections(draft, this.files);
     }
     return removed;
   }
@@ -808,6 +828,32 @@ export class RootStore {
     return this.#session_management.exportSession(session_id, title);
   }
 
+  async listSessionPage(filter: "active" | "archived", offset: number, query?: string) {
+    const client = this.#runtime.client;
+    if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
+    const result = await client.command({ type: "list_sessions", payload: { filter, offset, limit: 100, query: query ?? null } });
+    if (client !== this.#runtime.client) throw new Error("Runtime 连接已变化，请重试");
+    return result.payload;
+  }
+
+  async loadMoreSessions(filter: "active" | "archived"): Promise<void> {
+    const application = this.projection.application;
+    if (!application) return;
+    const offset = filter === "active" ? application.active_sessions_next_offset : application.archived_sessions_next_offset;
+    if (offset === null || offset === undefined) return;
+    const page = await this.listSessionPage(filter, offset);
+    if (application !== this.projection.application) return;
+    this.projection.appendSessionPage(filter, page.sessions, page.has_more ? offset + 100 : null);
+  }
+
+  async listSkills(workspace_id?: WorkspaceId | null): Promise<SkillManagementSnapshot> {
+    const client = this.#runtime.client;
+    if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
+    const result = await client.command({ type: "list_skills", payload: workspace_id ? { workspace_id } : {} });
+    if (client !== this.#runtime.client || this.connection.state !== "connected") throw new Error("Runtime 连接已变化，请重试");
+    return result.payload.snapshot;
+  }
+
   async listMcpServerOptions(request: ListMcpServerOptionsRequest): Promise<readonly McpServerOptionSnapshot[]> {
     const client = this.#runtime.client;
     if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
@@ -819,10 +865,6 @@ export class RootStore {
   async submitSessionCommand(session_id: SessionId, command: SessionCommand): Promise<boolean> {
     if (!this.projection.application?.capabilities.session_commands) {
       this.interaction_error = "当前 Runtime 不支持会话控制指令";
-      return false;
-    }
-    if (this.projection.session_views.get(session_id)?.session.role === "controller") {
-      this.interaction_error = "请在普通会话中加入刷新队列";
       return false;
     }
     return this.#run_interaction.submitSessionCommand(session_id, command);
@@ -1104,6 +1146,7 @@ export class RootStore {
   }
 
   dispose(): void {
+    if (this.#disposed) return;
     this.#flush_view_state();
     this.#disposed = true;
     this.#resource_snapshot_disposer();
@@ -1113,16 +1156,19 @@ export class RootStore {
     window.removeEventListener("keyup", this.#save_view_state);
     window.removeEventListener("blur", this.#flush_view_state);
     window.removeEventListener("pagehide", this.#flush_view_state);
+    window.removeEventListener("pagehide", this.resource_workspace.disconnectTerminals);
     this.transient_focus.clear();
     this.#resource_scope_disposer();
     this.resource_workspace.dispose();
+    this.files.dispose();
+    this.finishDirectorySelection(null);
     this.#runtime.dispose();
     this.device_gateway.dispose();
     this.settings.mcp.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
     for (const draft of this.new_session_drafts.clear()) {
-      void releaseDraftSelections(draft);
+      void releaseDraftSelections(draft, this.files);
     }
     if (this.#preferences_save_timer !== null) {
       window.clearTimeout(this.#preferences_save_timer);
@@ -1155,13 +1201,17 @@ export class RootStore {
         right_sidebar_width: this.navigation.right_sidebar_width,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
         close_behavior: this.desktop_lifecycle.close_behavior,
-        resource_workspace: parseResourceSnapshot(this.resource_workspace.captureSnapshot()),
+        resource_workspace: viewingSnapshot(this.resource_workspace.captureSnapshot(), this.files.desktop, this.files.native_host),
       };
+      if (!this.files.desktop) {
+        await saveDesktopPreferences(preferences);
+        return;
+      }
       const serialized = JSON.stringify(preferences);
       // 同一个 staging 文件只允许串行写入，后提交的快照不能被旧任务覆盖。
       const pending = this.#preferences_pending.catch(() => undefined).then(async () => {
         if (serialized === this.#last_saved_preferences) return;
-        await saveDesktopPreferences(preferences);
+        await saveDesktopPreferences(preferences, this.target_options.target_address);
         this.#last_saved_preferences = serialized;
       });
       this.#preferences_pending = pending;
@@ -1211,9 +1261,9 @@ function materializationManifest(draft: NewSessionDraft): SessionMaterialization
   };
 }
 
-async function releaseDraftSelections(draft: NewSessionDraft): Promise<void> {
+async function releaseDraftSelections(draft: NewSessionDraft, files: ClientResources): Promise<void> {
   await Promise.allSettled(
-    draft.attachments.map((attachment) => releaseAttachmentSelection(attachment.selection_id)),
+    draft.attachments.map((attachment) => files.releaseAttachmentSelection(attachment.selection_id)),
   );
 }
 

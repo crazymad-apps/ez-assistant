@@ -10,6 +10,8 @@ import { conversationItemId, RuntimeProjectionStore } from "../../src/stores/Run
 
 const application: ApplicationSnapshot = {
   runtime_lifecycle: "running",
+  active_sessions_next_offset: null,
+  archived_sessions_next_offset: null,
   configuration: {
     config_path: null,
     revision: "fixture-revision",

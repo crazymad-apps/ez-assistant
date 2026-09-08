@@ -183,6 +183,61 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn search_conversation_titles(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+        Box::pin(async move {
+            self.request(|reply| Command::SearchConversationTitles { request, reply })
+                .await
+        })
+    }
+    fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime> {
+        Box::pin(async move {
+            self.request(|reply| Command::LoadRuntimeGlobals { reply })
+                .await
+        })
+    }
+    fn prepare_session_execution(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_runtime::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::PrepareSessionExecution { session_id, reply })
+                .await
+        })
+    }
+    fn load_session_environment(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_runtime::SessionExecutionEnvironment> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::LoadSessionEnvironment { session_id, reply })
+                .await
+        })
+    }
+    fn load_session_state(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_runtime::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::LoadSessionState { session_id, reply })
+                .await
+        })
+    }
+    fn query_session_summaries(
+        &self,
+        query: assistant_runtime::SessionSummaryQuery,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>> {
+        Box::pin(async move {
+            self.request(|reply| Command::QuerySessionSummaries { query, reply })
+                .await
+        })
+    }
+
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
         Box::pin(async move { self.request(|reply| Command::LoadRuntime { reply }).await })
     }

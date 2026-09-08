@@ -221,6 +221,7 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
       className={[styles.content, className].filter(Boolean).join(" ")}
       aria-hidden={presence.state === "exiting" ? true : undefined}
       data-position-ready={position.ready}
+      data-overlay-region="floating"
       data-presence={presence.state}
       data-side={position.side}
       id={menu.content_id}

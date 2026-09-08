@@ -1,4 +1,5 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invokeRuntime as invoke, captureRuntimeBinding } from "./runtimeConnection";
+import { isTauri } from "@tauri-apps/api/core";
 import type {
   AttachmentId,
   ConversationOwner,
@@ -69,13 +70,14 @@ export async function chooseAttachmentFiles(): Promise<readonly AttachmentSelect
 
 export async function stageClipboardImage(file: File): Promise<AttachmentSelection> {
   ensureDesktopBridge();
+  const binding = captureRuntimeBinding();
   const bytes = new Uint8Array(await file.arrayBuffer());
   return invoke<AttachmentSelection>("stage_clipboard_image", bytes, {
     headers: {
       "x-ez-media-type": file.type,
       "x-ez-original-name": encodeURIComponent(file.name),
     },
-  }).catch(normalizeResourceFailure);
+  }, binding).catch(normalizeResourceFailure);
 }
 
 export async function releaseAttachmentSelection(selection_id: string): Promise<void> {
@@ -369,4 +371,9 @@ function normalizeResourceFailure(error: unknown): never {
     }
   }
   throw new NativeResourceFailure("本机资源操作失败。");
+}
+
+export async function downloadRuntimeResource(path: string, suggested_name: string, body?: unknown): Promise<void> {
+  ensureDesktopBridge();
+  await invoke("download_runtime_resource", {path, suggestedName: suggested_name, body: body ?? null}).catch(normalizeResourceFailure);
 }

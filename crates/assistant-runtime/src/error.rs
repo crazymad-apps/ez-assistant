@@ -110,10 +110,10 @@ pub enum RuntimeError {
     /// 用户提交的 Skill 名称格式无效。
     #[error("skill name is invalid")]
     SkillNameInvalid,
-    /// 当前 Session 没有可用于激活的冻结 Skill Catalog。
+    /// 当前技能扫描没有可用于激活的完整目录。
     #[error("session `{session_id}` skill catalog is unavailable")]
     SkillCatalogUnavailable { session_id: SessionId },
-    /// 当前 Session Catalog 中不存在指定 Skill。
+    /// 当前技能目录中不存在指定 Skill。
     #[error("skill was not found in session `{session_id}`")]
     SkillNotFound { session_id: SessionId },
     /// 指定 Skill 不允许用户显式激活。

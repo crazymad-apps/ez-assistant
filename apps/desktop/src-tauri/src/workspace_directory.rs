@@ -1,3 +1,4 @@
+use crate::runtime_connection::RuntimeTarget;
 use serde::Serialize;
 use tauri_plugin_dialog::DialogExt;
 
@@ -18,8 +19,12 @@ impl WorkspaceDirectoryFailure {
 
 #[tauri::command]
 pub(crate) async fn choose_workspace_directory(
+    target: RuntimeTarget,
     app: tauri::AppHandle,
 ) -> Result<Option<String>, WorkspaceDirectoryFailure> {
+    target
+        .ensure_local()
+        .map_err(|_| WorkspaceDirectoryFailure::unavailable())?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -34,6 +39,9 @@ pub(crate) async fn choose_workspace_directory(
     else {
         return Ok(None);
     };
+    target
+        .ensure_local()
+        .map_err(|_| WorkspaceDirectoryFailure::unavailable())?;
     let path = selection
         .into_path()
         .map_err(|_| WorkspaceDirectoryFailure::unavailable())?;

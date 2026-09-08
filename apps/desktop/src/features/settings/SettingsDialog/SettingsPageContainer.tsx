@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Icon } from "../../../components/Icon";
+import { InlineIconButton } from "../../../components/InlineIconButton";
 import styles from "./index.module.scss";
 
 type SettingsPageContainerProps = Readonly<{
@@ -17,20 +17,17 @@ export function SettingsPageContainer(props: SettingsPageContainerProps) {
     <section className={styles.page_container}>
       <header className={styles.page_container_header}>
         <div className={styles.page_container_heading}>
-          {props.on_back ? (
-            <button
-              aria-label={props.back_label ?? "返回"}
-              className={styles.page_container_back}
-              onClick={props.on_back}
-              type="button"
-            >
-              <Icon name="chevron-left" size={16} />
-            </button>
-          ) : null}
-          <div>
+          <div className={styles.page_container_title}>
+            {props.on_back ? (
+              <InlineIconButton
+                icon="chevron-left"
+                label={props.back_label ?? "返回"}
+                onClick={props.on_back}
+              />
+            ) : null}
             <h3>{props.title}</h3>
-            {props.description ? <p>{props.description}</p> : null}
           </div>
+          {props.description ? <p>{props.description}</p> : null}
         </div>
         {props.actions ? <div className={styles.page_container_actions}>{props.actions}</div> : null}
       </header>

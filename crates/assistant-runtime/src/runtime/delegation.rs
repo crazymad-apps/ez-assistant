@@ -15,7 +15,7 @@ impl AssistantRuntime {
         session_id: &assistant_protocol::SessionId,
         child_task_id: &assistant_protocol::ChildTaskId,
     ) -> RuntimeResult<agent_types::ConversationSnapshot> {
-        self.session(session_id)?;
+        self.session(session_id).await?;
         self.child_tasks
             .get(session_id, child_task_id)?
             .ok_or_else(|| RuntimeError::ChildTaskNotFound {
@@ -51,7 +51,7 @@ impl AssistantRuntime {
         &self,
         request: GetChildTaskRequest,
     ) -> RuntimeResult<GetChildTaskResult> {
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         let task = self
             .child_tasks
             .get(&request.session_id, &request.child_task_id)?
@@ -69,7 +69,7 @@ impl AssistantRuntime {
         request: CancelChildTaskRequest,
     ) -> RuntimeResult<CancelChildTaskResult> {
         self.ensure_running()?;
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         let existing = self
             .child_tasks
             .get(&request.session_id, &request.child_task_id)?

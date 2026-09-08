@@ -44,7 +44,7 @@ impl StorageEngine {
         Ok(diagnostics)
     }
 
-    fn recover_session_tool_images(
+    pub(super) fn recover_session_tool_images(
         &self,
         session_id: &SessionId,
         generation: u64,

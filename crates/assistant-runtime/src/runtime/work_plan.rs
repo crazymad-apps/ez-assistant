@@ -13,7 +13,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ClearWorkPlanResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;

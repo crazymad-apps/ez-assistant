@@ -1,3 +1,4 @@
+import { copyText } from "../platform/clipboard";
 import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 import { runInAction } from "mobx";
 import type {
@@ -14,7 +15,7 @@ import type {
   WorkspaceId,
   WorkspaceSummary,
 } from "../generated/assistant-protocol";
-import { exportSessionMarkdown } from "../native-bridge/nativeResource";
+import type { ClientResources } from "../runtime-client/ClientResources";
 import {
   openSessionWorkspaceDirectory,
   openWorkspaceDirectory,
@@ -45,6 +46,7 @@ type SessionManagementDependencies = Readonly<{
   navigation: NavigationStore;
   runtime: RuntimeLifecycleCoordinator;
   resources: ResourceWorkspaceStore;
+  files: ClientResources;
   save_preferences: () => void;
   select_draft: (workspace_id: WorkspaceId | null) => void;
   select_session: (session_id: SessionId) => Promise<void>;
@@ -425,7 +427,7 @@ export class SessionManagementController {
   async copyWorkspacePath(path: string): Promise<void> {
     this.dependencies.state.interaction_error = null;
     try {
-      await navigator.clipboard.writeText(path);
+      await copyText(path);
     } catch (error: unknown) {
       runInAction(() => {
         this.dependencies.state.interaction_error = displayError(error);
@@ -441,7 +443,7 @@ export class SessionManagementController {
     state.pending_session_action = true;
     state.interaction_error = null;
     try {
-      return await exportSessionMarkdown(session_id, title);
+      return await this.dependencies.files.exportSessionMarkdown(session_id, title);
     } catch (error: unknown) {
       runInAction(() => {
         state.interaction_error = displayError(error);

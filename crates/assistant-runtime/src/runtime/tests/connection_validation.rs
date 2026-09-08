@@ -24,6 +24,7 @@ async fn connection_validation_uses_only_the_fixed_minimal_request_and_creates_n
     assert!(
         runtime
             .list_sessions(ListSessionsRequest::default())
+            .await
             .expect("sessions")
             .sessions
             .is_empty()

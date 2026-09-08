@@ -408,6 +408,7 @@ pub(super) struct RunAuthorizationInput {
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
 pub(super) struct RunCompilationResources<'a> {
+    pub(super) skill_catalog: crate::SkillCatalog,
     pub(super) model_factory: &'a dyn crate::ModelServiceFactory,
     pub(super) context_window: Arc<agent_sdk::ContextWindowEvaluator>,
     pub(super) run_tool_factory: &'a dyn RunToolFactory,
@@ -443,7 +444,7 @@ impl AssistantRuntime {
         bind_image_preparation(&mut compiled, session.environment());
         Ok(RuntimeContextCompactor::for_manual(
             compiled.model,
-            session.system_prompt().clone(),
+            session.current_system_prompt()?,
         ))
     }
 }
@@ -550,14 +551,28 @@ pub(super) fn compile_run_agent(
     let (base_tools, infrastructure_policies) = bundle.into_parts();
     let active_skill_names = {
         let state = session.lock_state()?;
+        let mut latest_names = std::collections::BTreeSet::new();
         state
             .skill_activations
             .iter()
+            .rev()
             .filter(|activation| {
                 matches!(
                     &activation.owner,
                     SkillActivationOwner::Session(owner) if owner == session.id()
                 )
+            })
+            // 同名只比较最后一次激活，文件回退旧版本时也必须重新加载。
+            .filter(|activation| latest_names.insert(activation.name.clone()))
+            .filter(|activation| {
+                resources
+                    .skill_catalog
+                    .definitions
+                    .iter()
+                    .any(|definition| {
+                        definition.name == activation.name
+                            && definition.definition_digest == activation.definition_digest
+                    })
             })
             .map(|activation| activation.name.clone())
             .collect::<Vec<_>>()
@@ -565,7 +580,7 @@ pub(super) fn compile_run_agent(
     let skill_activation_latch = Arc::new(SkillActivationLatch::new(active_skill_names));
     let parent_compactor = Arc::new(RuntimeContextCompactor::for_parent(
         compiled.model.clone(),
-        session.system_prompt().clone(),
+        session.current_system_prompt()?,
     ));
     let goal_signal_latch = if let Some(binding) = authorization.goal_binding.as_ref() {
         let state = session.lock_state()?;
@@ -743,7 +758,7 @@ pub(super) fn compile_run_agent(
         }
         tool_assembly.contribute(
             RunToolContribution::tool(LoadSkillTool::new(
-                session.skill_catalog().clone(),
+                resources.skill_catalog.clone(),
                 skill_activation_latch.clone(),
             ))
             .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -808,7 +823,7 @@ pub(super) fn compile_run_agent(
                     .min(delegation.max_tool_calls().get()),
             ),
         };
-        let mut child_prompt_parts = session.system_prompt().parts().to_vec();
+        let mut child_prompt_parts = session.current_system_prompt()?.parts().to_vec();
         child_prompt_parts.push(crate::delegation::CHILD_AGENT_INSTRUCTION_V1.to_owned());
         let child_prompt = SystemPromptSnapshot::new(child_prompt_parts);
         let child_compactor = Arc::new(RuntimeContextCompactor::for_child(
@@ -854,7 +869,7 @@ pub(super) fn compile_run_agent(
                 infrastructure_policies,
                 events: authorization.events,
                 limits: delegation,
-                skill_catalog: session.skill_catalog().clone(),
+                skill_catalog: resources.skill_catalog.clone(),
                 mcp_registry: resources.mcp_registry.clone(),
                 disclosure_context: mcp_disclosure.context.clone(),
             }));
@@ -878,7 +893,7 @@ pub(super) fn compile_run_agent(
 
     let mut builder = AgentBuilder::new(
         compiled.model,
-        session.system_prompt().clone(),
+        session.current_system_prompt()?,
         resources.context_window,
     )
     .tools(parent_tools)

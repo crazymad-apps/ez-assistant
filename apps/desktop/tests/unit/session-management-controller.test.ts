@@ -1,3 +1,4 @@
+import { ClientResources } from "../../src/runtime-client/ClientResources";
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSummary } from "../../src/generated/assistant-protocol";
@@ -135,6 +136,7 @@ function controllerFixture(restored: boolean) {
   };
   const resources = new ResourceWorkspaceStore();
   const controller = new SessionManagementController({
+    files: new ClientResources(() => null, true),
     resources,
     connection,
     navigation,
@@ -184,4 +186,9 @@ it("does not consume the delete token or discard indexes when terminal cleanup f
   expect(fixture.command).not.toHaveBeenCalled();
   expect(fixture.resources.groups.has("session:keep-me")).toBe(true);
   expect(fixture.state.interaction_error).toBe("PTY cleanup failed");
+});
+
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
 });

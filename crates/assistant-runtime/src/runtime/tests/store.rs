@@ -1,6 +1,9 @@
 //! Runtime 异常收敛测试使用的易失 Store 包装；不接触真实 Runtime Home。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
@@ -35,6 +38,11 @@ pub(super) struct FaultInjectingStore {
     fail_settlement: bool,
     hang_shutdown: bool,
     shutdown_called: AtomicBool,
+    unavailable_session: Mutex<Option<SessionId>>,
+    pending_title_on_recovery: AtomicBool,
+    conversation_loads: AtomicUsize,
+    session_loads: Mutex<Vec<SessionId>>,
+    full_loads: AtomicUsize,
 }
 
 impl FaultInjectingStore {
@@ -45,6 +53,11 @@ impl FaultInjectingStore {
             fail_settlement: false,
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
+            unavailable_session: Mutex::new(None),
+            pending_title_on_recovery: AtomicBool::new(false),
+            conversation_loads: AtomicUsize::new(0),
+            session_loads: Mutex::new(Vec::new()),
+            full_loads: AtomicUsize::new(0),
         }
     }
 
@@ -55,6 +68,11 @@ impl FaultInjectingStore {
             fail_settlement: true,
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
+            unavailable_session: Mutex::new(None),
+            pending_title_on_recovery: AtomicBool::new(false),
+            conversation_loads: AtomicUsize::new(0),
+            session_loads: Mutex::new(Vec::new()),
+            full_loads: AtomicUsize::new(0),
         }
     }
 
@@ -65,7 +83,32 @@ impl FaultInjectingStore {
             fail_settlement: false,
             hang_shutdown: true,
             shutdown_called: AtomicBool::new(false),
+            unavailable_session: Mutex::new(None),
+            pending_title_on_recovery: AtomicBool::new(false),
+            conversation_loads: AtomicUsize::new(0),
+            session_loads: Mutex::new(Vec::new()),
+            full_loads: AtomicUsize::new(0),
         }
+    }
+
+    pub(super) fn pending_title_on_recovery(&self) {
+        self.pending_title_on_recovery
+            .store(true, Ordering::Release);
+    }
+
+    pub(super) fn loaded_session_ids(&self) -> Vec<SessionId> {
+        self.session_loads.lock().expect("loads").clone()
+    }
+    pub(super) fn full_load_count(&self) -> usize {
+        self.full_loads.load(Ordering::Acquire)
+    }
+
+    pub(super) fn conversation_load_count(&self) -> usize {
+        self.conversation_loads.load(Ordering::Acquire)
+    }
+
+    pub(super) fn isolate_on_recovery(&self, session_id: SessionId) {
+        *self.unavailable_session.lock().expect("isolation fixture") = Some(session_id);
     }
 
     pub(super) fn shutdown_called(&self) -> bool {
@@ -74,6 +117,63 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn search_conversation_titles(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+        self.inner.search_conversation_titles(request)
+    }
+    fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime> {
+        self.inner.load_runtime_globals()
+    }
+    fn query_session_summaries(
+        &self,
+        query: crate::SessionSummaryQuery,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>> {
+        self.inner.query_session_summaries(query)
+    }
+    fn prepare_session_execution(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.inner.prepare_session_execution(&session_id).await?;
+            self.load_session_state(&session_id).await
+        })
+    }
+    fn load_session_environment(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::SessionExecutionEnvironment> {
+        self.inner.load_session_environment(session_id)
+    }
+    fn load_session_state(&self, session_id: &SessionId) -> StoreFuture<'_, crate::LoadedSession> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.session_loads
+                .lock()
+                .expect("loads")
+                .push(session_id.clone());
+            let mut loaded = self.inner.load_session_state(&session_id).await?;
+            for session in &mut loaded.state.sessions {
+                if self
+                    .unavailable_session
+                    .lock()
+                    .expect("isolation fixture")
+                    .as_ref()
+                    == Some(&session.session_id)
+                {
+                    session.conversation_state = crate::StoredConversationState::Unavailable;
+                }
+                if self.pending_title_on_recovery.load(Ordering::Acquire) {
+                    session.automatic_title_pending = true;
+                }
+            }
+            Ok(loaded)
+        })
+    }
+
     fn register_paired_device(
         &self,
         device: crate::NewPairedDevice,
@@ -100,7 +200,28 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime> {
-        self.inner.load_runtime()
+        Box::pin(async move {
+            self.full_loads.fetch_add(1, Ordering::AcqRel);
+            let mut recovered = self.inner.load_runtime().await?;
+            if let Some(id) = self
+                .unavailable_session
+                .lock()
+                .expect("isolation fixture")
+                .as_ref()
+            {
+                for session in &mut recovered.sessions {
+                    if &session.session_id == id {
+                        session.conversation_state = crate::StoredConversationState::Unavailable;
+                    }
+                }
+            }
+            if self.pending_title_on_recovery.load(Ordering::Acquire) {
+                for session in &mut recovered.sessions {
+                    session.automatic_title_pending = true;
+                }
+            }
+            Ok(recovered)
+        })
     }
 
     fn load_memory_context(&self) -> StoreFuture<'_, MemoryContextSnapshot> {
@@ -363,6 +484,7 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot> {
+        self.conversation_loads.fetch_add(1, Ordering::AcqRel);
         self.inner.load_conversation(session_id)
     }
 

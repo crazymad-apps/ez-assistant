@@ -787,6 +787,7 @@ async fn hosting_rename_and_revoke_update_controller_without_duplicate_business_
     assert_eq!(
         runtime
             .session(&controller.session.session_id)
+            .await
             .expect("controller state")
             .summary()
             .expect("controller summary")
@@ -821,6 +822,7 @@ async fn hosting_rename_and_revoke_update_controller_without_duplicate_business_
     assert!(
         runtime
             .session(&controller.session.session_id)
+            .await
             .expect("controller state")
             .summary()
             .expect("controller summary")
@@ -960,7 +962,7 @@ async fn device_controller_delivery_report_returns_to_the_source_instead_of_pc_h
         .await
         .expect("device source run started");
 
-    let target_controller = runtime.session_for_test(&target.session.session_id);
+    let target_controller = runtime.session_for_test(&target.session.session_id).await;
     target_controller
         .lock_state()
         .expect("target state")
@@ -1006,7 +1008,9 @@ async fn device_controller_delivery_report_returns_to_the_source_instead_of_pc_h
         assistant_protocol::RunStatus::Completed
     );
 
-    let controller_session = runtime.session_for_test(&controller.session.session_id);
+    let controller_session = runtime
+        .session_for_test(&controller.session.session_id)
+        .await;
     let report_run_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let Some(run_id) = controller_session

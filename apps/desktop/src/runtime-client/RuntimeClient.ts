@@ -1,5 +1,8 @@
+import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
   DeviceGatewayCommand,
+  HostAccessCommand,
+  HostAccessStatus,
   DeviceGatewayCommandResult,
   DeviceGatewayEvent,
   RuntimeCommand,
@@ -54,26 +57,74 @@ export type RuntimeEventConnection = {
 export class RuntimeClient {
   readonly instance_id: string;
   readonly capabilities: RuntimeHostCapabilities;
-  readonly started_runtime: boolean;
   readonly address: string;
 
   readonly #base_url: string;
   readonly #access_token: string;
+  readonly #abort = new AbortController();
 
-  constructor(bootstrap: RuntimeBootstrap) {
+  constructor(bootstrap: RuntimeBootstrap, private readonly on_unauthorized?: () => void) {
     this.#base_url = bootstrap.base_url;
     this.#access_token = bootstrap.access_token;
     this.instance_id = bootstrap.instance_id;
     this.capabilities = bootstrap.capabilities;
-    this.started_runtime = bootstrap.started_runtime;
     this.address = new URL(bootstrap.base_url).origin;
+  }
+
+  dispose(): void { this.#abort.abort(); }
+
+  openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void): TerminalSocket {
+    return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal);
+  }
+
+  /** 文件 HTTP 请求复用当前连接的凭据、取消和登录失效处理，不重新发现本机 Host。 */
+  async resource<T>(path: string, init: RequestInit, consume: (response: Response) => Promise<T>): Promise<T> {
+    if (!path.startsWith("/") || path.startsWith("//")) throw new Error("资源路径无效。");
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    this.#abort.signal.addEventListener("abort", cancel, { once: true });
+    init.signal?.addEventListener("abort", cancel, { once: true });
+    if (this.#abort.signal.aborted || init.signal?.aborted) cancel();
+    // 请求和响应正文共用此取消域；连接 dispose 会中止尚未读完的下载。
+    try {
+      const headers = this.#headers(false);
+      new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+      const response = await this.#fetch(`${this.#base_url}${path}`, {
+        ...init, signal: abort.signal, headers,
+      });
+      if (!response.ok) throw await decodeCommandFailure(response);
+      return await consume(response);
+    } finally {
+      this.#abort.signal.removeEventListener("abort", cancel);
+      init.signal?.removeEventListener("abort", cancel);
+    }
+  }
+
+  async hostAccessCommand(command: HostAccessCommand): Promise<HostAccessStatus> {
+    const request_id = createRequestId();
+    const response = await this.#fetch(`${this.#base_url}/commands`, {
+      method: "POST", headers: this.#headers(true), body: JSON.stringify({ request_id, command: { scope: "host_access", payload: command } }),
+    });
+    if (!response.ok) throw await decodeCommandFailure(response);
+    const result = await response.json() as { request_id: string; result: { scope: string; payload: HostAccessStatus } };
+    if (result.request_id !== request_id || result.result.scope !== "host_access") throw new RuntimeClientError("protocol_mismatch", "Host 返回了不匹配的访问设置。");
+    return result.result.payload;
+  }
+
+  async #fetch(input: string, init: RequestInit): Promise<Response> {
+    const response = await fetch(input, { ...init, credentials: "same-origin", redirect: "error", signal: init.signal ?? this.#abort.signal });
+    if (response.status === 401) {
+      this.on_unauthorized?.();
+      throw new RuntimeClientError("authentication_required", "登录已失效，请重新登录。");
+    }
+    return response;
   }
 
   async command<TType extends RuntimeCommand["type"]>(
     command: Extract<RuntimeCommand, { readonly type: TType }>,
   ): Promise<Extract<RuntimeCommandResult, { readonly type: TType }>> {
     const request_id = createRequestId();
-    const response = await fetch(`${this.#base_url}/commands`, {
+    const response = await this.#fetch(`${this.#base_url}/commands`, {
       method: "POST",
       headers: this.#headers(true),
       body: JSON.stringify({
@@ -97,7 +148,7 @@ export class RuntimeClient {
 
   async deviceGatewayCommand(command: DeviceGatewayCommand): Promise<DeviceGatewayCommandResult> {
     const request_id = createRequestId();
-    const response = await fetch(`${this.#base_url}/commands`, {
+    const response = await this.#fetch(`${this.#base_url}/commands`, {
       method: "POST",
       headers: this.#headers(true),
       body: JSON.stringify({
@@ -123,7 +174,7 @@ export class RuntimeClient {
     listener: RuntimeEventListener,
     signal: AbortSignal,
   ): Promise<RuntimeEventConnection> {
-    const response = await fetch(`${this.#base_url}/events`, {
+    const response = await this.#fetch(`${this.#base_url}/events`, {
       headers: this.#headers(false),
       signal,
     });
@@ -136,7 +187,8 @@ export class RuntimeClient {
   }
 
   #headers(json: boolean): Headers {
-    const headers = new Headers({ Authorization: `Bearer ${this.#access_token}` });
+    const headers = new Headers();
+    if (this.#access_token) headers.set("Authorization", `Bearer ${this.#access_token}`);
     if (json) {
       headers.set("Content-Type", "application/json");
     }

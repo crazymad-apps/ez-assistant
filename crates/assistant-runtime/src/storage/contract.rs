@@ -49,10 +49,52 @@ pub struct RecoveredRuntime {
     pub skill_activations: Vec<StoredSkillActivation>,
 }
 
+/// 有界的会话摘要查询，不读取冻结提示词、输入、Run 或正文。
+#[derive(Clone, Debug)]
+pub struct SessionSummaryQuery {
+    pub filter: assistant_protocol::SessionListFilter,
+    pub session_id: Option<SessionId>,
+    pub role: Option<assistant_protocol::SessionRoleSnapshot>,
+    pub query: Option<String>,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+/// 单会话装配及其跨会话身份引用；引用只有角色与生命周期，不带历史正文。
+#[derive(Clone, Debug, Default)]
+pub struct LoadedSession {
+    pub state: RecoveredRuntime,
+    pub identities: Vec<(SessionId, crate::SessionRole, crate::StoredSessionLifecycle)>,
+}
+
 /// Assistant Runtime 使用的持久化能力端口。
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    /// 启动只读取全局设备与工作区事实，不恢复或加载历史会话。
+    fn search_conversation_titles(
+        &self,
+        request: ConversationSearchRequest,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>>;
+
+    fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime>;
+
+    /// 读取目标会话结构状态；不启动执行，不修复历史写操作。
+    fn load_session_environment(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::SessionExecutionEnvironment>;
+
+    fn load_session_state(&self, session_id: &SessionId) -> StoreFuture<'_, LoadedSession>;
+
+    /// 用户显式操作前收敛目标会话的未完成提交；不重放工具、不调度 Run。
+    fn prepare_session_execution(&self, session_id: &SessionId) -> StoreFuture<'_, LoadedSession>;
+
+    fn query_session_summaries(
+        &self,
+        query: SessionSummaryQuery,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>>;
+
     /// 恢复未完成提交并加载 Runtime 的结构化启动投影。
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime>;
 

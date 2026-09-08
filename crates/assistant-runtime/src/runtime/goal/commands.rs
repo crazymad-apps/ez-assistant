@@ -86,7 +86,7 @@ impl AssistantRuntime {
     pub async fn stop_goal(&self, request: StopGoalRequest) -> RuntimeResult<StopGoalResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -187,7 +187,7 @@ impl AssistantRuntime {
     pub async fn clear_goal(&self, request: ClearGoalRequest) -> RuntimeResult<ClearGoalResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -261,7 +261,7 @@ impl AssistantRuntime {
         // 与同一 Session 的 Stop/Clear/Input mutation 串行，避免校验通过后 Goal 世代被并发改写。
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -370,7 +370,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ResumeGoalResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;

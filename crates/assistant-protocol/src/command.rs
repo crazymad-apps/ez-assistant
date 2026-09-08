@@ -627,17 +627,25 @@ pub struct CancelSessionCompactionResult {
 }
 
 /// 按生命周期列出 Session；缺省只返回活动 Session。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSessionsRequest {
     #[serde(default)]
     pub filter: SessionListFilter,
+    #[serde(default)]
+    pub offset: u32,
+    /// 缺省 100，最大 200。
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 /// 列出 Session 的成功结果。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSessionsResult {
+    pub has_more: bool,
     /// 按 Runtime 确定性顺序返回的 Session 摘要。
     pub sessions: Vec<SessionSummary>,
 }
@@ -2354,6 +2362,7 @@ mod tests {
             ),
             (
                 RuntimeCommandResult::ListSessions(ListSessionsResult {
+                    has_more: false,
                     sessions: vec![session_summary()],
                 }),
                 "list_sessions",

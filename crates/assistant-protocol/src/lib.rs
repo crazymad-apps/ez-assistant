@@ -8,6 +8,7 @@ mod device_gateway;
 mod error;
 mod event;
 mod host;
+mod host_access;
 mod id;
 mod materialization;
 mod mcp;
@@ -17,6 +18,11 @@ mod product;
 mod resource;
 mod skill;
 mod snapshot;
+
+pub use host_access::{
+    HostAccessCommand, HostAccessConfiguration, HostAccessScheme, HostAccessStatus,
+    HostListenerState, HostLoginRequest, HostLoginResult,
+};
 
 pub use command::{
     ArchiveSessionRequest, ArchiveSessionResult, CancelChildTaskRequest, CancelChildTaskResult,
@@ -142,16 +148,16 @@ pub use product::{
     ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use resource::{
+    HostFileEntry, HostFileRequest, ListHostFilesRequest, ListHostFilesResult,
     ListSessionResourceFilesRequest, ListSessionResourceFilesResult,
     PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, SessionResourceEntry,
     SessionResourceEntryKind, SessionResourceEntryState, SessionResourceLocator,
     SessionResourcePreviewKind, SessionResourceRoot,
 };
 pub use skill::{
-    ActiveSkillSnapshot, SessionSkillCatalogSnapshot, SessionSkillCatalogStatusSnapshot,
-    SkillActivationTagSnapshot, SkillActivationTriggerSnapshot, SkillDetailSnapshot,
-    SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot, SkillHealthSnapshot,
-    SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
+    ActiveSkillSnapshot, SkillActivationTagSnapshot, SkillActivationTriggerSnapshot,
+    SkillDetailSnapshot, SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot,
+    SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
 };
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
@@ -169,4 +175,9 @@ pub use snapshot::{
 /// 客户端与 Runtime Host 当前共同理解的应用协议版本。
 ///
 /// 该常量通过 Host capabilities 投影，不定义 HTTP 或 SSE 的传输版本。
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+mod user_terminal;
+pub use user_terminal::{
+    UserTerminalControl, UserTerminalNotice, UserTerminalSize, UserTerminalSource,
+};

@@ -101,3 +101,8 @@ describe("NewSessionDraftStore", () => {
     expect(store.new_session_drafts.get("unbound")?.text).toBe("不会创建空会话");
   });
 });
+
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+});

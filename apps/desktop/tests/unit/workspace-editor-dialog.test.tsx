@@ -16,6 +16,8 @@ describe("WorkspaceEditorDialog", () => {
       observed_sequence: 1,
       value: {
         runtime_lifecycle: "running",
+        active_sessions_next_offset: null,
+        archived_sessions_next_offset: null,
         configuration: { state: "ready" },
         models: [],
         workspaces: [{
@@ -58,6 +60,8 @@ describe("WorkspaceEditorDialog", () => {
       observed_sequence: 1,
       value: {
         runtime_lifecycle: "running",
+        active_sessions_next_offset: null,
+        archived_sessions_next_offset: null,
         configuration: { state: "ready" },
         models: [],
         workspaces: [{

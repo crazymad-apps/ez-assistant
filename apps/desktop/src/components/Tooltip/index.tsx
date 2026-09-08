@@ -121,6 +121,7 @@ export function Tooltip(props: Readonly<{
           className={styles.tooltip}
           data-presence={presence.state}
           data-position-ready={position.ready}
+          data-overlay-region="floating"
           id={tooltip_id}
           onTransitionEnd={presence.onTransitionEnd}
           ref={tooltip_ref}

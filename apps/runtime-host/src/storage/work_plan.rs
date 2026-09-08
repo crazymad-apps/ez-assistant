@@ -14,26 +14,41 @@ use super::{
 
 impl StorageEngine {
     pub(super) fn load_all_work_plans(&self) -> StorageResult<Vec<StoredWorkPlan>> {
+        self.load_all_work_plans_scoped(None)
+    }
+
+    pub(super) fn load_all_work_plans_scoped(
+        &self,
+        session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredWorkPlan>> {
+        let predicate = if session_id.is_some() {
+            "session_id = ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT session_id, revision, objective, items_json, last_operation_id,
                         updated_at_ms
                  FROM session_work_plans
-                 ORDER BY session_id",
-            )
+                 WHERE {predicate} ORDER BY session_id"
+            ))
             .map_err(|source| internal_error("work plans could not be queried", source))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })
+            .query_map(
+                [session_id.map(assistant_protocol::SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
             .map_err(|source| internal_error("work plans could not be read", source))?;
         let mut plans = Vec::new();
         for row in rows {

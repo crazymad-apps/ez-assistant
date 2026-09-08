@@ -192,7 +192,6 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
               label="工作空间"
               on_select={() => scope_key && workspace_available && store.openWorkspace(scope_key)}
             />
-            <ResourceMenuItem disabled={false} icon="globe" label="浏览器" on_select={() => store.openBrowser(undefined, owner)} />
             <ResourceMenuItem disabled={!terminal_available} icon="terminal" label="终端" on_select={openTerminal} />
           </DropdownMenuContent>
         </DropdownMenu>}

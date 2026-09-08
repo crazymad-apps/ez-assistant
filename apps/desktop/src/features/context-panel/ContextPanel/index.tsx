@@ -1,3 +1,4 @@
+import { SkillListStore } from "../../skills";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
@@ -56,7 +57,8 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
   const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
-  const skills = sessionSkillRows(session_view);
+  const [skill_list] = useState(() => new SkillListStore());
+  const skills = sessionSkillRows(session_view, skill_list.snapshot);
   const session_workspace = session_view?.workspace;
   const draft_key = store.navigation.selected_draft_key;
   const new_session_draft = store.new_session_drafts.get(draft_key);
@@ -87,6 +89,17 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
       },
     }));
   };
+
+  const skills_open = sectionIsOpen("skills");
+  const workspace_id = session?.workspace_id ?? new_session_draft?.workspace_id;
+  // 目录不随 Session 冻结。可见期间在重新进入、设置/刷新事件和回到窗口时查询。
+  useEffect(() => {
+    if (!skills_open || (!session_id && !draft_key)) return;
+    const load = () => { void skill_list.load(() => store.listSkills(workspace_id)); };
+    load();
+    window.addEventListener("focus", load);
+    return () => { window.removeEventListener("focus", load); skill_list.dispose(); };
+  }, [skill_list, store, session_id, draft_key, workspace_id, skills_open, application]);
 
   const openAttachment = (attachment: AttachmentSummary) => {
     if (!session_id || !isPreviewableResource(attachment.original_name, attachment.media_type)) {
@@ -191,7 +204,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                     </span>
                     <span className={styles.path_text}>{directory}</span>
                     <div className={styles.path_actions}>
-                      {index === 0 && <InlineIconButton icon="external-link" label={`打开 ${directory}`} onClick={() => void store.openWorkspace(draft_workspace.workspace_id)} />}
+                      {store.files.native_host && index === 0 && <InlineIconButton icon="external-link" label={`打开 ${directory}`} onClick={() => void store.openWorkspace(draft_workspace.workspace_id)} />}
                       <InlineIconButton icon="copy" label={`复制 ${directory}`} onClick={() => void store.copyWorkspacePath(directory)} />
                     </div>
                   </div>
@@ -297,7 +310,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                             key={directory}
                             label={directory}
                             on_copy={() => void store.copyWorkspacePath(directory)}
-                            on_open_system={() => void store.openSessionWorkspaceDirectory(session.session_id, index)}
+                            on_open_system={store.files.native_host ? () => void store.openSessionWorkspaceDirectory(session.session_id, index) : undefined}
                             on_open_tab={() => store.resource_workspace.openWorkspace(`session:${session.session_id}`, locator)}
                             primary={index === 0}
                           />
@@ -311,7 +324,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                     <WorkspaceDirectoryRow
                       label="会话私有目录"
                       on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
-                      on_open_system={() => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT)}
+                      on_open_system={store.files.native_host ? () => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT) : undefined}
                       on_open_tab={() => store.resource_workspace.openWorkspace(
                         `session:${session.session_id}`,
                         SESSION_PRIVATE_ROOT,
@@ -326,7 +339,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                   <WorkspaceDirectoryRow
                     label="会话私有目录"
                     on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
-                    on_open_system={() => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT)}
+                    on_open_system={store.files.native_host ? () => void store.openSessionResourceInSystem(session.session_id, SESSION_PRIVATE_ROOT) : undefined}
                     on_open_tab={() => store.resource_workspace.openWorkspace(
                       `session:${session.session_id}`,
                       SESSION_PRIVATE_ROOT,
@@ -342,7 +355,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
           on_toggle={() => toggleSection("skills")}
           title="技能"
         >
-          {session_view ? (
+          {session_view || new_session_draft ? (
             <div className={styles.skill_context}>
               {skills.length > 0 ? (
                 <div className={styles.skill_list}>
@@ -353,10 +366,10 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                     </div>
                   ))}
                 </div>
-              ) : <p className={styles.empty_row}>{emptySkillMessage(session_view)}</p>}
-              {(session_view.skill_catalog?.diagnostics.length ?? 0) > 0 && (
+              ) : <p className={styles.empty_row}>{skill_list.error ?? (skill_list.loading ? "正在读取技能" : "当前没有可用技能")}</p>}
+              {(skill_list.snapshot?.diagnostics.length ?? 0) > 0 && (
                 <Button className={styles.skill_diagnostics} onClick={() => store.settings.open("skills")} size="small" variant="text">
-                  查看 {session_view.skill_catalog?.diagnostics.length} 项技能诊断
+                  查看 {skill_list.snapshot?.diagnostics.length} 项技能诊断
                 </Button>
               )}
             </div>
@@ -447,6 +460,8 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
               label: "在资源栏打开",
               on_select: () => openAttachment(attachment_menu.attachment),
             },
+            {label:"下载文件",on_select:()=>runAttachmentAction(store.files.downloadAttachment(attachment_menu.attachment.session_id, attachment_menu.attachment.attachment_id, attachment_menu.attachment.original_name),"下载失败。")},
+            ...(store.files.native_host ? [
             {
               label: "使用系统应用打开",
               on_select: () => runAttachmentAction(
@@ -466,7 +481,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 ),
                 "无法在 Finder 中显示。",
               ),
-            },
+            }            ] : []),
           ]}
           location={attachment_menu.location}
           on_close={() => setAttachmentMenu(null)}
@@ -503,7 +518,7 @@ function sessionWorkspaceLocator(directory_index: number): SessionResourceLocato
 function WorkspaceDirectoryRow(props: Readonly<{
   label: string;
   on_copy: () => void;
-  on_open_system: () => void;
+  on_open_system?: () => void;
   on_open_tab: () => void;
   primary?: boolean;
 }>) {
@@ -521,7 +536,7 @@ function WorkspaceDirectoryRow(props: Readonly<{
         <span className={styles.path_text}>{props.label}</span>
       </button>
       <div className={styles.path_actions}>
-        <InlineIconButton icon="external-link" label={`打开 ${props.label}`} onClick={props.on_open_system} />
+        {props.on_open_system && <InlineIconButton icon="external-link" label={`打开 ${props.label}`} onClick={props.on_open_system} />}
         <InlineIconButton icon="copy" label={`复制 ${props.label}`} onClick={props.on_copy} />
       </div>
     </div>
@@ -532,12 +547,4 @@ function imageHandlingLabel(mode: SessionViewSnapshot["composer_capabilities"]["
   if (mode === "native") return "模型原生";
   if (mode === "tool") return "辅助视觉模型";
   return "当前不可用";
-}
-
-function emptySkillMessage(view: SessionViewSnapshot): string {
-  if (!view.skill_catalog || view.skill_catalog.status === "legacy_unavailable") {
-    return "此历史会话没有可展示的技能信息";
-  }
-  if (view.skill_catalog.status === "unavailable") return "当前会话的技能信息不可用";
-  return "当前会话没有可用技能";
 }

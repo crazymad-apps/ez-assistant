@@ -65,6 +65,8 @@ export const ResourceBrowser = observer(function ResourceBrowser(props: Readonly
         <InlineIconButton icon="x" label="关闭提示" onClick={() => browser.dismissNotice()} />
       </div>}
       <div aria-busy={browser.loading} className={styles.viewport} ref={props.viewport_ref}>
+        {!browser.error && browser.preview && <img alt="" aria-hidden="true" className={styles.preview} src={browser.preview} />}
+        {!browser.error && browser.obscured && !browser.preview && <div className={styles.state}>网页暂时被浮层遮挡</div>}
         {browser.error ? <div className={styles.state} role="alert">
           <p>{browser.error}</p>
           <div className={styles.actions}>

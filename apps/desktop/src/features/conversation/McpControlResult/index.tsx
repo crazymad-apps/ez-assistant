@@ -13,8 +13,16 @@ const outcome_labels: Record<McpServerRefreshOutcome, string> = {
 
 /** 与普通用户气泡分离的可靠控制结果；不产生 Run、工具详情或重试模型按钮。 */
 export function McpControlResult(props: Readonly<{
-  message: Extract<ConversationItem, { type: "control_result" }>;
+  message: Extract<ConversationItem, { type: "control_result" | "skill_refresh_result" }>;
 }>) {
+  if (props.message.type === "skill_refresh_result") {
+    const { success, skill_count, message_id } = props.message;
+    const title = success ? "技能刷新完成" : "技能刷新失败";
+    return <article aria-label={title} className={styles.control_result} data-message-id={message_id} data-outcome={success ? "success" : "failure"}>
+      <div className={styles.result_heading}><Icon name="refresh" size={14} /><span>{title}</span>
+      <small>{success ? `${skill_count} 个技能` : "无法读取当前技能列表，请检查技能文件后重试。"}</small></div>
+    </article>;
+  }
   const result = props.message.result;
   const title = { success: "MCP 刷新完成", partial: "MCP 部分刷新完成", failure: "MCP 刷新失败" }[result.outcome];
   return (

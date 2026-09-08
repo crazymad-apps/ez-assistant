@@ -18,6 +18,10 @@
 
 ## 三、总体分层
 
+产品组成与技术分层分开描述：桌面级应用包含 Desktop、Host、Client，服务器级应用包含 Host、
+Client；Host 不单独分发。两类应用共用 Host／Runtime 能力，组件清单不等于进程清单，不改变
+下述 UI 与 Runtime 的进程及业务所有权边界。Client 的具体装配由对应版本方案明确。
+
 ```text
 Desktop / Other Application
           │
@@ -551,9 +555,10 @@ Model、System Prompt、Context Window、ToolSet、请求配置、Budget 和 Gua
 v0.8.0 开始建立正式 `assistant-runtime` 与 `apps/runtime-host`：Runtime library 持有内存 Session、
 Conversation、Run 和执行监督的权威状态，Host 只负责进程入口、具体资源装配与传输适配。
 该版本为验证双进程使用的 Unix Socket wire 是阶段性私有实现；自 v0.11.0 起，
-正式 Host 改为默认启用的本地 loopback HTTP。后续可选远程 HTTPS 默认关闭；如显式
-启用则复用同一组 Command、SSE 与 Streaming Upload API。这一替换不改变 Runtime 的业务
-权威状态或 Host 的适配层定位。
+正式 Host 改为默认启用的本地 loopback HTTP。v0.25.0 已确认的外部访问设计默认关闭，
+允许 HTTP／HTTPS、HTTPS 可选；显式启用后仍复用同一组 Command、SSE 与 Streaming Upload
+API，尚未实现。这一演进不改变 Runtime 的业务权威状态或 Host 的适配层定位，也不改变
+后续 Runtime 间通信和设备 Gateway 各自的加密协议。
 
 v0.9.0 由 Runtime 接管 Runtime Home 配置、脱敏诊断、model key 和 reload：Session 只冻结
 model key 与已渲染 System Prompt，每个 Run 按开始时取得的同一配置快照构造完整 Agent 和
@@ -645,12 +650,15 @@ fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。
 - SQLite 开关只以格式有效的 Skill `name` 为键，不区分来源或层级；禁用不会回退同名低优先级包。
 - Skill 是指令来源而不是权限来源；启用本身无需额外权限，包内文件、Shell 等能力仍由现有工具
   Authorizer 决定，`allowed-tools` 不转换为放行规则。
-- 新 Session 在创建边界冻结完整 Catalog、Winner 的精确 `SKILL.md` 正文与 digest、共享源目录、
-  确定性 revision 和模型可见 System Prompt Part；以后执行、归档恢复与重启均不重新扫描当前定义。
-  旧 Session 使用版本化 `legacy_unavailable` 空 Catalog，不因升级获得当前技能。
+- v0.25.0 起，Session 只冻结创建时的模型 System Prompt 文本，不保存技能目录。列表按需重新扫描，新用户激活与 Run 装配使用当前定义；运行中的执行与历史正文不被后续修改替换。
 - 普通资源始终保留在四个共享 Skill Root，按 Skill 指令通过既有文件/Shell 工具访问；Host 不枚举、
-  复制或建立 Session 私有 Skill 包。Fork 只复制 Catalog 结构化事实，不改写共享路径或复制文件。
+  复制或建立 Session 私有 Skill 包。Fork 继承已冻结系统提示词和所选消息中的激活事实，不复制目录。
 - 用户每次提交最多携带一个 Skill 名称；输入区再次选择属于客户端草稿替换，发送后由该 Input 独立冻结，
-  不形成会话级“当前选择”。Runtime 从 Session Catalog 解析正文并经统一 `InternalContext` 边界附加。
+  不形成会话级“当前选择”。Runtime 从当前技能扫描结果解析正文并经统一 `InternalContext` 边界附加。
 - Activation ledger 与 Input/Run/消息原子提交，是 Queue 标签、历史消息标签和当前上下文的唯一来源；
   文件或开关变化不改写已冻结事实。Fork 只继承所选 Conversation 前缀内的 Activation。
+
+### v0.25.0 显式 Skill refresh
+
+普通或主控会话执行 `/skill refresh` 时，Runtime 在控制队列边界扫描并提交结果，结果正文提供当时的可用目录，不替换系统提示词。扫描失败显示失败。
+`/skill` 和上下文技能列表每次进入读取当前目录，`/mcp` 查询当前服务 Registry。会话不持有目录快照或历史目录；Activation 随消息保存，恢复不依赖当前文件。

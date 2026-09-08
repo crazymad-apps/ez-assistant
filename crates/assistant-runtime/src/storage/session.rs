@@ -7,8 +7,7 @@ use assistant_protocol::{
 };
 
 use crate::{
-    PcOutputHosting, SessionExecutionEnvironment, SessionSkillCatalog, StoredMcpSelection,
-    StoredSkillActivation,
+    PcOutputHosting, SessionExecutionEnvironment, StoredMcpSelection, StoredSkillActivation,
 };
 
 use super::{StoredAttachment, StoredGoal, StoredSessionCommand, StoredWorkPlan};
@@ -55,7 +54,6 @@ pub struct NewStoredSession {
     pub model_key: ModelKey,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
-    pub skill_catalog: SessionSkillCatalog,
     pub environment: SessionExecutionEnvironment,
     pub current_variant: AgentVariant,
     pub approval_mode: ApprovalMode,
@@ -133,7 +131,6 @@ pub struct SessionHistoryClear {
     pub session_id: SessionId,
     pub expected_generation: u64,
     pub system_prompt: SystemPromptSnapshot,
-    pub skill_catalog: SessionSkillCatalog,
     /// 重建后的环境必须与 Session 现有稳定资源身份完全一致。
     pub environment: SessionExecutionEnvironment,
     pub expected_role: SessionRole,
@@ -190,7 +187,6 @@ pub struct StoredSession {
     pub model_key: ModelKey,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
-    pub skill_catalog: SessionSkillCatalog,
     pub environment: SessionExecutionEnvironment,
     pub lifecycle: StoredSessionLifecycle,
     pub current_variant: AgentVariant,

@@ -98,6 +98,7 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
       aria-hidden={presence.state === "exiting" ? true : undefined}
       className={props.class_name}
       data-position-ready={position.ready}
+      data-overlay-region="floating"
       data-presence={presence.state}
       inert={presence.state === "exiting" ? true : undefined}
       onTransitionEnd={presence.onTransitionEnd}

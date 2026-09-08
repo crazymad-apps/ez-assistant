@@ -548,13 +548,19 @@ impl StorageEngine {
     }
 
     pub(super) fn recover_body_appends(&mut self) -> StorageResult<HashSet<String>> {
+        self.recover_body_appends_scoped(None)
+    }
+    pub(super) fn recover_body_appends_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<HashSet<String>> {
         let pending = {
             let mut statement = self
                 .connection
-                .prepare("SELECT operation_id, session_id FROM body_appends ORDER BY created_at_ms, operation_id")
+                .prepare("SELECT operation_id, session_id FROM body_appends WHERE (?1 IS NULL OR session_id = ?1) ORDER BY created_at_ms, operation_id")
                 .map_err(|source| internal_error("staged appends could not be queried", source))?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|source| internal_error("staged appends could not be read", source))?;
@@ -572,18 +578,24 @@ impl StorageEngine {
     }
 
     pub(super) fn recover_child_body_appends(&mut self) -> StorageResult<HashSet<String>> {
+        self.recover_child_body_appends_scoped(None)
+    }
+    pub(super) fn recover_child_body_appends_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<HashSet<String>> {
         let pending = {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT operation_id, child_task_id FROM child_body_appends
+                    "SELECT operation_id, child_task_id FROM child_body_appends WHERE (?1 IS NULL OR session_id = ?1)
                      ORDER BY created_at_ms, operation_id",
                 )
                 .map_err(|source| {
                     internal_error("staged child appends could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|source| {

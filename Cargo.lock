@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-openai-compatible"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -289,6 +289,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -335,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-protocol"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -345,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -376,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -388,6 +400,7 @@ dependencies = [
  "agent-tools",
  "agent-tools-local",
  "agent-types",
+ "argon2",
  "assistant-protocol",
  "assistant-runtime",
  "async-stream",
@@ -405,15 +418,18 @@ dependencies = [
  "infer",
  "libc",
  "mdns-sd",
+ "nix 0.28.0",
  "pakery-core",
  "pakery-crypto",
  "pakery-spake2",
+ "portable-pty",
  "process-wrap",
  "rand_core 0.9.5",
  "rcgen",
  "reqwest",
  "rmcp",
  "rusqlite",
+ "rustix",
  "rustls-pki-types",
  "schemars 1.2.1",
  "serde",
@@ -426,6 +442,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.12+spec-1.1.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -742,6 +760,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +802,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -1140,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1400,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1804,18 +1837,23 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
+ "block2",
  "dirs",
+ "getrandom 0.4.3",
  "image",
  "infer",
  "libc",
- "nix 0.28.0",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "plist",
- "portable-pty",
  "reqwest",
+ "security-framework",
  "serde",
  "serde_json",
  "tauri",
@@ -1823,6 +1861,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-window-state",
+ "tauri-runtime-wry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3265,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3918,6 +3957,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "path-absolutize"
 version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4480,7 +4530,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4606,7 +4656,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4767,7 +4817,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-context",
  "agent-core",

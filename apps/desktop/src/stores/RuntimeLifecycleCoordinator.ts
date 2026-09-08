@@ -1,3 +1,4 @@
+import { refreshRuntimeConnection } from "../native-bridge/runtimeConnection";
 import { runInAction } from "mobx";
 import type {
   ChildTaskId,
@@ -24,6 +25,7 @@ const MAX_AUTOMATIC_RECONNECTS = 3;
 
 type RuntimeLifecycleDependencies = Readonly<{
   connection: ConnectionStore;
+  require_selected_target?: boolean;
   live_execution: LiveExecutionStore;
   navigation: NavigationStore;
   projection: RuntimeProjectionStore;
@@ -39,6 +41,7 @@ type RuntimeLifecycleDependencies = Readonly<{
 
 /** Owns Runtime transport, snapshot/event synchronization, and reconnect timers. */
 export class RuntimeLifecycleCoordinator {
+  #selected_bootstrap: RuntimeBootstrap | undefined;
   #client: RuntimeClient | null = null;
   #event_abort: AbortController | null = null;
   #connect_promise: Promise<void> | null = null;
@@ -63,6 +66,7 @@ export class RuntimeLifecycleCoordinator {
     if (this.#connect_promise) {
       return this.#connect_promise;
     }
+    if (bootstrap) this.#selected_bootstrap = bootstrap;
     const generation = ++this.#lifecycle_generation;
     this.dependencies.connection.beginInitialConnection();
     const connect_promise = this.#establishConnection(false, generation, bootstrap).finally(() => {
@@ -78,7 +82,7 @@ export class RuntimeLifecycleCoordinator {
     this.#clearReconnectTimer();
     this.#reconnect_attempt = 0;
     this.dependencies.connection.beginReconnect();
-    void this.#establishConnection(true, this.#lifecycle_generation);
+    void this.#establishConnection(true, ++this.#lifecycle_generation);
   }
 
   prepareForNativeRuntimeMutation(kind: "stop" | "restart"): void {
@@ -86,6 +90,7 @@ export class RuntimeLifecycleCoordinator {
     this.#connect_promise = null;
     this.#event_abort?.abort();
     this.#event_abort = null;
+    this.#client?.dispose();
     this.#client = null;
     this.#clearReconnectTimer();
     this.dependencies.connection.beginRuntimeMutation(kind);
@@ -95,7 +100,7 @@ export class RuntimeLifecycleCoordinator {
 
   reconnectAfterNativeRuntimeMutation(bootstrap?: RuntimeBootstrap): Promise<void> {
     this.#reconnect_attempt = 0;
-    return this.connect(bootstrap);
+    return this.connect(this.#selected_bootstrap?.binding_id ? undefined : bootstrap);
   }
 
   async selectInitialSession(): Promise<void> {
@@ -138,7 +143,25 @@ export class RuntimeLifecycleCoordinator {
     if (!this.#client) {
       return;
     }
-    const result = await this.#getApplication(this.#client);
+    const client = this.#client;
+    const previous = this.dependencies.projection.application;
+    const result = await this.#getApplication(client);
+    if (this.#disposed || this.#client !== client) return;
+    if (!rebase_event_sequence && previous) {
+      for (const filter of ["active", "archived"] as const) {
+        const key = filter === "active" ? "active_sessions" : "archived_sessions";
+        const offset_key = filter === "active" ? "active_sessions_next_offset" : "archived_sessions_next_offset";
+        const value = result.snapshot.value;
+        const wanted = previous[offset_key] ?? previous[key].length;
+        while (value[offset_key] != null && value[offset_key] < wanted) {
+          const offset = value[offset_key];
+          const page = await client.command({ type: "list_sessions", payload: { filter, offset, limit: 100, query: null } });
+          if (this.#disposed || this.#client !== client) return;
+          value[key] = [...new Map([...value[key], ...page.payload.sessions].map((session) => [session.session_id, session])).values()];
+          value[offset_key] = page.payload.has_more ? offset + 100 : null;
+        }
+      }
+    }
     runInAction(() => {
       if (rebase_event_sequence) {
         this.dependencies.projection.applyApplicationSnapshot(result.snapshot);
@@ -157,7 +180,7 @@ export class RuntimeLifecycleCoordinator {
     try {
       const result = await client.command({ type: "get_session_view", payload: { session_id } });
       if (
-        this.#client?.instance_id !== instance_id
+        this.#disposed || this.#client !== client
         || this.dependencies.navigation.selected_session_id !== session_id
       ) {
         return;
@@ -168,6 +191,7 @@ export class RuntimeLifecycleCoordinator {
         await this.loadChildTask(session_id, child_task_id);
       }
     } catch (error: unknown) {
+      if (this.#disposed || this.#client !== client) return;
       if (error instanceof RuntimeClientError && error.code === "snapshot_busy") {
         return;
       }
@@ -195,7 +219,7 @@ export class RuntimeLifecycleCoordinator {
         payload: { session_id, child_task_id },
       });
       if (
-        this.#client?.instance_id !== instance_id
+        this.#disposed || this.#client !== client
         || this.dependencies.navigation.selected_session_id !== session_id
         || this.dependencies.navigation.selected_child_task_id !== child_task_id
       ) {
@@ -203,6 +227,7 @@ export class RuntimeLifecycleCoordinator {
       }
       runInAction(() => this.#applyChildTaskResult(result.payload));
     } catch (error: unknown) {
+      if (this.#disposed || this.#client !== client) return;
       if (error instanceof RuntimeClientError && error.code === "snapshot_busy") {
         return;
       }
@@ -218,6 +243,8 @@ export class RuntimeLifecycleCoordinator {
     this.#connect_promise = null;
     this.#event_abort?.abort();
     this.#event_abort = null;
+    this.#client?.dispose();
+    this.#client = null;
     this.#clearReconnectTimer();
     if (this.#refresh_timer !== null) {
       window.clearTimeout(this.#refresh_timer);
@@ -239,11 +266,20 @@ export class RuntimeLifecycleCoordinator {
       this.dependencies.connection.beginReconnect();
     }
     try {
-      const bootstrap = prepared_bootstrap ?? await bootstrapRuntime();
+      const selected = this.#selected_bootstrap;
+      if (!selected && this.dependencies.require_selected_target) throw new RuntimeClientError("authentication_required", "请在 Runtime 连接设置中选择目标并登录。");
+      const bootstrap = prepared_bootstrap ?? await (selected?.binding_id ? refreshRuntimeConnection(selected) : bootstrapRuntime());
       if (!this.#isActiveGeneration(generation)) {
         return;
       }
-      const client = new RuntimeClient(bootstrap);
+      const client = new RuntimeClient(bootstrap, () => {
+        if (this.#client !== client) return;
+        runInAction(() => {
+          this.dependencies.connection.markDisconnected("登录已失效，请重新登录。", "authentication_required");
+          this.dependencies.projection.resetForInstance();
+          this.dependencies.live_execution.clear();
+        });
+      });
       if (
         this.dependencies.connection.instance_id
         && this.dependencies.connection.instance_id !== client.instance_id
@@ -252,6 +288,8 @@ export class RuntimeLifecycleCoordinator {
         this.dependencies.live_execution.clear();
       }
       this.#event_abort?.abort();
+      this.#client?.dispose();
+      this.#client = client;
       const event_abort = new AbortController();
       this.#event_abort = event_abort;
       const buffered_events: RuntimeEventEnvelope[] = [];
@@ -259,19 +297,21 @@ export class RuntimeLifecycleCoordinator {
       const stream = await client.connectEvents(
         {
           onEvent: (event) => {
+            if (!this.#isActiveGeneration(generation) || this.#client !== client) return;
             if (!snapshot_loaded) {
               buffered_events.push(event);
             } else {
               this.#applyEvent(event);
             }
           },
-          onDeviceGatewayEvent: () => this.dependencies.refresh_device_gateway(),
-          onGap: () => this.#handleStreamGap(),
+          onDeviceGatewayEvent: () => { if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.refresh_device_gateway(); },
+          onGap: () => { if (this.#isActiveGeneration(generation) && this.#client === client) this.#handleStreamGap(); },
         },
         event_abort.signal,
       );
-      this.#client = client;
+      if (!this.#isActiveGeneration(generation) || this.#client !== client) { event_abort.abort(); client.dispose(); return; }
       const application = await this.#getApplication(client);
+      if (!this.#isActiveGeneration(generation) || this.#client !== client) { event_abort.abort(); client.dispose(); return; }
       runInAction(() => this.dependencies.projection.applyApplicationSnapshot(application.snapshot));
       snapshot_loaded = true;
       for (const event of buffered_events) {
@@ -297,6 +337,9 @@ export class RuntimeLifecycleCoordinator {
       if (!this.#isActiveGeneration(generation)) {
         return;
       }
+      this.#event_abort?.abort();
+      this.#client?.dispose();
+      this.#client = null;
       const failure = normalizeFailure(error);
       runInAction(() => {
         if (failure.code === "component_mismatch") {
@@ -313,6 +356,21 @@ export class RuntimeLifecycleCoordinator {
 
   async #getApplication(client: RuntimeClient): Promise<GetApplicationSnapshotResult> {
     const result = await client.command({ type: "get_application_snapshot", payload: {} });
+    if (this.#disposed || this.#client !== client) return result.payload;
+    const selected_id = this.dependencies.navigation.selected_session_id;
+    const application = result.payload.snapshot.value;
+    if (selected_id && !application.active_sessions.some((session) => session.session_id === selected_id)) {
+      try {
+        const selected = await client.command({ type: "get_session", payload: { session_id: selected_id } });
+        if (this.#disposed || this.#client !== client) return result.payload;
+        const session = selected.payload.session;
+        if (session.lifecycle === "active" && (!session.workspace_id || application.workspaces.some(
+          (workspace) => workspace.workspace_id === session.workspace_id && workspace.lifecycle === "active",
+        ))) application.active_sessions.push(session);
+      } catch (error: unknown) {
+        if (!(error instanceof RuntimeClientError && error.code === "session_not_found")) throw error;
+      }
+    }
     return result.payload;
   }
 
@@ -353,6 +411,8 @@ export class RuntimeLifecycleCoordinator {
     }
     if (
       event.type === "config_changed"
+      || event.type === "mcp_registry_changed"
+      || event.type === "skill_settings_changed"
       || event.type === "workspace_changed"
       || event.type === "session_created"
       || event.type === "session_changed"
@@ -420,6 +480,7 @@ export class RuntimeLifecycleCoordinator {
       this.#disposed
       || this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
       || this.dependencies.connection.state === "component_mismatch"
+      || this.dependencies.connection.last_error_code === "authentication_required"
     ) {
       return;
     }
@@ -455,7 +516,7 @@ function normalizeFailure(error: unknown): RuntimeBootstrapFailure {
 }
 
 function displayError(error: unknown): string {
-  return error instanceof Error ? error.message : "无法连接本地 Runtime。";
+  return error instanceof Error ? error.message : "无法连接当前 Runtime。";
 }
 
 function isCommandBusinessFailure(error: unknown): error is RuntimeClientError {

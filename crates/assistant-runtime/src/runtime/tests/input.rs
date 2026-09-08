@@ -57,6 +57,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
             ConversationItem::User(message) => Some(message.message_id.clone()),
             ConversationItem::Assistant(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("source user message");
@@ -172,6 +173,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone(),
             })
+            .await
             .expect("session summary")
             .session
             .current_variant,
@@ -252,6 +254,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone()
             })
+            .await
             .expect("summary")
             .session
             .queued_input_count,
@@ -285,6 +288,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone()
             })
+            .await
             .expect("summary")
             .session
             .queued_input_count,
@@ -352,6 +356,7 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone()
             })
+            .await
             .expect("summary")
             .session
             .queued_input_count,

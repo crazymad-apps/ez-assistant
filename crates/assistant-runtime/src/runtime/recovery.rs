@@ -8,11 +8,9 @@ use assistant_protocol::{
 
 use crate::{
     RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredChildTask,
-    StoredInputState, StoredRunSettlement, StoredSessionLifecycle, StoredWorkspace,
-    goal::GoalControl, session::SessionController, work_plan::WorkPlan,
+    StoredInputState, StoredRunSettlement, StoredWorkspace, goal::GoalControl,
+    session::SessionController, work_plan::WorkPlan,
 };
-
-use super::controller::{ProxyReportDraft, build_proxy_report_input};
 
 pub(super) struct RecoveredRegistries {
     pub devices: BTreeMap<DeviceId, crate::PairedDevice>,
@@ -50,65 +48,11 @@ pub(super) fn prepare_interrupted_run_settlements(
             .get(&run.session_id)
             .copied()
             .ok_or_else(invalid_recovery)?;
-        let source_queue_empty = !recovered.inputs.iter().any(|candidate| {
-            candidate.session_id == run.session_id && candidate.state == StoredInputState::Queued
-        }) && !recovered.session_commands.iter().any(|candidate| {
-            candidate.session_id == run.session_id
-                && candidate.state == crate::StoredSessionCommandState::Queued
-        });
-        let proxy_report = if source.role == crate::SessionRole::Standard && source_queue_empty {
-            source
-                .proxy
-                .as_ref()
-                .and_then(|proxy| sessions.get(&proxy.controller_session_id).copied())
-                .filter(|controller| {
-                    controller.role == crate::SessionRole::Controller
-                        && controller.lifecycle == StoredSessionLifecycle::Active
-                })
-                .map(|controller| {
-                    let draft = ProxyReportDraft {
-                        source_session_id: source.session_id.clone(),
-                        source_title: source.title.clone(),
-                        source_run_id: run.run_id.clone(),
-                        source_goal_id: input
-                            .goal_binding
-                            .as_ref()
-                            .map(|binding| binding.goal_id.clone()),
-                        goal_summary: recovered
-                            .goals
-                            .iter()
-                            .find(|goal| goal.session_id == source.session_id)
-                            .map(|goal| {
-                                format!(
-                                    "state={:?}, runs={}/{}, tokens={}/{}, usage_complete={}",
-                                    goal.state,
-                                    goal.budget.used_runs,
-                                    goal.budget.max_runs,
-                                    goal.budget.used_total_tokens,
-                                    goal.budget.max_total_tokens,
-                                    goal.budget.usage_complete,
-                                )
-                            }),
-                        source_run_status: RunStatus::Interrupted,
-                        controller_session_id: controller.session_id.clone(),
-                        final_text: None,
-                        error: None,
-                        accepted_at_ms: finished_at_ms,
-                        reply_route: crate::runtime::controller::reply_route_for_input(input),
-                    };
-                    build_proxy_report_input(
-                        draft,
-                        controller.current_variant,
-                        controller.approval_mode,
-                        recovery_input_id()?,
-                        recovery_run_id()?,
-                    )
-                    .map(Box::new)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        // Store 已隔离的会话可能仍持有无法提交的工具交换。保留现场，禁止在全局
+        // 启动阶段再次结算它，更不能让单会话故障阻止其他会话提供服务。
+        if source.conversation_state == crate::StoredConversationState::Unavailable {
+            continue;
+        }
         settlements.push(StoredRunSettlement {
             operation_id: crate::id::generate("recovery-settlement").map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
@@ -123,34 +67,28 @@ pub(super) fn prepare_interrupted_run_settlements(
             messages: Vec::new(),
             message_step: None,
             goal_effect: None,
-            proxy_report,
+            proxy_report: None,
             finished_at_ms,
         });
     }
     Ok(settlements)
 }
 
-fn recovery_input_id() -> RuntimeResult<InputId> {
-    let value =
-        crate::id::generate("input").map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "recovery proxy report input id",
-        })?;
-    InputId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
-        component: "recovery proxy report input id",
-    })
-}
-
-fn recovery_run_id() -> RuntimeResult<RunId> {
-    let value = crate::id::generate("run").map_err(|_| RuntimeError::InternalStateUnavailable {
-        component: "recovery proxy report Run id",
-    })?;
-    RunId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
-        component: "recovery proxy report Run id",
-    })
-}
-
 pub(super) fn recover_registries(
     recovered: RecoveredRuntime,
+) -> RuntimeResult<RecoveredRegistries> {
+    recover_registries_with_identities(recovered, Vec::new())
+}
+
+pub(super) fn recover_session_registries(
+    loaded: crate::LoadedSession,
+) -> RuntimeResult<RecoveredRegistries> {
+    recover_registries_with_identities(loaded.state, loaded.identities)
+}
+
+fn recover_registries_with_identities(
+    recovered: RecoveredRuntime,
+    identities: Vec<(SessionId, crate::SessionRole, crate::StoredSessionLifecycle)>,
 ) -> RuntimeResult<RecoveredRegistries> {
     let devices = recovered
         .devices
@@ -160,7 +98,7 @@ pub(super) fn recover_registries(
     if devices.len() != recovered.devices.len() {
         return Err(invalid_recovery());
     }
-    let session_roles = recovered
+    let mut session_roles = recovered
         .sessions
         .iter()
         .map(|session| {
@@ -170,29 +108,37 @@ pub(super) fn recover_registries(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    if session_roles.len() != recovered.sessions.len()
-        || recovered.sessions.iter().any(|session| {
-            session.role == crate::SessionRole::Controller
-                && (session.proxy.is_some()
-                    || session.lifecycle != crate::StoredSessionLifecycle::Active)
-                || session.pc_output_hosting.as_ref().is_some_and(|hosting| {
-                    session.role != crate::SessionRole::Controller
-                        || devices.get(&hosting.device_id).is_none_or(|device| {
-                            device.lifecycle != crate::DeviceLifecycle::Paired
-                                || device.display_name != hosting.device_name
-                        })
-                })
-                || session.proxy.as_ref().is_some_and(|proxy| {
-                    session.role != crate::SessionRole::Standard
-                        || proxy.controller_session_id == session.session_id
-                        || session_roles.get(&proxy.controller_session_id)
-                            != Some(&(
-                                crate::SessionRole::Controller,
-                                crate::StoredSessionLifecycle::Active,
-                            ))
-                })
-        })
-    {
+    if session_roles.len() != recovered.sessions.len() {
+        return Err(invalid_recovery());
+    }
+    for (id, role, lifecycle) in identities {
+        if let Some(existing) = session_roles.insert(id, (role, lifecycle))
+            && existing != (role, lifecycle)
+        {
+            return Err(invalid_recovery());
+        }
+    }
+    if recovered.sessions.iter().any(|session| {
+        session.role == crate::SessionRole::Controller
+            && (session.proxy.is_some()
+                || session.lifecycle != crate::StoredSessionLifecycle::Active)
+            || session.pc_output_hosting.as_ref().is_some_and(|hosting| {
+                session.role != crate::SessionRole::Controller
+                    || devices.get(&hosting.device_id).is_none_or(|device| {
+                        device.lifecycle != crate::DeviceLifecycle::Paired
+                            || device.display_name != hosting.device_name
+                    })
+            })
+            || session.proxy.as_ref().is_some_and(|proxy| {
+                session.role != crate::SessionRole::Standard
+                    || proxy.controller_session_id == session.session_id
+                    || session_roles.get(&proxy.controller_session_id)
+                        != Some(&(
+                            crate::SessionRole::Controller,
+                            crate::StoredSessionLifecycle::Active,
+                        ))
+            })
+    }) {
         return Err(invalid_recovery());
     }
     let mut workspaces = BTreeMap::new();
@@ -284,11 +230,12 @@ pub(super) fn recover_registries(
     for command in &recovered.session_commands {
         let valid_result = match command.state {
             crate::StoredSessionCommandState::Queued => command.result.is_none(),
-            crate::StoredSessionCommandState::Committed => command.result.is_some(),
+            crate::StoredSessionCommandState::Committed => command
+                .result
+                .as_ref()
+                .is_some_and(|result| result.matches_command(&command.command)),
         };
-        if session_roles
-            .get(&command.session_id)
-            .is_none_or(|(role, _)| *role != crate::SessionRole::Standard)
+        if !session_roles.contains_key(&command.session_id)
             || input_sessions.contains_key(&command.input_id)
             || !command_ids.insert(command.input_id.clone())
             || !command_message_ids.insert(command.user_message_id.clone())
@@ -423,7 +370,16 @@ pub(super) fn recover_registries(
         }
     }
     let mut goals_by_session = BTreeMap::<SessionId, GoalControl>::new();
-    for stored in recovered.goals {
+    for mut stored in recovered.goals {
+        if stored.state == crate::StoredGoalState::Running {
+            // 只读投影与手动执行前落盘的暂停世代一致，避免用户刚读取的 CAS 立即过期。
+            stored.generation = stored
+                .generation
+                .checked_add(1)
+                .ok_or_else(invalid_recovery)?;
+            stored.state = crate::StoredGoalState::Paused;
+            stored.pause_reason = Some(crate::StoredGoalPauseReason::RecoveryRequired);
+        }
         let session_id = stored.session_id.clone();
         let goal = GoalControl::try_from(stored).map_err(|_| invalid_recovery())?;
         if goals_by_session.insert(session_id, goal).is_some() {
@@ -454,11 +410,7 @@ pub(super) fn recover_registries(
             .remove(&session_id)
             .unwrap_or_default();
         if activations.iter().any(|activation| {
-            activation.catalog_revision != stored.skill_catalog.revision
-                || stored.skill_catalog.definitions.iter().all(|definition| {
-                    definition.name != activation.name
-                        || definition.definition_digest != activation.definition_digest
-                })
+            !activation.has_valid_definition_identity()
                 || match &activation.owner {
                     crate::SkillActivationOwner::Session(owner) => owner != &session_id,
                     crate::SkillActivationOwner::ChildTask(owner) => !recovered_children
@@ -499,7 +451,10 @@ pub(super) fn recover_registries(
         return Err(invalid_recovery());
     }
     let mut child_tasks = BTreeMap::new();
-    for child in recovered.child_tasks {
+    for mut child in recovered.child_tasks {
+        if !child.status.is_terminal() {
+            child.status = assistant_protocol::ChildTaskStatus::Interrupted;
+        }
         if !sessions.contains_key(&child.session_id)
             || run_sessions.get(&child.parent_run_id) != Some(&child.session_id)
             || child_tasks

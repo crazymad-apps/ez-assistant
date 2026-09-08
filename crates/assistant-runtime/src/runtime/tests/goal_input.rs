@@ -13,7 +13,11 @@ fn goal_identity(
     runtime: &AssistantRuntime,
     session_id: &assistant_protocol::SessionId,
 ) -> (assistant_protocol::GoalId, u64) {
-    let controller = runtime.session(session_id).expect("session");
+    let controller = runtime
+        .session_loader
+        .cached(session_id)
+        .expect("registry")
+        .expect("session");
     let state = controller.lock_state().expect("state");
     let goal = state.goal.as_ref().expect("Goal");
     (goal.id.clone(), goal.generation)
@@ -140,6 +144,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
         loop {
             let cleared = runtime
                 .session(&session_id)
+                .await
                 .expect("session controller")
                 .lock_state()
                 .expect("session state")
@@ -155,7 +160,10 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
     .await
     .expect("Goal auto continuation completes");
 
-    let controller = runtime.session(&session_id).expect("session controller");
+    let controller = runtime
+        .session(&session_id)
+        .await
+        .expect("session controller");
     {
         let state = controller.lock_state().expect("session state");
         assert!(state.goal.is_none());
@@ -335,7 +343,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
         (session_id.clone(), goal_id.clone(), generation + 1)
     );
     {
-        let controller = runtime.session(&session_id).expect("session");
+        let controller = runtime.session(&session_id).await.expect("session");
         let state = controller.lock_state().expect("state");
         let goal = state.goal.as_ref().expect("Goal");
         assert!(matches!(
@@ -358,7 +366,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
         })
         .await
         .expect("clear Goal");
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     assert!(state.goal.is_none());
     assert!(state.work_plan.is_none());
@@ -434,7 +442,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .expect("start Goal");
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
     {
-        let controller = runtime.session(&session_id).expect("session");
+        let controller = runtime.session(&session_id).await.expect("session");
         let state = controller.lock_state().expect("state");
         let goal = state.goal.as_ref().expect("Goal");
         assert!(matches!(
@@ -459,7 +467,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .expect("resume Goal");
     wait_for_terminal(&runtime, &session_id, &resumed.run.run_id).await;
     {
-        let controller = runtime.session(&session_id).expect("session");
+        let controller = runtime.session(&session_id).await.expect("session");
         let state = controller.lock_state().expect("state");
         assert!(state.goal.is_none());
     }
@@ -473,6 +481,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
     }));
     let resume_message_id = runtime
         .session(&session_id)
+        .await
         .expect("session")
         .lock_state()
         .expect("state")
@@ -499,7 +508,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         assistant_protocol::RunStatus::Accepted,
         "history rewrite becomes a normal input after Goal completion"
     );
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     assert!(state.goal.is_none());
     assert!(!state.resume_required);
@@ -574,6 +583,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
     wait_for_terminal(&runtime, &source.session_id, &goal_run.run.run_id).await;
     let generation = runtime
         .session(&source.session_id)
+        .await
         .expect("source controller")
         .lock_state()
         .expect("source state")
@@ -591,6 +601,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
     assert!(
         runtime
             .session(&before.session_id)
+            .await
             .expect("before controller")
             .lock_state()
             .expect("before state")
@@ -609,6 +620,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
         .session;
     let source_goal_id = runtime
         .session(&source.session_id)
+        .await
         .expect("source controller")
         .lock_state()
         .expect("source state")
@@ -619,6 +631,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
         .clone();
     let after_controller = runtime
         .session(&after.session_id)
+        .await
         .expect("after controller");
     let after_state = after_controller.lock_state().expect("after state");
     let forked = after_state.goal.as_ref().expect("forked Goal");
@@ -670,6 +683,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
         loop {
             let paused = runtime
                 .session(&session_id)
+                .await
                 .expect("session")
                 .lock_state()
                 .expect("state")
@@ -689,7 +703,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
     })
     .await
     .expect("failure budget pauses Goal");
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     let goal = state.goal.as_ref().expect("Goal");
     assert_eq!(goal.budget.used_runs, 3);
@@ -789,7 +803,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
                 && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_CONTINUATION_V1"))))
     }));
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     assert!(state.goal.is_none());
 }
@@ -891,7 +905,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
                 && user.parts.iter().any(|part| matches!(part, UserPart::InternalContext(text)
                     if text.text.starts_with("GOAL_RESUME_INJECTION_V1"))))
     }));
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     assert_eq!(state.inputs.len(), 2, "held Input is reused, not copied");
     assert!(state.queue_item_ids.is_empty());
@@ -949,7 +963,7 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
         .await
         .expect("start Goal");
     wait_for_terminal(&runtime, &session_id, &run.run.run_id).await;
-    let controller = runtime.session(&session_id).expect("session");
+    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     let goal = state.goal.as_ref().expect("Goal");
     assert!(

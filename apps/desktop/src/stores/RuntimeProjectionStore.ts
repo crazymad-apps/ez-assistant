@@ -9,6 +9,7 @@ import type {
   ObservedSnapshot,
   RuntimeEventEnvelope,
   SessionId,
+  SessionSummary,
   SessionViewSnapshot,
 } from "../generated/assistant-protocol";
 
@@ -48,6 +49,7 @@ export class RuntimeProjectionStore {
       observed_sequence: observable,
       is_stale: observable,
       applyApplicationSnapshot: action,
+      appendSessionPage: action,
       refreshApplicationSnapshot: action,
       applySessionSnapshot: action,
       applyChildTaskSnapshot: action,
@@ -77,6 +79,16 @@ export class RuntimeProjectionStore {
     this.application = snapshot.value;
     this.#application_snapshot_sequence = snapshot.observed_sequence;
     this.is_stale = false;
+  }
+
+  appendSessionPage(filter: "active" | "archived", sessions: readonly SessionSummary[], next_offset: number | null): void {
+    const application = this.application;
+    if (!application) return;
+    const key = filter === "active" ? "active_sessions" : "archived_sessions";
+    const offset_key = filter === "active" ? "active_sessions_next_offset" : "archived_sessions_next_offset";
+    const merged = new Map(application[key].map((session) => [session.session_id, session]));
+    for (const session of sessions) merged.set(session.session_id, session);
+    this.application = { ...application, [key]: [...merged.values()], [offset_key]: next_offset };
   }
 
   applySessionSnapshot(snapshot: ObservedSnapshot<SessionViewSnapshot>): void {

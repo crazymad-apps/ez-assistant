@@ -8,8 +8,10 @@ license.workspace = true
 name = "ez_assistant_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[lints]
-workspace = true
+# 经用户确认，仅 browser_resource/platform.rs 的 macOS FFI 可局部允许 unsafe。
+# 其他桌面代码仍默认拒绝，workspace 其他成员继续继承 forbid。
+[lints.rust]
+unsafe_code = "deny"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -17,6 +19,7 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 assistant-protocol = { path = "../../../crates/assistant-protocol" }
 dirs.workspace = true
+getrandom.workspace = true
 infer.workspace = true
 image.workspace = true
 libc.workspace = true
@@ -33,11 +36,17 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { workspace = true, features = ["io"] }
 url.workspace = true
-portable-pty = "=0.9.0"
 
-[target.'cfg(unix)'.dependencies]
-nix = { version = "=0.28.0", features = ["signal", "process", "fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# platform.rs 按该版本的 WithWebview +1 所有权接管句柄，升级必须同步移除补偿。
+tauri-runtime-wry = "=2.11.4"
 # Already present through tauri-utils; read Safari's installed version without shelling out.
+security-framework = "=3.7.0"
 plist = { version = "=1.10.0", default-features = false }
+# 复用 Tauri/Wry 已有的 Apple 绑定版本；用于网页快照、图片编码及句柄生命周期。
+objc2 = "=0.6.4"
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSValue", "NSURL", "NSString"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSView", "NSWindow"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "WKWebView", "WKSnapshotConfiguration", "WKUserContentController", "block2"] }

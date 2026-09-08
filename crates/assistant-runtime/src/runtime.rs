@@ -19,6 +19,7 @@ pub(crate) mod product;
 mod quote;
 mod recovery;
 mod resource;
+mod session_loading;
 mod session_management;
 mod shutdown;
 mod skills;
@@ -101,7 +102,8 @@ pub struct AssistantRuntime {
     lifecycle: RwLock<RuntimeLifecycle>,
     sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
     workspaces: Arc<RwLock<BTreeMap<WorkspaceId, StoredWorkspace>>>,
-    attachments: RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>,
+    attachments: Arc<RwLock<BTreeMap<AttachmentId, crate::StoredAttachment>>>,
+    session_loader: Arc<session_loading::SessionLoader>,
     devices: RwLock<BTreeMap<DeviceId, crate::PairedDevice>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
@@ -211,23 +213,10 @@ impl AssistantRuntime {
         permission_store: Arc<dyn crate::PermissionFileStore>,
         recall_reference_key: [u8; 32],
     ) -> RuntimeResult<Self> {
-        let mut recovered = store
-            .load_runtime()
+        let recovered = store
+            .load_runtime_globals()
             .await
-            .map_err(|source| RuntimeError::from_store("recover runtime", source))?;
-        let recovery_settlements =
-            recovery::prepare_interrupted_run_settlements(&recovered, now_ms()?)?;
-        if !recovery_settlements.is_empty() {
-            for settlement in recovery_settlements {
-                store.settle_run(settlement).await.map_err(|source| {
-                    RuntimeError::from_store("settle interrupted recovery run", source)
-                })?;
-            }
-            recovered = store
-                .load_runtime()
-                .await
-                .map_err(|source| RuntimeError::from_store("reload recovered runtime", source))?;
-        }
+            .map_err(|source| RuntimeError::from_store("load runtime globals", source))?;
         let permission_scopes = permission_scopes(&recovered);
         let permission_coordinator =
             Arc::new(PermissionCoordinator::open(permission_store, permission_scopes).await);
@@ -245,7 +234,7 @@ impl AssistantRuntime {
             recovered,
             Arc::new(crate::HmacRecallReferenceCodec::new(recall_reference_key)),
         )?;
-        runtime.resume_pending_title_generations()?;
+        // 重启仅恢复可查询状态；历史标题任务等待用户后续操作，不自动调用模型。
         Ok(runtime)
     }
 
@@ -266,12 +255,23 @@ impl AssistantRuntime {
     ) -> RuntimeResult<Self> {
         let event_sender = ObservationCoordinator::new(config.event_capacity.get());
         let recovered = recover_registries(recovered)?;
+        let sessions = Arc::new(RwLock::new(recovered.sessions));
+        let attachments = Arc::new(RwLock::new(recovered.attachments));
+        let child_tasks = Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks));
+        let session_loader = Arc::new(session_loading::SessionLoader::new(
+            sessions.clone(),
+            attachments.clone(),
+            child_tasks.clone(),
+            store.clone(),
+            permission_coordinator.clone(),
+        ));
         Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
-            sessions: Arc::new(RwLock::new(recovered.sessions)),
+            sessions,
             workspaces: Arc::new(RwLock::new(recovered.workspaces)),
-            attachments: RwLock::new(recovered.attachments),
+            attachments,
+            session_loader,
             devices: RwLock::new(recovered.devices),
             delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
@@ -287,7 +287,7 @@ impl AssistantRuntime {
             skill_package_source,
             run_tool_factory,
             child_task_workspace_factory,
-            child_tasks: Arc::new(ChildTaskRegistry::recovered(recovered.child_tasks)),
+            child_tasks,
             output_dispatcher: Arc::new(crate::channel::NoopChannelOutputDispatcher),
             recall_reference_codec,
             context_window: Arc::new(
@@ -299,27 +299,6 @@ impl AssistantRuntime {
             root_cancellation: CancellationToken::new(),
             tasks: Arc::new(RuntimeTasks::new()),
         })
-    }
-
-    fn resume_pending_title_generations(&self) -> RuntimeResult<()> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-            .filter(|session| {
-                session
-                    .lock_state()
-                    .is_ok_and(|state| state.automatic_title_pending)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for session in sessions {
-            title::schedule_automatic_title(self.title_generation_context(), session);
-        }
-        Ok(())
     }
 
     /// 返回构造时已经校验的 Runtime 配置。
@@ -456,7 +435,8 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
-        self.ensure_model_not_in_flight(&request.model.model_key)?;
+        self.ensure_model_not_in_flight(&request.model.model_key)
+            .await?;
         let snapshot = self
             .config_registry
             .mutate(
@@ -477,7 +457,7 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
-        self.ensure_model_deletable(&request.model_key)?;
+        self.ensure_model_deletable(&request.model_key).await?;
         let snapshot = self
             .config_registry
             .mutate(
@@ -541,31 +521,40 @@ impl AssistantRuntime {
         })
     }
 
-    fn ensure_model_not_in_flight(
+    async fn ensure_model_not_in_flight(
         &self,
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<()> {
-        for session in self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-        {
-            let summary = session.summary()?;
-            if &summary.model_key == model_key
-                && (summary.active_run_id.is_some() || summary.queued_input_count > 0)
-            {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "model is used by an active or queued run",
-                });
+        let mut offset = 0;
+        loop {
+            let rows = self
+                .query_session_summaries(crate::SessionSummaryQuery {
+                    filter: assistant_protocol::SessionListFilter::All,
+                    session_id: None,
+                    role: None,
+                    query: None,
+                    offset,
+                    limit: 200,
+                })
+                .await?;
+            for summary in &rows {
+                if &summary.model_key == model_key
+                    && (summary.active_run_id.is_some() || summary.queued_input_count > 0)
+                {
+                    return Err(RuntimeError::InvalidRequest {
+                        reason: "model is used by an active or queued run",
+                    });
+                }
             }
+            if rows.len() < 200 {
+                break;
+            }
+            offset += 200;
         }
         Ok(())
     }
 
-    fn ensure_model_deletable(
+    async fn ensure_model_deletable(
         &self,
         model_key: &assistant_protocol::ModelKey,
     ) -> RuntimeResult<()> {
@@ -579,7 +568,7 @@ impl AssistantRuntime {
                 reason: "model is configured as the auxiliary vision model",
             });
         }
-        self.ensure_model_not_in_flight(model_key)
+        self.ensure_model_not_in_flight(model_key).await
     }
 
     /// 创建一个带初始 model key、冻结 System Prompt 和空 Conversation 的 Session。
@@ -660,7 +649,7 @@ impl AssistantRuntime {
                 model_key,
                 reasoning_effort: None,
                 system_prompt,
-                skill_catalog,
+
                 environment: prepared.environment,
                 current_variant: AgentVariant::Build,
                 approval_mode: ApprovalMode::Ask,
@@ -710,7 +699,7 @@ impl AssistantRuntime {
     }
 
     async fn ensure_controller_session(&self) -> RuntimeResult<Arc<SessionController>> {
-        if let Some(controller) = self.controller_sessions()?.into_iter().next() {
+        if let Some(controller) = self.controller_sessions().await?.into_iter().next() {
             return Ok(controller);
         }
         if self.config_registry.snapshot()?.active().is_none() {
@@ -727,117 +716,106 @@ impl AssistantRuntime {
                 "主控会话",
             )
             .await?;
-        self.session(&created.session.session_id)
+        self.session(&created.session.session_id).await
     }
 
-    pub(crate) fn controller_sessions(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {
-        let candidates = self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut controllers = candidates
-            .into_iter()
-            .filter_map(|session| match session.role() {
-                Ok(crate::SessionRole::Controller) => Some(Ok(session)),
-                Ok(crate::SessionRole::Standard) => None,
-                Err(error) => Some(Err(error)),
+    async fn controller_summaries(&self) -> RuntimeResult<Vec<SessionSummary>> {
+        let mut rows = self
+            .query_session_summaries(crate::SessionSummaryQuery {
+                filter: assistant_protocol::SessionListFilter::Active,
+                session_id: None,
+                role: Some(assistant_protocol::SessionRoleSnapshot::Controller),
+                query: None,
+                offset: 0,
+                limit: 200,
             })
-            .collect::<RuntimeResult<Vec<_>>>()?;
-        controllers.sort_by(|left, right| {
-            left.created_at_ms()
-                .cmp(&right.created_at_ms())
-                .then_with(|| left.id().cmp(right.id()))
+            .await?;
+        rows.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.session_id.cmp(&b.session_id))
         });
-        Ok(controllers)
+        Ok(rows)
+    }
+
+    pub(crate) async fn controller_sessions(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {
+        let mut result = Vec::new();
+        for row in self.controller_summaries().await? {
+            result.push(self.session(&row.session_id).await?);
+        }
+        Ok(result)
     }
 
     async fn prepare_session_skill_catalog(
         &self,
         workspace_directories: Option<Vec<String>>,
-    ) -> RuntimeResult<crate::SessionSkillCatalog> {
-        let states = self
-            .store
-            .list_skill_name_states()
-            .await
-            .map_err(|source| RuntimeError::from_store("load skill name states", source))?;
-        let scan = match self
-            .skill_package_source
-            .scan(crate::SkillScanRequest {
-                workspace_directories: workspace_directories.unwrap_or_default(),
-            })
-            .await
-        {
-            Ok(scan) => scan,
-            Err(_) => {
-                return Ok(crate::SessionSkillCatalog::unavailable(vec![
-                    crate::SkillDiagnostic::error(
-                        crate::SkillDiagnosticCode::ScanIncomplete,
-                        "skill package scan did not complete",
-                    ),
-                ]));
-            }
-        };
-        let discovery = crate::compile_skill_discovery(scan, &states);
-        if discovery.status == crate::SkillDiscoveryStatus::Unavailable {
-            return Ok(crate::SessionSkillCatalog::unavailable(
-                discovery.diagnostics,
-            ));
-        }
-        crate::SessionSkillCatalog::from_discovery(discovery).map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "skill catalog",
-            }
-        })
+    ) -> RuntimeResult<crate::SkillCatalog> {
+        skills::prepare_catalog(
+            self.store.as_ref(),
+            self.skill_package_source.as_ref(),
+            workspace_directories.unwrap_or_default(),
+        )
+        .await
     }
 
     /// 按置顶、最近活动时间和 SessionId 的确定性顺序列出当前进程内 Session。
-    pub fn list_sessions(&self, request: ListSessionsRequest) -> RuntimeResult<ListSessionsResult> {
-        let sessions: Vec<_> = self
-            .sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .values()
-            .cloned()
-            .collect();
-        let mut summaries = sessions
-            .into_iter()
-            .map(|session| session.summary())
-            .collect::<RuntimeResult<Vec<SessionSummary>>>()?
-            .into_iter()
-            .filter(|session| match request.filter {
-                assistant_protocol::SessionListFilter::Active => {
-                    session.lifecycle == assistant_protocol::SessionLifecycle::Active
-                }
-                assistant_protocol::SessionListFilter::Archived => {
-                    session.lifecycle == assistant_protocol::SessionLifecycle::Archived
-                }
-                assistant_protocol::SessionListFilter::All => true,
+    pub async fn list_sessions(
+        &self,
+        request: ListSessionsRequest,
+    ) -> RuntimeResult<ListSessionsResult> {
+        let limit = request.limit.unwrap_or(100).clamp(1, 200);
+        let mut summaries = self
+            .query_session_summaries(crate::SessionSummaryQuery {
+                filter: request.filter,
+                session_id: None,
+                role: None,
+                query: request.query,
+                offset: request.offset,
+                limit: limit + 1,
             })
-            .collect::<Vec<_>>();
-        summaries.sort_by(|left, right| {
-            right
-                .is_pinned
-                .cmp(&left.is_pinned)
-                .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
+            .await?;
+        let has_more = summaries.len() > limit as usize;
+        summaries.truncate(limit as usize);
         Ok(ListSessionsResult {
             sessions: summaries,
+            has_more,
         })
     }
 
-    /// 查询一个 Session 的稳定摘要。
-    pub fn get_session(&self, request: GetSessionRequest) -> RuntimeResult<GetSessionResult> {
-        Ok(GetSessionResult {
-            session: self.session(&request.session_id)?.summary()?,
-        })
+    async fn query_session_summaries(
+        &self,
+        query: crate::SessionSummaryQuery,
+    ) -> RuntimeResult<Vec<SessionSummary>> {
+        let mut rows = self
+            .store
+            .query_session_summaries(query)
+            .await
+            .map_err(|source| RuntimeError::from_store("query session summaries", source))?;
+        for row in &mut rows {
+            if let Some(session) = self.session_loader.cached(&row.session_id)? {
+                *row = session.summary()?;
+            }
+        }
+        Ok(rows)
+    }
+
+    pub async fn get_session(&self, request: GetSessionRequest) -> RuntimeResult<GetSessionResult> {
+        let session = self
+            .query_session_summaries(crate::SessionSummaryQuery {
+                filter: assistant_protocol::SessionListFilter::All,
+                session_id: Some(request.session_id.clone()),
+                role: None,
+                query: None,
+                offset: 0,
+                limit: 1,
+            })
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(RuntimeError::SessionNotFound {
+                session_id: request.session_id,
+            })?;
+        Ok(GetSessionResult { session })
     }
 
     /// 查询一个 Session 当前已经完整提交的 Agent 有效 Conversation。
@@ -848,7 +826,7 @@ impl AssistantRuntime {
         &self,
         session_id: &SessionId,
     ) -> RuntimeResult<ConversationSnapshot> {
-        let session = self.session(session_id)?;
+        let session = self.session(session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -857,10 +835,12 @@ impl AssistantRuntime {
 
     /// 查询指定 Session 中的 Runtime Run 快照。
     pub async fn get_run(&self, request: GetRunRequest) -> RuntimeResult<GetRunResult> {
-        let session = self.session(&request.session_id)?;
-        session
-            .ensure_conversation_loaded(self.store.as_ref())
-            .await?;
+        let session = self.session(&request.session_id).await?;
+        if session.lock_state()?.is_conversation_available {
+            session
+                .ensure_conversation_loaded(self.store.as_ref())
+                .await?;
+        }
         Ok(GetRunResult {
             run: session.run_snapshot(&request.run_id)?,
         })
@@ -868,7 +848,7 @@ impl AssistantRuntime {
 
     /// 请求取消一个活动 Run；终态 Run 重复取消会原样返回当前快照。
     pub async fn cancel_run(&self, request: CancelRunRequest) -> RuntimeResult<CancelRunResult> {
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -952,7 +932,7 @@ impl AssistantRuntime {
         &self,
         request: assistant_protocol::InterruptRunRequest,
     ) -> RuntimeResult<assistant_protocol::InterruptRunResult> {
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let revision = {
             let _mutation = session.mutation().await;
             let mut state = session.lock_state()?;
@@ -994,17 +974,8 @@ impl AssistantRuntime {
         }
     }
 
-    fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
-        self.sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| RuntimeError::SessionNotFound {
-                session_id: session_id.clone(),
-            })
+    async fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        self.session_loader.load(session_id).await
     }
 
     fn publish(&self, event: RuntimeEvent) {
@@ -1025,8 +996,8 @@ impl AssistantRuntime {
     }
 
     #[cfg(test)]
-    fn session_for_test(&self, session_id: &SessionId) -> Arc<SessionController> {
-        self.session(session_id).expect("session exists")
+    async fn session_for_test(&self, session_id: &SessionId) -> Arc<SessionController> {
+        self.session(session_id).await.expect("session exists")
     }
 }
 

@@ -33,6 +33,7 @@ async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available
                 .get_session(GetSessionRequest {
                     session_id: session.session.session_id.clone()
                 })
+                .await
                 .expect("query remains available")
                 .session,
             session.session
@@ -106,6 +107,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id.clone(),
             })
+            .await
             .expect("session query")
             .session
             .active_run_id,

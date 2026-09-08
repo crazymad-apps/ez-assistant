@@ -141,7 +141,9 @@ async fn system_context_query_returns_the_frozen_session_prompt_verbatim() {
     let session_id = created.session.session_id;
     let expected = runtime
         .session_for_test(&session_id)
-        .system_prompt()
+        .await
+        .current_system_prompt()
+        .expect("system prompt")
         .parts()
         .to_vec();
 

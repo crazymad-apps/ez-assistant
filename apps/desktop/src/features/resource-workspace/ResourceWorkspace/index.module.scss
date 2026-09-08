@@ -471,6 +471,18 @@ button.tree_entry_control {
 
 .breadcrumb_current { color: var(--ez-text); }
 
+// 最后一项占用剩余空间；DropdownMenu 外层与触发器都允许收缩，文件名只在挤压时省略。
+.breadcrumb > :last-child {
+  min-width: 0;
+  max-width: none;
+  flex: 1 1 auto;
+
+  > .breadcrumb_node_trigger {
+    min-width: 0;
+    max-width: none;
+  }
+}
+
 .breadcrumb_menu {
   overflow-y: auto;
   width: min(320px, calc(100vw - 24px));

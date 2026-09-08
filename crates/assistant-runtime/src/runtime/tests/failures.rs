@@ -543,6 +543,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
             .get_session(GetSessionRequest {
                 session_id: session.session.session_id,
             })
+            .await
             .expect("session query")
             .session
             .active_run_id,
@@ -612,6 +613,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .get_session(GetSessionRequest {
             session_id: session.session.session_id.clone(),
         })
+        .await
         .expect("session summary")
         .session;
     assert_eq!(summary.active_run_id, None);

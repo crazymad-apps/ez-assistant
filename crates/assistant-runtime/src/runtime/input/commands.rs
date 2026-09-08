@@ -20,7 +20,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<PrioritizeQueuedInputResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -82,7 +82,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ResumeQueuedInputResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -157,7 +157,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<CancelQueuedInputResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -225,7 +225,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ResumeSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -250,7 +250,7 @@ impl AssistantRuntime {
     pub async fn retry_run(&self, request: RetryRunRequest) -> RuntimeResult<RetryRunResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;

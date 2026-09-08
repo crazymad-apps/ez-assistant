@@ -13,7 +13,7 @@ import { MarkdownContent } from "../../../components/MarkdownContent";
 import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";
 import { copySkillDirectoryPath, openSkillDirectory } from "../../../native-bridge/skillDirectory";
 import { useRootStore } from "../../../stores/RootStoreContext";
-import { SettingsMessages } from "./RuntimeSettingsPage";
+import { SettingsMessages } from "./SettingsMessages";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./SkillSettingsPage.module.scss";
 import shared from "./index.module.scss";
@@ -91,7 +91,7 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
             trigger_class_name={styles.workspace_select}
             trigger_variant="compact"
           />
-          <details className={styles.directory_menu}>
+          {store.files.native_host && <details className={styles.directory_menu}>
             <summary>打开来源目录</summary>
             <div>
               {directory_sources.map((item) => {
@@ -104,7 +104,7 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
                 </div>;
               })}
             </div>
-          </details>
+          </details>}
         </div>
       )}
       title="技能"

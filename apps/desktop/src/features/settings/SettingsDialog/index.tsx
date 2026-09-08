@@ -16,7 +16,7 @@ import { McpSettingsPage } from "./McpSettingsPage";
 import styles from "./index.module.scss";
 
 const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
-  { id: "runtime", label: "运行时", icon: "terminal" },
+  { id: "runtime", label: "Runtime", icon: "terminal" },
   { id: "devices", label: "智能终端", icon: "device" },
   { id: "models", label: "模型", icon: "model" },
   { id: "memory", label: "记忆", icon: "pin" },
@@ -24,6 +24,8 @@ const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> 
   { id: "skills", label: "技能", icon: "folder" },
   { id: "mcp", label: "MCP", icon: "plugin" },
 ];
+
+const runtime_pages: readonly SettingsPage[] = ["runtime", "runtime_connection", "host_access", "runtime_diagnostics", "runtime_local"];
 
 export const SettingsDialog = observer(function SettingsDialog() {
   const store = useRootStore();
@@ -87,7 +89,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
           <nav aria-label="设置页面" className={styles.navigation}>
             {pages.map((page) => (
               <button
-                aria-current={settings.page === page.id ? "page" : undefined}
+                aria-current={(page.id === "runtime" ? runtime_pages.includes(settings.page) : settings.page === page.id) ? "page" : undefined}
                 key={page.id}
                 onClick={() => selectPage(page.id)}
                 type="button"
@@ -98,7 +100,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
             ))}
           </nav>
           <div className={styles.content}>
-            {settings.page === "runtime" && <RuntimeSettingsPage />}
+            {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} />}
             {settings.page === "devices" && <DeviceSettingsPage />}
             {settings.page === "models" && (
               <ModelsSettingsPage onDirtyChange={setFormDirty} />

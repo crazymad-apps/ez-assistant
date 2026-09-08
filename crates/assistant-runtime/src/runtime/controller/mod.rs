@@ -98,7 +98,7 @@ pub(crate) fn reply_route_for_input(input: &crate::StoredInput) -> ReplyRoute {
 
 /// 工具实例共享的 Runtime 私有协调器；不持有 Controller Session mutation gate。
 pub(crate) struct ControllerToolCoordinator {
-    sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+    session_loader: Arc<super::session_loading::SessionLoader>,
     workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
     store: Arc<dyn RuntimeStore>,
@@ -108,7 +108,7 @@ pub(crate) struct ControllerToolCoordinator {
 
 impl ControllerToolCoordinator {
     pub(super) fn new(
-        sessions: Arc<RwLock<BTreeMap<SessionId, Arc<SessionController>>>>,
+        session_loader: Arc<super::session_loading::SessionLoader>,
         workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
         config_registry: Arc<ConfigRegistry>,
         store: Arc<dyn RuntimeStore>,
@@ -116,7 +116,7 @@ impl ControllerToolCoordinator {
         wake_queue: Arc<WakeQueue>,
     ) -> Self {
         Self {
-            sessions,
+            session_loader,
             workspaces,
             config_registry,
             store,
@@ -125,65 +125,64 @@ impl ControllerToolCoordinator {
         }
     }
 
-    pub(super) fn list_managed_sessions(
+    pub(super) async fn list_managed_sessions(
         &self,
         controller_session_id: &SessionId,
     ) -> RuntimeResult<Vec<ManagedSession>> {
-        self.ensure_current_controller(controller_session_id)?;
-        let sessions = self.session_values()?;
+        self.ensure_current_controller(controller_session_id)
+            .await?;
+        let sessions = self
+            .store
+            .query_session_summaries(crate::SessionSummaryQuery {
+                filter: assistant_protocol::SessionListFilter::Active,
+                session_id: None,
+                role: Some(assistant_protocol::SessionRoleSnapshot::Standard),
+                query: None,
+                offset: 0,
+                limit: MAX_MANAGED_SESSIONS as u32,
+            })
+            .await
+            .map_err(|e| RuntimeError::from_store("list managed sessions", e))?;
+        let mut environments = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            environments.push(
+                self.store
+                    .load_session_environment(&session.session_id)
+                    .await
+                    .map_err(|e| RuntimeError::from_store("load managed session environment", e))?,
+            );
+        }
         let workspaces =
             self.workspaces
                 .read()
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "workspace registry",
                 })?;
-        let mut managed = sessions
-            .into_iter()
-            .filter_map(|session| {
-                let state = session.lock_state().ok()?;
-                if state.role != SessionRole::Standard
-                    || state.lifecycle != assistant_protocol::SessionLifecycle::Active
-                {
-                    return None;
-                }
-                let proxy_enabled = state
-                    .proxy
+        let mut managed = Vec::new();
+        for (mut row, environment) in sessions.into_iter().zip(environments) {
+            if let Some(session) = self.session_loader.cached(&row.session_id)? {
+                row = session.summary()?;
+            }
+            let proxy_enabled = row
+                .proxy
+                .as_ref()
+                .is_some_and(|p| &p.controller_session_id == controller_session_id);
+            let workspace = row.workspace_id.as_ref().and_then(|id| workspaces.get(id));
+            managed.push(ManagedSession {
+                session_id: row.session_id.as_str().to_owned(),
+                title: row.title,
+                workspace_id: row.workspace_id.as_ref().map(|id| id.as_str().to_owned()),
+                workspace_label: workspace.map(|w| w.label.clone()),
+                workspace_primary_directory: row
+                    .workspace_id
                     .as_ref()
-                    .is_some_and(|proxy| proxy.controller_session_id == *controller_session_id);
-                Some(ManagedSession {
-                    session_id: session.id().as_str().to_owned(),
-                    title: state.title.clone(),
-                    workspace_id: session
-                        .environment()
-                        .workspace_id
-                        .as_ref()
-                        .map(|id| id.as_str().to_owned()),
-                    workspace_label: session
-                        .environment()
-                        .workspace_id
-                        .as_ref()
-                        .and_then(|id| workspaces.get(id))
-                        .map(|workspace| workspace.label.clone()),
-                    workspace_primary_directory: session
-                        .environment()
-                        .workspace_id
-                        .as_ref()
-                        .map(|_| session.environment().working_directory.clone()),
-                    workspace_additional_directories: session
-                        .environment()
-                        .additional_workspace_directories
-                        .clone(),
-                    proxy_enabled,
-                    can_accept_message: proxy_enabled
-                        && !state
-                            .inputs
-                            .values()
-                            .any(|input| input.stored.state == StoredInputState::Queued),
-                })
-            })
-            .collect::<Vec<_>>();
-        managed.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-        managed.truncate(MAX_MANAGED_SESSIONS);
+                    .map(|_| environment.working_directory.clone()),
+                workspace_additional_directories: environment.additional_workspace_directories,
+                proxy_enabled,
+                can_accept_message: proxy_enabled && row.queued_input_count == 0,
+            });
+        }
+        managed.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         Ok(managed)
     }
 
@@ -193,8 +192,9 @@ impl ControllerToolCoordinator {
         target_session_id: &SessionId,
         enabled: bool,
     ) -> RuntimeResult<bool> {
-        self.ensure_current_controller(controller_session_id)?;
-        let target = self.session(target_session_id)?;
+        self.ensure_current_controller(controller_session_id)
+            .await?;
+        let target = self.session_loader.prepare(target_session_id).await?;
         let _mutation = target.mutation().await;
         target.ensure_healthy()?;
         target.ensure_active()?;
@@ -243,14 +243,15 @@ impl ControllerToolCoordinator {
         message_text: String,
         start_goal: bool,
     ) -> RuntimeResult<DeliveryReceipt> {
-        self.ensure_current_controller(controller_session_id)?;
+        self.ensure_current_controller(controller_session_id)
+            .await?;
         let message_text = message_text.trim().to_owned();
         if message_text.is_empty() || message_text.len() > MAX_CROSS_SESSION_INPUT_BYTES {
             return Err(RuntimeError::InvalidRequest {
                 reason: "controller message must be non-empty and within the input limit",
             });
         }
-        let target = self.session(target_session_id)?;
+        let target = self.session_loader.prepare(target_session_id).await?;
         let _mutation = target.mutation().await;
         target.ensure_healthy()?;
         target.ensure_active()?;
@@ -304,7 +305,9 @@ impl ControllerToolCoordinator {
         if start_goal {
             ensure_goal_model_supported(&self.config_registry, target.as_ref(), &model_key)?;
         }
-        let reply_route = self.reply_route(controller_session_id, controller_run_id)?;
+        let reply_route = self
+            .reply_route(controller_session_id, controller_run_id)
+            .await?;
         let mut message = create_user_message(message_text, Vec::new(), variant)?;
         message.origin = UserMessageOrigin::Runtime;
         InternalBoundaryCoordinator::append(
@@ -388,11 +391,11 @@ impl ControllerToolCoordinator {
     ///
     /// 调用方仍持有源 Session mutation gate，因此这里只短暂读取主控 Session 当前变体和审批模式，
     /// 并分配报告 Input/Run ID。返回值随后作为源 Run settlement 的可选 effect 原子提交。
-    pub(crate) fn prepare_proxy_report(
+    pub(crate) async fn prepare_proxy_report(
         &self,
         draft: ProxyReportDraft,
     ) -> RuntimeResult<NewStoredInput> {
-        let target = self.session(&draft.controller_session_id)?;
+        let target = self.session(&draft.controller_session_id).await?;
         target.ensure_healthy()?;
         target.ensure_active()?;
         let (variant, approval_mode, input_id, run_id) = {
@@ -420,7 +423,7 @@ impl ControllerToolCoordinator {
         &self,
         accepted: crate::AcceptedInput,
     ) -> RuntimeResult<()> {
-        let target = self.session(&accepted.input.session_id)?;
+        let target = self.session(&accepted.input.session_id).await?;
         let _mutation = target.mutation().await;
         let projection = {
             let mut state = target.lock_state()?;
@@ -461,43 +464,32 @@ impl ControllerToolCoordinator {
         (self.wake_queue)(target.clone())
     }
 
-    fn ensure_current_controller(&self, session_id: &SessionId) -> RuntimeResult<()> {
+    async fn ensure_current_controller(&self, session_id: &SessionId) -> RuntimeResult<()> {
         let mut controllers = self
-            .session_values()?
-            .into_iter()
-            .filter(|session| session.role().ok() == Some(SessionRole::Controller))
-            .collect::<Vec<_>>();
-        controllers.sort_by(|left, right| {
-            left.created_at_ms()
-                .cmp(&right.created_at_ms())
-                .then_with(|| left.id().cmp(right.id()))
+            .store
+            .query_session_summaries(crate::SessionSummaryQuery {
+                filter: assistant_protocol::SessionListFilter::Active,
+                session_id: None,
+                role: Some(assistant_protocol::SessionRoleSnapshot::Controller),
+                query: None,
+                offset: 0,
+                limit: 200,
+            })
+            .await
+            .map_err(|e| RuntimeError::from_store("query controller identity", e))?;
+        controllers.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.session_id.cmp(&b.session_id))
         });
-        if controllers.first().map(|session| session.id()) != Some(session_id) {
+        if controllers.first().map(|s| &s.session_id) != Some(session_id) {
             return Err(RuntimeError::ControllerUnavailable);
         }
         Ok(())
     }
 
-    fn session_values(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {
-        self.sessions
-            .read()
-            .map(|sessions| sessions.values().cloned().collect())
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })
-    }
-
-    fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
-        self.sessions
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "session registry",
-            })?
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| RuntimeError::SessionNotFound {
-                session_id: session_id.clone(),
-            })
+    async fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        self.session_loader.load(session_id).await
     }
 }
 
@@ -555,12 +547,12 @@ pub(crate) fn build_proxy_report_input(
 }
 
 impl ControllerToolCoordinator {
-    fn reply_route(
+    async fn reply_route(
         &self,
         controller_session_id: &SessionId,
         controller_run_id: &RunId,
     ) -> RuntimeResult<ReplyRoute> {
-        let controller = self.session(controller_session_id)?;
+        let controller = self.session(controller_session_id).await?;
         let state = controller.lock_state()?;
         let run =
             state

@@ -8,7 +8,7 @@ use assistant_protocol::{
 use assistant_runtime::{
     SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
     SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionRole, StoreError, StoreErrorKind,
+    SessionHistoryCompactionPreparationResult, SessionRole,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -94,13 +94,6 @@ impl StorageEngine {
         &mut self,
         clear: SessionHistoryClear,
     ) -> StorageResult<SessionHistoryClearResult> {
-        clear.skill_catalog.validate_structure().map_err(|source| {
-            StoreError::with_source(
-                StoreErrorKind::InvalidInput,
-                "clear skill catalog is invalid",
-                source,
-            )
-        })?;
         let stored_environment = self.load_session_environment(&clear.session_id)?;
         if stored_environment != clear.environment {
             return Err(conflict("clear session environment changed"));
@@ -119,8 +112,7 @@ impl StorageEngine {
         )?;
         let prompt_json = serde_json::to_string(&clear.system_prompt)
             .map_err(|source| internal_error("clear system prompt could not be encoded", source))?;
-        let skill_catalog_json = serde_json::to_string(&clear.skill_catalog)
-            .map_err(|source| internal_error("clear skill catalog could not be encoded", source))?;
+        let skill_catalog_json = "{}";
 
         {
             let transaction = self
@@ -489,6 +481,12 @@ impl StorageEngine {
 
     /// 在读取任何 Session/append 投影前收敛 clear 的文件阶段。
     pub(super) fn recover_session_history_operations(&mut self) -> StorageResult<BTreeSet<String>> {
+        self.recover_session_history_operations_scoped(None)
+    }
+    pub(super) fn recover_session_history_operations_scoped(
+        &mut self,
+        scope: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<BTreeSet<String>> {
         let operations = {
             let mut statement = self
                 .connection
@@ -496,14 +494,14 @@ impl StorageEngine {
                     "SELECT operation_id, session_id, kind, state, source_generation,
                             result_generation, compacted_message_count, retained_message_count
                      FROM session_history_operations
-                     WHERE state IN ('preparing', 'cleanup_pending')
+                     WHERE state IN ('preparing', 'cleanup_pending') AND (?1 IS NULL OR session_id = ?1)
                      ORDER BY created_at_ms, operation_id",
                 )
                 .map_err(|source| {
                     internal_error("session history operations could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([], |row| {
+                .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,

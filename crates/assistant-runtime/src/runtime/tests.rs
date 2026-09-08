@@ -863,6 +863,7 @@ async fn wait_for_pending_approval(
                 .list_pending_approvals(ListPendingApprovalsRequest {
                     session_id: session_id.clone(),
                 })
+                .await
                 .expect("list pending approvals")
                 .approvals;
             if let Some(approval) = approvals.pop() {
@@ -898,3 +899,5 @@ mod sessions;
 mod store;
 mod work_plan;
 mod workspace;
+
+mod startup;

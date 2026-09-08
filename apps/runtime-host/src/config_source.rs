@@ -110,11 +110,16 @@ pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeEr
 /// 生产 Host 使用的单一配置文件来源。
 pub(crate) struct LocalConfigSource {
     path: PathBuf,
+    /// 同一来源的 Runtime／Speech／Host 设置串行提交，避免两个 CAS 同时通过后互相覆盖。
+    write_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LocalConfigSource {
     pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            write_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 }
 
@@ -143,7 +148,9 @@ impl RuntimeConfigSource for LocalConfigSource {
     ) -> ConfigSourceReplaceFuture<'_> {
         let path = self.path.clone();
         Box::pin(async move {
+            let write_guard = self.write_gate.clone().lock_owned().await;
             match tokio::task::spawn_blocking(move || {
+                let _write_guard = write_guard;
                 replace_private_config(&path, expected_revision.as_deref(), &document)
             })
             .await
@@ -520,6 +527,26 @@ mod tests {
             panic!("updated");
         };
         assert_eq!(updated.contents(), "schema_version = 2\n");
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_with_the_same_revision_cannot_both_commit() {
+        let directory = tempdir().expect("tempdir");
+        let source = LocalConfigSource::new(directory.path().join("config.toml"));
+        let (first, second) = tokio::join!(
+            source.replace(None, "owner = 'first'\n".into()),
+            source.replace(None, "owner = 'second'\n".into()),
+        );
+        assert_eq!(
+            usize::from(matches!(first, ConfigSourceReplace::Applied(_)))
+                + usize::from(matches!(second, ConfigSourceReplace::Applied(_))),
+            1
+        );
+        assert_eq!(
+            usize::from(matches!(first, ConfigSourceReplace::Conflict(_)))
+                + usize::from(matches!(second, ConfigSourceReplace::Conflict(_))),
+            1
+        );
     }
 
     fn assert_unsafe(load: ConfigSourceLoad) {

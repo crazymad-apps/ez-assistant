@@ -9,10 +9,14 @@ const fake = vi.hoisted(() => ({
   parsed: [] as Array<() => void>,
   write: vi.fn(), dispose: vi.fn(),
 }));
-vi.mock("../../src/native-bridge/userTerminal", () => ({
-  createUserTerminal: fake.create, restartUserTerminal: fake.restart, closeUserTerminal: fake.close,
-  acknowledgeUserTerminal: fake.ack, writeUserTerminal: fake.input, resizeUserTerminal: fake.resize,
-}));
+import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
+const client = { openUserTerminal: (source: unknown, size: unknown, receive: unknown) => {
+  let id = "";
+  return {
+    created: fake.create(source, size, receive).then((created: {terminal_id: string}) => { id = created.terminal_id; return created; }),
+    close: () => fake.close(id), acknowledge: () => fake.ack(id), write: (bytes: Uint8Array) => fake.input(id, bytes), resize: (size: unknown) => fake.resize(id, size), disconnect: vi.fn(),
+  };
+} } as unknown as RuntimeClient;
 vi.mock("../../src/features/resource-workspace/terminalEmulator", () => ({
   createTerminalEmulator: async () => ({
     host: document.createElement("div"), fit: { proposeDimensions: () => ({ cols: 80, rows: 24 }) },
@@ -34,10 +38,10 @@ beforeEach(() => {
 });
 
 describe("user terminal ownership", () => {
-  it("waits for a pending native creation before releasing a closed tab", async () => {
+  it("waits for a pending Host creation before releasing a closed tab", async () => {
     let created!: (value: { terminal_id: string; directory_name: string }) => void;
     fake.create.mockImplementation(() => new Promise((resolve) => { created = resolve; }));
-    const controller = new TerminalController(source, vi.fn());
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
     await settle();
     const closing = controller.close();
     expect(fake.close).not.toHaveBeenCalled();
@@ -49,7 +53,7 @@ describe("user terminal ownership", () => {
   });
 
   it("acks only parsed output even when no pane is mounted", async () => {
-    const controller = new TerminalController(source, vi.fn());
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
     await settle();
     fake.receive?.({ type: "output", bytes: [0xe4, 0xb8] });
     expect(fake.write).toHaveBeenCalledWith(new Uint8Array([0xe4, 0xb8]));
@@ -61,7 +65,7 @@ describe("user terminal ownership", () => {
   });
 
   it("serializes large UTF-8 paste blocks without splitting or losing bytes", async () => {
-    const controller = new TerminalController(source, vi.fn());
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
     await settle();
     const pasted = "中文".repeat(4000) + "\r";
     fake.onData?.(pasted);
@@ -75,27 +79,27 @@ describe("user terminal ownership", () => {
     await controller.close();
   });
 
-  it("keeps the native handle after close failure and reuses frozen identity on restart", async () => {
-    const controller = new TerminalController(source, vi.fn());
+  it("keeps the connection after close failure and creates a fresh socket on restart", async () => {
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
     await settle();
     fake.receive?.({ type: "exited", code: 7 });
     expect(controller.exit_code).toBe(7);
     expect(controller.needs_close_confirmation).toBe(false);
     controller.restart(); await settle();
-    expect(fake.restart).toHaveBeenCalledWith("pty-1", { cols: 80, rows: 24 }, expect.any(Function));
-    expect(fake.create).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledWith("pty-1");
+    expect(fake.create).toHaveBeenCalledTimes(2);
     fake.close.mockRejectedValueOnce(new Error("cleanup failed"));
     await expect(controller.close()).rejects.toThrow("cleanup failed");
     expect(fake.dispose).not.toHaveBeenCalled();
-    expect(controller.native_id).toBe("pty-1");
+    expect(controller.terminal_id).toBe("pty-1");
     await controller.close();
     expect(controller.status).toBe("closed");
   });
 });
 
 describe("terminal tab exit", () => {
-  it.each([0, 1, 7])("forwards Ctrl+D and closes only after shell exit (%i) and native cleanup", async (code) => {
-    const store = new ResourceWorkspaceStore();
+  it.each([0, 1, 7])("forwards Ctrl+D and closes only after shell exit (%i) and Host cleanup", async (code) => {
+    const store = new ResourceWorkspaceStore(() => client);
     store.selectScope("session:one");
     store.openWorkspace("session:one");
     store.openTerminal(source);
@@ -126,7 +130,7 @@ describe("terminal tab exit", () => {
       fake.receive = receive;
       return new Promise((resolve) => { created = resolve; });
     });
-    const store = new ResourceWorkspaceStore();
+    const store = new ResourceWorkspaceStore(() => client);
     store.selectScope("session:one");
     store.openTerminal(source);
     await settle();
@@ -143,7 +147,7 @@ describe("terminal tab exit", () => {
   });
 
   it("retains communication and cleanup failures for inspection and retry", async () => {
-    const store = new ResourceWorkspaceStore();
+    const store = new ResourceWorkspaceStore(() => client);
     store.selectScope("session:one");
     store.openTerminal(source);
     await settle();
@@ -160,7 +164,7 @@ describe("terminal tab exit", () => {
     fake.receive?.({ type: "exited", code: 0 });
     await settle();
     expect(controller.error).toBe("cleanup failed");
-    expect(controller.native_id).toBe("pty-1");
+    expect(controller.terminal_id).toBe("pty-1");
     expect(store.active_tab.type).toBe("terminal");
     expect(fake.dispose).not.toHaveBeenCalled();
     await store.closeTerminalTab("terminal-1");
@@ -169,7 +173,7 @@ describe("terminal tab exit", () => {
 });
 
 it("retains a terminal through global cache eviction and closes workspace-sourced PTYs with their session", async () => {
-  const store = new ResourceWorkspaceStore();
+  const store = new ResourceWorkspaceStore(() => client);
   store.selectScope("session:owner");
   store.openTerminal(source);
   await settle();

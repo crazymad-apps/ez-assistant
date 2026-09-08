@@ -48,7 +48,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ForkSessionResult> {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
-        let source = self.session(&request.session_id)?;
+        let source = self.session(&request.session_id).await?;
         source.ensure_standard_role()?;
         source
             .ensure_conversation_loaded(self.store.as_ref())
@@ -143,12 +143,10 @@ impl AssistantRuntime {
             .session_environment_factory
             .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
                 session_id: &session_id,
-                source_system_prompt: source.system_prompt(),
+                source_system_prompt: &source.current_system_prompt()?,
                 source_environment: source.environment(),
             })
             .map_err(|source| RuntimeError::SessionEnvironmentBuildFailed { source })?;
-        // Skill 包由四个共享 Root 持有；Fork 只继承已经冻结的 Catalog 事实。
-        let skill_catalog = source.skill_catalog().clone();
 
         let attachments_by_path = self
             .attachments
@@ -318,7 +316,7 @@ impl AssistantRuntime {
                     model_key,
                     reasoning_effort,
                     system_prompt: prepared.system_prompt,
-                    skill_catalog,
+
                     environment: prepared.environment,
                     current_variant,
                     approval_mode,
@@ -401,7 +399,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<PrepareDeleteSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
@@ -454,7 +452,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<DeleteSessionResult> {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
@@ -525,7 +523,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ClearSessionResult> {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -598,7 +596,7 @@ impl AssistantRuntime {
                 session_id: request.session_id.clone(),
                 expected_generation: request.expected_generation,
                 system_prompt,
-                skill_catalog,
+
                 environment: prepared.environment,
                 expected_role,
                 changed_at_ms: now_ms()?,
@@ -671,7 +669,7 @@ impl AssistantRuntime {
 
     /// 按输入接收顺序和 attempt 返回指定 Session 的全部 Run。
     pub async fn list_runs(&self, request: ListRunsRequest) -> RuntimeResult<ListRunsResult> {
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -687,7 +685,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ArchiveSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_healthy()?;
@@ -722,7 +720,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<RestoreSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         if session.lock_state()?.lifecycle != SessionLifecycle::Archived {
@@ -765,7 +763,7 @@ impl AssistantRuntime {
         }
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.cancel_title_generation()?;
@@ -798,7 +796,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SetSessionPinnedResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         if session.lock_state()?.is_pinned == request.is_pinned {
@@ -834,14 +832,15 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let controller = self
-            .controller_sessions()?
+            .controller_sessions()
+            .await?
             .into_iter()
             .next()
             .ok_or(RuntimeError::ControllerUnavailable)?;
         self.controller_tool_coordinator()
             .set_proxy(controller.id(), &request.session_id, request.enabled)
             .await?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let summary = session.summary()?;
         Ok(SetSessionProxyResult { session: summary })
     }
@@ -853,7 +852,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SetMessageFeedbackResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -902,7 +901,7 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -950,7 +949,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SetSessionReasoningEffortResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -993,7 +992,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SetSessionVariantResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -1024,7 +1023,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SetSessionApprovalModeResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -1062,7 +1061,7 @@ impl AssistantRuntime {
                 reason: "message must not be blank",
             });
         }
-        let session = self.session(&request.session_id)?;
+        let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -1166,6 +1165,7 @@ impl AssistantRuntime {
             session.clone(),
             &config,
             RunCompilationResources {
+                skill_catalog: self.current_skill_catalog(&session).await?,
                 model_factory: self.model_factory.as_ref(),
                 context_window: self.context_window.clone(),
                 run_tool_factory: self.run_tool_factory.as_ref(),

@@ -142,7 +142,7 @@ impl AssistantRuntime {
             model_key,
             reasoning_effort: manifest.reasoning_effort,
             system_prompt,
-            skill_catalog,
+
             environment: prepared_environment.environment,
             current_variant: manifest.variant,
             approval_mode: manifest.approval_mode,
@@ -223,34 +223,33 @@ impl AssistantRuntime {
             .skill_name
             .map(|name| SkillName::parse(name).map_err(|_| RuntimeError::SkillNameInvalid))
             .transpose()?;
+        let skill_catalog = self.current_skill_catalog(&provisional).await?;
         let skill_activation = selected_skill
             .as_ref()
             .map(|name| {
-                let definition = provisional.skill_catalog().user_definition(name).map_err(
-                    |error| match error {
-                        SkillActivationResolveError::CatalogUnavailable => {
-                            RuntimeError::SkillCatalogUnavailable {
-                                session_id: session_id.clone(),
+                let definition =
+                    skill_catalog
+                        .user_definition(name)
+                        .map_err(|error| match error {
+                            SkillActivationResolveError::CatalogUnavailable => {
+                                RuntimeError::SkillCatalogUnavailable {
+                                    session_id: session_id.clone(),
+                                }
                             }
-                        }
-                        SkillActivationResolveError::NotFound => RuntimeError::SkillNotFound {
-                            session_id: session_id.clone(),
-                        },
-                        SkillActivationResolveError::NotUserInvocable => {
-                            RuntimeError::SkillNotUserInvocable {
+                            SkillActivationResolveError::NotFound => RuntimeError::SkillNotFound {
                                 session_id: session_id.clone(),
+                            },
+                            SkillActivationResolveError::NotUserInvocable => {
+                                RuntimeError::SkillNotUserInvocable {
+                                    session_id: session_id.clone(),
+                                }
                             }
-                        }
-                    },
-                )?;
+                        })?;
                 InternalBoundaryCoordinator::append(
                     &mut message,
                     InternalBoundaryRequest {
                         source: InternalBoundarySource::SkillActivation,
-                        text: render_user_activation(
-                            &provisional.skill_catalog().revision,
-                            definition,
-                        ),
+                        text: render_user_activation(&skill_catalog.revision, definition),
                     },
                 )?;
                 Ok(StoredSkillActivation {
@@ -265,7 +264,7 @@ impl AssistantRuntime {
                     input_id: Some(input_id.clone()),
                     message_id: message.id.clone(),
                     name: definition.name.clone(),
-                    catalog_revision: provisional.skill_catalog().revision.clone(),
+                    catalog_revision: skill_catalog.revision.clone(),
                     definition_digest: definition.definition_digest.clone(),
                     trigger: SkillActivationTrigger::User,
                     created_at_ms,
@@ -312,7 +311,9 @@ impl AssistantRuntime {
                 }
             })?;
 
-        if let Ok(existing) = self.session(&stored.session.session_id) {
+        if stored.accepted.is_duplicate
+            && let Ok(existing) = self.session(&stored.session.session_id).await
+        {
             let state = existing.lock_state()?;
             let run = state
                 .runs
@@ -449,7 +450,7 @@ fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
         model_key: session.model_key.clone(),
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt.clone(),
-        skill_catalog: session.skill_catalog.clone(),
+
         environment: session.environment.clone(),
         lifecycle: crate::StoredSessionLifecycle::Active,
         current_variant: session.current_variant,

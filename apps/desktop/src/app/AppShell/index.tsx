@@ -1,6 +1,9 @@
+import { HostDirectoryDialog } from "../../features/workspaces/HostDirectoryDialog";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "../../components/Icon";
+import { Button } from "../../components/Button";
+import { useApplicationConnection } from "../../features/runtime-access/ApplicationConnectionContext";
 import { Tooltip } from "../../components/Tooltip";
 import { usePresence } from "../../components/Presence";
 import { ResourceWorkspace } from "../../features/resource-workspace/ResourceWorkspace";
@@ -34,6 +37,7 @@ import styles from "./index.module.scss";
 
 export const AppShell = observer(function AppShell() {
   const store = useRootStore();
+  const application_connection = useApplicationConnection();
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
   const [window_maximized, setWindowMaximized] = useState(false);
   const application = store.projection.application;
@@ -113,7 +117,11 @@ export const AppShell = observer(function AppShell() {
           <span data-tauri-drag-region>ez-assistant · 本地 AI 助手</span>
           <span className={styles.app_version} data-tauri-drag-region>v{__APP_VERSION__}</span>
         </strong>
+        {application_connection?.desktop && <Tooltip content="打开 Web 端">
+          <Button aria-label="打开 Web 端" iconOnly variant="text" disabled={application_connection.web_pending || store.connection.state !== "connected"} onClick={() => void application_connection.openWeb()}><Icon name="globe" size={17} /></Button>
+        </Tooltip>}
         <RuntimeStatus />
+        {application_connection && !application_connection.desktop && <Button onClick={() => void application_connection.signOut()} variant="text">退出登录</Button>}
         {desktop_platform === "linux" && <LinuxWindowControls maximized={window_maximized} on_maximized_change={setWindowMaximized} />}
       </header>
 
@@ -142,6 +150,7 @@ export const AppShell = observer(function AppShell() {
         <ResourceWorkspace hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />
       </div>
       <SettingsDialog />
+      {store.directory_picker && <HostDirectoryDialog />}
       <DesktopLifecycleDialog />
       <ConversationSearchDialog />
       {workspace_editor_presence.mounted && retained_workspace_editor_ref.current && (

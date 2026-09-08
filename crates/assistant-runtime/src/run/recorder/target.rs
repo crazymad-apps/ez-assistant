@@ -381,26 +381,26 @@ impl RecorderTarget {
     /// 生成模型 Activation ledger 所需的冻结 Conversation 归属事实。
     pub(super) fn skill_activation_context(
         &self,
-    ) -> (
-        assistant_protocol::SessionId,
-        crate::SkillActivationOwner,
-        assistant_protocol::RunId,
-        String,
-    ) {
-        match self {
+    ) -> Result<
+        (
+            assistant_protocol::SessionId,
+            crate::SkillActivationOwner,
+            assistant_protocol::RunId,
+        ),
+        RecordError,
+    > {
+        Ok(match self {
             Self::Parent { session, run_id } => (
                 session.id().clone(),
                 crate::SkillActivationOwner::Session(session.id().clone()),
                 run_id.clone(),
-                session.skill_catalog().revision.clone(),
             ),
-            Self::Child { task, session } => (
+            Self::Child { task, .. } => (
                 task.session_id().clone(),
                 crate::SkillActivationOwner::ChildTask(task.id().as_str().to_owned()),
                 task.journal_owner().clone(),
-                session.skill_catalog().revision.clone(),
             ),
-        }
+        })
     }
 }
 

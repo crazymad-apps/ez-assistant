@@ -115,14 +115,17 @@
 }
 
 .page_container_heading {
+  min-width: 0;
+
+  h3 { margin: 0; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+  p { margin: 3px 0 0; overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.page_container_title {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 9px;
-
-  > div { min-width: 0; }
-  h3 { margin: 0; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
-  p { margin: 3px 0 0; overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
+  gap: 8px;
 }
 
 .page_container_actions {
@@ -146,21 +149,6 @@
     &:hover:not(:disabled) { color: var(--ez-text); background: var(--ez-surface-subtle); }
     &:disabled { opacity: 0.5; }
   }
-}
-
-.page_container_back {
-  display: grid;
-  width: var(--ez-control-height);
-  height: var(--ez-control-height);
-  padding: 0;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 0;
-  border-radius: var(--ez-radius-small);
-  color: var(--ez-text-secondary);
-  background: transparent;
-
-  &:hover { color: var(--ez-text); background: var(--ez-surface-muted); }
 }
 
 .page_container_content {
@@ -248,23 +236,6 @@
     white-space: nowrap;
   }
 }
-
-.lifecycle_card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 12px;
-  margin-top: 12px;
-  padding: 14px 15px;
-  border: 1px solid var(--ez-border);
-  border-radius: var(--ez-radius-medium);
-
-  h4 { margin: 0; }
-}
-
-.lifecycle_select { min-width: 116px; }
-.lifecycle_actions { display: flex; gap: 7px; }
-.lifecycle_actions button { min-height: var(--ez-control-height); padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text-secondary); background: var(--ez-surface); }
 
 .issue_list { margin-top: 12px; padding: 10px 12px; border-radius: var(--ez-radius-small); background: var(--ez-warning-soft); color: var(--ez-warning-text); }
 .issue_list p { margin: 3px 0; }
@@ -747,8 +718,6 @@
   }
   .page_container_header { min-height: 58px; padding-inline: 12px; }
   .page_container_content { padding-inline: 12px; }
-  .lifecycle_card { grid-template-columns: minmax(0, 1fr); }
-  .lifecycle_select { justify-self: start; }
   .diagnostic_card { align-items: stretch; flex-direction: column; }
   .diagnostic_card button { align-self: flex-start; }
   .paired_device_list > article { grid-template-columns: 10px minmax(0, 1fr); }

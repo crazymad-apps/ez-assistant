@@ -1288,6 +1288,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
                 .list_pending_approvals(ListPendingApprovalsRequest {
                     session_id: session.session.session_id.clone(),
                 })
+                .await
                 .expect("approvals")
                 .approvals;
             if approvals.len() == 2 {
@@ -1320,6 +1321,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
                 .list_pending_approvals(ListPendingApprovalsRequest {
                     session_id: session.session.session_id.clone(),
                 })
+                .await
                 .expect("approvals")
                 .approvals;
             if let Some(approval) = approvals
@@ -1353,6 +1355,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session.session.session_id.clone(),
             })
+            .await
             .expect("pending child approval")
             .approvals
             .len(),
@@ -1474,6 +1477,7 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session.session.session_id.clone(),
             })
+            .await
             .expect("approvals")
             .approvals
             .is_empty()

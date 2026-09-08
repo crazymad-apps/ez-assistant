@@ -6,6 +6,12 @@ export type BrowserEvent =
   | Readonly<{ type: "notice"; message: string; url: string | null }>;
 export type BrowserBounds = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type BrowserAction = "back" | "forward" | "reload" | "stop" | "focus";
+export type BrowserPreview = Readonly<{ url: string; image: string }>;
+
+export function captureResourceBrowser(browser_id: string): Promise<BrowserPreview | null> {
+  if (!isTauri()) return Promise.resolve(null);
+  return invoke("capture_resource_browser", { browserId: browser_id });
+}
 
 export async function createResourceBrowser(url: string, on_event: (event: BrowserEvent) => void): Promise<string> {
   if (!isTauri()) throw new Error("请在桌面应用中打开网页。");
@@ -29,7 +35,7 @@ export function layoutResourceBrowser(browser_id: string | null, bounds: Browser
   });
 }
 
-export function resourceBrowserUrl(browser_id: string): Promise<string> {
+export function resourceBrowserUrl(browser_id: string): Promise<string | null> {
   return invoke("resource_browser_url", { browserId: browser_id });
 }
 

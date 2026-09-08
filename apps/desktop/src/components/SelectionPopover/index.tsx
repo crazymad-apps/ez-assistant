@@ -332,6 +332,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
       aria-label={props.aria_label}
       aria-hidden={props.presence.state === "exiting" ? true : undefined}
       data-position-ready={position.ready}
+      data-overlay-region="floating"
       data-presence={props.presence.state}
       data-width={props.content_width}
       id={props.id}

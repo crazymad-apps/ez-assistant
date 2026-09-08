@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     net::TcpListener,
     path::Path,
     process::{Child, Command, Output, Stdio},
@@ -1153,6 +1153,37 @@ pub struct HostProcess {
 
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
+        Self::start_inner(runtime_home, None, None)
+    }
+
+    pub fn start_with_password(runtime_home: &Path, password: &str) -> Self {
+        Self::start_inner(runtime_home, Some(password), None)
+    }
+
+    pub fn start_with_client(runtime_home: &Path, client: &HttpClient) -> Self {
+        Self::start_inner(runtime_home, None, Some(client))
+    }
+
+    fn start_inner(runtime_home: &Path, password: Option<&str>, http: Option<&HttpClient>) -> Self {
+        // 产品默认固定 7240；每个隔离夹具显式配置自己的空闲端口，避免并行用例争用。
+        let path = runtime_home.join("config.toml");
+        let mut document = fs::read_to_string(&path)
+            .unwrap_or_else(|_| "schema_version = 1\ndefault_model = \"\"\n".into())
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        if document.get("host_access").is_none() {
+            let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+            let config = assistant_protocol::HostAccessConfiguration {
+                port: socket.local_addr().unwrap().port(),
+                ..Default::default()
+            };
+            let section = toml::to_string(&config)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            document["host_access"] = toml_edit::Item::Table(section.as_table().clone());
+            fs::write(path, document.to_string()).unwrap();
+        }
         // Runtime Home 与用户 Home 是不同的扫描来源。只隔离数据库不足以隔离 Skill；
         // 仅为测试子进程指定私有 Home，不改当前进程环境或真实用户目录，重启沿用同一路径。
         let user_directory = runtime_home.join("fixture-user-home");
@@ -1165,8 +1196,19 @@ impl HostProcess {
             .arg(runtime_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if password.is_some() {
+            command.arg("--password-stdin").stdin(Stdio::piped());
+        }
         let mut child = command.spawn().expect("spawn Runtime Host");
-        let (base_url, access_token) = wait_until_ready(runtime_home, &mut child);
+        if let Some(password) = password {
+            child
+                .stdin
+                .take()
+                .expect("password stdin")
+                .write_all(password.as_bytes())
+                .expect("initialize test password");
+        }
+        let (base_url, access_token) = wait_until_ready_with_client(runtime_home, &mut child, http);
         Self {
             child: Some(child),
             base_url,
@@ -1369,13 +1411,21 @@ impl Client {
 }
 
 fn wait_until_ready(runtime_home: &Path, child: &mut Child) -> (String, String) {
+    wait_until_ready_with_client(runtime_home, child, None)
+}
+fn wait_until_ready_with_client(
+    runtime_home: &Path,
+    child: &mut Child,
+    client: Option<&HttpClient>,
+) -> (String, String) {
     let deadline = Instant::now() + Duration::from_secs(8);
     let discovery_path = runtime_home.join("run/runtime.json");
-    let http = HttpClient::builder()
+    let default_http = HttpClient::builder()
         .connect_timeout(Duration::from_millis(200))
         .timeout(Duration::from_millis(500))
         .build()
         .expect("readiness client");
+    let http = client.unwrap_or(&default_http);
     loop {
         if let Ok(bytes) = fs::read(&discovery_path)
             && let Ok(discovery) = serde_json::from_slice::<Value>(&bytes)

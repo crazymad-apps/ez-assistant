@@ -10,7 +10,7 @@ import { ResourcePreview } from "../ResourcePreview";
 import { ResourceTerminal } from "../ResourceTerminal";
 import { ResourceBrowser } from "../ResourceBrowser";
 import { ResourceContextMenu, type ResourceMenuItem, type ResourceMenuLocation } from "../ResourceContextMenu";
-import { isPreviewableResource, type CachedResourcePage } from "../ResourceWorkspaceStore";
+import { type CachedResourcePage } from "../ResourceWorkspaceStore";
 
 /** 内容按标签 owner 取根目录；后台保活页面不能改用当前会话的投影或打开回调。 */
 export const ResourcePage = observer(function ResourcePage(props: Readonly<{
@@ -50,13 +50,14 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
       location,
       items: [
         {
-          disabled: !directory && !isPreviewableResource(entry.display_name),
           label: directory ? "在工作空间中打开" : "在资源栏打开",
           on_select: () => {
             if (directory) store.openWorkspace(scope_key, entry.locator);
             else store.openSessionResource(scope_key, session_id, entry.locator, entry.display_name);
           },
         },
+        ...(!directory ? [{label:"下载文件",on_select:()=>runResourceAction(root_store.files.downloadSessionFile(session_id,entry.locator,entry.display_name),"下载失败。")}] : []),
+        ...(root_store.files.native_host ? [
         {
           label: "使用系统应用打开",
           on_select: () => runResourceAction(
@@ -70,7 +71,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
             revealSessionResourceInDirectory(session_id, entry.locator),
             "无法在 Finder 中显示。",
           ),
-        },
+        }        ] : []),
       ],
     });
   }

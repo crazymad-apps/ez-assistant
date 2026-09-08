@@ -41,7 +41,9 @@ impl StorageEngine {
             .into_iter()
             .find(|command| command.input_id == commit.input_id)
             .ok_or_else(|| conflict("session command does not exist"))?;
-        if existing.session_id != commit.session_id || existing.user_message_id != commit.message.id
+        if !commit.result.matches_command(&existing.command)
+            || existing.session_id != commit.session_id
+            || existing.user_message_id != commit.message.id
         {
             return Err(conflict("session command identity is inconsistent"));
         }
@@ -72,10 +74,10 @@ impl StorageEngine {
                     source,
                 )
             })?;
-        let (source_generation, role) = self
+        let source_generation = self
             .connection
             .query_row(
-                "SELECT body_generation, role FROM sessions
+                "SELECT body_generation FROM sessions
                  WHERE session_id = ?1 AND lifecycle = 'active'
                    AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?1 AND status IN ('running', 'cancelling'))
                    AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?1)
@@ -83,16 +85,13 @@ impl StorageEngine {
                    AND NOT EXISTS (SELECT 1 FROM child_pending_tool_exchanges WHERE session_id = ?1)
                    AND NOT EXISTS (SELECT 1 FROM session_goals WHERE session_id = ?1)",
                 [commit.session_id.as_str()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, i64>(0),
             )
             .optional()
             .map_err(|source| {
                 internal_error("session command generation could not be queried", source)
             })?
             .ok_or_else(|| conflict("session command target is not active"))?;
-        if role != "standard" {
-            return Err(conflict("session command target is not standard"));
-        }
         let source_generation = u64::try_from(source_generation)
             .map_err(|source| invalid_data_with_source("session generation is invalid", source))?;
         let result_generation = source_generation

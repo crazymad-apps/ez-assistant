@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
-use crate::runtime_bootstrap::RuntimeBootstrapCoordinator;
+use crate::{runtime_bootstrap::RuntimeBootstrapCoordinator, runtime_connection::RuntimeTarget};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ExternalLinkFailure {
@@ -34,10 +34,15 @@ pub(crate) fn open_external_http_url(
 
 #[tauri::command]
 pub(crate) async fn open_workspace_directory(
+    target: RuntimeTarget,
     app: AppHandle,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     workspace_id: String,
 ) -> Result<(), ExternalLinkFailure> {
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     let workspace_id = WorkspaceId::new(workspace_id).map_err(|_| ExternalLinkFailure {
         code: "invalid_workspace",
         message: "工作空间标识无效。",
@@ -49,6 +54,10 @@ pub(crate) async fn open_workspace_directory(
             code: "workspace_unavailable",
             message: "无法从 Runtime 获取工作空间目录。",
         })?;
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|_| ExternalLinkFailure {
@@ -59,11 +68,16 @@ pub(crate) async fn open_workspace_directory(
 
 #[tauri::command]
 pub(crate) async fn open_session_workspace_directory(
+    target: RuntimeTarget,
     app: AppHandle,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     session_id: String,
     directory_index: usize,
 ) -> Result<(), ExternalLinkFailure> {
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     let session_id = SessionId::new(session_id).map_err(|_| ExternalLinkFailure {
         code: "invalid_session",
         message: "会话标识无效。",
@@ -75,6 +89,10 @@ pub(crate) async fn open_session_workspace_directory(
             code: "workspace_unavailable",
             message: "无法从 Runtime 获取该会话的工作目录。",
         })?;
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|_| ExternalLinkFailure {
@@ -85,10 +103,15 @@ pub(crate) async fn open_session_workspace_directory(
 
 #[tauri::command]
 pub(crate) async fn skill_directory_path(
+    target: RuntimeTarget,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     workspace_id: Option<String>,
     source: String,
 ) -> Result<String, ExternalLinkFailure> {
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     resolve_skill_directory(&coordinator, workspace_id, &source)
         .await
         .map(|path| path.to_string_lossy().into_owned())
@@ -96,11 +119,16 @@ pub(crate) async fn skill_directory_path(
 
 #[tauri::command]
 pub(crate) async fn open_skill_directory(
+    target: RuntimeTarget,
     app: AppHandle,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     workspace_id: Option<String>,
     source: String,
 ) -> Result<(), ExternalLinkFailure> {
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     let path = resolve_skill_directory(&coordinator, workspace_id, &source).await?;
     if !path.is_dir() {
         return Err(ExternalLinkFailure {
@@ -108,6 +136,10 @@ pub(crate) async fn open_skill_directory(
             message: "技能来源目录不存在。",
         });
     }
+    target.ensure_local().map_err(|_| ExternalLinkFailure {
+        code: "local_operation_unavailable",
+        message: "此操作仅支持当前本机 Runtime。",
+    })?;
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|_| ExternalLinkFailure {
@@ -196,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_directory_source_cannot_escape_the_fixed_allowlist() {
-        let coordinator = RuntimeBootstrapCoordinator::for_application();
+        let coordinator = RuntimeBootstrapCoordinator::for_application(true);
         let error = resolve_skill_directory(&coordinator, None, "../../private")
             .await
             .expect_err("arbitrary source must be rejected");

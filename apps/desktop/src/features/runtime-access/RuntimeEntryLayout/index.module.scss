@@ -1,0 +1,81 @@
+.page {
+  position: relative;
+  isolation: isolate;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  overflow: clip;
+  // 色层覆盖整个视口，给点阵增加远近层次，不围绕表单制造白色光圈。
+  background:
+    radial-gradient(ellipse at 3% 12%, #d8e5f6 0, transparent 52%),
+    radial-gradient(ellipse at 96% 78%, #e2def2 0, transparent 48%),
+    radial-gradient(ellipse at 32% 110%, #dcecf0 0, transparent 52%), #eef2f8;
+}
+// 与 AppShell 的 42px 顶栏保持同一垂直中心，匹配原生红绿灯的位置。
+.title_bar {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 24px;
+  font-size: var(--ez-font-base);
+  line-height: 1;
+  color: var(--ez-text-secondary);
+}
+.title_bar small {
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+.content {
+  position: relative;
+  z-index: 1;
+  width: min(384px, calc(100vw - 48px));
+  margin: 100px 0 48px;
+}
+.mark {
+  display: block;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 20px;
+}
+.content h1 {
+  font-size: 29px;
+  font-weight: 600;
+  letter-spacing: -1px;
+  text-align: center;
+  margin: 0 0 10px;
+}
+.subtitle {
+  color: var(--ez-text-muted);
+  font-size: 13px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  margin: 0 0 32px;
+}
+.footer {
+  position: absolute;
+  bottom: 22px;
+  color: var(--ez-text-muted);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+}
+@media (max-height: 620px) {
+  .content {
+    margin-top: 68px;
+  }
+  .mark {
+    width: 52px;
+    height: 52px;
+    margin-bottom: 14px;
+  }
+  .subtitle {
+    margin-bottom: 20px;
+  }
+}
+
+.title_bar[data-native-window="true"] {
+  padding-left: 106px;
+}

@@ -1,6 +1,6 @@
 import { action, makeObservable, observable, runInAction } from "mobx";
 import {
-  actOnResourceBrowser, closeResourceBrowser, createResourceBrowser,
+  actOnResourceBrowser, captureResourceBrowser, closeResourceBrowser, createResourceBrowser,
   navigateResourceBrowser, resourceBrowserUrl,
   type BrowserAction, type BrowserEvent,
 } from "../../native-bridge/resourceBrowser";
@@ -15,6 +15,10 @@ export class BrowserController {
   error: string | null = null;
   notice: string | null = null;
   notice_url: string | null = null;
+  preview: string | null = null;
+  obscured = false;
+  #preview_owner = {};
+  #preview_pending = false;
   #disposed = false;
   #page: object | null = {};
   // 页面实例会跨导航保留；单独取消旧 URL 查询，null 表示新地址尚未获得原生页面事件。
@@ -30,6 +34,7 @@ export class BrowserController {
     makeObservable(this, {
       native_id: observable, url: observable, title: observable, loading: observable, load_delayed: observable,
       error: observable, notice: observable, notice_url: observable, navigate: action, perform: action,
+      preview: observable, obscured: observable, clearPreview: action, setObscured: action,
       reportError: action, reportNotice: action, dismissNotice: action, suspend: action, resume: action,
     });
   }
@@ -39,6 +44,7 @@ export class BrowserController {
     let url: string;
     try { url = browserAddress(value); } catch (failure) { this.reportNotice(failure); return false; }
     this.#url_sync = null;
+    this.clearPreview();
     this.url = url;
     this.error = null;
     this.notice = null;
@@ -78,7 +84,10 @@ export class BrowserController {
       && this.native_id === id && this.#url_sync === sync;
     try {
       const url = await resourceBrowserUrl(id);
-      if (is_current()) runInAction(() => { this.url = url; });
+      if (is_current() && url) runInAction(() => {
+        if (this.url !== url) this.clearPreview();
+        this.url = url;
+      });
     } catch (failure) { if (is_current()) this.reportError(failure); }
   }
 
@@ -96,11 +105,33 @@ export class BrowserController {
 
   dismissNotice(): void { this.notice = null; this.notice_url = null; this.load_delayed = false; }
 
+  setObscured(value: boolean): void { this.obscured = value; }
+
+  /** 仅当前可见页面保留一张占位图；导航、切换和释放都使迟到截图失效。 */
+  clearPreview(): void { this.#preview_owner = {}; this.preview = null; }
+
+  async capturePreview(): Promise<void> {
+    const id = this.native_id;
+    const owner = this.#preview_owner;
+    if (!id || !this.url || this.loading || this.error || !this.#page || this.#disposed || this.#preview_pending) return;
+    this.#preview_pending = true;
+    try {
+      const preview = await captureResourceBrowser(id);
+      if (preview && this.#preview_owner === owner && !this.#disposed && this.native_id === id && preview.url === this.url) {
+        runInAction(() => { this.preview = preview.image; });
+      }
+    } catch {
+      // 截图不可用只影响占位，不应把正常网页变为加载错误或打断用户的弹窗操作。
+    } finally { this.#preview_pending = false; }
+  }
+
   /** 只释放页面实例，保留最后 URL/标题；创建和关闭串行，迟到页面事件不能覆盖重建实例。 */
   suspend(): void {
     if (!this.#page) return;
     this.#page = null;
     this.#url_sync = null;
+    this.clearPreview();
+    this.obscured = false;
     this.#stopLoading();
     this.#pending = this.#pending.then(async () => {
       const id = this.native_id;
@@ -142,6 +173,7 @@ export class BrowserController {
   }
 
   #startLoading(): void {
+    this.clearPreview();
     this.loading = true;
     this.load_delayed = false;
     clearTimeout(this.#load_timer);

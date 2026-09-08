@@ -29,6 +29,10 @@
   `manager.rs` 等无稳定领域含义的杂物箱。
 - 抽象必须服务于真实调用方、替换边界或测试边界；不为假想扩展提前创建公共 trait。
 - workspace 默认禁止 `unsafe`，以根 `Cargo.toml` 的 `unsafe_code = "forbid"` 为准。
+  2026-09-06 用户明确批准的唯一例外：Desktop 的
+  `apps/desktop/src-tauri/src/browser_resource/platform.rs` 内 WKWebView 截图与页面生命周期适配。
+  该 package 使用 `deny` 并仅对 FFI 函数局部 `allow`，必须说明主线程、指针与回调生命周期；
+  其他代码不得借此增加 unsafe，其他 workspace 成员仍继承 `forbid`。
 
 ## 三、Workspace、package 与依赖
 

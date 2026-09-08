@@ -19,12 +19,24 @@ export default async function setupRuntimeHost(_config: FullConfig): Promise<() 
   const additional_workspace = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-added-workspace-"));
   const provider = await startFakeProvider();
   const mcp_secret = "e2e-mcp-secret-must-not-leak-9273";
+  const reservation = createServer();
+  await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+  const reserved_address = reservation.address();
+  if (!reserved_address || typeof reserved_address === "string") throw new Error("test port missing");
+  const host_port = reserved_address.port;
+  await new Promise<void>((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
   const user_directory = join(runtime_home, "fixture-user-home");
   await mkdir(user_directory);
   await writeFile(
     join(runtime_home, "config.toml"),
     `schema_version = 1
 default_model = "fixture"
+
+[host_access]
+remote_enabled = false
+scheme = "http"
+port = ${host_port}
+server_names = []
 
 [models.fixture]
 protocol = "chat_completions"
@@ -92,6 +104,7 @@ max_output_tokens = 4096
     });
     process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE = additional_workspace;
     process.env.EZ_ASSISTANT_E2E_MCP_SECRET = mcp_secret;
+    process.env.EZ_ASSISTANT_E2E_SKILL_ROOT = join(user_directory, ".agents", "skills");
   } catch (error) {
     child.kill("SIGTERM");
     await provider.close();

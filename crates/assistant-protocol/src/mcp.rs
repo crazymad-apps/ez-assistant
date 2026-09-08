@@ -327,6 +327,7 @@ pub struct McpSelectionTagSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SessionCommand {
+    SkillRefresh,
     McpRefresh {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]

@@ -176,3 +176,14 @@ function detailView(overrides: Partial<ToolDetailView>): ToolDetailView {
     ...overrides,
   };
 }
+
+
+vi.mock("../../src/stores/RootStoreContext", async () => {
+  const { ClientResources } = await import("../../src/runtime-client/ClientResources");
+  const files = new ClientResources(() => null, true);
+  return {useRootStore: () => ({files})};
+});
+vi.mock("../../src/runtime-client/ClientResources", async (original) => {
+  const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+});

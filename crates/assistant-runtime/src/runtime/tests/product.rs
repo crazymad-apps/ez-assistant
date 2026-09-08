@@ -249,6 +249,7 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
 
     let controller = runtime
         .session(&session.session.session_id)
+        .await
         .expect("session controller");
     controller
         .lock_state()
@@ -360,6 +361,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
             ConversationItem::Assistant(message) => Some(message),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("assistant message");
@@ -484,6 +486,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
             ConversationItem::Assistant(message) => Some(message.message_id),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })
         .expect("assistant message");
@@ -538,6 +541,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
             ConversationItem::Assistant(message) => Some(message.feedback),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         });
     assert_eq!(cleared, Some(None));
@@ -765,11 +769,12 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
             },
             variant: assistant_protocol::AgentVariant::Build,
         })
+        .await
         .expect("MCP options");
     assert_eq!(options.servers.len(), 1);
     assert_eq!(options.servers[0].server_key.as_str(), "github");
     assert_eq!(options.servers[0].visible_tool_count, 2);
-    let controller = runtime.session_for_test(&session_id);
+    let controller = runtime.session_for_test(&session_id).await;
     controller.lock_state().expect("state").queue_paused_by_user = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
@@ -933,6 +938,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
         loop {
             if runtime
                 .session(&session_id)
+                .await
                 .expect("session")
                 .lock_state()
                 .expect("state")
@@ -1231,6 +1237,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
     assert!(
         runtime
             .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
             .expect("pending approvals")
             .approvals
             .is_empty()
@@ -1331,6 +1338,7 @@ async fn invalid_mcp_arguments_and_explicit_deny_never_reach_the_remote_server()
             .list_pending_approvals(ListPendingApprovalsRequest {
                 session_id: session_id.clone(),
             })
+            .await
             .expect("pending approvals")
             .approvals
             .is_empty()
@@ -1458,6 +1466,7 @@ async fn refreshing_a_server_cancels_its_pending_approval_without_calling_remote
     assert!(
         runtime
             .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
             .expect("pending approvals")
             .approvals
             .is_empty()

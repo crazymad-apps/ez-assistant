@@ -317,6 +317,7 @@ pub struct ConversationSearchRequest {
 /// 一条派生索引命中；正文仍须以对应 JSONL Conversation 为权威来源。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationSearchHit {
+    pub child_task_title: Option<String>,
     pub owner: ConversationOwner,
     pub generation: u64,
     pub message_id: MessageId,

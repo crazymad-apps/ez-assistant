@@ -86,7 +86,14 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         "completed"
     );
     let view = session_view(&mut client, &session_id);
-    let catalog = view["skill_catalog"]["skills"].as_array().expect("catalog");
+    assert!(
+        view.get("skill_catalog").is_none(),
+        "session projection must not carry a catalog"
+    );
+    let current = client.runtime("list_skills", json!({"workspace_id":workspace_id}));
+    let catalog = current["snapshot"]["skills"]
+        .as_array()
+        .expect("current catalog");
     assert_eq!(
         catalog.len(),
         2,

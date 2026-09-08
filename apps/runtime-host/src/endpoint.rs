@@ -1,4 +1,4 @@
-//! Runtime 单实例锁、动态 loopback 监听与私有发现文件所有权。
+//! Runtime 单实例锁、统一固定端口监听与私有发现文件所有权。
 
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -8,10 +8,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use assistant_protocol::{HostAccessConfiguration, HostAccessScheme};
+use axum_server::tls_rustls::RustlsConfig;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use std::net::TcpListener;
 use thiserror::Error;
-use tokio::net::TcpListener;
 
 const RUN_DIRECTORY: &str = "run";
 const LOCK_FILE: &str = "runtime.lock";
@@ -36,6 +38,8 @@ pub(crate) enum EndpointError {
     },
     #[error("runtime endpoint secret generation failed")]
     Entropy(#[from] getrandom::Error),
+    #[error("{0}")]
+    Access(#[from] crate::access::AccessError),
     #[error("runtime discovery data could not be encoded")]
     DiscoveryEncoding(#[from] serde_json::Error),
 }
@@ -49,6 +53,8 @@ pub(crate) struct RuntimeInstanceGuard {
 /// 已发布的本地 HTTP endpoint；Drop 只清理仍属于本实例的发现文件。
 pub(crate) struct OwnedEndpoint {
     listener: Option<TcpListener>,
+    tls: Option<RustlsConfig>,
+    scheme: HostAccessScheme,
     discovery_path: PathBuf,
     instance_id: String,
     access_token: String,
@@ -101,24 +107,21 @@ impl RuntimeInstanceGuard {
         }
     }
 
-    /// 在 Runtime 恢复完成后绑定动态端口并原子发布发现信息。
-    pub(crate) async fn bind_and_publish(self) -> Result<OwnedEndpoint, EndpointError> {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|source| EndpointError::Io {
-                path: self.run_directory.clone(),
-                source,
-            })?;
-        let address = listener.local_addr().map_err(|source| EndpointError::Io {
-            path: self.run_directory.clone(),
-            source,
-        })?;
+    /// 在 Runtime 恢复完成后绑定唯一端口并原子发布本机发现信息。
+    pub(crate) async fn bind_and_publish(
+        self,
+        configuration: &HostAccessConfiguration,
+    ) -> Result<OwnedEndpoint, EndpointError> {
+        let tls = crate::server::tls_configuration(configuration).await?;
+        let listener = crate::server::bind(configuration.port)?;
+        // 监听所有 IPv4 接口，发现文件只向本机客户端交付 loopback 地址。
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, configuration.port));
         let instance_id = random_secret(INSTANCE_ID_BYTES)?;
         let access_token = random_secret(TOKEN_BYTES)?;
         let discovery_path = self.run_directory.join(DISCOVERY_FILE);
         validate_regular_file_or_missing(&discovery_path, false)?;
         let discovery = RuntimeDiscovery {
-            address: format!("http://{address}"),
+            address: endpoint_url(address, configuration.scheme),
             instance_id: instance_id.clone(),
             access_token: access_token.clone(),
             pid: std::process::id(),
@@ -126,6 +129,8 @@ impl RuntimeInstanceGuard {
         write_discovery_atomic(&self.run_directory, &discovery_path, &discovery)?;
         Ok(OwnedEndpoint {
             listener: Some(listener),
+            tls,
+            scheme: configuration.scheme,
             discovery_path,
             instance_id,
             access_token,
@@ -142,25 +147,50 @@ impl OwnedEndpoint {
             .expect("RuntimeServer takes the endpoint listener exactly once")
     }
 
+    pub(crate) fn take_tls(&mut self) -> Option<RustlsConfig> {
+        self.tls.take()
+    }
+
     #[cfg(test)]
     pub(crate) fn address(&self) -> SocketAddr {
         self.address
     }
 
     pub(crate) fn base_url(&self) -> String {
-        format!("http://{}", self.address)
+        endpoint_url(self.address, self.scheme)
     }
 
     pub(crate) fn authority(&self) -> String {
-        self.address.to_string()
+        self.base_url()
+            .split_once("://")
+            .expect("endpoint URL has a scheme")
+            .1
+            .to_owned()
     }
 
     pub(crate) fn access_token(&self) -> &str {
         &self.access_token
     }
 
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     pub(crate) fn discovery_path(&self) -> &Path {
         &self.discovery_path
+    }
+}
+
+fn endpoint_url(address: SocketAddr, scheme: HostAccessScheme) -> String {
+    let (scheme, default_port) = if scheme == HostAccessScheme::Https {
+        ("https", 443)
+    } else {
+        ("http", 80)
+    };
+    if address.port() == default_port {
+        format!("{scheme}://{}", address.ip())
+    } else {
+        format!("{scheme}://{address}")
     }
 }
 
@@ -265,6 +295,14 @@ mod tests {
 
     use super::*;
 
+    fn configuration() -> HostAccessConfiguration {
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        HostAccessConfiguration {
+            port: socket.local_addr().unwrap().port(),
+            ..Default::default()
+        }
+    }
+
     fn runtime_home() -> (tempfile::TempDir, PathBuf) {
         let directory = tempdir().expect("tempdir");
         let home = directory.path().join("runtime-home");
@@ -274,12 +312,28 @@ mod tests {
         (directory, home)
     }
 
+    #[test]
+    fn standard_ports_use_the_same_authority_as_http_clients() {
+        assert_eq!(
+            endpoint_url("127.0.0.1:80".parse().unwrap(), HostAccessScheme::Http),
+            "http://127.0.0.1"
+        );
+        assert_eq!(
+            endpoint_url("127.0.0.1:443".parse().unwrap(), HostAccessScheme::Https),
+            "https://127.0.0.1"
+        );
+        assert_eq!(
+            endpoint_url("127.0.0.1:7240".parse().unwrap(), HostAccessScheme::Http),
+            "http://127.0.0.1:7240"
+        );
+    }
+
     #[tokio::test]
     async fn publish_uses_loopback_private_discovery_and_owned_cleanup() {
         let (_directory, home) = runtime_home();
         let mut endpoint = RuntimeInstanceGuard::acquire(&home)
             .expect("lock")
-            .bind_and_publish()
+            .bind_and_publish(&configuration())
             .await
             .expect("publish");
         assert_eq!(endpoint.address().ip(), Ipv4Addr::LOCALHOST);
@@ -325,7 +379,7 @@ mod tests {
         fs::create_dir(&discovery_path).expect("conflicting directory");
         let result = RuntimeInstanceGuard::acquire(&home)
             .expect("lock")
-            .bind_and_publish()
+            .bind_and_publish(&configuration())
             .await;
         let Err(error) = result else {
             panic!("unsafe discovery path must be rejected");
@@ -339,7 +393,7 @@ mod tests {
         let (_directory, home) = runtime_home();
         let endpoint = RuntimeInstanceGuard::acquire(&home)
             .expect("lock")
-            .bind_and_publish()
+            .bind_and_publish(&configuration())
             .await
             .expect("publish");
         let replacement = RuntimeDiscovery {

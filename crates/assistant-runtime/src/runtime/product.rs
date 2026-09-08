@@ -26,14 +26,13 @@ use assistant_protocol::{
     QueuedSessionItemSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot,
     RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
     RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot, SearchConversationHistoryRequest,
-    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSkillCatalogSnapshot,
-    SessionSkillCatalogStatusSnapshot, SessionUsageSnapshot, SessionViewSnapshot,
-    SkillActivationTagSnapshot, SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot,
-    SkillDiagnosticSnapshot, SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot,
-    SkillSummarySnapshot, TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus,
-    ToolCallId, ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin,
-    ToolFileResourceState, ToolInputSnapshot, UsageTotals, UserMessageSnapshot,
-    WorkPlanItemSnapshot, WorkPlanSnapshot,
+    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionUsageSnapshot,
+    SessionViewSnapshot, SkillActivationTagSnapshot, SkillActivationTriggerSnapshot,
+    SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot, SkillHealthSnapshot,
+    SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot, TodoItemStatusSnapshot,
+    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot,
+    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
+    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -64,7 +63,7 @@ pub(super) struct ProjectionContext {
     source_by_message: HashMap<String, ConversationInputSourceSnapshot>,
     skill_by_message: HashMap<String, SkillActivationTagSnapshot>,
     mcp_selection_by_message: HashMap<String, assistant_protocol::McpSelectionTagSnapshot>,
-    control_result_by_message: HashMap<String, assistant_protocol::McpRefreshControlResultSnapshot>,
+    control_result_by_message: HashMap<String, crate::StoredSessionCommandResult>,
     attachment_by_path: HashMap<String, AttachmentId>,
     feedback_by_message: HashMap<String, assistant_protocol::MessageFeedback>,
     mcp_identities: HashMap<(String, String), McpToolIdentity>,
@@ -93,7 +92,7 @@ impl AssistantRuntime {
     /// 导出只包含用户正文、附件名称、助手正文和工具调用摘要；Reasoning、
     /// Provider 私有状态、隐藏注入和完整工具输出不会进入结果。
     pub async fn export_session_markdown(&self, session_id: &SessionId) -> RuntimeResult<String> {
-        let session = self.session(session_id)?;
+        let session = self.session(session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -175,16 +174,22 @@ impl AssistantRuntime {
             let workspaces = self
                 .list_workspaces(ListWorkspacesRequest::default())?
                 .workspaces;
-            let mut active_sessions = self
+            let active_page = self
                 .list_sessions(ListSessionsRequest {
                     filter: SessionListFilter::Active,
-                })?
-                .sessions;
-            let mut archived_sessions = self
+                    ..Default::default()
+                })
+                .await?;
+            let archived_page = self
                 .list_sessions(ListSessionsRequest {
                     filter: SessionListFilter::Archived,
-                })?
-                .sessions;
+                    ..Default::default()
+                })
+                .await?;
+            let active_sessions_next_offset = active_page.has_more.then_some(100);
+            let archived_sessions_next_offset = archived_page.has_more.then_some(100);
+            let mut active_sessions = active_page.sessions;
+            let mut archived_sessions = archived_page.sessions;
             let active_workspace_ids = workspaces
                 .iter()
                 .map(|workspace| workspace.workspace_id.clone())
@@ -208,12 +213,20 @@ impl AssistantRuntime {
                     .active_count_for_session(&session.session_id)?;
             }
             let runtime_lifecycle = self.lifecycle()?;
-            let controllers = self.controller_sessions()?;
+            let controllers = self.controller_summaries().await?;
+            // 主控是固定入口，不受普通会话首页分页截断。
+            if let Some(controller) = controllers.first()
+                && !active_sessions
+                    .iter()
+                    .any(|row| row.session_id == controller.session_id)
+            {
+                active_sessions.push(controller.clone());
+            }
             let controller_availability = controllers
                 .first()
                 .map(
                     |controller| assistant_protocol::ControllerAvailabilitySnapshot::Available {
-                        session_id: controller.id().clone(),
+                        session_id: controller.session_id.clone(),
                     },
                 )
                 .unwrap_or_default();
@@ -230,6 +243,8 @@ impl AssistantRuntime {
                             workspaces,
                             active_sessions,
                             archived_sessions,
+                            active_sessions_next_offset,
+                            archived_sessions_next_offset,
                             controller_availability,
                             additional_controller_count,
                             capabilities: ApplicationCapabilities {
@@ -241,7 +256,7 @@ impl AssistantRuntime {
                                 child_task_view: true,
                                 mcp_tools: !self.mcp_service.registry.server_keys()?.is_empty(),
                                 mcp_management: self.mcp_service.management_available(),
-                                session_commands: self.mcp_service.management_available(),
+                                session_commands: true,
                             },
                         },
                     },
@@ -257,7 +272,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<GetSessionViewResult> {
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
-            let session = self.session(&request.session_id)?;
+            let session = self.session(&request.session_id).await?;
             session
                 .ensure_conversation_loaded(self.store.as_ref())
                 .await?;
@@ -277,7 +292,8 @@ impl AssistantRuntime {
             let mut attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
-                })?
+                })
+                .await?
                 .attachments;
             let generation = session.lock_state()?.body_generation;
             let projection = self.projection_context(&session, &attachments).await?;
@@ -321,12 +337,11 @@ impl AssistantRuntime {
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
             let workspace = self.session_workspace_snapshot(&session)?;
-            let (work_plan, goal, skill_catalog, active_skills) = {
+            let (work_plan, goal, active_skills) = {
                 let state = session.lock_state()?;
                 (
                     state.work_plan.as_ref().map(project_work_plan),
                     state.goal.as_ref().map(project_goal).transpose()?,
-                    project_session_skill_catalog(session.skill_catalog()),
                     project_active_skills(&state)?,
                 )
             };
@@ -361,7 +376,6 @@ impl AssistantRuntime {
                             runs,
                             usage,
                             child_tasks: child_task_items,
-                            skill_catalog,
                             active_skills,
                             conversation,
                         },
@@ -378,7 +392,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<GetChildTaskViewResult> {
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
-            self.session(&request.session_id)?;
+            self.session(&request.session_id).await?;
             let stored = self
                 .child_tasks
                 .get(&request.session_id, &request.child_task_id)?
@@ -444,14 +458,15 @@ impl AssistantRuntime {
             let start = self.event_sender.sequence();
             let (generation, projection) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
-                    let session = self.session(session_id)?;
+                    let session = self.session(session_id).await?;
                     session
                         .ensure_conversation_loaded(self.store.as_ref())
                         .await?;
                     let attachments = self
                         .list_attachments(ListAttachmentsRequest {
                             session_id: session_id.clone(),
-                        })?
+                        })
+                        .await?
                         .attachments;
                     let generation = { session.lock_state()?.body_generation };
                     let projection = self.projection_context(&session, &attachments).await?;
@@ -552,12 +567,13 @@ impl AssistantRuntime {
         let limit = validated_limit(request.limit)?;
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
-            let session = self.session(&request.session_id)?;
+            let session = self.session(&request.session_id).await?;
             session.run_snapshot(&request.run_id)?;
             let attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
-                })?
+                })
+                .await?
                 .attachments;
             let (generation, message_ids) =
                 {
@@ -661,7 +677,7 @@ impl AssistantRuntime {
         let offset = usize::try_from(request.offset).map_err(|_| RuntimeError::InvalidRequest {
             reason: "conversation search offset is too large",
         })?;
-        let caller = self.session(&request.session_id)?.summary()?;
+        let caller = self.session(&request.session_id).await?.summary()?;
         let store_scope = match request.scope {
             ConversationHistoryScope::Session => ConversationSearchScope::Session {
                 session_id: request.session_id.clone(),
@@ -676,57 +692,18 @@ impl AssistantRuntime {
             },
             ConversationHistoryScope::Global => ConversationSearchScope::Global,
         };
-        let mut sessions = self
-            .list_sessions(ListSessionsRequest {
-                filter: SessionListFilter::Active,
-            })?
-            .sessions;
-        sessions.extend(
-            self.list_sessions(ListSessionsRequest {
-                filter: SessionListFilter::Archived,
-            })?
-            .sessions,
-        );
-        sessions.retain(|session| history_scope_matches(&request, &caller, session));
-        let sessions_by_id = sessions
-            .iter()
-            .map(|session| (session.session_id.as_str().to_owned(), session))
-            .collect::<HashMap<_, _>>();
-        let normalized_query = query.to_lowercase();
-        let mut items = Vec::new();
-        for session in &sessions {
-            if session.title.to_lowercase().contains(&normalized_query) {
-                items.push(ConversationHistoryHit {
-                    owner: ConversationOwner::MainSession {
-                        session_id: session.session_id.clone(),
-                    },
-                    session_title: session.title.clone(),
-                    child_task_title: None,
-                    message_id: None,
-                    created_at_ms: session.updated_at_ms,
-                    snippet: session.title.clone(),
-                    match_kind: ConversationHistoryMatchKind::Title,
-                    lifecycle: session.lifecycle,
-                });
-            }
-            for task in self.child_tasks.list_for_session(&session.session_id)? {
-                if task.title.to_lowercase().contains(&normalized_query) {
-                    items.push(ConversationHistoryHit {
-                        owner: ConversationOwner::ChildTask {
-                            session_id: session.session_id.clone(),
-                            child_task_id: task.child_task_id,
-                        },
-                        session_title: session.title.clone(),
-                        child_task_title: Some(task.title.clone()),
-                        message_id: None,
-                        created_at_ms: Some(task.finished_at_ms.unwrap_or(task.created_at_ms)),
-                        snippet: task.title,
-                        match_kind: ConversationHistoryMatchKind::Title,
-                        lifecycle: session.lifecycle,
-                    });
-                }
-            }
-        }
+        let mut items = self
+            .store
+            .search_conversation_titles(ConversationSearchRequest {
+                query: query.to_owned(),
+                scope: store_scope.clone(),
+                limit: offset
+                    .saturating_add(limit)
+                    .saturating_add(1)
+                    .min(MAX_PAGE_SIZE),
+            })
+            .await
+            .map_err(|e| RuntimeError::from_store("search conversation titles", e))?;
 
         let mut partial = false;
         let mut failed_owners = Vec::new();
@@ -750,16 +727,13 @@ impl AssistantRuntime {
             failed_owners = page.failed_owners;
             for hit in page.hits {
                 let session_id = owner_session_id(&hit.owner);
-                let Some(session) = sessions_by_id.get(session_id.as_str()) else {
-                    continue;
-                };
-                let child_task_title = match &hit.owner {
-                    ConversationOwner::MainSession { .. } => None,
-                    ConversationOwner::ChildTask { child_task_id, .. } => self
-                        .child_tasks
-                        .get(session_id, child_task_id)?
-                        .map(|task| task.title),
-                };
+                let session = self
+                    .get_session(assistant_protocol::GetSessionRequest {
+                        session_id: session_id.clone(),
+                    })
+                    .await?
+                    .session;
+                let child_task_title = hit.child_task_title;
                 items.push(ConversationHistoryHit {
                     owner: hit.owner,
                     session_title: session.title.clone(),
@@ -788,7 +762,7 @@ impl AssistantRuntime {
         &self,
         request: GetConversationRecallWindowRequest,
     ) -> RuntimeResult<GetConversationRecallWindowResult> {
-        self.session(&request.session_id)?;
+        self.session(&request.session_id).await?;
         let before = usize::try_from(request.before.min(50)).expect("u32 fits usize");
         let after = usize::try_from(request.after.min(50)).expect("u32 fits usize");
         let (window, projection) = self
@@ -905,11 +879,12 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ProjectionContext> {
         match owner {
             ConversationOwner::MainSession { session_id } => {
-                let session = self.session(session_id)?;
+                let session = self.session(session_id).await?;
                 let attachments = self
                     .list_attachments(ListAttachmentsRequest {
                         session_id: session_id.clone(),
-                    })?
+                    })
+                    .await?
                     .attachments;
                 Ok(self.projection_context(&session, &attachments).await?)
             }
@@ -925,7 +900,7 @@ impl AssistantRuntime {
             let start = self.event_sender.sequence();
             let (snapshot, run_id) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
-                    let session = self.session(session_id)?;
+                    let session = self.session(session_id).await?;
                     session
                         .ensure_conversation_loaded(self.store.as_ref())
                         .await?;
@@ -998,7 +973,7 @@ impl AssistantRuntime {
             ConversationOwner::MainSession { session_id }
             | ConversationOwner::ChildTask { session_id, .. } => session_id,
         };
-        let caller_session = self.session(caller_session_id).ok()?;
+        let caller_session = self.session(caller_session_id).await.ok()?;
         let recall = crate::conversation_recall::RuntimeConversationRecall::new(
             self.store.clone(),
             self.recall_reference_codec.clone(),
@@ -1007,23 +982,31 @@ impl AssistantRuntime {
         );
         let mut items = Vec::with_capacity(response.items.len());
         for item in response.items {
-            let navigation = item
+            let target = item
                 .origins
                 .iter()
                 .filter_map(|origin| origin.reference.as_deref())
-                .find_map(|reference| recall.resolve_reference(reference).ok())
-                .and_then(|target| {
-                    let session_id = match &target.owner {
-                        ConversationOwner::MainSession { session_id }
-                        | ConversationOwner::ChildTask { session_id, .. } => session_id,
-                    };
-                    let lifecycle = self.session(session_id).ok()?.summary().ok()?.lifecycle;
+                .find_map(|reference| recall.resolve_reference(reference).ok());
+            let navigation = if let Some(target) = target {
+                let session_id = match &target.owner {
+                    ConversationOwner::MainSession { session_id }
+                    | ConversationOwner::ChildTask { session_id, .. } => session_id,
+                };
+                self.get_session(assistant_protocol::GetSessionRequest {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .ok()
+                .and_then(|summary| {
                     Some(RecallNavigationTarget {
                         owner: target.owner,
                         message_id: protocol_message_id(target.message_id.as_str()).ok()?,
-                        lifecycle,
+                        lifecycle: summary.session.lifecycle,
                     })
-                });
+                })
+            } else {
+                None
+            };
             items.push(RecallToolDetailItem {
                 content: item.content,
                 role: memory_string_attribute(&item.attributes, "role"),
@@ -1057,7 +1040,7 @@ impl AssistantRuntime {
             ConversationOwner::MainSession { session_id }
             | ConversationOwner::ChildTask { session_id, .. } => session_id,
         };
-        let session = self.session(session_id)?;
+        let session = self.session(session_id).await?;
         let (snapshot, environment) = match owner {
             ConversationOwner::MainSession { .. } => {
                 session
@@ -1382,41 +1365,6 @@ fn protocol_effort_key(value: crate::ReasoningEffortKey) -> ReasoningEffortKey {
         crate::ReasoningEffortKey::High => ReasoningEffortKey::High,
         crate::ReasoningEffortKey::XHigh => ReasoningEffortKey::XHigh,
         crate::ReasoningEffortKey::Max => ReasoningEffortKey::Max,
-    }
-}
-
-fn project_session_skill_catalog(
-    catalog: &crate::SessionSkillCatalog,
-) -> SessionSkillCatalogSnapshot {
-    SessionSkillCatalogSnapshot {
-        status: match catalog.status {
-            crate::SkillCatalogStatus::Ready => SessionSkillCatalogStatusSnapshot::Ready,
-            crate::SkillCatalogStatus::Empty => SessionSkillCatalogStatusSnapshot::Empty,
-            crate::SkillCatalogStatus::Unavailable => {
-                SessionSkillCatalogStatusSnapshot::Unavailable
-            }
-            crate::SkillCatalogStatus::LegacyUnavailable => {
-                SessionSkillCatalogStatusSnapshot::LegacyUnavailable
-            }
-        },
-        skills: catalog
-            .definitions
-            .iter()
-            .map(|definition| SkillSummarySnapshot {
-                name: definition.name.as_str().to_owned(),
-                description: definition.description.clone(),
-                source: project_skill_source(definition.source),
-                model_invocable: definition.model_invocable,
-                user_invocable: definition.user_invocable,
-                enabled: true,
-                health: SkillHealthSnapshot::Ready,
-            })
-            .collect(),
-        diagnostics: catalog
-            .diagnostics
-            .iter()
-            .map(project_skill_diagnostic)
-            .collect(),
     }
 }
 
@@ -1766,9 +1714,22 @@ pub(super) fn project_conversation(
         match message {
             ConversationMessage::User(user) if user.transcript_visibility.is_visible() => {
                 if let Some(result) = context.control_result_by_message.get(user.id.as_str()) {
-                    items.push(ConversationItem::ControlResult {
-                        message_id: protocol_message_id(user.id.as_str())?,
-                        result: result.clone(),
+                    let message_id = protocol_message_id(user.id.as_str())?;
+                    items.push(match result {
+                        crate::StoredSessionCommandResult::Mcp(result) => {
+                            ConversationItem::ControlResult {
+                                message_id,
+                                result: result.clone(),
+                            }
+                        }
+                        crate::StoredSessionCommandResult::SkillRefresh {
+                            success,
+                            skill_count,
+                        } => ConversationItem::SkillRefreshResult {
+                            message_id,
+                            success: *success,
+                            skill_count: *skill_count,
+                        },
                     });
                     continue;
                 }
@@ -2436,20 +2397,6 @@ fn validated_limit(limit: u32) -> RuntimeResult<usize> {
 }
 
 /// 产品搜索范围在进入派生索引前先由 Runtime 权威 Session 投影收窄。
-fn history_scope_matches(
-    request: &SearchConversationHistoryRequest,
-    caller: &assistant_protocol::SessionSummary,
-    candidate: &assistant_protocol::SessionSummary,
-) -> bool {
-    match request.scope {
-        ConversationHistoryScope::Session => candidate.session_id == request.session_id,
-        ConversationHistoryScope::Workspace => {
-            caller.workspace_id.is_some() && candidate.workspace_id == caller.workspace_id
-        }
-        ConversationHistoryScope::Global => true,
-    }
-}
-
 fn owner_session_id(owner: &ConversationOwner) -> &SessionId {
     match owner {
         ConversationOwner::MainSession { session_id }
