@@ -660,3 +660,56 @@ refresh 沿用已约定机制：插入一条 `user` role 消息，不触发 Run�
 只有显式业务操作前执行目标存储恢复和结算，不启动历史队列、Goal、子任务或标题生成。
 审批 Registry 仅属当前进程，退出后直接丢弃，不恢复轮内执行。旧 Run 查询可返回中断元信息，
 不以正文可恢复为前提；异常正文仍不得进入执行。恢复不得改写冻结系统提示词和工作空间环境。
+
+## v0.25.1 M0 在线发现契约（部分实现）
+
+- `ModelServiceFactory::discover_models` 是现有宿主替换边界的异步能力；纯推理工厂默认返回
+  Unsupported，不能退回静态目录。Runtime 不引入 reqwest、数据库或服务商原始 JSON。
+- `ModelDiscoveryRequest` 借用本次连接和凭据并携带超时；future 生命周期由调用方所有。
+  `DiscoveredModel` 表示当前在线条目；`ModelParameters` 为在线／固定共用的内部参数值，不派生持久化或 wire 序列化。
+- `resolve_model_parameters` 只消费按服务商实例＋模型 ID 定位的快照：固定存在时不调用在线 future，
+  不合并在线字段；不存在才解析本次在线结果。数值与思考组合校验后返回不可变快照，输出不得超过 u32。
+  未知能力仍保留，用途／方言兼容及真实 Store 保存、删除由 M3 完成。
+- Token 限制区分 Unknown／Known／Invalid，能力区分未知／支持／不支持。列表存在不代表
+  参数完整、可以执行或账号有权限；完整执行准备及正式选择调用方待 M3 接通。
+- 发现错误的 Debug／Display 仅给固定分类，底层 source 仅供内部诊断；不得将错误链直接投影到客户端。
+  本阶段不切换现有 ConfigRegistry、默认／会话／辅助选择或运行装配来源。
+
+
+### v0.25.1 M3 全局配置与模型配置分离
+
+当前 Runtime 不再接收 ModelCatalog，旧逐模型 TOML 编辑／查询命令已移除；前述静态目录章节
+是历史行为。config.toml 只提供全局策略，缺文件使用声明的全局缺省值并投影 Missing；无效文件
+不给出有效快照。默认与辅助引用由数据库 ModelSettings 提供，连接验证使用 ModelSelection 和
+与 Run 相同的 managed_model 准备。ApplicationSnapshot 提供 providers/model_settings，
+不再返回旧 models 列表。客户端和全部夹具切换仍属于 M3 门禁，不能只据 Host 构建宣布完成。
+
+
+### v0.25.1 执行入口收敛
+
+- Core 的 DuplicateToolCallId 终态映射为 ModelExecutionFailed，主 Run／子任务提示本次响应
+  已拒绝、未执行其中的工具并请用户重试；正常结算失败 Run，不把会话标记成存储故障。
+
+- 在线发现用于模型管理、无固定记录的新选择和新 Run 准备。标题、手动压缩、Goal 检查及强度设置
+  复用会话已解析的模型参数；进程重启或参数失效后只读取固定配置，无可用值时提示用户重新选择。
+- Session 的 model_binding 只引用当前进程已接纳的 PreparedModel，不序列化、不保存列表；
+  新选择或 Run 接纳时替换，引用和服务商配置失效时不能继续使用旧参数。
+- 图片、工具、思考及工具选择子能力未知只限制相应功能，不阻止无关文本用途；原始参数保持未知。
+- 独立输入限制仍传至模型服务，自动压缩只使用原有上下文窗口策略。
+
+### v0.25.1 M3 模板与强度映射
+
+- 类型与发现格式在 Runtime 保存时校验一致；套餐密钥不可保存为百炼 API 类型。
+- GetModelConfiguration 对在线身份已确认的模型或明确 manual 的新建草稿按字段补充有来源的规格模板，仅补 Unknown，
+  不覆盖 Invalid／不支持／在线已知值；返回字段来源、文档与核查日期。模板不扩充在线目录，
+  prepare_model 无固定记录时使用同一补齐逻辑，参数完整即可选择与执行，不要求先保存。
+  固定记录整份优先；在线身份失败不使用模板代替目录，不自动落库。configured_model 仍不隐式联网，标题优先复用当前会话已接纳的模型。
+- reasoning_efforts 保存标准档位到字符串线上值的映射。编译沿用 ResolvedReasoningEffort，
+  key／label 与 wire_value 分开，发送映射值而非 as_str；拒绝空白、控制字符和过长映射。
+
+### v0.25.1 M3 手动模型来源
+
+- 固定记录 origin 为 online/manual；首次创建后不可改，模板字段来源与模型创建来源分开。
+- manual 草稿与首次保存不查在线目录；完整固定记录直接用于选择及执行，在线失败不阻塞它。
+- 删除 manual 与重置 online 共用单记录删除能力，保留引用和历史；重置／删除文案依据持久化来源。
+- 在线目录返回参数摘要（模板参与、是否待补全），由 Runtime 的现有模板及参数校验计算，不修改原始 metadata、不落库；UI 与固定记录合并后用 Tag 展示。

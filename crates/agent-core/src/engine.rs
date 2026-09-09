@@ -137,6 +137,11 @@ impl Engine {
                 TurnEnd::Terminal(outcome) => return outcome,
             };
 
+            // 使用本轮请求的冻结快照；拒绝必须早于 pending、授权和工具副作用。
+            if snapshot.validate_response_tool_call_ids(&message).is_err() {
+                return self.fail(ExecutionError::DuplicateToolCallId);
+            }
+
             let calls = tool_calls_of(&message);
             if calls.is_empty() {
                 // 无工具调用：最终消息 Core 不落账，经完成事件交 Runtime。

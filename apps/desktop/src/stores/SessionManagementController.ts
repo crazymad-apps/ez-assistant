@@ -8,7 +8,7 @@ import type {
   CompactSessionOutcome,
   MessageFeedback,
   MessageId,
-  ModelKey,
+  ModelSelection,
   PrepareDeleteSessionResult,
   SessionId,
   UpdateWorkspaceRequest,
@@ -456,10 +456,10 @@ export class SessionManagementController {
     }
   }
 
-  setSessionModel(session_id: SessionId, model_key: ModelKey): Promise<boolean> {
+  setSessionModel(session_id: SessionId, model_selection: ModelSelection | null): Promise<boolean> {
     return this.#runSessionMutation(session_id, () => this.dependencies.runtime.client!.command({
       type: "set_session_model",
-      payload: { session_id, model_key },
+      payload: { session_id, model_selection },
     }));
   }
 

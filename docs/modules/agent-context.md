@@ -15,6 +15,7 @@
 
 - 通过唯一 Context Window Evaluator，基于最近完整 Provider Result 的
   `total_tokens` 和当前 `ModelService::context_window_tokens()` 判断窗口占用。
+  `max_input_tokens()` 仅保留为模型参数，不增加自动压缩阈值。
 - 按完整 User Turn 和 Tool Exchange 构造历史布局，区分 protected System prefix、
   可压缩 head 与 protected recent tail。
 - 复用 `agent-types` 的规范对话结构校验，并校验压缩候选 replacement。
@@ -36,6 +37,8 @@
 - Core、Harness 和未来 Runtime 不得在本 crate 外重复窗口比例、历史切分或 replacement
   校验逻辑。
 - usage 缺失时返回明确判断结果，不在业务代码中回退到裸算或隐藏 TokenEstimator。
+  独立输入限制同样不代表可精确预估首次请求或新增文本、图片、工具结果；这类实际 Token 校验仍由
+  Provider 执行。禁止为本地预检静默截断内容；窗口判断不是新的 Token 计数服务。
 - 窗口判断在最新 Provider `total_tokens` 上额外计入当前 Conversation 中 ProviderState payload 的
   保守字节预算；该预算用于避免本地不透明续传包绕过窗口限制，不把 payload 当 reasoning 正文。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。

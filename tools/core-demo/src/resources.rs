@@ -242,6 +242,10 @@ impl ModelService for ObservedModelService {
         self.inner.context_window_tokens()
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         self.observation
             .logical_calls

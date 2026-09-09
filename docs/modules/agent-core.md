@@ -17,7 +17,7 @@
 - 单次 `AgentExecution` 的上下文组装、工具结果回填和事件输出。
 - 每个 Model Step 建立请求前通过共享 Context Window Evaluator 执行上下文预检；
   判断只使用最近完整 Provider Result 的 `total_tokens` 和当前模型
-  `context_window_tokens`。达到压缩阈值或 Provider 报告 Context Overflow 时，以
+  `context_window_tokens`。达到原有窗口压缩阈值或 Provider 报告 Context Overflow 时，以
   可靠终态交回 Runtime。
 - 与执行逻辑直接相关的 token、轮次和工具调用限制。
 - 规范对话、Provider Codec、Safety/Recorder/Authorizer 等稳定能力接口。
@@ -44,6 +44,9 @@ Context Window Evaluator、历史布局和 replacement 校验归
 - 工具输入先完成 schema/类型校验和确定性参数解析，形成 resolved invocation 后才
   进入 Authorizer；授权和执行不得再次各自解析原始 JSON。
 - Core 接收规范对话快照，不使用 `ConversationRef` 自行加载或持久化 Session。
+  每次完整模型响应接纳前复用快照的工具调用 ID 校验；与本次请求快照或响应批内重复时，
+  返回 DuplicateToolCallId 失败终态，不创建 pending、不授权、不执行工具、不自动重试或改写 ID。
+  不查询压缩前的产品历史。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；
   `complete_tool_exchange` 只有在可靠提交成功后才能请求通用的上下文改变 continuation，规范快照不得

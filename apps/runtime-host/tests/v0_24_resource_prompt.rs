@@ -43,7 +43,7 @@ fn model_wire_keeps_file_uri_rules_frozen_and_rebuilds_them_on_clear() {
     )["workspace"]["workspace_id"]
         .clone();
     let session_id = string(&client.runtime("create_session", json!({
-        "title": "Resource prompt fixture", "workspace_id": workspace_id, "model_key": "fixture"
+        "title": "Resource prompt fixture", "workspace_id": workspace_id, "model_selection":null
     }))["session"]["session_id"]);
     submit(&mut client, &session_id, "new-session");
 

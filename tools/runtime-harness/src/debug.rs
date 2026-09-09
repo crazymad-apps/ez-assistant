@@ -335,6 +335,10 @@ impl ModelService for ObservedModelService {
         self.inner.context_window_tokens()
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let debug = Arc::clone(&self.debug);
         let endpoint = self.endpoint.clone();
@@ -825,6 +829,7 @@ mod tests {
         let evaluation = ContextWindowEvaluation {
             used_tokens: Some(90),
             context_window_tokens: 100,
+            max_input_tokens: None,
             used_ratio: Some(0.9),
             decision: ContextWindowDecision::CompactionRequired,
         };

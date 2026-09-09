@@ -13,6 +13,7 @@ mod id;
 mod materialization;
 mod mcp;
 mod memory;
+mod model_management;
 mod permission;
 mod product;
 mod resource;
@@ -30,31 +31,29 @@ pub use command::{
     CancelSessionCompactionRequest, CancelSessionCompactionResult, ClearGoalRequest,
     ClearGoalResult, ClearSessionRequest, ClearSessionResult, ClearWorkPlanRequest,
     ClearWorkPlanResult, CompactSessionOutcome, CompactSessionRequest, CompactSessionResult,
-    ConfigurationMutationResult, ConnectionValidationFailure, ConnectionValidationFailureKind,
-    ConnectionValidationOutcome, CreateModelRequest, CreatePinnedMemoryRequest,
-    CreateSessionRequest, CreateSessionResult, DecideApprovalRequest, DecideApprovalResult,
-    DeleteModelRequest, DeletePinnedMemoryRequest, DeleteSessionImpact, DeleteSessionRequest,
+    ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
+    CreatePinnedMemoryRequest, CreateSessionRequest, CreateSessionResult, DecideApprovalRequest,
+    DecideApprovalResult, DeletePinnedMemoryRequest, DeleteSessionImpact, DeleteSessionRequest,
     DeleteSessionResult, ForkSessionRequest, ForkSessionResult, GenerateSessionTitleRequest,
     GenerateSessionTitleResult, GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest,
     GetChildTaskResult, GetConfigStatusRequest, GetConfigStatusResult,
-    GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult, GetModelRequest, GetModelResult,
-    GetPermissionDocumentRequest, GetPermissionDocumentResult, GetPersonaRequest, GetPersonaResult,
-    GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult, GetSkillDetailRequest,
-    GetSkillDetailResult, GetSystemContextRequest, GetSystemContextResult, GetWorkspaceRequest,
-    GetWorkspaceResult, ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest,
-    ListChildTasksResult, ListModelsRequest, ListModelsResult, ListPendingApprovalsRequest,
-    ListPendingApprovalsResult, ListPinnedMemoriesRequest, ListPinnedMemoriesResult,
-    ListRunsRequest, ListRunsResult, ListSessionsRequest, ListSessionsResult, ListSkillsRequest,
-    ListSkillsResult, ListWorkspacesRequest, ListWorkspacesResult, ModelCatalogEntrySnapshot,
-    ModelCatalogSnapshot, ModelConfigurationInput, ModelConnectionTarget, ModelCredentialChange,
-    PinnedMemoryMutationResult, PrepareDeleteSessionRequest, PrepareDeleteSessionResult,
-    ReenterFromUserMessageRequest, ReenterFromUserMessageResult, RegisterWorkspaceRequest,
-    RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest,
-    ReloadPermissionsResult, RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest,
-    RenameSessionResult, ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult,
-    RestoreSessionRequest, RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult,
-    ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand,
-    RuntimeCommandResult, SecretValue, SessionHistoryCleanupStatus, SetAuxiliaryVisionModelRequest,
+    GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult, GetPermissionDocumentRequest,
+    GetPermissionDocumentResult, GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult,
+    GetSessionRequest, GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult,
+    GetSystemContextRequest, GetSystemContextResult, GetWorkspaceRequest, GetWorkspaceResult,
+    ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
+    ListPendingApprovalsRequest, ListPendingApprovalsResult, ListPinnedMemoriesRequest,
+    ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
+    ListSessionsResult, ListSkillsRequest, ListSkillsResult, ListWorkspacesRequest,
+    ListWorkspacesResult, PinnedMemoryMutationResult, PrepareDeleteSessionRequest,
+    PrepareDeleteSessionResult, ReenterFromUserMessageRequest, ReenterFromUserMessageResult,
+    RegisterWorkspaceRequest, RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult,
+    ReloadPermissionsRequest, ReloadPermissionsResult, RemoveWorkspaceRequest,
+    RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
+    ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult, RestoreSessionRequest,
+    RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult, ResumeSessionRequest,
+    ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult,
+    SecretValue, SessionHistoryCleanupStatus, SetAuxiliaryVisionModelRequest,
     SetCurrentControllerOutputHostingRequest, SetCurrentControllerOutputHostingResult,
     SetDefaultModelRequest, SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest,
     SetPersonaResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
@@ -63,12 +62,11 @@ pub use command::{
     SetSessionReasoningEffortResult, SetSessionVariantRequest, SetSessionVariantResult,
     SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest, ShutdownRuntimeResult,
     StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
-    UpdateModelRequest, UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
+    UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
     UploadAttachmentResult, ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
-    ModelConfiguration, ModelConfigurationOrigin,
 };
 pub use device_gateway::{
     CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot,
@@ -86,11 +84,12 @@ pub use event::{
 };
 pub use host::{
     RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
+    RuntimeHostStartupError, RuntimeHostStartupStage,
 };
 pub use id::{
     ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, DeviceId, GoalId,
-    IdempotencyKey, IdentifierError, InputId, McpServerKey, McpServerKeyError, MessageId, ModelKey,
-    ModelKeyError, PartId, ResourceRefId, RunId, SessionId, TodoItemId, ToolCallId, WorkspaceId,
+    IdempotencyKey, IdentifierError, InputId, McpServerKey, McpServerKeyError, MessageId, PartId,
+    ProviderInstanceId, ResourceRefId, RunId, SessionId, TodoItemId, ToolCallId, WorkspaceId,
 };
 pub use materialization::{
     SessionMaterializationAttachment, SessionMaterializationManifest, SessionMaterializationResult,
@@ -175,9 +174,20 @@ pub use snapshot::{
 /// 客户端与 Runtime Host 当前共同理解的应用协议版本。
 ///
 /// 该常量通过 Host capabilities 投影，不定义 HTTP 或 SSE 的传输版本。
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 mod user_terminal;
 pub use user_terminal::{
     UserTerminalControl, UserTerminalNotice, UserTerminalSize, UserTerminalSource,
+};
+
+pub use model_management::{
+    CreateProviderRequest, DiscoveredModel, GetModelConfigurationRequest, GetModelSettingsRequest,
+    ListFixedModelConfigsRequest, ListProvidersRequest, ModelConfigOrigin,
+    ModelConfigurationDetail, ModelConfigurationSource, ModelConfigurationSummary,
+    ModelDiscoveryFormat, ModelFeatureSupport, ModelFixedConfig, ModelParameters,
+    ModelReasoningMode, ModelSelection, ModelSettings, ModelTokenLimit, ModelToolChoiceSupport,
+    ModelToolImageProjection, ProviderConnection, ProviderCredentialChange,
+    ProviderProtocolPreference, ProviderRequest, ProviderSessionUsage, ProviderSummary,
+    ProviderType, ProviderUsage, SaveModelFixedConfigRequest, UpdateProviderRequest,
 };

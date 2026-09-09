@@ -48,7 +48,7 @@ fn formal_host_projects_main_and_child_tool_images_across_restart_and_failures()
             "create_session",
             json!({
                 "title": "Tool image projection",
-                "model_key": "qwen-image-fixture",
+                "model_selection":null,
                 "workspace_id": workspace_id,
             }),
         )["session"]["session_id"],

@@ -3,7 +3,7 @@ import type {
   AgentVariant,
   ApprovalMode,
   AttachmentId,
-  ModelKey,
+  ModelSelection,
   McpSelectionTagSnapshot,
   QuotedTextSnapshot,
   ReasoningEffortKey,
@@ -32,7 +32,7 @@ export type NewSessionDraft = Readonly<{
   text: string;
   attachments: readonly ComposerAttachment[];
   quotes: readonly QuotedTextSnapshot[];
-  model_key: ModelKey | null;
+  model_selection: ModelSelection | null;
   reasoning_effort: ReasoningEffortKey | null;
   variant: AgentVariant;
   approval_mode: ApprovalMode;
@@ -83,10 +83,10 @@ export class NewSessionDraftStore {
     });
   }
 
-  open(key: NewSessionDraftKey, default_model_key: ModelKey | null): NewSessionDraft {
+  open(key: NewSessionDraftKey): NewSessionDraft {
     const existing = this.drafts.get(key);
     if (existing) return existing;
-    const created = createDraft(key, default_model_key);
+    const created = createDraft(key);
     this.drafts.set(key, created);
     return created;
   }
@@ -108,8 +108,8 @@ export class NewSessionDraftStore {
     this.#patch(key, { attachments });
   }
 
-  updateModel(key: NewSessionDraftKey, model_key: ModelKey | null): void {
-    this.#patch(key, { model_key, reasoning_effort: null });
+  updateModel(key: NewSessionDraftKey, model_selection: ModelSelection | null): void {
+    this.#patch(key, { model_selection, reasoning_effort: null });
   }
 
   updateReasoningEffort(key: NewSessionDraftKey, reasoning_effort: ReasoningEffortKey | null): void {
@@ -219,22 +219,22 @@ export function isDraftMeaningful(draft: NewSessionDraft): boolean {
   );
 }
 
-export function isDraftCustomized(draft: NewSessionDraft, default_model_key: ModelKey | null): boolean {
+export function isDraftCustomized(draft: NewSessionDraft): boolean {
   return isDraftMeaningful(draft)
-    || draft.model_key !== default_model_key
+    || draft.model_selection !== null
     || draft.reasoning_effort !== null
     || draft.variant !== "build"
     || draft.approval_mode !== "ask";
 }
 
-function createDraft(key: NewSessionDraftKey, default_model_key: ModelKey | null): NewSessionDraft {
+function createDraft(key: NewSessionDraftKey): NewSessionDraft {
   return {
     key,
     workspace_id: workspaceForDraftKey(key),
     text: "",
     attachments: [],
     quotes: [],
-    model_key: default_model_key,
+    model_selection: null,
     reasoning_effort: null,
     variant: "build",
     approval_mode: "ask",

@@ -7,10 +7,10 @@ use ts_rs::TS;
 
 use crate::{
     ApprovalId, ApprovalSnapshot, AttachmentId, AttachmentSummary, ChildTaskId, ChildTaskSnapshot,
-    ConfigurationStatus, GoalId, InputId, MessageId, ModelConfiguration, ModelKey, PartId,
-    ReasoningEffortKey, RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeLifecycle,
-    SessionId, SessionLifecycle, SessionSummary, TodoItemId, TokenUsageSnapshot,
-    ToolActivityStatus, ToolCallId, WorkspaceSummary,
+    ConfigurationStatus, GoalId, InputId, MessageId, ModelSelection, PartId, ReasoningEffortKey,
+    RunId, RunSnapshot, RunStatus, RuntimeErrorInfo, RuntimeLifecycle, SessionId, SessionLifecycle,
+    SessionSummary, TodoItemId, TokenUsageSnapshot, ToolActivityStatus, ToolCallId,
+    WorkspaceSummary,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -32,9 +32,9 @@ pub enum ImageHandlingMode {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ComposerCapabilitiesSnapshot {
-    /// 当前 Session 历史模型键仍能解析为可用配置时返回该键；否则前端必须视为未选择模型。
-    #[serde(default)]
-    pub selected_model_key: Option<ModelKey>,
+    /// 当前显式或默认二元引用；失效时保留引用并报告原因。
+    pub selected_model: Option<crate::ModelSelection>,
+    pub model_error: Option<crate::RuntimeErrorInfo>,
     pub reasoning_effort_options: Vec<ReasoningEffortOptionSnapshot>,
     pub image_handling: ImageHandlingMode,
     /// 当前冻结模型是否支持 Goal 所需的 Tool Call。
@@ -165,7 +165,8 @@ pub struct ApplicationCapabilities {
 pub struct ApplicationSnapshot {
     pub runtime_lifecycle: RuntimeLifecycle,
     pub configuration: ConfigurationStatus,
-    pub models: Vec<ModelConfiguration>,
+    pub providers: Vec<crate::ProviderSummary>,
+    pub model_settings: crate::ModelSettings,
     /// 活动 Workspace，以及仍被当前 Session 绑定的已移除 Workspace。
     pub workspaces: Vec<WorkspaceSummary>,
     pub active_sessions: Vec<SessionSummary>,
@@ -438,7 +439,7 @@ pub enum ToolInputSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ImageInspectionDetailSnapshot {
-    pub auxiliary_model: ModelKey,
+    pub auxiliary_model: ModelSelection,
     pub elapsed_ms: u64,
     pub usage: Option<TokenUsageSnapshot>,
 }
@@ -996,9 +997,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../apps/desktop/src/generated/assistant-protocol.ts"
         ));
-        for forbidden in ["access_token", "api_key:", "authorization"] {
+        // 精确匹配字段标识，has_api_key 是安全布尔摘要，不能被 api_key 的子串检查误报。
+        let identifiers = source.to_ascii_lowercase();
+        for forbidden in ["access_token", "api_key", "authorization"] {
             assert!(
-                !source.to_ascii_lowercase().contains(forbidden),
+                !identifiers
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .any(|identifier| identifier == forbidden),
                 "generated bindings contain forbidden field {forbidden}"
             );
         }

@@ -397,7 +397,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ModelKey;
 
     #[test]
     fn event_envelope_has_a_stable_watermark_shape() {
@@ -428,7 +427,11 @@ mod tests {
         SessionSummary {
             session_id: session_id(),
             title: "Session 1".to_owned(),
-            model_key: ModelKey::new("model-1").expect("model key"),
+            model_selection: Some(crate::ModelSelection {
+                provider_instance_id: crate::ProviderInstanceId::new("provider-1")
+                    .expect("provider"),
+                model_id: "vendor/model-1".to_owned(),
+            }),
             reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
             role: crate::SessionRoleSnapshot::Standard,

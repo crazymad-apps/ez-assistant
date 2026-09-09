@@ -20,7 +20,7 @@ use serde_json::json;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{AssistantRuntime, model::compile_model_service};
+use super::{AssistantRuntime, model::compile_resolved_model_service};
 use crate::{
     ModelServiceFactory, RuntimeError, RuntimeResult, RuntimeStore, SessionTitleGenerationCommit,
     config::ConfigRegistry,
@@ -174,7 +174,7 @@ async fn begin_title_generation(
     session.ensure_active()?;
     session.ensure_standard_role()?;
 
-    let (conversation, model_key, expected_title, pending) = {
+    let (conversation, model_selection, expected_title, pending) = {
         let state = session.lock_state()?;
         let conversation = state
             .journal
@@ -185,7 +185,7 @@ async fn begin_title_generation(
             .snapshot();
         (
             conversation,
-            state.model_key.clone(),
+            state.model_selection.clone(),
             state.title.clone(),
             state.automatic_title_pending,
         )
@@ -205,7 +205,19 @@ async fn begin_title_generation(
         session.lock_state()?.automatic_title_pending = false;
     }
     let config = context.config_registry.snapshot()?;
-    let compiled = compile_model_service(&config, &model_key, context.model_factory.as_ref())?;
+    let prepared = super::model::resolve_session_model(
+        &context.config_registry,
+        session,
+        model_selection.as_ref(),
+        context.store.as_ref(),
+    )
+    .await?;
+    let compiled = compile_resolved_model_service(
+        &config,
+        &prepared.model,
+        context.model_factory.as_ref(),
+        None,
+    )?;
     if !compiled.model.capabilities().tool_calls {
         return Err(RuntimeError::InvalidRequest {
             reason: "session model does not support the title output contract",

@@ -1,12 +1,4 @@
-//! `config.toml` schema version 1 的 serde 输入类型。
-//!
-//! 模型表先保留为 [`toml::Value`]，由编译层逐条反序列化，确保单模型字段错误不会
-//! 阻止其他模型进入有效配置。
-//!
-//! Raw 类型只描述文件形状，不承担业务默认合并、范围判断或安全投影，也不 derive Debug/
-//! Serialize。尤其是 `RawModelConfig` 可以短暂持有 API Key，不能作为 Runtime 状态长期保存。
-
-use std::collections::BTreeMap;
+//! 全局 config.toml 输入；服务商、模型引用和固定参数由数据库模型管理承担。
 
 use serde::Deserialize;
 
@@ -14,12 +6,10 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 /// schema version 1 的顶层输入。
 ///
-/// 未知全局字段直接失败；models 保留 value map 是唯一有意延迟的反序列化边界。
+/// 未知全局字段直接失败；Host 自有表由各自模块解释。
 pub(super) struct RawConfig {
     /// 决定整份文件的解释规则。
     pub(super) schema_version: u32,
-    /// 用户选择的默认模型 key，形式和可用性在语义阶段分别校验。
-    pub(super) default_model: String,
     /// Runtime 维度配置；整表缺失时使用明确默认值。
     #[serde(default)]
     pub(super) runtime: RawRuntimeConfig,
@@ -29,9 +19,6 @@ pub(super) struct RawConfig {
     /// MCP 进程级运行参数；逐 Server 配置存放在独立的 `mcp.json` 中。
     #[serde(default)]
     pub(super) mcp: RawMcpConfig,
-    /// 按用户 key 保存的模型原始表；每个 value 后续独立编译。
-    #[serde(default)]
-    pub(super) models: BTreeMap<String, toml::Value>,
     /// Host 私有语音配置由 Runtime Host 使用同一安全配置源解释；Runtime 只容忍该顶层表，
     /// 不编译、保存或投影其中的 Provider 与 credential。
     #[serde(default, rename = "speech")]
@@ -107,14 +94,13 @@ pub(super) struct RawModelRetryConfig {
 pub(super) struct RawAgentConfig {
     #[serde(default)]
     pub(super) defaults: RawAgentDefaults,
-    /// 可选辅助视觉模型，只引用既有模型 key。
+    /// 辅助识图的请求预算；模型引用由数据库设置提供。
     pub(super) vision: Option<RawVisionConfig>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawVisionConfig {
-    pub(super) model_key: String,
     pub(super) timeout_ms: u64,
     pub(super) max_output_tokens: u32,
 }
@@ -213,23 +199,4 @@ pub(super) enum RawGuardrailMode {
     Off,
     Observe,
     Enforce,
-}
-
-/// 单个 `models.<key>` 的原始字段集合。
-///
-/// 必填字段仍使用 Option，是为了在语义阶段一次报告多个缺失项，而不是让 serde 在第一个字段
-/// 处提前返回；未知字段和错误字段类型仍由 deny_unknown_fields/serde 拒绝。
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawModelConfig {
-    pub(super) display_name: Option<String>,
-    pub(super) protocol: Option<String>,
-    pub(super) provider: Option<String>,
-    pub(super) endpoint: Option<String>,
-    pub(super) model: Option<String>,
-    pub(super) api_key: Option<String>,
-    pub(super) context_window_tokens: Option<u64>,
-    pub(super) max_output_tokens: Option<u32>,
-    #[serde(default)]
-    pub(super) capabilities: super::catalog::CapabilityInput,
 }

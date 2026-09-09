@@ -34,7 +34,7 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
     let bound = runtime
         .create_session(CreateSessionRequest {
             title: Some("Bound".to_owned()),
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(first.workspace_id.clone()),
         })
         .await
@@ -90,7 +90,7 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
     let error = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(first.workspace_id.clone()),
         })
         .await
@@ -132,7 +132,7 @@ async fn unbound_session_remains_supported_and_unknown_workspace_is_structured()
     let error = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(
                 assistant_protocol::WorkspaceId::new("w-missing").expect("workspace id"),
             ),
@@ -240,7 +240,7 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
     let existing = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(registered.workspace_id.clone()),
         })
         .await
@@ -321,7 +321,7 @@ async fn workspace_update_changes_current_projection_but_not_existing_session_en
     let new_session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(registered.workspace_id),
         })
         .await
@@ -387,7 +387,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     let first_session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(first_workspace.workspace_id),
         })
         .await
@@ -396,7 +396,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     let second_session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(second_workspace.workspace_id),
         })
         .await
@@ -457,7 +457,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
     let session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(workspace.workspace_id),
         })
         .await

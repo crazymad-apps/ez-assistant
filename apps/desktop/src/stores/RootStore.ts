@@ -20,7 +20,7 @@ import type {
   McpServerOptionSnapshot,
   MessageId,
   MessageFeedback,
-  ModelKey,
+  ModelSelection,
   QuotedTextSnapshot,
   PrepareDeleteSessionResult,
   RecallNavigationTarget,
@@ -113,6 +113,7 @@ export class RootStore {
   #preferences_pending: Promise<void> = Promise.resolve();
   #last_saved_preferences = "";
   #resource_snapshot_disposer: IReactionDisposer;
+  #resource_restore: Promise<void> | null = null;
   readonly #save_view_state = () => this.#schedulePreferencesSave();
   readonly #flush_view_state = () => { void this.flushPreferences().catch(() => undefined); };
   #conversation_search_revision = 0;
@@ -189,7 +190,10 @@ export class RootStore {
     this.desktop_lifecycle.start();
     this.#runtime_state_disposer = reaction(
       () => this.connection.state,
-      (state) => this.desktop_lifecycle.syncRuntimeState(state),
+      (state) => {
+        this.desktop_lifecycle.syncRuntimeState(state);
+        if (state === "connected") void this.#restoreResourceSnapshot();
+      },
       { fireImmediately: true },
     );
     this.settings = new SettingsStore({
@@ -325,7 +329,7 @@ export class RootStore {
     await this.initializePreferences();
     if (this.#disposed) return;
     await this.#runtime.connect(bootstrap);
-    if (this.#disposed) return;
+    if (this.#disposed || this.connection.state !== "connected") return;
     await this.#restoreResourceSnapshot();
   }
 
@@ -359,7 +363,11 @@ export class RootStore {
     }
   }
 
-  async #restoreResourceSnapshot(): Promise<void> {
+  #restoreResourceSnapshot(): Promise<void> {
+    return this.#resource_restore ??= this.#restoreConnectedResources();
+  }
+
+  async #restoreConnectedResources(): Promise<void> {
     if (this.#disposed) return;
     try {
       if (this.#pending_snapshot) await this.resource_workspace.restoreSnapshot(this.#pending_snapshot);
@@ -580,7 +588,7 @@ export class RootStore {
       }
     }
     const key = draftKeyForWorkspace(workspace_id);
-    this.new_session_drafts.open(key, this.projection.application?.configuration.default_model ?? null);
+    this.new_session_drafts.open(key);
     this.navigation.selectDraft(key);
     this.interaction_error = null;
     void this.#loadNewSessionDraftSkills(key);
@@ -590,7 +598,7 @@ export class RootStore {
     const removed = this.new_session_drafts.remove(key);
     if (removed) await releaseDraftSelections(removed, this.files);
     if (this.navigation.selected_draft_key === key) {
-      this.new_session_drafts.open(key, this.projection.application?.configuration.default_model ?? null);
+      this.new_session_drafts.open(key);
     }
   }
 
@@ -870,8 +878,8 @@ export class RootStore {
     return this.#run_interaction.submitSessionCommand(session_id, command);
   }
 
-  async setSessionModel(session_id: SessionId, model_key: ModelKey): Promise<boolean> {
-    return this.#session_management.setSessionModel(session_id, model_key);
+  async setSessionModel(session_id: SessionId, model_selection: ModelSelection | null): Promise<boolean> {
+    return this.#session_management.setSessionModel(session_id, model_selection);
   }
 
   async setSessionVariant(session_id: SessionId, variant: AgentVariant): Promise<boolean> {
@@ -1244,7 +1252,7 @@ function materializationManifest(draft: NewSessionDraft): SessionMaterialization
   return {
     idempotency_key: createOperationId("new-session"),
     ...(draft.workspace_id ? { workspace_id: draft.workspace_id } : {}),
-    ...(draft.model_key ? { model_key: draft.model_key } : {}),
+    ...(draft.model_selection ? { model_selection: draft.model_selection } : {}),
     ...(draft.reasoning_effort ? { reasoning_effort: draft.reasoning_effort } : {}),
     variant: draft.variant,
     approval_mode: draft.approval_mode,

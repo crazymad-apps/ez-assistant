@@ -31,11 +31,15 @@ pub(super) async fn upload_attachment(
     Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return runtime_error(error),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return upload_error(invalid_upload("session id is invalid")),
     };
-    if let Err(error) = state.runtime.begin_attachment_upload(&session_id).await {
+    if let Err(error) = services.runtime.begin_attachment_upload(&session_id).await {
         return runtime_error(error);
     }
 
@@ -121,7 +125,7 @@ pub(super) async fn upload_attachment(
         cleanup(&staging_path).await;
         return upload_error(error.protocol_info());
     }
-    let result = state
+    let result = services
         .runtime
         .finalize_attachment_upload(StagedAttachmentUpload {
             session_id,

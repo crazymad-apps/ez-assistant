@@ -70,7 +70,9 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - wire-only 图片 envelope 只由当前规范 Tool Result 确定性重建，不分配 MessageId，也不能回写
   Conversation、Journal、Recall、事件或产品消息计数。投影为 `Unsupported`、图片未准备或资源
   不匹配时必须在建流前失败，不能静默丢图或动态改走另一投影。
-- Service 构造时显式接收模型上下文窗口；请求设置输出上限时，直接根据 `ChatProtocolAdapter` 的
+- Service 构造时显式接收模型上下文窗口；`with_max_input_tokens` 可绑定正整数且不超过窗口的
+  独立输入限制，通过 ModelService 暴露为模型参数，不增加非标准 wire 字段或额外压缩策略。
+  请求设置输出上限时，直接根据 `ChatProtocolAdapter` 的
   `max_output_tokens_field` 编码或返回配置错误。
 - Context Overflow 只根据可审阅 fixture 中确认的结构化 `error.code` /
   `error.type` 精确映射；当前 allowlist 为 `context_length_exceeded`，禁止通过
@@ -109,8 +111,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   Kimi `k3`；未知兼容端点仍使用保守通用方言。Qwen 工具图片固定使用批次聚合 User Image，Kimi
   与 DeepSeek `deepseek-v4-flash-vision-exp` 固定使用原生 content-parts function output；DeepSeek
   非视觉 Flash/Pro 不启用图片，不得运行期试错切换。
-- OpenAI、DeepSeek 与 Kimi 的非空 encrypted reasoning 保存为完整原生 item，并同时生成规范
-  `ReasoningPart`。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
+- OpenAI、DeepSeek 与 Kimi 的非空 encrypted reasoning 保存为完整原生 item；只有可见文本存在时生成规范
+  `ReasoningPart`，纯加密 item 不要求摘要或关联 Part，仍需按原顺序在精确相容路由回放。回放只接受 provider、protocol、规范 endpoint、model、格式和 related part
   完全相容的状态；相容 payload 损坏或与规范 reasoning 矛盾时 fail-closed，路由不相容时跳过
   opaque item，并只按目标方言明确声明的普通 reasoning 形状投影规范 part。Qwen/Kimi 的
   `encrypted_content: null` 不生成空状态。

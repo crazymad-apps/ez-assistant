@@ -868,13 +868,8 @@ impl ResponsesAssembler {
                         }));
                     }
                     if let Some(payload) = opaque_payload {
-                        let related_part_id = segments
-                            .values()
-                            .next()
-                            .map(|state| state.id.clone())
-                            .ok_or_else(|| {
-                                protocol("opaque reasoning item has no normalized reasoning part")
-                            })?;
+                        let related_part_id =
+                            segments.values().next().map(|state| state.id.clone());
                         let fingerprint =
                             self.adapter.route_fingerprint.clone().ok_or_else(|| {
                                 protocol("opaque reasoning item has no bound route fingerprint")

@@ -236,9 +236,10 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
 #[tokio::test]
 async fn start_goal_rejects_a_model_without_tool_calls() {
     let runtime = runtime_with_tools(empty_model(), ToolSetSnapshot::default());
-    runtime.config_registry.replace_document_for_test(&format!(
-        "{TEST_CONFIG}\n[models.fixture.capabilities]\ntool_calls = false\ntool_choice = {{ auto = false, none = false, required = false, named = false }}\n"
-    ));
+    let mut parameters = model_fixture::parameters();
+    parameters.tool_calls = assistant_protocol::ModelFeatureSupport::Unsupported;
+    parameters.tool_choice = assistant_protocol::ModelToolChoiceSupport::default();
+    model_fixture::save_fixed(&runtime, "fixture", parameters).await;
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
         .await

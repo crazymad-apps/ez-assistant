@@ -41,7 +41,7 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
         "create_session",
         json!({
             "title": "Mode and reload recovery",
-            "model_key": "fixture",
+            "model_selection":null,
             "workspace_id": workspace_id,
         }),
     )["session"]["session_id"]
@@ -196,7 +196,7 @@ fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
         "create_session",
         json!({
             "title": "Variant scoped workspace allow",
-            "model_key": "fixture",
+            "model_selection":null,
             "workspace_id": workspace_id,
         }),
     )["session"]["session_id"]
@@ -345,7 +345,7 @@ fn default_session_permissions_apply_immediately_in_the_formal_host() {
     let mut client = host.connect();
     let session_id = client.runtime(
         "create_session",
-        json!({ "title": "Session default permissions", "model_key": "fixture" }),
+        json!({ "title": "Session default permissions", "model_selection":null }),
     )["session"]["session_id"]
         .as_str()
         .expect("session id")
@@ -460,7 +460,7 @@ fn pending_approval_is_queryable_but_is_not_restored_after_host_restart() {
     let mut client = first_host.connect();
     let session_id = client.runtime(
         "create_session",
-        json!({ "title": "Approval restart", "model_key": "fixture" }),
+        json!({ "title": "Approval restart", "model_selection":null }),
     )["session"]["session_id"]
         .as_str()
         .expect("session id")

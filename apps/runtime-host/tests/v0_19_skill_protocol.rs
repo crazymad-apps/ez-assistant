@@ -65,7 +65,7 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
             "create_session",
             json!({
                 "title":"Skill activation",
-                "model_key":"fixture",
+                "model_selection":null,
                 "workspace_id":workspace_id
             }),
         )["session"]["session_id"],
@@ -215,7 +215,7 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
             "create_session",
             json!({
                 "title":"Agent Skill activation",
-                "model_key":"fixture",
+                "model_selection":null,
                 "workspace_id":workspace_id
             }),
         )["session"]["session_id"],

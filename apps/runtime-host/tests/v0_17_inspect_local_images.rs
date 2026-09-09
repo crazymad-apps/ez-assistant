@@ -50,7 +50,7 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
             "create_session",
             json!({
                 "title":"Inspect local images",
-                "model_key":"text-fixture",
+                "model_selection":null,
                 "workspace_id":workspace_id,
             }),
         )["session"]["session_id"],

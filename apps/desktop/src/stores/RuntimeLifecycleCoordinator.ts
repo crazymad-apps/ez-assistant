@@ -290,6 +290,10 @@ export class RuntimeLifecycleCoordinator {
       this.#event_abort?.abort();
       this.#client?.dispose();
       this.#client = client;
+      await client.waitUntilReady((health) => {
+        if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.connection.markStartup(health);
+      });
+      if (!this.#isActiveGeneration(generation) || this.#client !== client) { client.dispose(); return; }
       const event_abort = new AbortController();
       this.#event_abort = event_abort;
       const buffered_events: RuntimeEventEnvelope[] = [];
@@ -481,6 +485,7 @@ export class RuntimeLifecycleCoordinator {
       || this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
       || this.dependencies.connection.state === "component_mismatch"
       || this.dependencies.connection.last_error_code === "authentication_required"
+      || this.dependencies.connection.last_error_code === "runtime_startup_failed"
     ) {
       return;
     }

@@ -113,6 +113,8 @@ pub(super) enum ResponsesToolChoiceMode {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(super) struct ResponsesReasoningConfig {
     pub effort: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

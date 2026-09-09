@@ -233,7 +233,7 @@ export function ToolDetailDialog({
               <DetailSection title="执行结果">
                 {detail.image_inspection && (
                   <dl className={styles.facts}>
-                    <div><dt>辅助模型</dt><dd>{detail.image_inspection.auxiliary_model}</dd></div>
+                    <div><dt>辅助模型</dt><dd>{detail.image_inspection.auxiliary_model.model_id}</dd></div>
                     <div><dt>耗时</dt><dd>{detail.image_inspection.elapsed_ms} ms</dd></div>
                     <div><dt>辅助用量</dt><dd>{formatUsage(detail.image_inspection.usage)}</dd></div>
                   </dl>

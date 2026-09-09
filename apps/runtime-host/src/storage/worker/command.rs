@@ -34,6 +34,47 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    LoadProviders {
+        reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredProvider>, StoreError>>,
+    },
+    PutProvider {
+        provider: assistant_runtime::StoredProvider,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    RemoveProvider {
+        id: assistant_protocol::ProviderInstanceId,
+        reply: oneshot::Sender<Result<assistant_protocol::ProviderUsage, StoreError>>,
+    },
+    ProviderUsage {
+        id: assistant_protocol::ProviderInstanceId,
+        reply: oneshot::Sender<Result<assistant_protocol::ProviderUsage, StoreError>>,
+    },
+    LoadModelSettings {
+        reply: oneshot::Sender<Result<assistant_protocol::ModelSettings, StoreError>>,
+    },
+    SaveModelSettings {
+        settings: assistant_protocol::ModelSettings,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    GetModelFixedConfig {
+        selection: assistant_protocol::ModelSelection,
+        reply: oneshot::Sender<Result<Option<assistant_protocol::ModelFixedConfig>, StoreError>>,
+    },
+    ListModelFixedConfigs {
+        id: assistant_protocol::ProviderInstanceId,
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<Result<Vec<assistant_protocol::ModelFixedConfig>, StoreError>>,
+    },
+    PutModelFixedConfig {
+        config: assistant_protocol::ModelFixedConfig,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ResetModelFixedConfig {
+        selection: assistant_protocol::ModelSelection,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
     #[cfg(test)]
     PanicForTest {
         reply: oneshot::Sender<Result<(), StoreError>>,

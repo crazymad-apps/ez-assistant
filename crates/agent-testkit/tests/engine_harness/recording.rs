@@ -1,6 +1,56 @@
 use super::*;
 
 #[tokio::test]
+async fn duplicate_response_call_is_rejected_before_recording_or_tool_execution() {
+    let log = OrderLog::new();
+    let history = vec![
+        ConversationMessage::Assistant(calls_message(
+            "old-assistant",
+            vec![call("reused-call", "read_file", json!({}))],
+        )),
+        ConversationMessage::Tool(tool_message(
+            "old-tool-result",
+            success_result("reused-call", json!("old result")),
+        )),
+    ];
+    let response = calls_message(
+        "new-assistant",
+        vec![call("reused-call", "read_file", json!({}))],
+    );
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::Events(message_events(&response))],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log.clone()));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        "read_file",
+        json!("unexpected"),
+        log.clone(),
+    )]);
+    let (input, _) = make_input(history);
+    let (outcome, events) = finish(AgentExecution::start(
+        make_spec(model.clone(), tools, ExecutionBudget::default()),
+        input,
+        make_context(recorder.clone(), authorizer),
+    ))
+    .await;
+    assert_failed(outcome, ExecutionError::DuplicateToolCallId);
+    assert!(
+        log.entries().is_empty(),
+        "no pending record, authorization or tool execution"
+    );
+    assert!(recorder.deltas().is_empty());
+    assert_eq!(model.take_requests().len(), 1, "no automatic retry");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolProposed { .. }))
+    );
+}
+
+#[tokio::test]
 async fn hallucinated_tool_with_empty_snapshot_feeds_error_result() {
     let log = OrderLog::new();
     let turn1 = calls_message("message_1", vec![call("call_1", "ghost_tool", json!({}))]);

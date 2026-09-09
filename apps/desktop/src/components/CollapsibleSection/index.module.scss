@@ -1,0 +1,19 @@
+.section { min-width: 0; margin: 0; }
+
+// 折叠头是内容标题，不继承表单操作按钮的高度、边框和内边距。
+.section > .trigger {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; max-width: 100%; height: auto; min-height: 24px;
+  margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--ez-text); font: inherit; line-height: 1.4;
+  text-align: left; cursor: pointer;
+  > svg { flex-shrink: 0; color: var(--ez-text-muted); }
+  &:hover:not(:disabled) { color: var(--ez-primary); }
+  &:focus-visible { outline: 2px solid var(--ez-primary); outline-offset: 2px; }
+  &:disabled { cursor: default; opacity: .48; }
+}
+
+.body {
+  display: grid; gap: 12px; padding-top: 12px;
+  > p { margin: 0; }
+}

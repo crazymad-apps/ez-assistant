@@ -13,7 +13,6 @@ use super::{
     attachment::summary as attachment_summary,
     goal::GoalSubmissionPersistence,
     input::{automatic_session_title, projection::project_accepted_input},
-    model::resolve_session_model_key,
     quote::{deactivate_quote_sources, insert_quotes, validate_quotes},
     session_management::supports_effort,
 };
@@ -41,19 +40,24 @@ impl AssistantRuntime {
         staged_attachments: Vec<StagedSessionAttachment>,
     ) -> RuntimeResult<SessionMaterializationResult> {
         let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         let _workspace_mutation = self.workspace_mutation_gate.lock().await;
         validate_manifest(&manifest, &staged_attachments)?;
 
         let configuration = self.config_registry.snapshot()?;
-        let model_key = resolve_session_model_key(&configuration, manifest.model_key.clone())?;
-        let model = configuration
-            .active()
-            .and_then(|active| active.model(&model_key))
-            .ok_or_else(|| RuntimeError::ModelUnavailable {
-                model_key: model_key.clone(),
-            })?;
+        let model_selection = manifest.model_selection.clone();
+        let prepared_model = self
+            .config_registry
+            .prepare_model(
+                &configuration,
+                model_selection.as_ref(),
+                self.store.as_ref(),
+                self.model_factory.as_ref(),
+            )
+            .await?;
+        let _binding = self.model_binding_gate.read().await;
+        prepared_model.ensure_current(&self.config_registry)?;
+        let model = &prepared_model.model;
         if manifest
             .reasoning_effort
             .is_some_and(|effort| !supports_effort(model.capabilities(), effort))
@@ -139,7 +143,7 @@ impl AssistantRuntime {
             session_id: session_id.clone(),
             title: automatic_session_title(&manifest.message),
             title_origin: SessionTitleOrigin::Generated,
-            model_key,
+            model_selection,
             reasoning_effort: manifest.reasoning_effort,
             system_prompt,
 
@@ -152,7 +156,7 @@ impl AssistantRuntime {
             created_at_ms,
         };
         let provisional = Arc::new(SessionController::new(stored_session_preview(&new_session)));
-        let goal_submission = self.goal_submission(&provisional, manifest.mode)?;
+        let goal_submission = self.goal_submission(&provisional, manifest.mode).await?;
 
         let (input_id, run_id) = {
             let state = provisional.lock_state()?;
@@ -447,7 +451,7 @@ fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
         session_id: session.session_id.clone(),
         title: session.title.clone(),
         title_origin: session.title_origin,
-        model_key: session.model_key.clone(),
+        model_selection: session.model_selection.clone(),
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt.clone(),
 

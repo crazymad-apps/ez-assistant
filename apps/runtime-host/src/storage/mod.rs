@@ -22,6 +22,9 @@ mod input_state;
 mod materialization;
 mod memory;
 mod mode;
+mod model_management;
+
+pub(crate) mod migrations;
 mod permission;
 mod recall_index;
 mod recovery;
@@ -66,6 +69,13 @@ const DELETION_STAGING_DIRECTORY: &str = "staging/deletions";
 const DATABASE_FILE: &str = "runtime.sqlite3";
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 存储线程发布的启动进度；版本只来自已核验账本或已提交迁移，不是预期目标。
+#[derive(Clone)]
+pub(crate) struct DatabaseStartupProgress {
+    pub(crate) stage: assistant_protocol::RuntimeHostStartupStage,
+    pub(crate) database_version: Option<String>,
+}
 
 type StorageResult<T> = Result<T, StoreError>;
 

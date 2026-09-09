@@ -19,7 +19,7 @@ fn formal_host_mcp_disconnect_timeout_and_cancel_never_replay() {
             wait_for_mcp(&mut client);
             let session = client.runtime(
                 "create_session",
-                json!({"title":"MCP fault","model_key":"fixture"}),
+                json!({"title":"MCP fault","model_selection":null}),
             );
             let session_id = session["session"]["session_id"]
                 .as_str()

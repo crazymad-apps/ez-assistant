@@ -426,6 +426,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         static_run_tool_factory(ToolSetSnapshot::default()),
         Arc::new(TestChildWorkspaceFactory::default()),
     );
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
     runtime
         .reload_config(ReloadConfigRequest::default())
         .await

@@ -155,7 +155,7 @@ export function runFailureMessage(
   const kind_message: Partial<Record<ModelFailureKind, string>> = {
     configuration: "当前模型配置无法用于此会话，请检查配置或切换模型后重试。",
     authentication: "模型认证失败，请检查 API Key 和访问权限。",
-    connection: "无法连接模型服务，请检查网络和 Endpoint。",
+    connection: "无法连接模型服务，请检查网络和服务地址。",
     timeout: "模型响应超时，请稍后重试。",
     stream_interrupted: "模型响应意外中断，请重试本轮。",
     provider_rejected: "模型服务拒绝了本次请求，请检查模型能力与请求参数。",

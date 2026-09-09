@@ -20,7 +20,7 @@ fn formal_host_projects_vllm_reasoning_into_run_and_conversation() {
     let session_id = text(
         &client.runtime(
             "create_session",
-            json!({"title":"vLLM reasoning", "model_key":"vllm-fixture"}),
+            json!({"title":"vLLM reasoning", "model_selection":null}),
         )["session"]["session_id"],
     );
     let run_id = text(

@@ -40,6 +40,9 @@ const ERROR_BODY_SAMPLE_LIMIT: usize = 2048;
 ///
 /// 无效 URL 的错误只描述违反的规则，不回显可能含 credential 的原始输入。
 pub enum OpenAiChatCompletionsServiceError {
+    /// 独立输入上限必须为正整数，且不能超过同一服务的上下文窗口。
+    #[error("model input limit must be positive and within the context window")]
+    InvalidInputLimit,
     /// Base URL 不是可安全记录的绝对 URL。
     #[error("invalid OpenAI-compatible base URL: {0}")]
     InvalidBaseUrl(&'static str),
@@ -62,6 +65,7 @@ pub struct OpenAiChatCompletionsService {
     model: String,
     /// 调用方为当前模型配置的上下文窗口上限。
     context_window_tokens: u64,
+    max_input_tokens: Option<u64>,
     /// Provider 方言配置。
     adapter: ChatProtocolAdapter,
     /// 底层 HTTP Transport。
@@ -72,6 +76,21 @@ pub struct OpenAiChatCompletionsService {
 
 impl OpenAiChatCompletionsService {
     /// 用默认 [`ReqwestTransport`] 和显式上下文窗口创建服务。
+    /// 在构造期绑定已知输入限制；不向 Provider wire 增加非标准字段。
+    ///
+    /// # Errors
+    /// 非空限制为零或超过当前上下文窗口时返回配置错误。
+    pub fn with_max_input_tokens(
+        mut self,
+        limit: Option<u64>,
+    ) -> Result<Self, OpenAiChatCompletionsServiceError> {
+        if limit.is_some_and(|value| value == 0 || value > self.context_window_tokens) {
+            return Err(OpenAiChatCompletionsServiceError::InvalidInputLimit);
+        }
+        self.max_input_tokens = limit;
+        Ok(self)
+    }
+
     pub fn new(
         base_url: impl Into<String>,
         credential: BearerCredential,
@@ -174,6 +193,7 @@ impl OpenAiChatCompletionsService {
             credential,
             model: model.into(),
             context_window_tokens,
+            max_input_tokens: None,
             adapter,
             transport,
             capabilities,
@@ -193,6 +213,10 @@ impl ModelService for OpenAiChatCompletionsService {
 
     fn context_window_tokens(&self) -> u64 {
         self.context_window_tokens
+    }
+
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.max_input_tokens
     }
 
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {

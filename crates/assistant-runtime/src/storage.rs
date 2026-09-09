@@ -9,6 +9,7 @@ mod conversation;
 mod error;
 mod execution;
 mod goal;
+mod model_management;
 mod session;
 mod volatile;
 mod work_plan;
@@ -64,3 +65,5 @@ pub use workspace::{
     StoredAttachment, StoredAttachmentState, StoredSessionMaterialization, StoredWorkspace,
     StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
 };
+
+pub use model_management::StoredProvider;

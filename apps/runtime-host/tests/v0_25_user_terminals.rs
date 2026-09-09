@@ -332,7 +332,7 @@ fn session_deletion_reclaims_its_terminal_and_tcp_loss_does_not_cancel_a_run() {
     let mut api = host.connect();
     let created = api.runtime(
         "create_session",
-        json!({"title":"M4 session", "model_key":"fixture"}),
+        json!({"title":"M4 session", "model_selection":null}),
     );
     let id = created["session"]["session_id"].as_str().unwrap();
     let source = json!({"type":"session", "session_id":id, "locator":{"root":{"type":"session_private"}, "relative_path":""}});

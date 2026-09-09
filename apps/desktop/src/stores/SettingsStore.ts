@@ -3,10 +3,18 @@ import { action, makeObservable, observable, observableRef, runInAction } from "
 import type {
   ConfigurationStatus,
   ConnectionValidationFailure,
-  ModelConfiguration,
-  ModelConfigurationInput,
-  ModelCatalogSnapshot,
-  ModelKey,
+  ModelConfigOrigin,
+  ModelSelection,
+  ModelSettings,
+  ProviderSummary,
+  ProviderUsage,
+  ProviderInstanceId,
+  DiscoveredModel,
+  ProviderConnection,
+  ProviderCredentialChange,
+  ModelConfigurationDetail,
+  ModelFixedConfig,
+  ModelParameters,
   PermissionDocumentDraft,
   PermissionDocumentRevision,
   PermissionDocumentScope,
@@ -35,14 +43,16 @@ export class SettingsStore {
   #skill_scope_initialized_for_open = false;
   #skill_detail_request = 0;
   #skill_request = 0;
+  // 仅标识前端读取；新读取或已提交 mutation 使先前响应失效，不属于持久化版本。
+  #model_read = 0;
   readonly mcp: McpSettingsStore;
   is_open = false;
   page: SettingsPage = "runtime";
   loading = false;
   pending_action: string | null = null;
   status: ConfigurationStatus | null = null;
-  models: readonly ModelConfiguration[] = [];
-  model_catalog: ModelCatalogSnapshot | null = null;
+  providers: readonly ProviderSummary[] = [];
+  model_settings: ModelSettings = { default_model: null, vision_model: null };
   error_message: string | null = null;
   notice_message: string | null = null;
   configuration_conflict = false;
@@ -63,8 +73,8 @@ export class SettingsStore {
       loading: observable,
       pending_action: observable,
       status: observableRef,
-      models: observableRef,
-      model_catalog: observableRef,
+      providers: observableRef,
+      model_settings: observableRef,
       error_message: observable,
       notice_message: observable,
       configuration_conflict: observable,
@@ -89,13 +99,8 @@ export class SettingsStore {
       selectSkillWorkspace: action,
       setSkillEnabled: action,
       replacePermissionDocument: action,
-      createModel: action,
-      updateModel: action,
-      deleteModel: action,
       setDefaultModel: action,
       setAuxiliaryVisionModel: action,
-      validateConfigured: action,
-      validateCandidate: action,
       clearMessages: action,
       showError: action,
       showNotice: action,
@@ -271,26 +276,30 @@ export class SettingsStore {
       this.error_message = "运行时尚未连接。";
       return;
     }
+    const request = ++this.#model_read;
     this.loading = true;
     this.error_message = null;
     try {
-      const [status, models] = await Promise.all([
+      const [status, providers, settings] = await Promise.all([
         client.command({ type: "get_config_status", payload: {} }),
-        client.command({ type: "list_models", payload: {} }),
+        client.command({ type: "list_providers", payload: {} }),
+        client.command({ type: "get_model_settings", payload: {} }),
       ]);
       runInAction(() => {
+        if (client !== this.dependencies.get_client() || request !== this.#model_read) return;
         this.status = status.payload.status;
-        this.models = models.payload.models;
-        this.model_catalog = models.payload.catalog;
+        this.providers = providers.payload;
+        this.model_settings = settings.payload;
         this.configuration_conflict = false;
       });
     } catch (error: unknown) {
       runInAction(() => {
+        if (client !== this.dependencies.get_client() || request !== this.#model_read) return;
         this.error_message = displayError(error);
       });
     } finally {
       runInAction(() => {
-        this.loading = false;
+        if (request === this.#model_read) this.loading = false;
       });
     }
   }
@@ -300,10 +309,8 @@ export class SettingsStore {
     if (!client) return;
     await this.runAction("reload", async () => {
       const result = await client.command({ type: "reload_config", payload: {} });
-      const models = await client.command({ type: "list_models", payload: {} });
       this.status = result.payload.status;
-      this.models = models.payload.models;
-      this.model_catalog = models.payload.catalog;
+      await this.loadModelSettings();
       this.notice_message = "配置已重新加载。";
       await this.dependencies.refresh_application();
     });
@@ -380,147 +387,212 @@ export class SettingsStore {
     });
   }
 
-  async createModel(model: ModelConfigurationInput, set_default: boolean): Promise<boolean> {
+  async loadModelSettings(signal?: AbortSignal): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("create", async () => {
-      const result = await client.command({
-        type: "create_model",
-        payload: {
-          model,
-          expected_revision: this.status?.revision ?? null,
-          set_default,
-        },
+    const request = ++this.#model_read;
+    runInAction(() => { this.loading = true; });
+    try {
+      const [providers, settings] = await Promise.all([
+        client.command({ type: "list_providers", payload: {} }, { signal }),
+        client.command({ type: "get_model_settings", payload: {} }, { signal }),
+      ]);
+      if (signal?.aborted || client !== this.dependencies.get_client() || request !== this.#model_read) return false;
+      runInAction(() => {
+        this.providers = providers.payload;
+        this.model_settings = settings.payload;
       });
-      this.applyMutation(result.payload);
-      this.notice_message = "模型已添加。";
-      await this.dependencies.refresh_application();
-    });
-  }
-
-  async updateModel(model: ModelConfigurationInput, set_default: boolean): Promise<boolean> {
-    const client = this.requireClient();
-    const revision = this.status?.revision;
-    if (!client || !revision) {
-      this.error_message = "请先重新加载配置。";
+      return true;
+    } catch (error: unknown) {
+      if (!signal?.aborted && client === this.dependencies.get_client() && request === this.#model_read) runInAction(() => this.showError(displayError(error)));
       return false;
+    } finally {
+      runInAction(() => { if (request === this.#model_read) this.loading = false; });
     }
-    return this.runAction("update", async () => {
-      const result = await client.command({
-        type: "update_model",
-        payload: { model, expected_revision: revision, set_default },
-      });
-      this.applyMutation(result.payload);
-      this.notice_message = "模型已保存。";
-      await this.dependencies.refresh_application();
-    });
   }
 
-  async deleteModel(model_key: ModelKey, replacement_default: ModelKey | null): Promise<boolean> {
+  async listProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<DiscoveredModel[]> {
     const client = this.requireClient();
-    const revision = this.status?.revision;
-    if (!client || !revision) return false;
-    return this.runAction("delete", async () => {
-      const result = await client.command({
-        type: "delete_model",
-        payload: { model_key, expected_revision: revision, replacement_default },
-      });
-      this.applyMutation(result.payload);
-      this.notice_message = "模型已删除。";
-      await this.dependencies.refresh_application();
-    });
+    if (!client) throw new Error("运行时尚未连接。");
+    const result = await client.command({ type: "list_provider_models", payload: { provider_instance_id } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    return result.payload;
   }
 
-  async setDefaultModel(model_key: ModelKey): Promise<boolean> {
+  async setDefaultModel(selection: ModelSelection | null): Promise<boolean> {
     const client = this.requireClient();
-    const revision = this.status?.revision;
-    if (!client || !revision) return false;
+    if (!client) return false;
     return this.runAction("default", async () => {
-      const result = await client.command({
-        type: "set_default_model",
-        payload: { model_key, expected_revision: revision },
+      const result = await client.command({ type: "set_default_model", payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+      this.invalidateModelRead();
+      runInAction(() => {
+        this.model_settings = result.payload;
+        this.notice_message = "默认模型已更新。";
       });
-      this.applyMutation(result.payload);
-      this.notice_message = "默认模型已更新。";
-      await this.dependencies.refresh_application();
+      await this.refreshAfterModelMutation(client);
     });
   }
 
-  async setAuxiliaryVisionModel(model_key: ModelKey | null): Promise<boolean> {
+  async setAuxiliaryVisionModel(selection: ModelSelection | null): Promise<boolean> {
     const client = this.requireClient();
-    const revision = this.status?.revision;
-    if (!client || !revision) {
-      this.error_message = "请先重新加载配置。";
-      return false;
-    }
+    if (!client) return false;
     return this.runAction("vision-model", async () => {
-      const result = await client.command({
-        type: "set_auxiliary_vision_model",
-        payload: { model_key, expected_revision: revision },
+      const result = await client.command({ type: "set_auxiliary_vision_model", payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+      this.invalidateModelRead();
+      runInAction(() => {
+        this.model_settings = result.payload;
+        this.notice_message = selection ? "默认识图模型已更新。" : "默认识图模型已清除。";
       });
-      this.applyMutation(result.payload);
-      this.notice_message = model_key ? "默认识图模型已更新。" : "默认识图模型已清除。";
-      await this.dependencies.refresh_application();
+      await this.refreshAfterModelMutation(client);
     });
   }
 
-  async validateCandidate(model: ModelConfigurationInput): Promise<ValidateModelConnectionResult | null> {
+  async saveProvider(provider_instance_id: ProviderInstanceId | null, connection: ProviderConnection, credential: ProviderCredentialChange): Promise<ProviderSummary | null> {
+    const client = this.requireClient();
+    if (!client) return null;
+    let saved: ProviderSummary | null = null;
+    const applied = await this.runAction("provider:save", async () => {
+      const result = provider_instance_id
+        ? await client.command({ type: "update_provider", payload: { provider_instance_id, connection, credential } })
+        : await client.command({ type: "create_provider", payload: { connection, credential } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+      saved = result.payload;
+      this.invalidateModelRead();
+      runInAction(() => {
+        this.providers = [...this.providers.filter((item) => item.provider_instance_id !== result.payload.provider_instance_id), result.payload];
+        this.showNotice("服务商已保存。");
+      });
+      await this.refreshAfterModelMutation(client);
+    });
+    return applied ? saved : null;
+  }
+
+  async getProviderUsage(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderUsage> {
+    const client = this.requireClient();
+    if (!client) throw new Error("运行时尚未连接。");
+    const result = await client.command({ type: "get_provider_usage", payload: { provider_instance_id } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取影响。");
+    return result.payload;
+  }
+
+  async deleteProvider(provider_instance_id: ProviderInstanceId): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction("provider:delete", async () => {
+      const result = await client.command({ type: "delete_provider", payload: { provider_instance_id } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+      this.invalidateModelRead();
+      runInAction(() => {
+        this.providers = this.providers.filter((item) => item.provider_instance_id !== provider_instance_id);
+        this.showNotice(`服务商已删除，已删除 ${result.payload.fixed_config_count} 条固定配置；${result.payload.session_count} 个显式引用会话需重选模型。${result.payload.default_model ? "默认模型需重选。" : ""}${result.payload.vision_model ? "辅助识图模型需重选。" : ""}`);
+      });
+      await this.refreshAfterModelMutation(client);
+    });
+  }
+
+  async getModelConfiguration(selection: ModelSelection, signal?: AbortSignal, origin: ModelConfigOrigin = "online"): Promise<ModelConfigurationDetail> {
+    const client = this.requireClient();
+    if (!client) throw new Error("运行时尚未连接。");
+    const result = await client.command({ type: "get_model_configuration", payload: { ...selection, origin } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    const detail = result.payload;
+    // Dev 前端可能热更新而独立 Host 仍运行旧构建。拒绝不完整详情，不让 render 访问缺失字段。
+    if (!detail || !["online", "manual"].includes(detail.origin) || !detail.field_sources || Array.isArray(detail.field_sources)
+      || typeof detail.field_sources !== "object" || !detail.parameters?.tool_choice
+      || Array.isArray(detail.parameters.reasoning_efforts)) {
+      throw new Error("模型详情格式与当前界面不一致，请重启对应 Runtime 后重试。");
+    }
+    return detail;
+  }
+
+  async listFixedModels(provider_instance_id: ProviderInstanceId, offset: number, signal?: AbortSignal): Promise<ModelFixedConfig[]> {
+    const client = this.requireClient();
+    if (!client) throw new Error("运行时尚未连接。");
+    const result = await client.command({ type: "list_fixed_model_configs", payload: { provider_instance_id, offset, limit: 20 } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    return result.payload;
+  }
+
+  async listAllFixedModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ModelFixedConfig[]> {
+    const records: ModelFixedConfig[] = [];
+    for (let offset = 0; !signal?.aborted; offset += 20) {
+      const page = await this.listFixedModels(provider_instance_id, offset, signal);
+      records.push(...page);
+      if (page.length < 20) break;
+    }
+    return records;
+  }
+
+  async saveModelFixedConfig(selection: ModelSelection, parameters: ModelParameters, origin: ModelConfigOrigin = "online"): Promise<ModelFixedConfig | null> {
+    const client = this.requireClient();
+    if (!client) return null;
+    let saved: ModelFixedConfig | null = null;
+    const applied = await this.runAction("model:save", async () => {
+      const result = await client.command({ type: "save_model_fixed_config", payload: { selection, parameters, origin } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取配置。");
+      saved = result.payload;
+      this.showNotice("已固定，下次执行生效。");
+      await this.refreshAfterModelMutation(client);
+    });
+    return applied ? saved : null;
+  }
+
+  async resetModelFixedConfig(selection: ModelSelection, origin: ModelConfigOrigin = "online"): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction("model:reset", async () => {
+      await client.command({ type: "reset_model_fixed_config", payload: selection });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取配置。");
+      this.showNotice(origin === "manual" ? "手动模型已删除。" : "固定配置已重置。");
+      await this.refreshAfterModelMutation(client);
+    });
+  }
+
+  async validateModel(selection: ModelSelection): Promise<ValidateModelConnectionResult | null> {
     const client = this.requireClient();
     if (!client) return null;
     let validation: ValidateModelConnectionResult | null = null;
-    const succeeded = await this.runAction("validate", async () => {
-      const result = await client.command({
-        type: "validate_model_connection",
-        payload: { target: { type: "candidate", payload: model } },
-      });
+    const applied = await this.runAction("model:validate", async () => {
+      const result = await client.command({ type: "validate_model_connection", payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
       validation = result.payload;
-      if (result.payload.outcome.status === "succeeded") {
-        this.showNotice("连接测试成功。");
-      } else {
-        this.showError(displayConnectionFailure(result.payload.outcome.failure));
-      }
+      if (result.payload.outcome.status === "succeeded") this.showNotice("连接测试成功。");
+      else this.showError(displayConnectionFailure(result.payload.outcome.failure));
     });
-    return succeeded ? validation : null;
+    return applied ? validation : null;
   }
 
-  async validateConfigured(model_key: ModelKey): Promise<ValidateModelConnectionResult | null> {
-    const client = this.requireClient();
-    if (!client) return null;
-    let validation: ValidateModelConnectionResult | null = null;
-    const succeeded = await this.runAction(`validate:${model_key}`, async () => {
-      const result = await client.command({
-        type: "validate_model_connection",
-        payload: { target: { type: "configured", payload: { model_key } } },
-      });
-      validation = result.payload;
-      if (result.payload.outcome.status === "succeeded") {
-        this.showNotice(`模型“${model_key}”连接测试成功。`);
-      } else {
-        this.showError(displayConnectionFailure(result.payload.outcome.failure));
-      }
-    });
-    return succeeded ? validation : null;
+  private invalidateModelRead(): void {
+    this.#model_read += 1;
+    runInAction(() => { this.loading = false; });
   }
 
-  private applyMutation(result: { status: ConfigurationStatus; models: ModelConfiguration[] }): void {
-    this.status = result.status;
-    this.models = result.models;
+  private async refreshAfterModelMutation(client: RuntimeClient): Promise<void> {
+    // 写命令已成功；刷新失败不能把已提交保存显示为失败并诱发重复创建。
+    try { await this.dependencies.refresh_application(); }
+    catch {
+      if (client === this.dependencies.get_client()) this.showError("保存已完成，但刷新应用状态失败，请重新连接后核对。");
+    }
   }
 
   private requireClient(): RuntimeClient | null {
     const client = this.dependencies.get_client();
-    if (!client) this.error_message = "运行时尚未连接。";
+    if (!client) this.showError("运行时尚未连接。");
     return client;
   }
 
   private async runAction(name: string, operation: () => Promise<void>): Promise<boolean> {
-    this.pending_action = name;
-    this.clearMessages();
+    if (this.pending_action) return false;
+    const client = this.dependencies.get_client();
+    runInAction(() => { this.pending_action = name; this.clearMessages(); });
     try {
       await operation();
-      return true;
+      return client === this.dependencies.get_client();
     } catch (error: unknown) {
       runInAction(() => {
+        if (client !== this.dependencies.get_client()) return;
         this.error_message = displayError(error);
         this.configuration_conflict = (error as { code?: string }).code === "configuration_conflict";
         this.permission_conflict = (error as { code?: string }).code === "permission_file_conflict";
@@ -550,8 +622,8 @@ function displayError(error: unknown): string {
 
 function displayConnectionFailure(failure: ConnectionValidationFailure): string {
   const messages: Record<ConnectionValidationFailure["kind"], string> = {
-    configuration: "当前模型配置无法用于连接测试，请检查协议、Endpoint 和模型 ID。",
-    connection: "无法连接模型服务，请检查 Endpoint 和网络状态。",
+    configuration: "当前模型配置无法用于连接测试，请检查协议、服务地址和模型 ID。",
+    connection: "无法连接模型服务，请检查服务地址和网络状态。",
     timeout: "模型连接测试超时，请稍后重试。",
     authentication: "API Key 无效或无权访问该模型，请检查凭据。",
     model_unavailable: "当前模型不可用，请检查模型 ID 和账号权限。",

@@ -13,8 +13,7 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use assistant_protocol::{
     GetSessionViewRequest, GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult,
-    RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
-    SessionId, ShutdownRuntimeRequest, WorkspaceId,
+    RuntimeHostCapabilities, RuntimeHostFeature, SessionId, ShutdownRuntimeRequest, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -33,6 +32,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
+    RuntimeHostFeature::StartupDiagnostics,
     RuntimeHostFeature::EventEnvelopes,
     RuntimeHostFeature::ApplicationSnapshot,
     RuntimeHostFeature::SessionView,
@@ -487,24 +487,7 @@ impl RuntimeBootstrapCoordinator {
         &self,
         discovery: &RuntimeDiscovery,
     ) -> Result<RuntimeHostCapabilities, RuntimeBootstrapError> {
-        let health = self
-            .http
-            .get(format!("{}/health", discovery.address))
-            .bearer_auth(&discovery.access_token)
-            .send()
-            .await
-            .map_err(runtime_unavailable)?
-            .error_for_status()
-            .map_err(runtime_unavailable)?
-            .json::<RuntimeHostHealth>()
-            .await
-            .map_err(runtime_unavailable)?;
-        if health.status != RuntimeHostHealthStatus::Ready {
-            return Err(bootstrap_error(
-                RuntimeBootstrapErrorCode::RuntimeUnavailable,
-                "Runtime 尚未就绪。",
-            ));
-        }
+        // 端点可达即交给客户端展示初始化状态；不能因数据库尚未 Ready 再次 launch。
         self.http
             .get(format!("{}/capabilities", discovery.address))
             .bearer_auth(&discovery.access_token)
@@ -913,6 +896,82 @@ mod tests {
             }
             server.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn reachable_diagnostic_host_is_reused_without_launch_or_health_readiness_timeout() {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0; 2048];
+                    let length = stream.read(&mut chunk).unwrap();
+                    assert!(length > 0);
+                    bytes.extend_from_slice(&chunk[..length]);
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                let (status, headers, body) = if request.starts_with("GET /capabilities ") {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer")
+                    );
+                    (
+                        "200 OK",
+                        "Content-Type: application/json\r\n",
+                        serde_json::to_string(&RuntimeHostCapabilities {
+                            protocol_version: assistant_protocol::PROTOCOL_VERSION,
+                            runtime_version: "0.25.1".into(),
+                            max_command_bytes: 1024,
+                            max_attachment_bytes: None,
+                            sse: true,
+                            streaming_upload: true,
+                            features: REQUIRED_FEATURES.to_vec(),
+                        })
+                        .unwrap(),
+                    )
+                } else {
+                    assert!(
+                        request.starts_with("OPTIONS /commands "),
+                        "must not wait for health before returning discovery"
+                    );
+                    (
+                        "204 No Content",
+                        "Access-Control-Allow-Origin: http://localhost:1420\r\n",
+                        String::new(),
+                    )
+                };
+                write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let home = tempdir().unwrap();
+        let directory = home.path().join("run");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("runtime.json");
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "address":address, "instance_id":"initializing-instance", "access_token":"a".repeat(43), "pid":std::process::id(),
+        })).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let coordinator = RuntimeBootstrapCoordinator::new(
+            home.path().to_owned(),
+            home.path().join("no-executable"),
+        )
+        .unwrap();
+        let connected = coordinator.bootstrap().await.unwrap();
+        assert_eq!(connected.instance_id, "initializing-instance");
+        assert!(!connected.started_runtime);
+        server.join().unwrap();
     }
 
     #[test]

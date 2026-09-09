@@ -1764,7 +1764,6 @@ fn output_preference_from_snapshot(preference: OutputPreferenceSnapshot) -> Outp
 fn input_error(error: &assistant_runtime::RuntimeError) -> (&'static str, bool) {
     match error {
         assistant_runtime::RuntimeError::ControllerUnavailable => ("controller_unavailable", true),
-        assistant_runtime::RuntimeError::ModelUnavailable { .. } => ("model_unavailable", true),
         assistant_runtime::RuntimeError::RuntimeNotRunning { .. } => ("runtime_unavailable", true),
         _ => ("input_rejected", true),
     }

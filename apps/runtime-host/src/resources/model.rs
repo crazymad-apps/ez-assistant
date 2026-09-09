@@ -1,5 +1,7 @@
 //! 已编译 Runtime 模型配置到 OpenAI-compatible Adapter 的 Host 装配。
 
+mod discovery;
+
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use agent_model::{ModelCapabilities, ModelService, ModelServiceBundle, ReasoningEffort};
@@ -27,6 +29,13 @@ impl HostModelServiceFactory {
 }
 
 impl ModelServiceFactory for HostModelServiceFactory {
+    fn discover_models<'a>(
+        &'a self,
+        request: assistant_runtime::ModelDiscoveryRequest<'a>,
+    ) -> assistant_runtime::ModelDiscoveryFuture<'a> {
+        Box::pin(discovery::discover(request))
+    }
+
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
@@ -50,8 +59,7 @@ impl ModelServiceFactory for HostModelServiceFactory {
                 let mut adapter =
                     chat_adapter(request.provider, request.capabilities.reasoning_enabled());
                 if request.capabilities.reasoning.is_some() {
-                    let effort_field = (!effort_values.is_empty())
-                        .then_some(reasoning_effort_field(request.provider, request.model));
+                    let effort_field = (!effort_values.is_empty()).then_some("reasoning_effort");
                     adapter = if adapter.supports_reasoning() {
                         adapter.with_reasoning_efforts(effort_field, effort_values)
                     } else {
@@ -61,7 +69,7 @@ impl ModelServiceFactory for HostModelServiceFactory {
                             effort_values,
                         )
                     };
-                    if let Some(policy) = reasoning_replay_policy(request.provider, request.model) {
+                    if let Some(policy) = reasoning_replay_policy(request.provider) {
                         adapter = adapter.with_reasoning_replay(policy);
                     }
                 }
@@ -77,11 +85,13 @@ impl ModelServiceFactory for HostModelServiceFactory {
                         capabilities,
                         timeouts,
                     )
+                    .map_err(model_service_error)?
+                    .with_max_input_tokens(request.max_input_tokens)
                     .map_err(model_service_error)?,
                 )
             }
             ModelProtocol::OpenAiResponses => {
-                let mut adapter = responses_adapter(request.provider, request.model)
+                let mut adapter = responses_adapter(request.provider)
                     .with_reasoning_efforts(effort_values)
                     .with_tool_choice(request.capabilities.tool_choice)
                     .with_tool_image_projection(request.capabilities.tool_image_projection);
@@ -100,6 +110,8 @@ impl ModelServiceFactory for HostModelServiceFactory {
                         capabilities,
                         timeouts,
                     )
+                    .map_err(model_service_error)?
+                    .with_max_input_tokens(request.max_input_tokens)
                     .map_err(model_service_error)?,
                 )
             }
@@ -130,17 +142,12 @@ fn chat_adapter(
     }
 }
 
-fn responses_adapter(
-    provider: &agent_types::ProviderId,
-    model_id: &str,
-) -> ResponsesProtocolAdapter {
-    match (provider.as_str(), model_id) {
-        ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp") => {
-            ResponsesProtocolAdapter::deepseek()
-        }
-        ("dashscope", "qwen3.8-max") => ResponsesProtocolAdapter::qwen(),
-        ("moonshot", "k3") => ResponsesProtocolAdapter::kimi(),
-        ("openai", _) => ResponsesProtocolAdapter::openai(),
+fn responses_adapter(provider: &agent_types::ProviderId) -> ResponsesProtocolAdapter {
+    match provider.as_str() {
+        "deepseek" => ResponsesProtocolAdapter::deepseek(),
+        "dashscope_api" | "dashscope_plan" => ResponsesProtocolAdapter::qwen(),
+        "moonshot" => ResponsesProtocolAdapter::kimi(),
+        "openai" => ResponsesProtocolAdapter::openai(),
         _ => ResponsesProtocolAdapter::openai_compatible(provider.clone()),
     }
 }
@@ -175,25 +182,10 @@ fn model_service_error(
     ModelServiceFactoryError::with_source("model service could not be created", source)
 }
 
-/// effort 字段属于具体服务方言与模型批次，不能只按 OpenAI-compatible 协议猜测。
-fn reasoning_effort_field(provider: &agent_types::ProviderId, model_id: &str) -> &'static str {
-    match (provider.as_str(), model_id) {
-        ("dashscope", "qwen3.8-max") => "reasoning_effort",
-        ("dashscope", _) => "thinking_budget",
-        _ => "reasoning_effort",
-    }
-}
-
-/// reasoning 历史回放属于具体模型批次的协议方言，不能由公共字段名推断。
-fn reasoning_replay_policy(
-    provider: &agent_types::ProviderId,
-    model_id: &str,
-) -> Option<ReasoningReplayPolicy> {
-    match (provider.as_str(), model_id) {
-        // Qwen 3.8 的 preserve_thinking 模式要求后续请求完整携带历史 reasoning_content。
-        ("dashscope", "qwen3.8-max") => Some(ReasoningReplayPolicy::PreserveAll),
-        // 公共 Kimi API 与 Kimi Code 使用不同 ID，但 K3 都要求保留历史 reasoning_content。
-        ("moonshot", "kimi-k3" | "k3") => Some(ReasoningReplayPolicy::PreserveAll),
+/// 思考历史编码属于服务商方言；是否思考由生效模型能力决定，不按模型 ID 分支。
+fn reasoning_replay_policy(provider: &agent_types::ProviderId) -> Option<ReasoningReplayPolicy> {
+    match provider.as_str() {
+        "dashscope_api" | "dashscope_plan" | "moonshot" => Some(ReasoningReplayPolicy::PreserveAll),
         _ => None,
     }
 }
@@ -201,255 +193,70 @@ fn reasoning_replay_policy(
 #[cfg(test)]
 mod tests {
     use agent_types::ProviderId;
-    use assistant_runtime::{ModelCatalog, ModelProtocol, ReasoningEffortKey};
-
-    fn resolved(
-        catalog: &ModelCatalog,
-        provider: &str,
-        model_id: &str,
-    ) -> assistant_runtime::ResolvedModelCapabilities {
-        resolved_protocol(
-            catalog,
-            provider,
+    #[test]
+    fn both_protocols_bind_input_limits_without_changing_the_context_window() {
+        use super::*;
+        use assistant_runtime::ResolvedModelCapabilities;
+        let home = tempfile::tempdir().unwrap();
+        let factory = HostModelServiceFactory::new(home.path());
+        let provider = ProviderId::new("openai").unwrap();
+        let capabilities = ResolvedModelCapabilities {
+            image_input: false,
+            reasoning: None,
+            tool_calls: false,
+            tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+            tool_choice: agent_model::ToolChoiceCapabilities::default(),
+            streaming: true,
+        };
+        for protocol in [
             ModelProtocol::OpenAiChatCompletions,
-            model_id,
-        )
-    }
-
-    fn resolved_protocol(
-        catalog: &ModelCatalog,
-        provider: &str,
-        protocol: ModelProtocol,
-        model_id: &str,
-    ) -> assistant_runtime::ResolvedModelCapabilities {
-        catalog.resolve(
-            &ProviderId::new(provider).expect("provider id"),
-            protocol,
-            model_id,
-        )
-    }
-
-    #[test]
-    fn bundled_model_catalog_is_strictly_valid() {
-        ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
-            .expect("bundled model catalog");
-    }
-
-    #[test]
-    fn bundled_model_catalog_contains_only_the_latest_verified_batches() {
-        let catalog = ModelCatalog::from_json(include_str!("../../resources/model-catalog.json"))
-            .expect("bundled model catalog");
-
-        assert_eq!(catalog.revision(), "2026-08-22-m6");
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "dashscope"
-                && route.provider_label == "阿里云百炼（Qwen）"
-                && route.protocol_label == "Chat Completions（OpenAI Compatible）"
-                && route.model_ids == ["qwen3.8-max"]
-        }));
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "deepseek"
-                && route.protocol == ModelProtocol::OpenAiResponses
-                && route.model_ids == ["deepseek-v4-flash", "deepseek-v4-pro"]
-        }));
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "deepseek"
-                && route.protocol == ModelProtocol::OpenAiResponses
-                && route.model_ids == ["deepseek-v4-flash-vision-exp"]
-        }));
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "dashscope"
-                && route.protocol == ModelProtocol::OpenAiResponses
-                && route.model_ids == ["qwen3.8-max"]
-        }));
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "moonshot"
-                && route.protocol == ModelProtocol::OpenAiResponses
-                && route.model_ids == ["k3"]
-        }));
-
-        let openai = resolved(&catalog, "openai", "gpt-5.6");
-        assert!(openai.image_input);
-        assert_eq!(
-            openai.tool_image_projection,
-            agent_model::ToolImageProjection::Unsupported
-        );
-        assert_eq!(
-            openai
-                .reasoning
-                .expect("gpt-5.6 reasoning")
-                .efforts
-                .into_iter()
-                .map(|effort| effort.key)
-                .collect::<Vec<_>>(),
-            [
-                ReasoningEffortKey::Low,
-                ReasoningEffortKey::Medium,
-                ReasoningEffortKey::High,
-                ReasoningEffortKey::XHigh,
-                ReasoningEffortKey::Max,
-            ]
-        );
-
-        let qwen = resolved(&catalog, "dashscope", "qwen3.8-max");
-        assert!(qwen.image_input);
-        assert_eq!(
-            qwen.tool_image_projection,
-            agent_model::ToolImageProjection::AggregatedUserInput
-        );
-        assert_eq!(
-            qwen.reasoning
-                .expect("qwen3.8-max reasoning")
-                .default_effort,
-            Some(ReasoningEffortKey::XHigh)
-        );
-
-        let kimi = resolved(&catalog, "moonshot", "kimi-k3");
-        assert!(kimi.image_input);
-        assert_eq!(
-            kimi.tool_image_projection,
-            agent_model::ToolImageProjection::AggregatedUserInput
-        );
-        assert_eq!(
-            kimi.reasoning.expect("kimi-k3 reasoning").default_effort,
-            Some(ReasoningEffortKey::Max)
-        );
-
-        let kimi_code = resolved(&catalog, "moonshot", "k3");
-        assert!(kimi_code.image_input);
-        assert_eq!(
-            kimi_code.tool_image_projection,
-            agent_model::ToolImageProjection::AggregatedUserInput
-        );
-        assert_eq!(
-            kimi_code.reasoning.expect("k3 reasoning").default_effort,
-            Some(ReasoningEffortKey::High)
-        );
-        assert!(catalog.routes().iter().any(|route| {
-            route.provider.as_str() == "moonshot"
-                && route.provider_label == "Moonshot（Kimi）"
-                && route.model_ids == ["k3"]
-        }));
-
-        assert!(resolved(&catalog, "zhipu", "glm-5v-turbo").image_input);
-        assert!(
-            resolved(&catalog, "deepseek", "deepseek-v4-pro")
-                .reasoning
-                .is_some()
-        );
-        assert_eq!(
-            resolved(&catalog, "deepseek", "deepseek-v4-pro").tool_image_projection,
-            agent_model::ToolImageProjection::Unsupported
-        );
-        let deepseek_vision = resolved(&catalog, "deepseek", "deepseek-v4-flash-vision-exp");
-        assert!(deepseek_vision.image_input);
-        assert_eq!(
-            deepseek_vision.tool_image_projection,
-            agent_model::ToolImageProjection::AggregatedUserInput
-        );
-        assert_eq!(
-            deepseek_vision
-                .reasoning
-                .as_ref()
-                .expect("deepseek vision reasoning")
-                .default_effort,
-            Some(ReasoningEffortKey::High)
-        );
-        assert_eq!(
-            deepseek_vision
-                .reasoning
-                .expect("deepseek vision reasoning")
-                .efforts
-                .into_iter()
-                .map(|effort| effort.key)
-                .collect::<Vec<_>>(),
-            [ReasoningEffortKey::High, ReasoningEffortKey::Max]
-        );
-
-        // 旧批次不再由随包表猜测能力，未命中时回到协议保守基线。
-        let legacy = resolved(&catalog, "deepseek", "deepseek-chat");
-        assert!(!legacy.image_input);
-        assert!(legacy.reasoning.is_none());
-
-        let deepseek_responses = resolved_protocol(
-            &catalog,
-            "deepseek",
             ModelProtocol::OpenAiResponses,
-            "deepseek-v4-pro",
-        );
-        assert!(deepseek_responses.tool_calls);
-        assert!(deepseek_responses.reasoning_enabled());
-        assert!(!deepseek_responses.image_input);
-        let deepseek_vision_responses = resolved_protocol(
-            &catalog,
-            "deepseek",
-            ModelProtocol::OpenAiResponses,
-            "deepseek-v4-flash-vision-exp",
-        );
-        assert!(deepseek_vision_responses.image_input);
-        assert_eq!(
-            deepseek_vision_responses.tool_image_projection,
-            agent_model::ToolImageProjection::NativeFunctionOutput
-        );
-        let qwen_responses = resolved_protocol(
-            &catalog,
-            "dashscope",
-            ModelProtocol::OpenAiResponses,
-            "qwen3.8-max",
-        );
-        assert!(qwen_responses.image_input);
-        assert_eq!(
-            qwen_responses.tool_image_projection,
-            agent_model::ToolImageProjection::AggregatedUserInput
-        );
-        let kimi_responses =
-            resolved_protocol(&catalog, "moonshot", ModelProtocol::OpenAiResponses, "k3");
-        assert!(kimi_responses.image_input);
-        assert_eq!(
-            kimi_responses.tool_image_projection,
-            agent_model::ToolImageProjection::NativeFunctionOutput
-        );
-        assert_eq!(
-            resolved_protocol(&catalog, "zhipu", ModelProtocol::OpenAiResponses, "glm-5.2",),
-            assistant_runtime::ResolvedModelCapabilities::conservative_openai_responses()
-        );
-    }
-
-    #[test]
-    fn qwen38_uses_its_documented_string_effort_field() {
-        let dashscope = ProviderId::new("dashscope").expect("provider id");
-        let moonshot = ProviderId::new("moonshot").expect("provider id");
-        assert_eq!(
-            super::reasoning_effort_field(&dashscope, "qwen3.8-max"),
-            "reasoning_effort"
-        );
-        assert_eq!(
-            super::reasoning_effort_field(&dashscope, "future-budget-model"),
-            "thinking_budget"
-        );
-        assert_eq!(
-            super::reasoning_replay_policy(&dashscope, "qwen3.8-max"),
-            Some(agent_openai_compatible::ReasoningReplayPolicy::PreserveAll)
-        );
-        assert_eq!(
-            super::reasoning_replay_policy(&dashscope, "future-budget-model"),
-            None
-        );
-        for model_id in ["kimi-k3", "k3"] {
-            assert_eq!(
-                super::reasoning_replay_policy(&moonshot, model_id),
-                Some(agent_openai_compatible::ReasoningReplayPolicy::PreserveAll)
-            );
+        ] {
+            for limit in [None, Some(64000), Some(0), Some(128001)] {
+                let result = factory.create_model(ModelServiceFactoryRequest {
+                    provider: &provider,
+                    protocol,
+                    capabilities: &capabilities,
+                    endpoint: "https://example.test/v1",
+                    model: "org/model",
+                    api_key: "artificial-key",
+                    context_window_tokens: 128000,
+                    max_input_tokens: limit,
+                    connect_timeout: std::time::Duration::from_secs(1),
+                    request_timeout: std::time::Duration::from_secs(1),
+                });
+                if matches!(limit, Some(0 | 128001)) {
+                    assert!(result.is_err());
+                    continue;
+                }
+                let bundle = result.unwrap();
+                assert_eq!(bundle.model.context_window_tokens(), 128000);
+                assert_eq!(bundle.model.max_input_tokens(), limit);
+            }
         }
     }
 
     #[test]
-    fn deepseek_vision_responses_uses_the_verified_deepseek_dialect() {
-        let deepseek = ProviderId::new("deepseek").expect("provider id");
-        assert_eq!(
-            super::responses_adapter(&deepseek, "deepseek-v4-flash-vision-exp"),
-            agent_openai_compatible::ResponsesProtocolAdapter::deepseek()
-        );
+    fn provider_rules_select_responses_and_reasoning_replay_without_model_identity() {
+        use agent_openai_compatible::{ReasoningReplayPolicy, ResponsesProtocolAdapter};
+        for (name, adapter, replay) in [
+            ("deepseek", ResponsesProtocolAdapter::deepseek(), None),
+            (
+                "dashscope_api",
+                ResponsesProtocolAdapter::qwen(),
+                Some(ReasoningReplayPolicy::PreserveAll),
+            ),
+            (
+                "moonshot",
+                ResponsesProtocolAdapter::kimi(),
+                Some(ReasoningReplayPolicy::PreserveAll),
+            ),
+            ("openai", ResponsesProtocolAdapter::openai(), None),
+        ] {
+            let provider = ProviderId::new(name).unwrap();
+            assert_eq!(super::responses_adapter(&provider), adapter);
+            assert_eq!(super::reasoning_replay_policy(&provider), replay);
+        }
     }
 
     #[test]

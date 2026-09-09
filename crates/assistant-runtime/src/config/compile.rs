@@ -1,26 +1,15 @@
-//! 顶层配置解析、全局策略编译和整体状态决策。
-//!
-//! 本模块只决定“整份配置是否能形成快照”以及 Runtime/Agent 全局策略。模型表先作为
-//! TOML value map 留在 [`RawConfig`] 中，再交给 `model` 模块逐条编译；这样全局错误可以
-//! fail-closed，而单模型错误只让配置进入 Degraded，不会拖垮其他有效模型。
+//! 全局策略的纯配置编译；模型连接与参数只由 managed_model 编译。
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
-    time::Duration,
-};
+use std::{collections::BTreeSet, num::NonZeroU32, time::Duration};
 
 use agent_core::{ActiveGuardrailMode, ExecutionBudget, GuardrailCheckConfig, GuardrailConfig};
 use agent_model::{GenerationConfig, ModelRetryPolicy, ModelRetryReason};
-use assistant_protocol::ModelKey;
 
 use super::{
-    catalog::ModelCatalog,
     domain::{
         ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
         McpRuntimeConfig, ResolvedConfig, RuntimeModelTransportConfig,
     },
-    model::compile_model,
     schema::{
         RawConfig, RawDelegationConfig, RawExecutionLimits, RawGenerationConfig, RawGuardrailCheck,
         RawGuardrailConfig, RawGuardrailMode, RawMcpConfig, RawModelRetryConfig, RawRuntimeConfig,
@@ -32,40 +21,26 @@ const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 /// 解析并编译一份 schema version 1 的 config.toml 文本。
 ///
-/// 编译分为四层：TOML 语法、顶层 schema、全局策略、逐模型语义。前三层失败时没有
-/// active 快照；逐模型错误则保留有效模型和安全诊断。整个过程是纯函数，不读取文件、
+/// 编译包括 TOML 语法、顶层 schema 与全局策略；错误返回安全诊断且没有 active 快照。
+/// 整个过程是纯函数，不读取文件、
 /// 不修改 Runtime registry，也不向错误中附带原始 TOML。
 pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
-    compile_runtime_config_with_catalog(document, &ModelCatalog::empty())
-}
-
-/// 使用已校验的随包目录编译 config.toml；目录本身不由该纯函数读取或写回。
-pub fn compile_runtime_config_with_catalog(
-    document: &str,
-    catalog: &ModelCatalog,
-) -> ConfigCompilation {
     // 先用无业务类型的 Value 检查语法和重复 key。若直接进入 serde 结构，语法错误和
     // 顶层类型错误会混在一起，也更容易误把包含源码片段的底层错误向上透出。
     if toml::from_str::<toml::Value>(document).is_err() {
         return invalid_compilation(
-            None,
             None,
             ConfigIssueCode::InvalidSyntax,
             "configuration is not valid TOML",
         );
     }
 
-    // 第二遍只解析全局结构；models 的 value 仍未进入 RawModelConfig。
+    // 第二遍只解析全局结构；旧模型键已由 Host 的启动收尾删除。
     let raw = match toml::from_str::<RawConfig>(document) {
         Ok(raw) => raw,
         Err(error) => {
             let code = classify_deserialization_error(&error, ConfigIssueCode::InvalidTopLevel);
-            return invalid_compilation(
-                None,
-                None,
-                code,
-                "top-level configuration structure is invalid",
-            );
+            return invalid_compilation(None, code, "top-level configuration structure is invalid");
         }
     };
 
@@ -73,7 +48,6 @@ pub fn compile_runtime_config_with_catalog(
     if raw.schema_version != SUPPORTED_SCHEMA_VERSION {
         return invalid_compilation(
             Some(raw.schema_version),
-            None,
             ConfigIssueCode::UnsupportedSchemaVersion,
             "configuration schema version is not supported",
         );
@@ -97,92 +71,24 @@ pub fn compile_runtime_config_with_catalog(
                 projection: ConfigProjection {
                     state: ConfigState::Invalid,
                     schema_version: Some(raw.schema_version),
-                    default_model: ModelKey::new(raw.default_model).ok(),
-                    auxiliary_vision_model: None,
                     delegation: None,
-                    models: Vec::new(),
                     issues,
                 },
             };
         }
     };
 
-    // default_model 形式无效不妨碍用户显式选择其他有效模型，所以属于 Degraded 而非 Invalid。
-    let mut all_issues = Vec::new();
-    let default_model = match ModelKey::new(raw.default_model.clone()) {
-        Ok(key) => Some(key),
-        Err(_) => {
-            all_issues.push(global_issue(
-                ConfigIssueCode::InvalidModelKey,
-                "default model key is invalid",
-            ));
-            None
-        }
-    };
-
-    // BTreeMap 同时保证模型查找使用强类型 key，并为后续协议投影提供确定性顺序。
-    let mut valid_models = BTreeMap::new();
-    let mut model_projections = Vec::with_capacity(raw.models.len());
-    for (raw_key, value) in raw.models {
-        let output = compile_model(
-            raw_key,
-            value,
-            &raw.default_model,
-            &global.generation,
-            catalog,
-        );
-        all_issues.extend(output.projection.issues.iter().cloned());
-        if let Some(model) = output.resolved {
-            valid_models.insert(model.key().clone(), model);
-        }
-        model_projections.push(output.projection);
-    }
-
-    // 默认 key 既要形式合法，也必须确实进入有效模型 map；仅在原始 models 表中出现不够。
-    let default_is_available = default_model
-        .as_ref()
-        .is_some_and(|key| valid_models.contains_key(key));
-    if !default_is_available {
-        all_issues.push(ConfigIssue {
-            code: ConfigIssueCode::DefaultModelUnavailable,
-            model_key: default_model.clone(),
-            message: "default model is not available",
-        });
-    }
-
-    let auxiliary_vision_model = global
-        .vision
-        .as_ref()
-        .map(|vision| vision.model_key.clone());
-    let vision = global.vision.filter(|vision| {
-        let valid = valid_models
-            .get(&vision.model_key)
-            .is_some_and(|model| model.capabilities().image_input);
-        if !valid {
-            all_issues.push(ConfigIssue {
-                code: ConfigIssueCode::InvalidModel,
-                model_key: None,
-                message: "auxiliary vision model is unavailable or lacks image input",
-            });
-        }
-        valid
-    });
-    let state = if all_issues.is_empty() {
-        ConfigState::Ready
-    } else {
-        ConfigState::Degraded
-    };
+    let state = ConfigState::Ready;
     let resolved = ResolvedConfig {
         schema_version: raw.schema_version,
-        default_model: default_model.clone(),
         transport: global.transport,
+        generation: global.generation,
         retry_policy: global.retry_policy,
         budget: global.budget,
         guardrails: global.guardrails,
         delegation: global.delegation,
         mcp: global.mcp,
-        vision,
-        models: valid_models,
+        vision: global.vision,
     };
     ConfigCompilation {
         state,
@@ -190,11 +96,8 @@ pub fn compile_runtime_config_with_catalog(
         projection: ConfigProjection {
             state,
             schema_version: Some(raw.schema_version),
-            default_model,
-            auxiliary_vision_model,
             delegation: Some(global.delegation),
-            models: model_projections,
-            issues: all_issues,
+            issues: Vec::new(),
         },
     }
 }
@@ -307,14 +210,8 @@ fn compile_global(
     }
 
     let vision = match vision {
-        Some(vision)
-            if vision.timeout_ms > 0
-                && vision.max_output_tokens > 0
-                && ModelKey::new(vision.model_key.clone()).is_ok() =>
-        {
+        Some(vision) if vision.timeout_ms > 0 && vision.max_output_tokens > 0 => {
             Some(super::domain::VisionConfig {
-                model_key: ModelKey::new(vision.model_key.clone())
-                    .expect("vision model key was validated"),
                 timeout: Duration::from_millis(vision.timeout_ms),
                 max_output_tokens: vision.max_output_tokens,
             })
@@ -475,11 +372,7 @@ pub(super) fn classify_deserialization_error(
 
 /// 构造不归属于某个合法模型 key 的固定安全诊断。
 pub(super) fn global_issue(code: ConfigIssueCode, message: &'static str) -> ConfigIssue {
-    ConfigIssue {
-        code,
-        model_key: None,
-        message,
-    }
+    ConfigIssue { code, message }
 }
 
 /// 构造没有 active 快照的 Invalid 结果。
@@ -487,7 +380,6 @@ pub(super) fn global_issue(code: ConfigIssueCode, message: &'static str) -> Conf
 /// 只允许传入已经脱敏的静态 message；调用方不得把底层解析错误文本传到这里。
 fn invalid_compilation(
     schema_version: Option<u32>,
-    default_model: Option<ModelKey>,
     code: ConfigIssueCode,
     message: &'static str,
 ) -> ConfigCompilation {
@@ -498,10 +390,7 @@ fn invalid_compilation(
         projection: ConfigProjection {
             state: ConfigState::Invalid,
             schema_version,
-            default_model,
-            auxiliary_vision_model: None,
             delegation: None,
-            models: Vec::new(),
             issues: vec![issue],
         },
     }

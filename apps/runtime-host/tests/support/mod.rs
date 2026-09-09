@@ -10,7 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{Json, Router, response::IntoResponse, routing::post};
+use axum::{
+    Json, Router,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use reqwest::blocking::Client as HttpClient;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -32,6 +36,23 @@ impl FakeProvider {
 
     /// 复用同一有界生命周期承载测试私有 wire fixture，不增加产品模型或 MCP 路由。
     pub fn with_router(app: Router) -> Self {
+        let app = app.route(
+            "/v1/models",
+            get(|| async {
+                let data = [
+                    "offline-model",
+                    "offline-alternate",
+                    "offline-vllm",
+                    "offline-responses",
+                    "deepseek-v4-pro",
+                    "qwen3.8-max",
+                    "offline-text",
+                    "offline-mcp",
+                ]
+                .map(|id| json!({"id":id,"object":"model","owned_by":"fixture"}));
+                Json(json!({"object":"list","data":data}))
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
         listener
             .set_nonblocking(true)
@@ -974,175 +995,143 @@ fn inspect_images_tool_response(paths: Vec<&str>) -> String {
     format!("data: {proposal}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
-pub fn write_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "fixture"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[models.fixture]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "{endpoint}"
-model = "offline-model"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-
-[models.alternate]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "{endpoint}"
-model = "offline-alternate"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
-    );
-    fs::write(runtime_home.join("config.toml"), document).expect("write test config");
+/// 测试模型配置独立于产品 TOML；Host Ready 后通过正式模型管理命令安装一次。
+pub fn write_model_fixture(runtime_home: &Path, providers: Vec<Value>) {
+    fs::create_dir_all(runtime_home).unwrap();
+    fs::write(runtime_home.join("config.toml"), "schema_version=1\n[runtime.model_transport]\nconnect_timeout_ms=1000\nrequest_timeout_ms=10000\n").unwrap();
+    fs::write(
+        runtime_home.join("fixture-model-setup.json"),
+        serde_json::to_vec(&providers).unwrap(),
+    )
+    .unwrap();
 }
 
-pub fn write_vllm_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "vllm-fixture"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[models.vllm-fixture]
-protocol = "openai_chat_completions"
-provider = "vllm"
-endpoint = "{endpoint}"
-model = "offline-vllm"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-
-[models.vllm-fixture.capabilities]
-image_input = false
-tool_calls = true
-streaming = true
-
-[models.vllm-fixture.capabilities.reasoning]
-enabled = true
-"#
-    );
-    fs::write(runtime_home.join("config.toml"), document).expect("write vLLM test config");
+pub fn model_parameters(image: bool, reasoning: bool, projection: &str) -> Value {
+    json!({
+        "context_window_tokens":{"state":"known","value":8192}, "max_output_tokens":{"state":"known","value":4096},
+        "max_input_tokens":{"state":"unknown"}, "reasoning_max_input_tokens":{"state":"unknown"}, "reasoning_max_output_tokens":{"state":"unknown"},
+        "streaming":"supported", "tool_calls":"supported", "image_input":if image {"supported"} else {"unsupported"},
+        "tool_choice":{"auto":"supported","none":"supported","required":"supported","named":"supported"},
+        "tool_image_projection":projection, "reasoning":if reasoning {"supported"} else {"unsupported"},
+        "reasoning_mode":if reasoning {"optional"} else {"unsupported"}, "reasoning_efforts":{}, "default_reasoning_effort":null
+    })
 }
 
-pub fn write_responses_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "responses-fixture"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[models.responses-fixture]
-protocol = "openai_responses"
-provider = "fixture"
-endpoint = "{endpoint}"
-model = "offline-responses"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
-    );
-    fs::write(runtime_home.join("config.toml"), document).expect("write Responses test config");
+pub fn provider_fixture(
+    endpoint: &str,
+    api_key: &str,
+    provider_type: &str,
+    protocol: &str,
+    models: Vec<Value>,
+) -> Value {
+    let provider: assistant_protocol::ProviderType =
+        serde_json::from_value(json!(provider_type)).expect("fixture provider type");
+    json!({"connection": {"display_name":"Fixture provider","provider_type":provider_type,"endpoint":endpoint,"protocol_preference":protocol,"models_path":"/v1/models","discovery_format":provider.discovery_format()}, "api_key":api_key, "models":models})
 }
 
-pub fn write_deepseek_responses_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "deepseek-responses"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[models.deepseek-responses]
-protocol = "openai_responses"
-provider = "deepseek"
-endpoint = "{endpoint}"
-model = "deepseek-v4-pro"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
+pub fn write_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![provider_fixture(
+            endpoint,
+            api_key,
+            "local",
+            "chat_completions",
+            vec![
+                json!({"model_id":"offline-model","parameters":model_parameters(false,false,"unsupported"),"purpose":"default"}),
+                json!({"model_id":"offline-alternate","parameters":model_parameters(false,false,"unsupported")}),
+            ],
+        )],
     );
-    fs::write(runtime_home.join("config.toml"), document)
-        .expect("write DeepSeek Responses test config");
 }
 
-pub fn write_qwen_image_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "qwen-image-fixture"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[models.qwen-image-fixture]
-protocol = "openai_chat_completions"
-provider = "dashscope"
-endpoint = "{endpoint}"
-model = "qwen3.8-max"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
+pub fn write_vllm_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![provider_fixture(
+            endpoint,
+            api_key,
+            "vllm",
+            "chat_completions",
+            vec![
+                json!({"model_id":"offline-vllm","parameters":model_parameters(false,true,"unsupported"),"purpose":"default"}),
+            ],
+        )],
     );
-    fs::write(runtime_home.join("config.toml"), document).expect("write Qwen image test config");
 }
 
-pub fn write_auxiliary_vision_config(runtime_home: &Path, endpoint: &str, api_key: &str) {
-    fs::create_dir_all(runtime_home).expect("create runtime home");
-    let document = format!(
-        r#"schema_version = 1
-default_model = "text-fixture"
-
-[runtime.model_transport]
-connect_timeout_ms = 1000
-request_timeout_ms = 10000
-
-[agent.vision]
-model_key = "vision-fixture"
-timeout_ms = 10000
-max_output_tokens = 1024
-
-[models.text-fixture]
-protocol = "openai_chat_completions"
-provider = "fixture"
-endpoint = "{endpoint}"
-model = "offline-text"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-
-[models.vision-fixture]
-protocol = "openai_chat_completions"
-provider = "dashscope"
-endpoint = "{endpoint}"
-model = "qwen3.8-max"
-api_key = "{api_key}"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
+pub fn write_responses_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![provider_fixture(
+            endpoint,
+            api_key,
+            "openai",
+            "responses",
+            vec![
+                json!({"model_id":"offline-responses","parameters":model_parameters(false,false,"unsupported"),"purpose":"default"}),
+            ],
+        )],
     );
-    fs::write(runtime_home.join("config.toml"), document)
-        .expect("write auxiliary vision test config");
+}
+
+pub fn write_deepseek_responses_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![provider_fixture(
+            endpoint,
+            api_key,
+            "deepseek",
+            "responses",
+            vec![
+                json!({"model_id":"deepseek-v4-pro","parameters":model_parameters(false,false,"unsupported"),"purpose":"default"}),
+            ],
+        )],
+    );
+}
+
+pub fn write_qwen_image_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![provider_fixture(
+            endpoint,
+            api_key,
+            "dashscope_plan",
+            "chat_completions",
+            vec![
+                json!({"model_id":"qwen3.8-max","parameters":model_parameters(true,true,"follow_up_user_message"),"purpose":"default"}),
+            ],
+        )],
+    );
+}
+
+pub fn write_auxiliary_vision_config(home: &Path, endpoint: &str, api_key: &str) {
+    write_model_fixture(
+        home,
+        vec![
+            provider_fixture(
+                endpoint,
+                api_key,
+                "local",
+                "chat_completions",
+                vec![
+                    json!({"model_id":"offline-text","parameters":model_parameters(false,false,"unsupported"),"purpose":"default"}),
+                ],
+            ),
+            provider_fixture(
+                endpoint,
+                api_key,
+                "dashscope_plan",
+                "chat_completions",
+                vec![
+                    json!({"model_id":"qwen3.8-max","parameters":model_parameters(true,true,"follow_up_user_message"),"purpose":"vision"}),
+                ],
+            ),
+        ],
+    );
+    let mut document = fs::read_to_string(home.join("config.toml")).unwrap();
+    document.push_str("\n[agent.vision]\ntimeout_ms=10000\nmax_output_tokens=1024\n");
+    fs::write(home.join("config.toml"), document).unwrap();
 }
 
 pub struct HostProcess {
@@ -1168,7 +1157,7 @@ impl HostProcess {
         // 产品默认固定 7240；每个隔离夹具显式配置自己的空闲端口，避免并行用例争用。
         let path = runtime_home.join("config.toml");
         let mut document = fs::read_to_string(&path)
-            .unwrap_or_else(|_| "schema_version = 1\ndefault_model = \"\"\n".into())
+            .unwrap_or_else(|_| "schema_version = 1\n".into())
             .parse::<toml_edit::DocumentMut>()
             .unwrap();
         if document.get("host_access").is_none() {
@@ -1209,11 +1198,42 @@ impl HostProcess {
                 .expect("initialize test password");
         }
         let (base_url, access_token) = wait_until_ready_with_client(runtime_home, &mut child, http);
-        Self {
+        let host = Self {
             child: Some(child),
             base_url,
             access_token,
+        };
+        let fixture_path = runtime_home.join("fixture-model-setup.json");
+        if fixture_path.exists() {
+            let providers: Vec<Value> =
+                serde_json::from_slice(&fs::read(&fixture_path).unwrap()).unwrap();
+            let mut client = host.connect();
+            for fixture in providers {
+                let provider = client.runtime("create_provider", json!({"connection":fixture["connection"],"credential":{"mode":"replace","value":fixture["api_key"]}}));
+                for model in fixture["models"].as_array().unwrap() {
+                    let selection = json!({"provider_instance_id":provider["provider_instance_id"],"model_id":model["model_id"]});
+                    client.runtime(
+                        "save_model_fixed_config",
+                        json!({"selection":selection,"parameters":model["parameters"]}),
+                    );
+                    match model["purpose"].as_str() {
+                        Some("default") => {
+                            client.runtime("set_default_model", json!({"selection":selection}));
+                        }
+                        Some("vision") => {
+                            client.runtime(
+                                "set_auxiliary_vision_model",
+                                json!({"selection":selection}),
+                            );
+                        }
+                        None => {}
+                        _ => panic!("unknown fixture model purpose"),
+                    }
+                }
+            }
+            fs::remove_file(fixture_path).unwrap();
         }
+        host
     }
 
     pub fn connect(&self) -> Client {
@@ -1437,7 +1457,12 @@ fn wait_until_ready_with_client(
                 .get(format!("{base_url}/health"))
                 .bearer_auth(access_token)
                 .send()
-                .is_ok_and(|response| response.status().is_success())
+                .is_ok_and(|response| {
+                    response.status().is_success()
+                        && response
+                            .json::<serde_json::Value>()
+                            .is_ok_and(|health| health["status"] == "ready")
+                })
         {
             return (base_url.to_owned(), access_token.to_owned());
         }

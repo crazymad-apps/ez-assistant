@@ -43,7 +43,7 @@ pub(in crate::runtime) struct PreparedGoalSubmission {
 
 impl AssistantRuntime {
     /// 在解析附件和构造 UserMessage 前校验 Goal 提交意图。
-    pub(in crate::runtime) fn goal_submission(
+    pub(in crate::runtime) async fn goal_submission(
         &self,
         session: &SessionController,
         mode: SubmitInputMode,
@@ -51,7 +51,7 @@ impl AssistantRuntime {
         match mode {
             SubmitInputMode::Normal => Ok(GoalSubmission::None),
             SubmitInputMode::ResumeGoal => {
-                let (model_key, goal) = {
+                let (model_selection, goal) = {
                     let state = session.lock_state()?;
                     let goal = state.goal.as_ref().ok_or(RuntimeError::InvalidRequest {
                         reason: "session has no Goal to resume",
@@ -61,22 +61,34 @@ impl AssistantRuntime {
                             reason: "only a paused Goal can be resumed",
                         });
                     }
-                    (state.model_key.clone(), goal.clone())
+                    (state.model_selection.clone(), goal.clone())
                 };
-                ensure_goal_model_supported(&self.config_registry, session, &model_key)?;
+                ensure_goal_model_supported(
+                    &self.config_registry,
+                    session,
+                    model_selection.as_ref(),
+                    self.store.as_ref(),
+                )
+                .await?;
                 Ok(GoalSubmission::Resume(Box::new(goal)))
             }
             SubmitInputMode::StartGoal => {
-                let model_key = {
+                let model_selection = {
                     let state = session.lock_state()?;
                     if state.goal.is_some() {
                         return Err(RuntimeError::GoalAlreadyExists {
                             session_id: session.id().clone(),
                         });
                     }
-                    state.model_key.clone()
+                    state.model_selection.clone()
                 };
-                ensure_goal_model_supported(&self.config_registry, session, &model_key)?;
+                ensure_goal_model_supported(
+                    &self.config_registry,
+                    session,
+                    model_selection.as_ref(),
+                    self.store.as_ref(),
+                )
+                .await?;
                 Ok(GoalSubmission::Start)
             }
         }
@@ -267,7 +279,7 @@ impl AssistantRuntime {
         session.ensure_healthy()?;
 
         // 一次锁内冻结恢复所依赖的全部事实并分配 ID；后续 Store I/O 期间不持有 Session 锁。
-        let (goal, model_key, input_id, run_id, variant, approval_mode) = {
+        let (goal, model_selection, input_id, run_id, variant, approval_mode) = {
             let state = session.lock_state()?;
             let goal = state
                 .goal
@@ -289,14 +301,20 @@ impl AssistantRuntime {
             }
             (
                 goal.clone(),
-                state.model_key.clone(),
+                state.model_selection.clone(),
                 self.allocate_input_id(&state)?,
                 allocate_run_id(&state)?,
                 state.current_variant,
                 state.approval_mode,
             )
         };
-        ensure_goal_model_supported(&self.config_registry, session.as_ref(), &model_key)?;
+        ensure_goal_model_supported(
+            &self.config_registry,
+            session.as_ref(),
+            model_selection.as_ref(),
+            self.store.as_ref(),
+        )
+        .await?;
 
         // 先构造下一世代及其隐藏 continuation，但此时不能提前修改内存中的权威 Goal 投影。
         let accepted_at_ms = super::super::now_ms()?;
@@ -374,7 +392,7 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
-        let (goal, model_key, mut message) = {
+        let (goal, model_selection, mut message) = {
             let state = session.lock_state()?;
             let goal = state
                 .goal
@@ -415,9 +433,15 @@ impl AssistantRuntime {
                     component: "held input message",
                 },
             )?;
-            (goal.clone(), state.model_key.clone(), message)
+            (goal.clone(), state.model_selection.clone(), message)
         };
-        ensure_goal_model_supported(&self.config_registry, session.as_ref(), &model_key)?;
+        ensure_goal_model_supported(
+            &self.config_registry,
+            session.as_ref(),
+            model_selection.as_ref(),
+            self.store.as_ref(),
+        )
+        .await?;
         let accepted_at_ms = super::super::now_ms()?;
         let resumed =
             goal.resume(accepted_at_ms)
@@ -592,18 +616,20 @@ impl GoalSubmission {
 }
 
 /// 校验目标 Session 当前模型能够执行 Goal 所需的工具调用。
-pub(in crate::runtime) fn ensure_goal_model_supported(
+pub(in crate::runtime) async fn ensure_goal_model_supported(
     config_registry: &ConfigRegistry,
     session: &SessionController,
-    model_key: &assistant_protocol::ModelKey,
+    model_selection: Option<&assistant_protocol::ModelSelection>,
+    store: &dyn crate::RuntimeStore,
 ) -> RuntimeResult<()> {
-    let snapshot = config_registry.snapshot()?;
-    let model = snapshot
-        .model(model_key)
-        .ok_or_else(|| RuntimeError::ModelUnavailable {
-            model_key: model_key.clone(),
-        })?;
-    if !model.capabilities().tool_calls {
+    let prepared = super::super::model::resolve_session_model(
+        config_registry,
+        session,
+        model_selection,
+        store,
+    )
+    .await?;
+    if !prepared.model.capabilities().tool_calls {
         return Err(RuntimeError::GoalUnsupportedByModel {
             session_id: session.id().clone(),
         });

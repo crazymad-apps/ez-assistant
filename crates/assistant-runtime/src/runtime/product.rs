@@ -170,7 +170,8 @@ impl AssistantRuntime {
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
             let configuration = self.get_config_status(Default::default())?.status;
-            let models = self.list_models(Default::default())?.models;
+            let providers = self.list_providers()?;
+            let model_settings = self.get_model_settings()?;
             let workspaces = self
                 .list_workspaces(ListWorkspacesRequest::default())?
                 .workspaces;
@@ -239,7 +240,8 @@ impl AssistantRuntime {
                         value: ApplicationSnapshot {
                             runtime_lifecycle,
                             configuration,
-                            models,
+                            providers,
+                            model_settings,
                             workspaces,
                             active_sessions,
                             archived_sessions,
@@ -333,9 +335,11 @@ impl AssistantRuntime {
                 .get_session_usage(&request.session_id)
                 .await
                 .map_err(|source| RuntimeError::from_store("load session usage", source))?;
-            let usage = project_usage(&stored_usage, &summary, self)?;
+            let (composer_capabilities, context_window) = self
+                .composer_capabilities(summary.model_selection.as_ref())
+                .await?;
+            let usage = project_usage(&stored_usage, context_window);
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
-            let composer_capabilities = self.composer_capabilities(&summary.model_key)?;
             let workspace = self.session_workspace_snapshot(&session)?;
             let (work_plan, goal, active_skills) = {
                 let state = session.lock_state()?;
@@ -1307,17 +1311,36 @@ impl AssistantRuntime {
 }
 
 impl AssistantRuntime {
-    fn composer_capabilities(
+    async fn composer_capabilities(
         &self,
-        model_key: &assistant_protocol::ModelKey,
-    ) -> RuntimeResult<ComposerCapabilitiesSnapshot> {
+        model_selection: Option<&assistant_protocol::ModelSelection>,
+    ) -> RuntimeResult<(ComposerCapabilitiesSnapshot, Option<u64>)> {
         let snapshot = self.config_registry.snapshot()?;
-        let Some(active) = snapshot.active() else {
-            return Ok(unavailable_composer_capabilities());
+        let prepared = match self
+            .config_registry
+            .prepare_model(
+                &snapshot,
+                model_selection,
+                self.store.as_ref(),
+                self.model_factory.as_ref(),
+            )
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let selected = model_selection.cloned().or(self
+                    .config_registry
+                    .managed_models()?
+                    .settings
+                    .default_model
+                    .clone());
+                return Ok((
+                    unavailable_composer_capabilities(selected, Some(error.to_protocol_info())),
+                    None,
+                ));
+            }
         };
-        let Some(model) = active.model(model_key) else {
-            return Ok(unavailable_composer_capabilities());
-        };
+        let model = &prepared.model;
         let reasoning_effort_options = model
             .capabilities()
             .reasoning
@@ -1335,23 +1358,38 @@ impl AssistantRuntime {
             .unwrap_or_default();
         let image_handling = if model.capabilities().image_input {
             ImageHandlingMode::Native
-        } else if model.capabilities().tool_calls && active.vision().is_some() {
+        } else if model.capabilities().tool_calls
+            && self
+                .config_registry
+                .managed_models()?
+                .settings
+                .vision_model
+                .is_some()
+        {
             ImageHandlingMode::Tool
         } else {
             ImageHandlingMode::Unavailable
         };
-        Ok(ComposerCapabilitiesSnapshot {
-            selected_model_key: Some(model_key.clone()),
-            reasoning_effort_options,
-            image_handling,
-            goal_supported: model.capabilities().tool_calls,
-        })
+        Ok((
+            ComposerCapabilitiesSnapshot {
+                selected_model: Some(prepared.selection.clone()),
+                model_error: None,
+                reasoning_effort_options,
+                image_handling,
+                goal_supported: model.capabilities().tool_calls,
+            },
+            Some(model.context_window_tokens()),
+        ))
     }
 }
 
-fn unavailable_composer_capabilities() -> ComposerCapabilitiesSnapshot {
+fn unavailable_composer_capabilities(
+    selected_model: Option<assistant_protocol::ModelSelection>,
+    model_error: Option<assistant_protocol::RuntimeErrorInfo>,
+) -> ComposerCapabilitiesSnapshot {
     ComposerCapabilitiesSnapshot {
-        selected_model_key: None,
+        selected_model,
+        model_error,
         reasoning_effort_options: Vec::new(),
         image_handling: ImageHandlingMode::Unavailable,
         goal_supported: false,
@@ -2232,7 +2270,13 @@ fn project_image_inspection_detail(
 ) -> Option<assistant_protocol::ImageInspectionDetailSnapshot> {
     let metadata = result.metadata.as_deref()?;
     Some(assistant_protocol::ImageInspectionDetailSnapshot {
-        auxiliary_model: assistant_protocol::ModelKey::new(metadata.model_key.clone()?).ok()?,
+        auxiliary_model: assistant_protocol::ModelSelection {
+            provider_instance_id: assistant_protocol::ProviderInstanceId::new(
+                metadata.model_provider.clone()?,
+            )
+            .ok()?,
+            model_id: metadata.model_id.clone()?,
+        },
         elapsed_ms: metadata.elapsed_ms?,
         usage: metadata.usage.as_ref().map(token_usage),
     })
@@ -2240,9 +2284,8 @@ fn project_image_inspection_detail(
 
 fn project_usage(
     stored: &crate::StoredSessionUsage,
-    session: &assistant_protocol::SessionSummary,
-    runtime: &AssistantRuntime,
-) -> RuntimeResult<SessionUsageSnapshot> {
+    context_window: Option<u64>,
+) -> SessionUsageSnapshot {
     let previous = stored.latest.as_ref();
     let accumulated = (stored.request_count > 0).then_some(UsageTotals {
         input_tokens: Some(stored.input_tokens),
@@ -2256,12 +2299,6 @@ fn project_usage(
         && stored.cached_request_count == stored.request_count)
         .then(|| ratio_basis_points(stored.cached_input_tokens, stored.input_tokens))
         .flatten();
-    let context_window = runtime
-        .list_models(Default::default())?
-        .models
-        .into_iter()
-        .find(|model| model.model_key.as_ref() == Some(&session.model_key))
-        .and_then(|model| model.context_window_tokens);
     let context = previous.zip(context_window).map(|(usage, window_tokens)| {
         let used_tokens = usage.input_tokens;
         let basis_points = used_tokens
@@ -2275,7 +2312,7 @@ fn project_usage(
             usage_basis_points: u16::try_from(basis_points).unwrap_or(10_000),
         }
     });
-    Ok(SessionUsageSnapshot {
+    SessionUsageSnapshot {
         accumulated,
         previous_turn: previous.map(usage_totals),
         latest_cache_hit_basis_points,
@@ -2289,7 +2326,7 @@ fn project_usage(
             },
         ),
         context,
-    })
+    }
 }
 
 fn project_child_usage(snapshot: &ConversationSnapshot) -> ChildTaskUsageSnapshot {
@@ -2616,6 +2653,47 @@ mod tool_image_projection_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn image_inspection_preserves_provider_identity_and_arbitrary_model_ids() {
+        for provider in ["provider-one", "provider-two"] {
+            let result = ToolResult {
+                call_id: agent_types::ToolCallId::new("inspect-call").unwrap(),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::text("image description"),
+                metadata: Some(Box::new(agent_types::ToolExecutionMetadata {
+                    model_provider: Some(provider.into()),
+                    model_id: Some("org/vision:latest".into()),
+                    elapsed_ms: Some(12),
+                    usage: None,
+                })),
+            };
+            let stored = serde_json::to_value(&result).unwrap();
+            assert!(stored["metadata"].get("model_key").is_none());
+            let restored: ToolResult = serde_json::from_value(stored).unwrap();
+            let detail = project_image_inspection_detail(&restored).unwrap();
+            assert_eq!(
+                detail.auxiliary_model.provider_instance_id.as_str(),
+                provider
+            );
+            assert_eq!(detail.auxiliary_model.model_id, "org/vision:latest");
+            assert_eq!(detail.elapsed_ms, 12);
+        }
+        // 旧标识只按未知字段丢弃，不转换为默认模型，不影响历史工具正文读取。
+        let legacy: agent_types::ToolExecutionMetadata = serde_json::from_value(json!({
+            "model_key": "old-invalid/model", "elapsed_ms": 9, "usage": null,
+        }))
+        .unwrap();
+        assert!(legacy.model_provider.is_none());
+        assert!(legacy.model_id.is_none());
+        assert_eq!(legacy.elapsed_ms, Some(9));
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("model_key")
+                .is_none()
+        );
+    }
 
     fn image_exchange() -> (
         ConversationSnapshot,

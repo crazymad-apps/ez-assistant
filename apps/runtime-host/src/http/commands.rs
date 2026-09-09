@@ -100,6 +100,27 @@ pub(super) async fn handle_command(
         )
             .into_response();
     }
+    // 本机关闭属于进程控制；未就绪时不能进入任何业务 dispatch。
+    if state.startup.services().is_err() {
+        if matches!(
+            request.command,
+            HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
+        ) {
+            state.shutdown.cancel();
+            return Json(CommandResponse {
+                request_id: request.request_id,
+                result: HostCommandResult::Runtime(Box::new(
+                    RuntimeCommandResult::ShutdownRuntime(
+                        assistant_protocol::ShutdownRuntimeResult {
+                            lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
+                        },
+                    ),
+                )),
+            })
+            .into_response();
+        }
+        return super::error::HttpError::unavailable().into_response();
+    }
     if matches!(
         request.command,
         HostCommand::Runtime(RuntimeCommand::ReloadConfig(_))
@@ -155,22 +176,26 @@ async fn dispatch_device_gateway(
     state: &HttpState,
     command: DeviceGatewayCommand,
 ) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
+    let services = state
+        .startup
+        .services()
+        .map_err(|error| error.to_protocol_info())?;
     let result = match command {
         DeviceGatewayCommand::GetSnapshot(_) => DeviceGatewayCommandResult::GetSnapshot(
-            state
+            services
                 .device_gateway
                 .snapshot()
                 .await
                 .map_err(|error| error.to_protocol_info())?,
         ),
         DeviceGatewayCommand::SetAccessEnabled(request) => {
-            state
+            services
                 .device_gateway
                 .set_enabled(request.enabled)
                 .await
                 .map_err(|error| error.to_protocol_info())?;
             DeviceGatewayCommandResult::SetAccessEnabled(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -178,13 +203,13 @@ async fn dispatch_device_gateway(
             })
         }
         DeviceGatewayCommand::OpenPairingWindow(_) => {
-            state
+            services
                 .device_gateway
                 .open_pairing_window()
                 .await
                 .map_err(|error| error.to_protocol_info())?;
             DeviceGatewayCommandResult::OpenPairingWindow(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -192,9 +217,9 @@ async fn dispatch_device_gateway(
             })
         }
         DeviceGatewayCommand::ClosePairingWindow(_) => {
-            state.device_gateway.close_pairing_window().await;
+            services.device_gateway.close_pairing_window().await;
             DeviceGatewayCommandResult::ClosePairingWindow(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -202,13 +227,13 @@ async fn dispatch_device_gateway(
             })
         }
         DeviceGatewayCommand::ConfirmPairing(request) => {
-            state
+            services
                 .device_gateway
                 .confirm_pairing(request)
                 .await
                 .map_err(|error| error.to_protocol_info())?;
             DeviceGatewayCommandResult::ConfirmPairing(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -216,14 +241,14 @@ async fn dispatch_device_gateway(
             })
         }
         DeviceGatewayCommand::RenameDevice(request) => {
-            state
+            services
                 .runtime
                 .rename_paired_device(request.device_id, request.display_name)
                 .await
                 .map_err(|error| error.to_protocol_info())?;
-            state.device_gateway.notify_changed();
+            services.device_gateway.notify_changed();
             DeviceGatewayCommandResult::RenameDevice(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -231,18 +256,18 @@ async fn dispatch_device_gateway(
             })
         }
         DeviceGatewayCommand::RevokeDevice(request) => {
-            state
+            services
                 .runtime
                 .revoke_paired_device(request.device_id.clone())
                 .await
                 .map_err(|error| error.to_protocol_info())?;
-            state
+            services
                 .device_gateway
                 .revoke_connection(&request.device_id)
                 .await;
-            state.device_gateway.notify_changed();
+            services.device_gateway.notify_changed();
             DeviceGatewayCommandResult::RevokeDevice(DeviceGatewayMutationResult {
-                snapshot: state
+                snapshot: services
                     .device_gateway
                     .snapshot()
                     .await
@@ -257,8 +282,73 @@ async fn dispatch_runtime(
     state: &HttpState,
     command: RuntimeCommand,
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
-    let runtime = state.runtime.as_ref();
+    let services = state.startup.services()?;
+    let runtime = services.runtime.as_ref();
     let (result, shutdown) = match command {
+        RuntimeCommand::ListProviders(_) => (
+            RuntimeCommandResult::ListProviders(runtime.list_providers()?),
+            false,
+        ),
+        RuntimeCommand::CreateProvider(request) => (
+            RuntimeCommandResult::CreateProvider(runtime.create_provider(request).await?),
+            false,
+        ),
+        RuntimeCommand::UpdateProvider(request) => (
+            RuntimeCommandResult::UpdateProvider(runtime.update_provider(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetProviderUsage(request) => (
+            RuntimeCommandResult::GetProviderUsage(
+                runtime
+                    .get_provider_usage(request.provider_instance_id)
+                    .await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::DeleteProvider(request) => (
+            RuntimeCommandResult::DeleteProvider(
+                runtime
+                    .delete_provider(request.provider_instance_id)
+                    .await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListProviderModels(request) => (
+            RuntimeCommandResult::ListProviderModels(
+                runtime
+                    .list_provider_models(request.provider_instance_id)
+                    .await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetModelSettings(_) => (
+            RuntimeCommandResult::GetModelSettings(runtime.get_model_settings()?),
+            false,
+        ),
+        RuntimeCommand::GetModelConfiguration(request) => (
+            RuntimeCommandResult::GetModelConfiguration(
+                runtime.get_model_configuration(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::SaveModelFixedConfig(request) => (
+            RuntimeCommandResult::SaveModelFixedConfig(
+                runtime.save_model_fixed_config(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ResetModelFixedConfig(request) => (
+            RuntimeCommandResult::ResetModelFixedConfig(
+                runtime.reset_model_fixed_config(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListFixedModelConfigs(request) => (
+            RuntimeCommandResult::ListFixedModelConfigs(
+                runtime.list_fixed_model_configs(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetApplicationSnapshot(request) => (
             RuntimeCommandResult::GetApplicationSnapshot(
                 runtime.get_application_snapshot(request).await?,
@@ -373,32 +463,12 @@ async fn dispatch_runtime(
             RuntimeCommandResult::GetConfigStatus(runtime.get_config_status(request)?),
             false,
         ),
-        RuntimeCommand::ListModels(request) => (
-            RuntimeCommandResult::ListModels(runtime.list_models(request)?),
-            false,
-        ),
-        RuntimeCommand::GetModel(request) => (
-            RuntimeCommandResult::GetModel(runtime.get_model(request)?),
-            false,
-        ),
         RuntimeCommand::ReloadConfig(request) => {
             let result = runtime.reload_config(request).await?;
-            state.speech.reload().await;
-            state.device_gateway.notify_changed();
+            state.startup.services()?.speech.reload().await;
+            state.startup.services()?.device_gateway.notify_changed();
             (RuntimeCommandResult::ReloadConfig(result), false)
         }
-        RuntimeCommand::CreateModel(request) => (
-            RuntimeCommandResult::CreateModel(runtime.create_model(request).await?),
-            false,
-        ),
-        RuntimeCommand::UpdateModel(request) => (
-            RuntimeCommandResult::UpdateModel(runtime.update_model(request).await?),
-            false,
-        ),
-        RuntimeCommand::DeleteModel(request) => (
-            RuntimeCommandResult::DeleteModel(runtime.delete_model(request).await?),
-            false,
-        ),
         RuntimeCommand::SetDefaultModel(request) => (
             RuntimeCommandResult::SetDefaultModel(runtime.set_default_model(request).await?),
             false,

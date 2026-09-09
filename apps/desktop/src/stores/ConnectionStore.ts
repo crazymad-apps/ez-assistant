@@ -1,5 +1,6 @@
 import { action, makeObservable, observable, observableRef } from "mobx";
-import type { RuntimeHostCapabilities } from "../generated/assistant-protocol";
+import { startupMessage } from "../runtime-client/startupStatus";
+import type { RuntimeHostCapabilities, RuntimeHostHealth } from "../generated/assistant-protocol";
 
 export type RuntimeConnectionState =
   | "booting"
@@ -15,6 +16,7 @@ export type RuntimeConnectionState =
 
 export class ConnectionStore {
   state: RuntimeConnectionState = "booting";
+  startup: RuntimeHostHealth | null = null;
   error_message: string | null = null;
   instance_id: string | null = null;
   capabilities: RuntimeHostCapabilities | null = null;
@@ -26,6 +28,8 @@ export class ConnectionStore {
   constructor() {
     makeObservable(this, {
       state: observable,
+      startup: observableRef,
+      markStartup: action,
       error_message: observable,
       instance_id: observable,
       capabilities: observableRef,
@@ -43,8 +47,16 @@ export class ConnectionStore {
     });
   }
 
+  markStartup(health: RuntimeHostHealth): void {
+    this.startup = health;
+    this.state = "connecting";
+    this.error_message = health.status === "ready" ? null : startupMessage(health);
+    this.is_stale = true;
+  }
+
   beginInitialConnection(): void {
     this.state = "starting_runtime";
+    this.startup = null;
     this.error_message = null;
     this.last_error_code = null;
     this.is_stale = true;
@@ -63,6 +75,7 @@ export class ConnectionStore {
     address: string | null = null,
   ): void {
     this.state = "connected";
+    this.startup = null;
     this.instance_id = instance_id;
     this.capabilities = capabilities;
     this.address = address;

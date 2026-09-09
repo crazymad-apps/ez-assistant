@@ -39,11 +39,10 @@ pub use channel::{
 pub use config::{
     ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig, ModelCatalog,
-    ModelCatalogError, ModelConfigProjection, ModelProtocol, ReasoningEffortKey,
-    ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities, ResolvedModelConfig,
-    ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig, RuntimeConfigSource,
-    RuntimeModelTransportConfig, compile_runtime_config, compile_runtime_config_with_catalog,
+    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig, ModelProtocol,
+    ReasoningEffortKey, ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities,
+    ResolvedModelConfig, ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig,
+    RuntimeConfigSource, RuntimeModelTransportConfig, compile_runtime_config,
 };
 pub use conversation_recall::HmacRecallReferenceCodec;
 pub use delegation::DELEGATE_TASK_TOOL_NAME;
@@ -59,9 +58,13 @@ pub use environment::{
 pub use error::{RuntimeError, RuntimeResult};
 pub use factory::{
     ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
-    ChildTaskWorkspaceLease, ModelServiceFactory, ModelServiceFactoryError,
-    ModelServiceFactoryRequest, RunToolBundle, RunToolFactory, RunToolFactoryError,
-    RunToolFactoryErrorKind, RunToolFactoryRequest,
+    ChildTaskWorkspaceLease, DiscoveredModel, ModelDiscoveryError, ModelDiscoveryErrorKind,
+    ModelDiscoveryFormat, ModelDiscoveryFuture, ModelDiscoveryRequest, ModelFeatureSupport,
+    ModelParameterError, ModelParameterSource, ModelParameters, ModelReasoningMode,
+    ModelServiceFactory, ModelServiceFactoryError, ModelServiceFactoryRequest, ModelTokenLimit,
+    ResolvedModelParameters, RunToolBundle, RunToolFactory, RunToolFactoryError,
+    RunToolFactoryErrorKind, RunToolFactoryRequest, resolve_model_parameters,
+    validate_fixed_model_parameters,
 };
 pub use mcp::{
     McpConfigSource, McpConnection, McpConnectionError, McpConnectionFactory,
@@ -119,7 +122,7 @@ pub use storage::{
     StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredGoal,
     StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
     StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState, StoredMcpSelection,
-    StoredMessageFeedback, StoredQueueItem, StoredRun, StoredRunContinuation,
+    StoredMessageFeedback, StoredProvider, StoredQueueItem, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
     StoredSessionCommand, StoredSessionCommandResult, StoredSessionCommandState, StoredSessionFork,
     StoredSessionLifecycle, StoredSessionMaterialization, StoredSessionUsage, StoredTodoItemStatus,

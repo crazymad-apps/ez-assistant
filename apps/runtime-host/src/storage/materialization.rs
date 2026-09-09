@@ -596,16 +596,16 @@ fn insert_session(
     transaction
         .execute(
             "INSERT INTO sessions (
-                session_id, title, model_key, reasoning_effort, system_prompt_json,
+                session_id, title, model_id, reasoning_effort, system_prompt_json,
                 skill_catalog_json, current_variant, approval_mode, role, lifecycle,
                 body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms,
-                is_pinned, title_origin, materialization_key, automatic_title_pending
+                is_pinned, title_origin, materialization_key, automatic_title_pending, model_provider_instance_id
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'standard', 'active',
-                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12)",
+                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12, ?13)",
             params![
                 session.session_id.as_str(),
                 session.title,
-                session.model_key.as_str(),
+                session.model_selection.as_ref().map(|selection| selection.model_id.as_str()),
                 session.reasoning_effort.map(reasoning_effort_value),
                 prompt_json,
                 skill_catalog_json,
@@ -618,6 +618,7 @@ fn insert_session(
                 },
                 session.materialization_key.as_ref().map(|key| key.as_str()),
                 i64::from(session.automatic_title_pending),
+                        session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
             ],
         )
         .map_err(|source| database_write_error("session could not be materialized", source))?;
@@ -670,7 +671,7 @@ fn stored_session(session: NewStoredSession) -> StoredSession {
         session_id: session.session_id,
         title: session.title,
         title_origin: session.title_origin,
-        model_key: session.model_key,
+        model_selection: session.model_selection,
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt,
 
@@ -726,7 +727,7 @@ fn materialization_semantically_matches(
     existing_files.sort_unstable();
     candidate_files.sort_unstable();
     existing.title == candidate.session.title
-        && existing.model_key == candidate.session.model_key
+        && existing.model_selection == candidate.session.model_selection
         && existing.reasoning_effort == candidate.session.reasoning_effort
         && existing.environment.workspace_id == candidate.session.environment.workspace_id
         && (existing.environment.workspace_id.is_none()

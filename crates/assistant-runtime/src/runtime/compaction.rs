@@ -42,13 +42,22 @@ impl AssistantRuntime {
         request: CompactSessionRequest,
     ) -> RuntimeResult<CompactSessionResult> {
         let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
+        let selection = session.model_selection()?;
+        // 只复用当前模型或读取固定配置，短接纳阶段核验引用；不进行在线发现。
+        let (compactor, prepared) = self
+            .compile_session_compactor(&session, selection.as_ref())
+            .await?;
+        let _binding = self.model_binding_gate.read().await;
         let mutation = session.mutation().await;
+        if session.model_selection()? != selection {
+            return Err(RuntimeError::ConfigurationConflict);
+        }
+        prepared.ensure_current(&self.config_registry)?;
         session.ensure_healthy()?;
         session.ensure_active()?;
         session.ensure_idle()?;
@@ -62,7 +71,6 @@ impl AssistantRuntime {
                 session_id: request.session_id,
             });
         }
-        let compactor = self.compile_session_compactor(&session)?;
         let prepared_at_ms = super::now_ms()?;
         match self
             .store

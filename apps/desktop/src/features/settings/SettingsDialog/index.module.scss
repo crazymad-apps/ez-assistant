@@ -420,7 +420,8 @@
 
 .model_form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 15px; }
 .model_form label,
-.form_field { display: grid; gap: 6px; color: var(--ez-text-secondary); font-size: var(--ez-font-small); font-weight: 600; }
+.form_field { display: grid; min-width: 0; gap: 6px; color: var(--ez-text-secondary); font-size: var(--ez-font-small); line-height: 1.4; }
+.model_form label, .form_field > span { font-weight: 600; }
 .model_form input:not([type="checkbox"]),
 .model_form select { width: 100%; min-width: 0; height: var(--ez-control-height); padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); outline: 0; color: var(--ez-text); background: var(--ez-surface); font: inherit; font-weight: 400; }
 .model_form input:where(:not([type="checkbox"]):not([type="radio"])):focus,
@@ -429,8 +430,13 @@
 .form_select { position: relative; display: block; min-width: 0; }
 .form_select select { padding-right: 32px; appearance: none; cursor: pointer; }
 .form_select svg { position: absolute; top: 50%; right: 10px; pointer-events: none; transform: translateY(-50%); }
-.secret_field > span { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
-.secret_field button { min-width: 54px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text-secondary); background: var(--ez-surface); }
+.secret_field { position: relative; display: block; min-width: 0; }
+.model_form .secret_field > input { padding-right: 36px; }
+.secret_field > .secret_toggle {
+  position: absolute; right: 3px; inset-block: 2px; width: 28px; height: auto;
+  min-width: 0; min-height: 0; padding: 0; border: 0; border-radius: var(--ez-radius-small);
+  color: var(--ez-text-muted); background: transparent;
+}
 .full_field { grid-column: 1 / -1; }
 .default_checkbox { display: flex !important; grid-column: 1 / -1; grid-template-columns: 16px auto; align-items: center; justify-content: start; }
 .form_actions { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; margin-top: 18px; }
@@ -722,4 +728,53 @@
   .diagnostic_card button { align-self: flex-start; }
   .paired_device_list > article { grid-template-columns: 10px minmax(0, 1fr); }
   .paired_device_actions { grid-column: 2; justify-content: flex-start; }
+}
+
+// 模型管理页面共用行、表单和参考表；长模型 ID 在窄窗口中仍可辨认。
+.model_rows {
+  display: grid;
+  margin-block: 12px;
+  > button {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; height: auto; min-height: var(--ez-control-height-large); padding: 10px 8px; border: 0;
+    border-bottom: 1px solid var(--ez-border); color: var(--ez-text);
+    background: transparent; text-align: left;
+    &:hover { background: var(--ez-surface-subtle); }
+    &:focus-visible { @include fields.focus-border; }
+    > span { display: grid; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
+    small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  }
+}
+.model_section_heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 20px; h4 { margin: 0; } }
+.model_search { width: 100%; min-height: var(--ez-control-height); margin-top: 10px; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); background: var(--ez-surface); color: var(--ez-text); &:focus { @include fields.focus-border; } }
+.model_details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; dt { color: var(--ez-text-muted); } dd { margin: 0; overflow-wrap: anywhere; } }
+.model_reference { width: 100%; margin-block: 12px; table-layout: fixed; border-collapse: collapse; text-align: left; th, td { padding: 8px 6px; border-bottom: 1px solid var(--ez-border); overflow-wrap: anywhere; } }
+.model_documentation {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin: 0;
+  color: var(--ez-text-muted); font-size: var(--ez-font-small); line-height: 1.5;
+  > a { flex-shrink: 0; color: var(--ez-primary); text-decoration: underline; }
+  > span { min-width: 0; }
+}
+.model_fieldset {
+  min-width: 0; padding: 0; margin: 0; border: 0; display: grid; gap: 14px;
+  > h4 { margin: 0; }
+  > .model_form + h4 { margin-top: 6px; }
+}
+.model_form > div { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.model_section_heading button, .model_fieldset button, .runtime_actions > button {
+  min-height: var(--ez-control-height); padding-inline: 10px; border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small); color: var(--ez-text); background: var(--ez-surface);
+  &:disabled { opacity: .48; }
+}
+
+.model_rows > button > .model_status_tags {
+  display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center;
+  flex: 0 1 auto; gap: 6px; overflow-wrap: normal;
+}
+.model_tag {
+  display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 4px;
+  font-size: var(--ez-font-small); line-height: 1.5; white-space: nowrap;
+  color: var(--ez-text-secondary); background: var(--ez-surface-muted);
+  &[data-tone="accent"] { color: var(--ez-primary-text); background: var(--ez-primary-soft); }
+  &[data-tone="warning"] { color: var(--ez-warning); background: var(--ez-warning-soft); }
 }

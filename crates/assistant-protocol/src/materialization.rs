@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::{
-    AgentVariant, ApprovalMode, AttachmentSummary, IdempotencyKey, InputId, ModelKey,
+    AgentVariant, ApprovalMode, AttachmentSummary, IdempotencyKey, InputId, ModelSelection,
     QuotedTextSnapshot, ReasoningEffortKey, RunSnapshot, SessionSummary, SubmitInputMode,
     WorkspaceId,
 };
@@ -28,7 +28,7 @@ pub struct SessionMaterializationManifest {
     pub workspace_id: Option<WorkspaceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub model_key: Option<ModelKey>,
+    pub model_selection: Option<ModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reasoning_effort: Option<ReasoningEffortKey>,

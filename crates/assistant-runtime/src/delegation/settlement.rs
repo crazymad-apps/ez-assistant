@@ -159,6 +159,10 @@ fn failed_terminal(error: RuntimeErrorInfo) -> ChildTerminal {
 
 fn execution_error(error: ExecutionError) -> RuntimeErrorInfo {
     let (code, message) = match error {
+        ExecutionError::DuplicateToolCallId => (
+            RuntimeErrorCode::ModelExecutionFailed,
+            "子任务模型返回了重复的工具调用 ID，本次响应已拒绝，未执行其中的工具，请重试。",
+        ),
         ExecutionError::Model(_) => (
             RuntimeErrorCode::ModelExecutionFailed,
             "child model execution failed",

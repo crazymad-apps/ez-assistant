@@ -22,9 +22,9 @@ use agent_types::{
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, DeviceId,
-    GoalId, IdempotencyKey, InputId, McpServerKey, MessageFeedback, ModelKey,
-    PermissionDiagnosticCode, RunId, RunStatus, SessionHistoryCleanupStatus, SessionId,
-    SessionTitleOrigin, TodoItemId, WorkspaceId,
+    GoalId, IdempotencyKey, InputId, McpServerKey, MessageFeedback, ModelSelection,
+    PermissionDiagnosticCode, ProviderInstanceId, RunId, RunStatus, SessionHistoryCleanupStatus,
+    SessionId, SessionTitleOrigin, TodoItemId, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
@@ -88,6 +88,13 @@ fn workspace_id(value: &str) -> WorkspaceId {
     WorkspaceId::new(value).expect("workspace id")
 }
 
+fn model_selection(model_id: &str) -> ModelSelection {
+    ModelSelection {
+        provider_instance_id: ProviderInstanceId::new("fixture-provider").expect("provider"),
+        model_id: model_id.to_owned(),
+    }
+}
+
 fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     let session_directory = sessions_directory.join(value);
     let private_directory = session_directory.join("private");
@@ -97,7 +104,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         title: format!("Session {value}"),
         title_origin: assistant_protocol::SessionTitleOrigin::Generated,
         automatic_title_pending: false,
-        model_key: ModelKey::new("fixture-model").expect("model key"),
+        model_selection: Some(model_selection("fixture-model")),
         reasoning_effort: None,
         system_prompt: SystemPromptSnapshot::new(vec!["stable prompt".to_owned()]),
 
@@ -2985,7 +2992,7 @@ fn paired_device_input_can_target_an_active_standard_session() {
 }
 
 #[test]
-fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
+fn repeated_version_alignment_preserves_session_run_and_child_rows() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
     seed_session_and_run(&mut engine, "s-schema-child", "r-schema-child");
@@ -2998,8 +3005,9 @@ fn child_schema_upgrade_is_idempotent_and_preserves_existing_rows() {
         )
         .expect("count legacy rows");
 
-    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization");
-    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization twice");
+    drop(engine);
+    drop(open_engine(&root));
+    let engine = open_engine(&root);
 
     let after: (i64, i64, i64) = engine
         .connection
@@ -3028,7 +3036,8 @@ fn legacy_run_message_ref_without_step_remains_readable_and_uninferred() {
         )
         .expect("insert legacy ref without step");
 
-    super::schema::initialize(&mut engine.connection).expect("repeat schema initialization");
+    drop(engine);
+    let engine = open_engine(&root);
 
     let runs = engine.load_runs().expect("load legacy run");
     assert_eq!(runs[0].message_ids[0].as_str(), "assistant-legacy-step");
@@ -3210,35 +3219,6 @@ fn completed_or_empty_work_plan_is_atomically_cleared_with_a_durable_operation_r
         reopened
             .load_work_plan(&session)
             .expect("load empty-cleared plan")
-            .is_none()
-    );
-}
-
-#[test]
-fn legacy_empty_work_plan_is_removed_on_reopen() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let session = session_id("s-work-plan-legacy-empty");
-    let mut engine = open_engine(&root);
-    let sessions_directory = engine.sessions_directory.clone();
-    engine
-        .create_session(new_session(session.as_str(), &sessions_directory))
-        .expect("create session");
-    engine
-        .connection
-        .execute(
-            "INSERT INTO session_work_plans (
-                session_id, revision, objective, items_json, last_operation_id, updated_at_ms
-             ) VALUES (?1, 1, 'legacy empty plan', '[]', 'legacy-empty-call', 1)",
-            [session.as_str()],
-        )
-        .expect("insert legacy empty work plan");
-    drop(engine);
-
-    let reopened = open_engine(&root);
-    assert!(
-        reopened
-            .load_work_plan(&session)
-            .expect("load migrated work plan")
             .is_none()
     );
 }
@@ -3959,7 +3939,7 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
         Path::new(&source.environment.session_private_directory).join("permissions.json");
     let permission_bytes = fs::read(&permission_path).expect("read legacy permission document");
 
-    // v0.14.2 与当前版本共用原有业务表；这里只移除 v0.15 新增对象，构造精确的旧版形态。
+    // 人工构造无版本账本、无模型管理表且缺少早期记忆表的旧库；不对生产库执行降级。
     engine
         .connection
         .execute_batch(
@@ -3971,7 +3951,14 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
              DROP TABLE IF EXISTS conversation_recall_heads;
              DROP TABLE IF EXISTS pinned_memories;
              DROP TABLE IF EXISTS memory_state;
-             DROP TABLE IF EXISTS persona;",
+             DROP TABLE IF EXISTS persona;
+             DROP TABLE model_fixed_configs;
+             DROP TABLE model_settings;
+             DROP TABLE providers;
+             DROP TABLE schema_migrations;
+             ALTER TABLE sessions DROP COLUMN model_id;
+             ALTER TABLE sessions DROP COLUMN model_provider_instance_id;
+             ALTER TABLE sessions ADD COLUMN model_key TEXT NOT NULL DEFAULT 'discarded-old-model';",
         )
         .expect("downgrade fixture to v0.14.2 shape");
     drop(engine);
@@ -6793,7 +6780,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     assert!(matches!(
         engine.set_session_model(ModelChange {
             session_id: session.clone(),
-            model_key: ModelKey::new("other-model").expect("model key"),
+            model_selection: Some(model_selection("other-model")),
             reasoning_effort: None,
             changed_at_ms: 2_001,
         }),
@@ -6809,7 +6796,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     engine
         .set_session_model(ModelChange {
             session_id: session.clone(),
-            model_key: ModelKey::new("other-model").expect("model key"),
+            model_selection: Some(model_selection("other-model")),
             reasoning_effort: None,
             changed_at_ms: 2_003,
         })
@@ -6864,7 +6851,10 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         recovered.sessions[0].lifecycle,
         StoredSessionLifecycle::Active
     );
-    assert_eq!(recovered.sessions[0].model_key.as_str(), "other-model");
+    assert_eq!(
+        recovered.sessions[0].model_selection,
+        Some(model_selection("other-model"))
+    );
     assert_eq!(
         recovered.sessions[0].current_variant,
         assistant_protocol::AgentVariant::Plan
@@ -9009,7 +8999,6 @@ async fn duplicate_call_in_ready_exchange_does_not_prevent_runtime_startup() {
         Arc::new(crate::config_source::LocalConfigSource::new(
             root.path().join("config.toml"),
         )),
-        Arc::new(assistant_runtime::ModelCatalog::from_json(crate::MODEL_CATALOG_JSON).unwrap()),
         resources.model_factory,
         resources.session_environment_factory,
         resources.skill_package_source,

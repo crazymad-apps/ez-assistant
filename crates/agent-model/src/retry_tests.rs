@@ -66,6 +66,10 @@ impl ModelService for ScriptedService {
         self.context_window_tokens
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        Some(64_000)
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         self.calls
             .lock()
@@ -684,6 +688,7 @@ fn capabilities_context_window_and_attempt_events_are_transparent_and_serializab
     let service = RetryingModelService::new(inner, policy(Vec::new()));
     assert_eq!(service.capabilities(), &capabilities());
     assert_eq!(service.context_window_tokens(), 128_000);
+    assert_eq!(service.max_input_tokens(), Some(64_000));
 
     let event = ModelAttemptEvent::EstablishmentFailed {
         trace: Some(

@@ -1,4 +1,5 @@
 import {
+  Children,
   Component,
   createContext,
   type ComponentProps,
@@ -42,7 +43,17 @@ type LocalResourceContextValue = Readonly<{
 
 const LOCAL_RESOURCE_PREFIX = "https://local-resource.invalid/";
 const LocalResourceContext = createContext<LocalResourceContextValue>({});
-const markdownComponents = { a: SafeLink, img: SafeImage } as Components;
+const markdownComponents = { a: SafeLink, img: SafeImage, ol: OrderedList } as Components;
+
+function OrderedList({ children, node, start, reversed, style, ...props }: ComponentProps<"ol"> & { node?: MarkdownNode }) {
+  const count = node?.children?.filter((child) => child.tagName === "li").length ?? Children.count(children);
+  const first = start ?? (reversed ? count : 1);
+  const last = first + Math.max(0, count - 1) * (reversed ? -1 : 1);
+  const digits = Math.max(String(first).length, String(last).length);
+  // 序号仍由浏览器生成；只按位数预留标记及间隔，避免长列表的数字被外层裁剪。
+  return <ol {...props} data-streamdown="ordered-list" start={start} reversed={reversed}
+    style={{ ...style, paddingInlineStart: `calc(${digits}ch + 1.25em)` }}>{children}</ol>;
+}
 
 export function MarkdownContent({
   text,

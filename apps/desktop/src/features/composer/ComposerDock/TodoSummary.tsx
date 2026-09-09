@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { WorkPlanSnapshot } from "../../../generated/assistant-protocol";
 import { Icon } from "../../../components/Icon";
-import { AnchoredOverlay } from "./AnchoredOverlay";
+import { AnchoredOverlay } from "../../../components/AnchoredOverlay";
 import styles from "./index.module.scss";
 
 const TODO_EXIT_MOTION_MS = 110;

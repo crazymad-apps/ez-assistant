@@ -1,0 +1,121 @@
+.trigger { display: inline-flex; min-width: 0; align-items: center; justify-content: center; gap: 6px; }
+.trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trigger_wrapper { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+.clear_space { width: 14px; height: 14px; flex-shrink: 0; }
+.trigger_wrapper > .clear_trigger {
+  position: absolute; inset-block: 2px; right: 6px; width: 24px; height: auto; min-height: 0; min-width: 0;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--ez-radius-small);
+  color: inherit; background: transparent;
+  > svg { grid-area: 1 / 1; }
+  .clear_icon { opacity: 0; }
+  &:not(:disabled):hover, &:focus-visible {
+    .clear_arrow { opacity: 0; }
+    .clear_icon { opacity: 1; }
+  }
+}
+@media (hover: none) {
+  .clear_trigger:not(:disabled) { .clear_arrow { opacity: 0; } .clear_icon { opacity: 1; } }
+}
+
+.settings_cascade { position: fixed; z-index: var(--ez-z-popover); opacity: 0; }
+.settings_cascade {
+  transform: translateY(4px);
+  transition:
+    opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
+}
+
+.settings_cascade[data-position-ready="true"][data-presence="entered"] { opacity: 1; transform: translateY(0); }
+.settings_cascade[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
+.settings_cascade {
+  width: min(226px, calc(100vw - 16px));
+  padding: 5px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: 10px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-popover);
+}
+
+.settings_primary { display: grid; gap: 2px; }
+.separator { height: 1px; margin: 5px 3px; background: var(--ez-border-strong); }
+.selected_icon { color: var(--ez-primary); }
+
+.settings_category {
+  --ez-control-default-height: var(--ez-control-height-large); height: auto;
+  display: grid;
+  width: 100%;
+  min-height: var(--ez-control-height);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ez-text-secondary);
+  background: transparent;
+  text-align: left;
+
+  > span { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
+  b { font-size: var(--ez-font-base); }
+  small { overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-base); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  &:hover,
+  &:focus-visible,
+  &[data-active="true"] { outline: 0; background: var(--ez-surface-muted); }
+  &[aria-disabled="true"], &:disabled { opacity: 0.5; }
+}
+
+.settings_secondary {
+  position: absolute;
+  top: -6px;
+  width: min(340px, calc(100vw - 250px));
+  min-width: 220px;
+  padding: 5px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: 10px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-popover);
+
+  &[data-side="right"] { left: calc(100% + 6px); }
+  &[data-side="left"] { right: calc(100% + 6px); }
+
+  > div { display: grid; max-height: min(320px, calc(100vh - 90px)); gap: 2px; overflow-y: auto; overscroll-behavior: contain; }
+  button[role="menuitemradio"] {
+    --ez-control-default-height: var(--ez-control-height-large); height: auto;
+    display: grid;
+    width: 100%;
+    min-height: var(--ez-control-height);
+    grid-template-columns: minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--ez-text-secondary);
+    background: transparent;
+    text-align: left;
+  }
+  button[role="menuitemradio"]:hover,
+  button[role="menuitemradio"]:focus-visible,
+  button[role="menuitemradio"][data-active="true"] { outline: 0; background: var(--ez-surface-muted); }
+  button[role="menuitemradio"] > span { display: grid; min-width: 0; gap: 2px; }
+  b,
+  small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  b { font-size: var(--ez-font-base); }
+  small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  i { display: grid; width: 18px; height: 18px; place-items: center; color: var(--ez-primary); }
+}
+
+.settings_primary { max-height: min(420px, calc(100vh - 32px)); overflow-y: auto; }
+.secondary_content { padding: 6px; input { width: 100%; min-height: var(--ez-control-height); border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); padding-inline: 8px; color: var(--ez-text); background: var(--ez-surface); } p { overflow-wrap: anywhere; } }
+@media (prefers-reduced-motion: reduce) { .settings_cascade { transition: none; } }
+@media (max-width: 720px) { .settings_cascade { width: 204px; } .settings_secondary { width: min(280px, calc(100vw - 228px)); min-width: 180px; } }
+// 空间不足时由同一组件替换面板，隐藏一级同时移出其键盘命中范围。
+.settings_cascade:has([data-side="inline"]) .settings_primary { display: none; }
+.settings_secondary[data-side="inline"] {
+  position: static; width: 100%; min-width: 0; padding: 0; border: 0; box-shadow: none;
+}
+.settings_secondary { max-height: min(420px, calc(100dvh - 32px)); overflow-y: auto; }
+.secondary_header { display: flex; align-items: center; gap: 6px; padding: 5px 8px 7px; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+.secondary_header strong { min-width: 0; overflow-wrap: anywhere; }
+
+.primary_actions { display: grid; > button { min-height: var(--ez-control-height); padding: 5px 8px; border: 0; border-radius: 7px; color: var(--ez-text-secondary); background: transparent; text-align: left; &:hover, &:focus-visible { outline: 0; background: var(--ez-surface-muted); } &:disabled { opacity: .5; } } }

@@ -14,17 +14,19 @@ use super::HttpState;
 
 pub(super) async fn stream_events(
     State(state): State<HttpState>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(project_events(
-        state.runtime.subscribe_event_envelopes(),
-        state.device_gateway.subscribe_events(),
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, super::error::HttpError>
+{
+    let services = state.startup.services()?;
+    Ok(Sse::new(project_events(
+        services.runtime.subscribe_event_envelopes(),
+        services.device_gateway.subscribe_events(),
         state.shutdown,
     ))
     .keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
 
 /// 把可丢弃 Runtime 广播投影为 SSE。订阅者一旦落后，就不能继续假装事件连续：先发送

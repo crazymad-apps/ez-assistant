@@ -65,7 +65,6 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
           <h4>配置</h4>
           <dl>
             <div><dt>状态</dt><dd data-state={status?.state}>{configurationLabel(status?.state)}</dd></div>
-            <div><dt>默认模型</dt><dd>{status?.default_model ?? "—"}</dd></div>
             <div><dt>结构版本</dt><dd>{status?.schema_version ?? "—"}</dd></div>
             <div><dt>修订</dt><dd title={status?.revision ?? undefined}>{status?.revision?.slice(0, 12) ?? "—"}</dd></div>
           </dl>

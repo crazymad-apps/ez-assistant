@@ -24,7 +24,7 @@ export const WebLoginPage = observer(function WebLoginPage({
       <section className={styles.login} aria-label="Host 登录">
         {connection.phase !== "login" ? (
           <p className={styles.loading} role="status">
-            正在连接 Runtime…
+            {connection.current?.connection.error_message ?? "正在连接 Runtime…"}
           </p>
         ) : (
           <form

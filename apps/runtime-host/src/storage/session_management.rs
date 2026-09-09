@@ -508,12 +508,12 @@ impl StorageEngine {
         let changed = self
             .connection
             .execute(
-                "UPDATE sessions SET model_key = ?1, reasoning_effort = ?2
+                "UPDATE sessions SET model_id = ?1, reasoning_effort = ?2, model_provider_instance_id = ?4
                  WHERE session_id = ?3 AND lifecycle = 'active'
                    AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
                    AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
                    AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?3)",
-                params![change.model_key.as_str(), change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str()],
+                params![change.model_selection.as_ref().map(|selection| selection.model_id.as_str()), change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str(), change.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str())],
             )
             .map_err(|source| {
                 database_write_error("session model could not be changed", source)

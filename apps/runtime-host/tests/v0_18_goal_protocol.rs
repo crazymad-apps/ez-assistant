@@ -289,7 +289,7 @@ fn create_session(client: &mut Client, title: &str) -> String {
     string(
         &client.runtime(
             "create_session",
-            json!({"title":title,"model_key":"fixture"}),
+            json!({"title":title,"model_selection":null}),
         )["session"]["session_id"],
     )
 }

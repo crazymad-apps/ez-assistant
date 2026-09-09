@@ -301,9 +301,7 @@ mod tests {
         AssistantPart, FinishReason, MessageId, ModelIdentity, PartId, ProviderId, TextPart,
         ToolCall, ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
     };
-    use assistant_protocol::{
-        AgentVariant, ApprovalMode, ChildTaskId, InputId, ModelKey, RunId, SessionId,
-    };
+    use assistant_protocol::{AgentVariant, ApprovalMode, ChildTaskId, InputId, RunId, SessionId};
     use serde_json::json;
 
     use crate::{
@@ -323,7 +321,7 @@ mod tests {
                 title: "recorder fixture".to_owned(),
                 title_origin: assistant_protocol::SessionTitleOrigin::Generated,
                 automatic_title_pending: false,
-                model_key: ModelKey::new("fixture").expect("model key"),
+                model_selection: None,
                 reasoning_effort: None,
                 system_prompt: SystemPromptSnapshot::new(vec!["parent".to_owned()]),
 

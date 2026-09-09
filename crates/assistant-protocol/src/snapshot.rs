@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::{
-    AttachmentId, ChildTaskId, InputId, ModelKey, RunId, RuntimeErrorInfo, SessionId, ToolCallId,
-    WorkspaceId,
+    AttachmentId, ChildTaskId, InputId, RunId, RuntimeErrorInfo, SessionId, ToolCallId, WorkspaceId,
 };
 
 /// Runtime 对外可见的生命周期状态。
@@ -519,8 +518,8 @@ pub struct SessionSummary {
     pub session_id: SessionId,
     /// 创建 Session 时确定的展示标题。
     pub title: String,
-    /// Session 后续 Run 当前使用的用户模型 key。
-    pub model_key: ModelKey,
+    /// 显式模型二元引用；None 表示每次执行跟随当前默认模型。
+    pub model_selection: Option<crate::ModelSelection>,
     /// 后续 Run 使用的显式强度；空值表示使用模型默认开启档位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -827,6 +826,13 @@ mod tests {
             "resume_required": false
         });
         let session: SessionSummary = serde_json::from_value(session).expect("legacy session");
+        assert_eq!(session.model_selection, None);
+        assert!(
+            serde_json::to_value(&session)
+                .unwrap()
+                .get("model_key")
+                .is_none()
+        );
         assert_eq!(session.current_variant, AgentVariant::Build);
         assert_eq!(session.approval_mode, ApprovalMode::Ask);
         assert_eq!(session.role, SessionRoleSnapshot::Standard);

@@ -14,15 +14,15 @@ use crate::{
     GetToolDetailRequest, GetToolDetailResult, GoalId, GoalSnapshot, IdempotencyKey, InputId,
     InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
     ListConversationPageResult, MemoryAttributeValue, MemoryCapabilities, MessageFeedback,
-    MessageId, ModelConfiguration, ModelKey, PermissionDiagnostic, PermissionDocumentDraft,
-    PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
-    PermissionFileSummary, PersonaSnapshot, PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot,
-    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, ReasoningEffortKey,
-    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
-    ResumeQueuedInputResult, RunId, RunSnapshot, RuntimeLifecycle,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionListFilter, SessionSummary, SkillDetailSnapshot, SkillManagementSnapshot,
-    SystemContextSnapshot, WorkPlanSnapshot, WorkspaceId, WorkspaceSummary,
+    MessageId, PermissionDiagnostic, PermissionDocumentDraft, PermissionDocumentRevision,
+    PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
+    PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
+    PrioritizeQueuedInputResult, ReasoningEffortKey, RejectApprovalAndStopRunRequest,
+    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
+    RunSnapshot, RuntimeLifecycle, SearchConversationHistoryRequest,
+    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSummary,
+    SkillDetailSnapshot, SkillManagementSnapshot, SystemContextSnapshot, WorkPlanSnapshot,
+    WorkspaceId, WorkspaceSummary,
 };
 
 /// 显式设置当前产品 Controller 的 PC 输出附加托管目标。
@@ -53,56 +53,6 @@ pub struct GetConfigStatusRequest {}
 pub struct GetConfigStatusResult {
     /// 当前配置总体状态。
     pub status: ConfigurationStatus,
-}
-
-/// 按确定性顺序查询全部脱敏模型投影。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ListModelsRequest {}
-
-/// 随 Runtime 发版的模型目录中一组精确路由建议。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ModelCatalogEntrySnapshot {
-    pub provider: String,
-    pub provider_label: String,
-    pub protocol: String,
-    pub protocol_label: String,
-    pub model_ids: Vec<String>,
-}
-
-/// Desktop 可用于模型表单建议项的随包目录投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ModelCatalogSnapshot {
-    pub revision: String,
-    pub entries: Vec<ModelCatalogEntrySnapshot>,
-}
-
-/// 全部模型的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ListModelsResult {
-    /// 按配置 key 确定性排序的模型投影。
-    pub models: Vec<ModelConfiguration>,
-    /// 随包静态目录提供的协议、供应商和模型 ID 建议，不限制用户输入目录外值。
-    pub catalog: ModelCatalogSnapshot,
-}
-
-/// 查询一个合法 model key 的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct GetModelRequest {
-    /// 要查询的用户 model key。
-    pub model_key: ModelKey,
-}
-
-/// 单个模型的脱敏投影。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct GetModelResult {
-    /// 指定模型的脱敏投影。
-    pub model: ModelConfiguration,
 }
 
 /// 显式重新读取唯一配置源。
@@ -141,76 +91,19 @@ impl std::fmt::Debug for SecretValue {
     }
 }
 
-/// 编辑模型时对既有凭据采取的显式动作。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-#[serde(tag = "mode", content = "value", rename_all = "snake_case")]
-pub enum ModelCredentialChange {
-    Unchanged,
-    Replace(#[ts(type = "string")] SecretValue),
-    Clear,
-}
-
-/// 设置表单提交给 Runtime 的完整模型 candidate。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ModelConfigurationInput {
-    pub model_key: ModelKey,
-    pub display_name: String,
-    pub protocol: String,
-    pub provider: String,
-    pub endpoint: String,
-    pub model: String,
-    pub context_window_tokens: u64,
-    pub max_output_tokens: u32,
-    pub credential: ModelCredentialChange,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ConfigurationMutationResult {
-    pub status: ConfigurationStatus,
-    pub models: Vec<ModelConfiguration>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct CreateModelRequest {
-    pub model: ModelConfigurationInput,
-    pub expected_revision: Option<String>,
-    pub set_default: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct UpdateModelRequest {
-    pub model: ModelConfigurationInput,
-    pub expected_revision: String,
-    pub set_default: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct DeleteModelRequest {
-    pub model_key: ModelKey,
-    pub expected_revision: String,
-    pub replacement_default: Option<ModelKey>,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SetDefaultModelRequest {
-    pub model_key: ModelKey,
-    pub expected_revision: String,
+    /// None 清除默认选择；Some 保存服务商实例和在线模型 ID。
+    pub selection: Option<crate::ModelSelection>,
 }
 
 /// 设置文本主模型调用识图工具时使用的辅助视觉模型。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SetAuxiliaryVisionModelRequest {
-    /// None 清除配置；Some 必须指向一条有效且支持图片输入的模型配置。
-    pub model_key: Option<ModelKey>,
-    pub expected_revision: String,
+    /// None 清除选择；Some 必须拥有有效参数并显式支持图片输入。
+    pub selection: Option<crate::ModelSelection>,
 }
 
 /// 以 Session 为入口显式重载 Global、可选 Workspace 和 Session 权限文件。
@@ -295,15 +188,7 @@ pub struct DecideApprovalResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ValidateModelConnectionRequest {
     /// 已保存模型或尚未写入配置的表单 candidate。
-    pub target: ModelConnectionTarget,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
-pub enum ModelConnectionTarget {
-    Configured { model_key: ModelKey },
-    Candidate(ModelConfigurationInput),
+    pub selection: crate::ModelSelection,
 }
 
 /// 连接验证失败的稳定分类。
@@ -360,7 +245,7 @@ pub enum ConnectionValidationOutcome {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ValidateModelConnectionResult {
     /// 本次使用的用户 model key。
-    pub model_key: ModelKey,
+    pub selection: crate::ModelSelection,
     /// 成功或结构化失败。
     pub outcome: ConnectionValidationOutcome,
 }
@@ -479,8 +364,8 @@ pub struct UploadAttachmentResult {
 pub struct CreateSessionRequest {
     /// 可选展示标题；`None` 表示由 Runtime 选择默认标题。
     pub title: Option<String>,
-    /// 显式模型 key；`None` 表示使用创建时配置快照中的默认模型。
-    pub model_key: Option<ModelKey>,
+    /// 显式模型二元引用；None 表示后续执行跟随当前默认模型。
+    pub model_selection: Option<crate::ModelSelection>,
     /// 可选的 Workspace 冻结绑定；创建后不能直接换绑。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<WorkspaceId>,
@@ -1052,7 +937,7 @@ pub struct SetMessageFeedbackResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SetSessionModelRequest {
     pub session_id: SessionId,
-    pub model_key: ModelKey,
+    pub model_selection: Option<crate::ModelSelection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1253,6 +1138,18 @@ pub struct GetSystemContextResult {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    ListProviders(crate::ListProvidersRequest),
+    CreateProvider(crate::CreateProviderRequest),
+    UpdateProvider(crate::UpdateProviderRequest),
+    DeleteProvider(crate::ProviderRequest),
+    GetProviderUsage(crate::ProviderRequest),
+    ListProviderModels(crate::ProviderRequest),
+    GetModelSettings(crate::GetModelSettingsRequest),
+    GetModelConfiguration(crate::GetModelConfigurationRequest),
+    SaveModelFixedConfig(crate::SaveModelFixedConfigRequest),
+    ResetModelFixedConfig(crate::ModelSelection),
+    ListFixedModelConfigs(crate::ListFixedModelConfigsRequest),
+
     /// 查询 Desktop 首屏所需的权威组合投影。
     GetApplicationSnapshot(GetApplicationSnapshotRequest),
     /// 查询一个主 Session 页面所需的权威组合投影。
@@ -1295,17 +1192,12 @@ pub enum RuntimeCommand {
     /// 查询配置总体状态。
     GetConfigStatus(GetConfigStatusRequest),
     /// 列出全部模型脱敏投影。
-    ListModels(ListModelsRequest),
     /// 查询一个模型脱敏投影。
-    GetModel(GetModelRequest),
     /// 显式重新加载配置。
     ReloadConfig(ReloadConfigRequest),
     /// 在唯一配置源中新建模型。
-    CreateModel(CreateModelRequest),
     /// 更新唯一配置源中的模型。
-    UpdateModel(UpdateModelRequest),
     /// 从唯一配置源删除模型。
-    DeleteModel(DeleteModelRequest),
     /// 设置后续新会话使用的默认模型。
     SetDefaultModel(SetDefaultModelRequest),
     /// 设置识图工具使用的辅助视觉模型。
@@ -1425,6 +1317,18 @@ pub enum RuntimeCommand {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommandResult {
+    ListProviders(Vec<crate::ProviderSummary>),
+    CreateProvider(crate::ProviderSummary),
+    UpdateProvider(crate::ProviderSummary),
+    DeleteProvider(crate::ProviderUsage),
+    GetProviderUsage(crate::ProviderUsage),
+    ListProviderModels(Vec<crate::DiscoveredModel>),
+    GetModelSettings(crate::ModelSettings),
+    GetModelConfiguration(crate::ModelConfigurationDetail),
+    SaveModelFixedConfig(crate::ModelFixedConfig),
+    ResetModelFixedConfig(()),
+    ListFixedModelConfigs(Vec<crate::ModelFixedConfig>),
+
     GetApplicationSnapshot(GetApplicationSnapshotResult),
     GetSessionView(Box<GetSessionViewResult>),
     GetChildTaskView(Box<GetChildTaskViewResult>),
@@ -1448,16 +1352,11 @@ pub enum RuntimeCommandResult {
     /// 配置总体状态已返回。
     GetConfigStatus(GetConfigStatusResult),
     /// 模型列表已返回。
-    ListModels(ListModelsResult),
     /// 单模型投影已返回。
-    GetModel(GetModelResult),
     /// 配置已重新加载并返回新状态。
     ReloadConfig(ReloadConfigResult),
-    CreateModel(ConfigurationMutationResult),
-    UpdateModel(ConfigurationMutationResult),
-    DeleteModel(ConfigurationMutationResult),
-    SetDefaultModel(ConfigurationMutationResult),
-    SetAuxiliaryVisionModel(ConfigurationMutationResult),
+    SetDefaultModel(crate::ModelSettings),
+    SetAuxiliaryVisionModel(crate::ModelSettings),
     GetMemoryCapabilities(GetMemoryCapabilitiesResult),
     GetPersona(GetPersonaResult),
     SetPersona(SetPersonaResult),
@@ -1566,7 +1465,7 @@ mod tests {
         SessionSummary {
             session_id: SessionId::new("session-1").expect("session id"),
             title: "Session 1".to_owned(),
-            model_key: ModelKey::new("model-1").expect("model key"),
+            model_selection: Some(model_selection()),
             reasoning_effort: None,
             lifecycle: crate::SessionLifecycle::Active,
             role: crate::SessionRoleSnapshot::Standard,
@@ -1676,32 +1575,14 @@ mod tests {
             revision: Some("revision-1".to_owned()),
             state: crate::ConfigurationState::Ready,
             schema_version: Some(1),
-            default_model: Some(ModelKey::new("model-1").expect("model key")),
-            auxiliary_vision_model: None,
             issues: Vec::new(),
         }
     }
 
-    fn model_configuration() -> ModelConfiguration {
-        ModelConfiguration {
-            model_key: Some(ModelKey::new("model-1").expect("model key")),
-            display_name: "Model 1".to_owned(),
-            protocol: Some("chat_completions".to_owned()),
-            provider: Some("fixture".to_owned()),
-            endpoint: Some("https://api.example.test/v1".to_owned()),
-            model: Some("fixture-model".to_owned()),
-            context_window_tokens: Some(8_192),
-            max_output_tokens: Some(4_096),
-            agent_max_output_tokens: None,
-            effective_max_output_tokens: Some(4_096),
-            supports_image_input: false,
-            api_key_configured: true,
-            origin: crate::ModelConfigurationOrigin::ConfigurationFile,
-            editable: true,
-            deletable: true,
-            is_default: true,
-            is_valid: true,
-            issues: Vec::new(),
+    fn model_selection() -> crate::ModelSelection {
+        crate::ModelSelection {
+            provider_instance_id: crate::ProviderInstanceId::new("provider-1").expect("provider"),
+            model_id: "vendor/model-1".to_owned(),
         }
     }
 
@@ -1842,23 +1723,16 @@ mod tests {
                 "get_config_status",
             ),
             (
-                RuntimeCommand::ListModels(ListModelsRequest::default()),
-                "list_models",
-            ),
-            (
-                RuntimeCommand::GetModel(GetModelRequest {
-                    model_key: ModelKey::new("model-1").expect("model key"),
-                }),
-                "get_model",
-            ),
-            (
                 RuntimeCommand::ReloadConfig(ReloadConfigRequest::default()),
                 "reload_config",
             ),
             (
                 RuntimeCommand::SetAuxiliaryVisionModel(SetAuxiliaryVisionModelRequest {
-                    model_key: Some(ModelKey::new("model-1").expect("model key")),
-                    expected_revision: "revision-1".to_owned(),
+                    selection: Some(crate::ModelSelection {
+                        provider_instance_id: crate::ProviderInstanceId::new("provider-1")
+                            .expect("provider"),
+                        model_id: "model-1".into(),
+                    }),
                 }),
                 "set_auxiliary_vision_model",
             ),
@@ -1884,9 +1758,7 @@ mod tests {
             ),
             (
                 RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
-                    target: ModelConnectionTarget::Configured {
-                        model_key: ModelKey::new("model-1").expect("model key"),
-                    },
+                    selection: model_selection(),
                 }),
                 "validate_model_connection",
             ),
@@ -2118,7 +1990,7 @@ mod tests {
             (
                 RuntimeCommand::SetSessionModel(SetSessionModelRequest {
                     session_id: session_id.clone(),
-                    model_key: ModelKey::new("model-2").expect("model key"),
+                    model_selection: Some(model_selection()),
                 }),
                 "set_session_model",
             ),
@@ -2178,38 +2050,13 @@ mod tests {
                 "get_config_status",
             ),
             (
-                RuntimeCommandResult::ListModels(ListModelsResult {
-                    models: vec![model_configuration()],
-                    catalog: ModelCatalogSnapshot {
-                        revision: "fixture".to_owned(),
-                        entries: vec![ModelCatalogEntrySnapshot {
-                            provider: "fixture".to_owned(),
-                            provider_label: "Fixture".to_owned(),
-                            protocol: "openai_chat_completions".to_owned(),
-                            protocol_label: "OpenAI Chat Completions".to_owned(),
-                            model_ids: vec!["fixture-model".to_owned()],
-                        }],
-                    },
-                }),
-                "list_models",
-            ),
-            (
-                RuntimeCommandResult::GetModel(GetModelResult {
-                    model: model_configuration(),
-                }),
-                "get_model",
-            ),
-            (
                 RuntimeCommandResult::ReloadConfig(ReloadConfigResult {
                     status: configuration_status(),
                 }),
                 "reload_config",
             ),
             (
-                RuntimeCommandResult::SetAuxiliaryVisionModel(ConfigurationMutationResult {
-                    status: configuration_status(),
-                    models: vec![model_configuration()],
-                }),
+                RuntimeCommandResult::SetAuxiliaryVisionModel(crate::ModelSettings::default()),
                 "set_auxiliary_vision_model",
             ),
             (
@@ -2239,7 +2086,7 @@ mod tests {
             ),
             (
                 RuntimeCommandResult::ValidateModelConnection(ValidateModelConnectionResult {
-                    model_key: ModelKey::new("model-1").expect("model key"),
+                    selection: model_selection(),
                     outcome: ConnectionValidationOutcome::Failed(ConnectionValidationFailure {
                         kind: ConnectionValidationFailureKind::Authentication,
                         message: "model authentication failed".to_owned(),

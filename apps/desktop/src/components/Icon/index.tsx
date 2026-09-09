@@ -15,6 +15,8 @@ export type IconName =
   | "device"
   | "desktop"
   | "edit"
+  | "eye"
+  | "eye-off"
   | "expand-all"
   | "external-link"
   | "file"
@@ -73,6 +75,8 @@ const paths: Record<IconName, ReactNode> = {
   ),
   desktop: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
   edit: <><path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" /><path d="m13.7 7.5 3 3" /></>,
+  eye: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
+  "eye-off": <><path d="m3 3 18 18M10.6 5.1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3 3.9M6.2 6.2A20 20 0 0 0 2 12s3.5 7 10 7a11 11 0 0 0 5.8-1.8M9.9 9.9a3 3 0 0 0 4.2 4.2" /></>,
   "expand-all": <><path d="m7 9 5-5 5 5" /><path d="m7 15 5 5 5-5" /></>,
   "external-link": <><path d="M14 4h6v6M20 4l-9 9" /><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></>,
   file: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h4" /></>,

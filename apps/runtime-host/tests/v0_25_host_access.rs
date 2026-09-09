@@ -430,7 +430,7 @@ fn closing_external_access_does_not_cancel_an_accepted_runtime_run() {
     let mut local = host.connect();
     let session = local.runtime(
         "create_session",
-        json!({"title":"remote lifecycle", "model_key":"fixture"}),
+        json!({"title":"remote lifecycle", "model_selection":null}),
     );
     let session_id = session["session"]["session_id"].as_str().unwrap();
     let accepted = http.post(format!("{origin}/commands")).bearer_auth(&token).json(&json!({

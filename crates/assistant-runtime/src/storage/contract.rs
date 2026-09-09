@@ -71,6 +71,42 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>>;
+    fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()>;
+    /// 同一提交边界内统计实际影响并删除连接与固定配置，保留所有模型引用。
+    fn remove_provider(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage>;
+    /// 全库引用查询，只读取精确数量和最多 20 个标题，不装配会话正文。
+    fn provider_usage(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage>;
+    fn load_model_settings(&self) -> StoreFuture<'_, assistant_protocol::ModelSettings>;
+    fn save_model_settings(
+        &self,
+        settings: assistant_protocol::ModelSettings,
+    ) -> StoreFuture<'_, ()>;
+    fn get_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ModelFixedConfig>>;
+    fn list_model_fixed_configs(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ModelFixedConfig>>;
+    fn put_model_fixed_config(
+        &self,
+        config: assistant_protocol::ModelFixedConfig,
+    ) -> StoreFuture<'_, ()>;
+    fn reset_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, ()>;
+
     /// 启动只读取全局设备与工作区事实，不恢复或加载历史会话。
     fn search_conversation_titles(
         &self,

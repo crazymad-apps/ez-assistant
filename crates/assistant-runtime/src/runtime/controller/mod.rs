@@ -261,7 +261,7 @@ impl ControllerToolCoordinator {
             controller_run_id,
             controller_tool_call_id,
         )?;
-        let (variant, approval_mode, input_id, run_id, model_key) = {
+        let (variant, approval_mode, input_id, run_id, model_selection) = {
             let state = target.lock_state()?;
             if let Some(existing) = state
                 .inputs
@@ -299,11 +299,17 @@ impl ControllerToolCoordinator {
                 state.approval_mode,
                 allocate_input_id(&state)?,
                 allocate_run_id(&state)?,
-                state.model_key.clone(),
+                state.model_selection.clone(),
             )
         };
         if start_goal {
-            ensure_goal_model_supported(&self.config_registry, target.as_ref(), &model_key)?;
+            ensure_goal_model_supported(
+                &self.config_registry,
+                target.as_ref(),
+                model_selection.as_ref(),
+                self.store.as_ref(),
+            )
+            .await?;
         }
         let reply_route = self
             .reply_route(controller_session_id, controller_run_id)

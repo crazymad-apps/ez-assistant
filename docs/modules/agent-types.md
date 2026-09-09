@@ -10,13 +10,17 @@
 - 不定义服务 trait、Registry、全局状态和运行时句柄。
 - 不依赖 Tokio、HTTP、Provider SDK、Tauri、Runtime、数据库或 `assistant-protocol`。
 - Provider 原生 schema 不得进入本 crate；不透明 Provider 状态必须有 Provider、Protocol、类型和格式版本边界。
-- `OpaqueProviderState` 还必须绑定规范 `related_part_id` 和由 Adapter 计算的精确路由指纹；旧数据
+- `OpaqueProviderState` 必须绑定由 Adapter 计算的精确路由指纹；有可见文本时关联规范
+  `related_part_id`，纯加密状态允许不关联文本，禁止伪造 ReasoningPart。旧数据
   可读取为无路由绑定状态，但不得在新请求中作为相容状态回放。payload 单 item 上限为 2 MiB，
   单 Assistant Turn 的 8 MiB 上限由消费方执行；`Debug` 只能展示类型、边界和字节数，不能展示
   payload 或路由指纹。
 - 公共不变量使用受控构造并覆盖序列化 round-trip 测试。
 - `ConversationSnapshot` 是 ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果
   顺序的唯一校验入口；Context、Provider 和 Harness 只能复用，不能各自实现。
+  `validate_response_tool_call_ids` 在响应接纳前与本次请求快照比较，同时拒绝响应批内重复。
+  完整产品历史的调用 ID 唯一性以 ContextSummary 为边界，压缩前的调用不占用后续上下文的 ID；
+  边界不能截断未完成的 Tool Call/Result 配对，消息自身的 MessageId 唯一性不变。
 - `ContextSummaryMessage` 是明确的派生上下文类型，不伪装成 User/Assistant，也不保存策略；
   生成摘要的模型身份、摘要请求自身的 usage 和被压缩历史的累计 usage 分字段保存。
 - `UserPart::Injected` 只保留旧 Conversation 的读取兼容；新产生的变体指令、Goal、WorkPlan、

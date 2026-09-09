@@ -1,0 +1,12 @@
+.form {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

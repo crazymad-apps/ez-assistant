@@ -1,3 +1,4 @@
+import { modelProvider, modelSelection, discoveredModel } from "../support/modelManagement";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -193,7 +194,7 @@ describe("ComposerDock", () => {
       const view = store.projection.session_views.get("session-1")!;
       store.projection.session_views.set("session-1", { ...view,
         session: { ...view.session, role: "controller" },
-        composer_capabilities: { ...view.composer_capabilities, selected_model_key: null },
+        composer_capabilities: { ...view.composer_capabilities, selected_model: null },
       });
     });
     const submit = vi.spyOn(store, "submitInput");
@@ -240,6 +241,7 @@ describe("ComposerDock", () => {
   it("keeps workspace drafts isolated and allows an attachment-only first send", async () => {
     const user = userEvent.setup();
     const store = new RootStore();
+  vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
       protocol_version: 1,
       runtime_version: "test",
@@ -280,6 +282,7 @@ describe("ComposerDock", () => {
 
   it("keeps pasted image attachments isolated between workspace drafts", async () => {
     const store = new RootStore();
+  vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
       protocol_version: 1,
       runtime_version: "test",
@@ -441,9 +444,10 @@ describe("ComposerDock", () => {
 
     await user.type(input, "/model");
     await user.keyboard("{Enter}");
-    await user.click(await screen.findByRole("menuitemradio", { name: /备用模型/ }));
-    await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", "alternate"));
-    await waitFor(() => expect(screen.queryByRole("menuitemradio", { name: /备用模型/ })).not.toBeInTheDocument());
+    await user.click(await screen.findByRole("menuitem", { name: /测试服务商/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /alternate/ }));
+    await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", { provider_instance_id: "provider-1", model_id: "alternate" }));
+    await waitFor(() => expect(screen.queryByRole("menuitemradio", { name: /alternate/ })).not.toBeInTheDocument());
 
     await user.type(input, "/mode");
     await user.keyboard("{Enter}");
@@ -819,7 +823,8 @@ describe("ComposerDock", () => {
     const user = userEvent.setup();
     const store = renderComposer({
       composer_capabilities: {
-        selected_model_key: "fixture",
+        model_error: null,
+      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [
           { key: "low", label: "较少" },
           { key: "max", label: "最大" },
@@ -868,12 +873,15 @@ describe("ComposerDock", () => {
     const user = userEvent.setup();
     const store = renderComposer({
       composer_capabilities: {
-        selected_model_key: null,
+        model_error: null,
+      selected_model: null,
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: false,
       },
     });
+    const restored = store.projection.session_views.get("session-1")!;
+    store.projection.session_views.set("session-1", { ...restored, session: { ...restored.session, model_selection: null } });
     const set_model = vi.spyOn(store, "setSessionModel").mockResolvedValue(true);
     const input = screen.getByRole("textbox", { name: "输入消息" });
 
@@ -881,15 +889,15 @@ describe("ComposerDock", () => {
     expect(input).toHaveAttribute("placeholder", "选择模型后开始对话，或输入 / 使用控制指令");
     await user.type(input, "普通消息");
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "模型设置" })).toHaveTextContent("未选择模型");
+    expect(screen.getByRole("button", { name: "模型设置" })).toHaveTextContent("选择模型");
 
     await user.click(screen.getByRole("button", { name: "模型设置" }));
-    await user.click(screen.getByRole("menuitem", { name: /模型/ }));
-    expect(screen.getAllByRole("menuitemradio").every(
-      (item) => item.getAttribute("aria-checked") === "false",
-    )).toBe(true);
-    await user.click(screen.getByRole("menuitemradio", { name: /备用模型/ }));
-    expect(set_model).toHaveBeenCalledWith("session-1", "alternate");
+    await user.click(screen.getByRole("menuitem", { name: /测试服务商/ }));
+    await screen.findByRole("menuitemradio", { name: /alternate/ });
+    expect(screen.getByRole("menuitemradio", { name: "默认模型" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("menuitemradio", { name: /alternate/ })).toHaveAttribute("aria-checked", "false");
+    await user.click(await screen.findByRole("menuitemradio", { name: /alternate/ }));
+    expect(set_model).toHaveBeenCalledWith("session-1", { provider_instance_id: "provider-1", model_id: "alternate" });
   });
 
   it("repositions the settings submenu from measured DOM dimensions", async () => {
@@ -901,7 +909,7 @@ describe("ComposerDock", () => {
       if (this instanceof HTMLDivElement && this.getAttribute("aria-label") === "模型设置") {
         return domRect(766, 300, 226, 100);
       }
-      if (this.getAttribute("role") === "menu" && this.getAttribute("aria-label") === "模型") {
+      if (this.getAttribute("role") === "menu" && this.getAttribute("aria-label") === "测试服务商") {
         return domRect(0, 0, 340, 330);
       }
       return domRect(0, 0, 0, 0);
@@ -909,8 +917,8 @@ describe("ComposerDock", () => {
     renderComposer();
 
     await user.click(screen.getByRole("button", { name: "模型设置" }));
-    await user.click(screen.getByRole("menuitem", { name: /^模型/ }));
-    const secondary = await screen.findByRole("menu", { name: "模型" });
+    await user.click(screen.getByRole("menuitem", { name: /测试服务商/ }));
+    const secondary = await screen.findByRole("menu", { name: "测试服务商" });
     await waitFor(() => {
       expect(secondary).toHaveAttribute("data-side", "left");
       expect(secondary).toHaveStyle({ top: "-38px" });
@@ -925,7 +933,8 @@ describe("ComposerDock", () => {
     const user = userEvent.setup();
     const store = renderComposer({
       composer_capabilities: {
-        selected_model_key: "fixture",
+        model_error: null,
+      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: false,
@@ -1080,7 +1089,8 @@ describe("ComposerDock", () => {
     const store = renderComposer({
       goal: goalSnapshot("running"),
       composer_capabilities: {
-        selected_model_key: "fixture",
+        model_error: null,
+      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: true,
@@ -1174,6 +1184,7 @@ function renderComposer(overrides: Readonly<{
   session?: Partial<SessionSummary>;
 }> = {}): RootStore {
   const store = new RootStore();
+  vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
   vi.spyOn(store, "listSkills").mockResolvedValue(overrides.skill_catalog ?? { available: true, skills: [], diagnostics: [] });
   store.connection.markConnected("instance-1", {
     protocol_version: 1,
@@ -1214,11 +1225,8 @@ function applicationSnapshot(): ApplicationSnapshot {
     runtime_lifecycle: "running",
     active_sessions_next_offset: null,
     archived_sessions_next_offset: null,
-    configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, default_model: "fixture", auxiliary_vision_model: null, issues: [] },
-    models: [
-      model("fixture", "本地模型（7B）", true),
-      model("alternate", "备用模型", false),
-    ],
+    configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, issues: [] },
+    providers: [modelProvider], model_settings: { default_model: modelSelection, vision_model: null },
     workspaces: [{
       workspace_id: "workspace-1",
       label: "project",
@@ -1238,29 +1246,6 @@ function applicationSnapshot(): ApplicationSnapshot {
   };
 }
 
-function model(model_key: string, display_name: string, is_default: boolean): ApplicationSnapshot["models"][number] {
-  return {
-    model_key,
-    display_name,
-    protocol: "chat_completions",
-    provider: "fixture",
-    endpoint: "http://127.0.0.1/v1",
-    model: `${model_key}-model`,
-    context_window_tokens: 128_000,
-    max_output_tokens: 4_096,
-    agent_max_output_tokens: 4_096,
-    effective_max_output_tokens: 4_096,
-    supports_image_input: false,
-    api_key_configured: true,
-    origin: "configuration_file",
-    editable: true,
-    deletable: true,
-    is_default,
-    is_valid: true,
-    issues: [],
-  };
-}
-
 function sessionView(overrides: Readonly<{
   queue?: QueueSnapshot;
   approvals?: readonly ApprovalSnapshot[];
@@ -1276,7 +1261,8 @@ function sessionView(overrides: Readonly<{
     session: { ...sessionSummary(), ...overrides.session },
     conversation_generation: 1,
     composer_capabilities: overrides.composer_capabilities ?? {
-      selected_model_key: "fixture",
+      model_error: null,
+      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
       reasoning_effort_options: [],
       image_handling: "unavailable",
       goal_supported: false,
@@ -1335,7 +1321,7 @@ function sessionSummary(): SessionSummary {
   return {
     session_id: "session-1",
     title: "交互测试",
-    model_key: "fixture",
+    model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
     lifecycle: "active",
     role: "standard",
     current_variant: "build",

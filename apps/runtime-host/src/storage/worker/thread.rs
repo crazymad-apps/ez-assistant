@@ -12,8 +12,9 @@ pub(super) fn run_worker(
     runtime_home: PathBuf,
     mut receiver: mpsc::Receiver<Command>,
     ready: oneshot::Sender<Result<(), StoreError>>,
+    progress: Option<tokio::sync::watch::Sender<crate::storage::DatabaseStartupProgress>>,
 ) {
-    let mut engine = match StorageEngine::open(&runtime_home) {
+    let mut engine = match StorageEngine::open_with_progress(&runtime_home, progress.as_ref()) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine
@@ -26,6 +27,42 @@ pub(super) fn run_worker(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
+            Command::LoadProviders { reply } => {
+                let _ = reply.send(engine.load_providers());
+            }
+            Command::PutProvider { provider, reply } => {
+                let _ = reply.send(engine.put_provider(provider));
+            }
+            Command::RemoveProvider { id, reply } => {
+                let _ = reply.send(engine.remove_provider(id));
+            }
+            Command::ProviderUsage { id, reply } => {
+                let _ = reply.send(engine.provider_usage(id));
+            }
+            Command::LoadModelSettings { reply } => {
+                let _ = reply.send(engine.load_model_settings());
+            }
+            Command::SaveModelSettings { settings, reply } => {
+                let _ = reply.send(engine.save_model_settings(settings));
+            }
+            Command::GetModelFixedConfig { selection, reply } => {
+                let _ = reply.send(engine.get_model_fixed_config(selection));
+            }
+            Command::ListModelFixedConfigs {
+                id,
+                offset,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(engine.list_model_fixed_configs(id, offset, limit));
+            }
+            Command::PutModelFixedConfig { config, reply } => {
+                let _ = reply.send(engine.put_model_fixed_config(config));
+            }
+            Command::ResetModelFixedConfig { selection, reply } => {
+                let _ = reply.send(engine.reset_model_fixed_config(selection));
+            }
+
             #[cfg(test)]
             Command::PanicForTest { reply } => {
                 drop(reply);

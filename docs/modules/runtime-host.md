@@ -717,3 +717,47 @@ prepare_session_execution 在手动操作前处理目标已记录提交，不重
 MCP 连接与工具发现不再阻塞监听发布。Host Supervisor 管理可降级的 mcp_startup 子系统；
 初始化结束后等待 Host 关闭，初始化中收到关闭则取消，连接资源仍由既有 factory 统一回收。
 基本配置／Store 故障仍阻止启动；不得把它们随 MCP 一起后台化或忽略。启动分段日志不含凭据。
+
+## v0.25.1 M0 在线模型发现（部分实现）
+
+- Host 在既有 ModelServiceFactory 中实现单次在线发现；网络与原始 JSON 解析位于
+  `resources/model/discovery`，不引入第二份服务商配置、默认选择或模型目录持久化。
+- 当前覆盖 OpenAI 风格列表、vLLM max_model_len、百炼原生分页 model_info、Kimi Coding 参数。
+  请求提供可为空的 models_path 覆盖与格式；留空由适配器选择默认路径，不按名称猜路径。六个远端连接列表解析与一次显式固定参数
+  的最小文本调用已通过；本地 vLLM 未连接，完整规格和产品调用方尚未接通。
+- 每次调用独立获取，整次超时覆盖所有分页与响应体；调用方丢弃 future 即取消，无独立分页任务。
+  单页 1 MiB／整次 8 MiB／100 页／10,000 模型为资源上限，超过时失败而非截断成功。
+- 不自动重试或重定向；分页链接不来自响应，只构造同一显式 Endpoint 的页码查询。错误时丢弃
+  全部本次结果，不返回上次列表，错误正文不进入可展示消息。凭据请求不实现 Debug。
+- 未声明字段保持未知，非法限制单独标识；发现解析禁止用模型名、静态目录或手工值补齐。用户显式固定参数由独立来源解析处理。
+  正式 UI、数据库、TOML 与旧字段切换属于 M3；上文既有行为在完成切换前仍是当前产品路径。
+
+
+## v0.25.1 M1 迁移与备份基础（未接入生产启动）
+
+- `storage/migrations` 是 Host 私有的版本链、独立快照备份和事务执行能力；M1 仅 cfg(test) 接入，
+  engine::open 仍运行现有 schema 初始化。M2/M3 前不向正式产品注册测试 manifest 或目标模型表。
+- 版本记录必须是固定 manifest 的完整前缀；逐版本事务内校验、记账，高版本和缺口拒绝继续。
+  校验只读，迁移 SQL 不能自行 COMMIT、关闭约束或写版本表。失败只回滚当前版本，不执行后继。
+- 备份采用既有 rusqlite 的 Backup API；源快照与独立只读备份精确比较普通表数量、全字段摘要和
+  schema，检查完整性与外键；配置另存原件并回读核验。附件与 Conversation 不包含在 SQLite 备份内。
+- 真实生产调用必须持有 RuntimeInstanceGuard，早于 worker 业务准入；M1 隔离验证不代表已接通
+  这一启动顺序。完整初始 SQL／旧字段消费者切换归 M3，分类依据见
+  [数据库初始化分类](../resources/v0.25.1-数据库初始化分类.md)。
+
+## v0.25.1 M2 启动诊断
+
+认证配置、进程独占锁与唯一监听先于业务存储初始化；HttpState 的 Starting/Ready/Unavailable
+原子发布真实 Runtime、Gateway、Speech 句柄，不创建占位 Runtime。health/capabilities 保持认证，
+未 Ready 时业务命令、事件、上传及终端返回不可用；仅本机原生受控关闭属于进程控制例外。
+存储 worker 经有界 watch 报告实际阶段，客户端轮询不会取消、重启或重试数据库初始化。
+故障后保留同监听诊断，修复后的显式 Host 重启重新初始化；监听前认证／TLS 故障仍明确失败。
+
+
+### v0.25.1 M3 模型与迁移入口切换
+
+本版已删除随包 model-catalog.json 和启动目录装配，前述 v0.16 目录说明仅记录历史实现。
+StorageEngine 在打开日常业务连接前执行唯一 migrations manifest，终点使用 CARGO_PKG_VERSION；
+无账本从 0.25.1 开始，已有库先独立备份并完整回读核验。schema.rs 仅保留日常 FTS 初始化，
+旧完整 DDL 只作为 tests/legacy_v0_25_0.sql 人工升级夹具。数据库成功后再执行配置 CAS 清理；
+文件收尾失败关闭业务 Store、保留已提交数据库和诊断监听，不自动还原数据库。

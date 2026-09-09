@@ -18,8 +18,9 @@
   pre,
   table { margin: 0.55em 0; }
 
-  ul,
-  ol { padding-left: 1.5em; }
+  ul { padding-inline-start: 1.5em; }
+  ol { list-style-position: outside; }
+  ol > li::marker { font-variant-numeric: tabular-nums; }
 
   li + li { margin-top: 0.2em; }
 

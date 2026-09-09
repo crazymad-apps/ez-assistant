@@ -1,0 +1,84 @@
+import { expect, test } from "@playwright/test";
+
+// 所有服务商、固定配置和会话都来自 globalSetup 人工生成的隔离库。
+test("Web uses provider model settings, persists edits, and resets to current online metadata", async ({ page }) => {
+  const fixture = JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!) as { base_url: string; access_token: string };
+  const issued = await fetch(`${fixture.base_url}/auth/login`, {
+    method: "POST", headers: { Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ method: "desktop" }),
+  });
+  expect(issued.ok).toBe(true);
+  const { token } = await issued.json() as { token: string };
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`${fixture.base_url}/#token=${encodeURIComponent(token)}`);
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  await dialog.getByRole("button", { name: "模型", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "模型与服务商" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "默认模型", exact: true })).toContainText("offline-model");
+  await dialog.screenshot({ path: test.info().outputPath("models-home.png") });
+  await dialog.getByRole("button", { name: /管理服务商 离线测试服务商/ }).click();
+  const endpoint = await dialog.locator("dl dd").nth(1).innerText();
+  await expect(dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true }).click();
+  const context = dialog.getByLabel("上下文窗口（Token）", { exact: true });
+  await expect(context).toHaveValue("16384");
+  await context.fill("32768");
+  await dialog.getByRole("button", { name: "保存固定配置", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("已固定");
+  await dialog.getByRole("button", { name: "返回", exact: true }).click();
+  await dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true }).click();
+  await expect(context).toHaveValue("32768");
+  await dialog.screenshot({ path: test.info().outputPath("fixed-model.png") });
+  await page.setViewportSize({ width: 720, height: 820 });
+  await dialog.screenshot({ path: test.info().outputPath("fixed-model-narrow.png") });
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("button", { name: "重置配置", exact: true }).click();
+  await page.getByRole("dialog", { name: "重置固定配置？", exact: true }).getByRole("button", { name: "重置配置", exact: true }).click();
+  await expect(dialog.getByText("来源：在线参数／模板预填", { exact: true })).toBeVisible();
+  await expect(context).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "重置配置", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "返回", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "配置模型 offline-model", exact: true })).toContainText("已固定");
+  await expect(dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true })).not.toContainText("已固定");
+  await dialog.getByRole("button", { name: "返回", exact: true }).click();
+  await dialog.getByRole("button", { name: "默认模型", exact: true }).click();
+  await page.getByRole("menuitem", { name: /离线测试服务商/ }).click();
+  await expect(page.getByRole("menuitemradio", { name: /alternate-offline-model/ })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("model-cascade.png") });
+  await dialog.getByRole("button", { name: "默认模型", exact: true }).click();
+  await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();
+  await dialog.getByLabel("服务商名称", { exact: true }).fill("删除验证服务商");
+  await dialog.getByLabel("服务地址", { exact: true }).fill(endpoint);
+  await dialog.getByLabel("API Key", { exact: true }).fill("e2e-placeholder-not-a-real-secret");
+  await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "删除验证服务商", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "删除服务商", exact: true }).click();
+  const confirmation = page.getByRole("dialog", { name: "删除“删除验证服务商”？", exact: true });
+  await expect(confirmation.getByText(/0 个显式引用会话/)).toContainText("0 条固定配置");
+  await confirmation.screenshot({ path: test.info().outputPath("provider-deletion.png") });
+  await confirmation.getByRole("button", { name: "删除服务商", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "模型与服务商", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("服务商已删除");
+  await expect(dialog.getByRole("button", { name: /管理服务商 删除验证服务商/ })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "默认模型", exact: true })).toContainText("offline-model");
+  await dialog.getByRole("button", { name: "关闭设置", exact: true }).click();
+  const model_trigger = page.getByRole("button", { name: "模型设置", exact: true });
+  await model_trigger.click();
+  const follow = page.getByRole("menuitemradio", { name: "默认模型", exact: true });
+  await expect(follow).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: /离线测试服务商/ })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("menuitem", { name: "管理服务商", exact: true })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(follow).toBeFocused();
+  await page.screenshot({ path: test.info().outputPath("model-follow-default.png") });
+  await page.keyboard.press("Enter");
+  await expect(model_trigger).toHaveAttribute("aria-expanded", "false");
+  await model_trigger.click();
+  await expect(follow).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  await expect(model_trigger).toHaveAttribute("aria-expanded", "false");
+
+});

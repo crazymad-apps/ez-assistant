@@ -6,11 +6,22 @@ vi.mock("../../src/native-bridge/nativeResource", async (original) => ({
 }));
 import {
   draftKeyForWorkspace,
+  isDraftCustomized,
   NewSessionDraftStore,
 } from "../../src/stores/NewSessionDraftStore";
 import { RootStore } from "../../src/stores/RootStore";
 
 describe("NewSessionDraftStore", () => {
+  it("keeps following-default intent and treats explicit choices as customized", () => {
+    const drafts = new NewSessionDraftStore();
+    const draft = drafts.open("unbound");
+    expect(draft.model_selection).toBeNull();
+    expect(isDraftCustomized(draft)).toBe(false);
+    drafts.updateModel("unbound", { provider_instance_id: "provider-1", model_id: "vendor/model.v1" });
+    expect(isDraftCustomized(drafts.get("unbound")!)).toBe(true);
+    drafts.updateModel("unbound", null);
+    expect(isDraftCustomized(drafts.get("unbound")!)).toBe(false);
+  });
   it("passes a stable MCP key in first materialization and preserves it on rejection", async () => {
     const store = new RootStore();
     store.connection.markConnected("instance-1", {
@@ -37,10 +48,10 @@ describe("NewSessionDraftStore", () => {
     const first = draftKeyForWorkspace("workspace-1");
     const second = draftKeyForWorkspace("workspace-2");
 
-    drafts.open(first, "model-a");
+    drafts.open(first);
     drafts.updateText(first, "保留这段草稿");
     drafts.updateGoalArmed(first, true);
-    drafts.open(second, "model-a");
+    drafts.open(second);
     drafts.updateText(second, "另一个工作空间");
 
     expect(drafts.get(first)).toMatchObject({
@@ -57,10 +68,10 @@ describe("NewSessionDraftStore", () => {
 
   it("retains one materialization manifest until the draft changes or the attempt is cleared", () => {
     const drafts = new NewSessionDraftStore();
-    drafts.open("unbound", "model-a");
+    drafts.open("unbound");
     const manifest = {
       idempotency_key: "attempt-1",
-      model_key: "model-a",
+      model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
       variant: "build" as const,
       approval_mode: "ask" as const,
       message: "首次发送",

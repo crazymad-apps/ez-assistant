@@ -17,12 +17,15 @@ fn formal_host_uses_the_explicit_responses_protocol_without_chat_fallback() {
     let mut client = host.connect();
     let status = client.runtime("get_config_status", json!({}));
     assert_eq!(status["status"]["state"], "ready");
-    let models = client.runtime("list_models", json!({}));
-    assert_eq!(models["models"][0]["protocol"], "openai_responses");
+    let providers = client.runtime("list_providers", json!({}));
+    assert_eq!(
+        providers[0]["connection"]["protocol_preference"],
+        "responses"
+    );
 
     let created = client.runtime(
         "create_session",
-        json!({"title":"Responses offline", "model_key":"responses-fixture"}),
+        json!({"title":"Responses offline", "model_selection":null}),
     );
     let session_id = created["session"]["session_id"]
         .as_str()
@@ -85,7 +88,7 @@ fn opaque_reasoning_survives_formal_host_restart_and_replays_on_the_exact_route(
     let mut first = first_host.connect();
     let created = first.runtime(
         "create_session",
-        json!({"title":"Responses opaque restart", "model_key":"deepseek-responses"}),
+        json!({"title":"Responses opaque restart", "model_selection":null}),
     );
     let session_id = created["session"]["session_id"]
         .as_str()

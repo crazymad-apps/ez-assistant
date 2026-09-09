@@ -53,7 +53,8 @@ pub struct InspectImagesRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageInspection {
     pub text: String,
-    pub model_key: String,
+    pub model_provider: String,
+    pub model_id: String,
     pub elapsed_ms: u64,
     pub usage: Option<agent_types::TokenUsage>,
 }

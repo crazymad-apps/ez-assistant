@@ -181,6 +181,7 @@ pub(super) async fn runtime_with_permission_components(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
     runtime
 }
 
@@ -334,7 +335,7 @@ async fn reload_replaces_the_whole_session_cohort_and_publishes_one_fact() {
     let session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(workspace.workspace_id.clone()),
         })
         .await

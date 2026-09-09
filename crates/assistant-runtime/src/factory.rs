@@ -1,5 +1,18 @@
 //! Run 前模型服务与 System Prompt 的宿主注入边界。
 
+mod discovery;
+mod parameters;
+pub use parameters::{
+    ModelParameterError, ModelParameterSource, ResolvedModelParameters, resolve_model_parameters,
+    validate_fixed_model_parameters,
+};
+
+pub use discovery::{
+    DiscoveredModel, ModelDiscoveryError, ModelDiscoveryErrorKind, ModelDiscoveryFormat,
+    ModelDiscoveryFuture, ModelDiscoveryRequest, ModelFeatureSupport, ModelParameters,
+    ModelReasoningMode, ModelTokenLimit,
+};
+
 use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use agent_core::ToolPolicy;
@@ -72,6 +85,8 @@ pub struct ModelServiceFactoryRequest<'a> {
     pub model: &'a str,
     pub api_key: &'a str,
     pub context_window_tokens: u64,
+    /// 当前已编译思考模式的独立输入上限。
+    pub max_input_tokens: Option<u64>,
     pub connect_timeout: Duration,
     /// 等待响应建立及相邻流 chunk 的最长时间；不是流式请求总预算。
     pub request_timeout: Duration,
@@ -106,6 +121,21 @@ impl ModelServiceFactoryError {
 
 /// 从 Runtime 已校验配置构造具体 Provider 模型服务。
 pub trait ModelServiceFactory: Send + Sync {
+    /// 获取本次在线目录。旧的纯推理测试工厂默认不具备此能力，不回退到静态目录。
+    ///
+    /// # Errors
+    /// 返回结构化的配置、网络或解析错误；部分分页成功不构成一次成功结果。
+    fn discover_models<'a>(
+        &'a self,
+        _request: ModelDiscoveryRequest<'a>,
+    ) -> ModelDiscoveryFuture<'a> {
+        Box::pin(async {
+            Err(ModelDiscoveryError::new(
+                ModelDiscoveryErrorKind::Unsupported,
+            ))
+        })
+    }
+
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,

@@ -41,6 +41,11 @@ impl ContextWindowEvaluator {
             return Err(ContextWindowError::ZeroContextWindow);
         }
 
+        let max_input_tokens = model.max_input_tokens();
+        if max_input_tokens.is_some_and(|limit| limit == 0 || limit > context_window_tokens) {
+            return Err(ContextWindowError::InvalidInputLimit);
+        }
+
         let latest_assistant = snapshot
             .messages
             .iter()
@@ -55,6 +60,7 @@ impl ContextWindowEvaluator {
             return Ok(ContextWindowEvaluation {
                 used_tokens: None,
                 context_window_tokens,
+                max_input_tokens,
                 used_ratio: None,
                 decision: ContextWindowDecision::UsageUnavailable,
             });
@@ -66,6 +72,7 @@ impl ContextWindowEvaluator {
             .total_tokens
             .saturating_add(provider_state_payload_budget(snapshot));
         let used_ratio = used_tokens as f64 / context_window_tokens as f64;
+        // 输入上限保留为模型参数，不将其另行解释为自动压缩阈值。
         let decision = if used_ratio >= self.compaction_threshold_ratio {
             ContextWindowDecision::CompactionRequired
         } else {
@@ -74,6 +81,7 @@ impl ContextWindowEvaluator {
         Ok(ContextWindowEvaluation {
             used_tokens: Some(used_tokens),
             context_window_tokens,
+            max_input_tokens,
             used_ratio: Some(used_ratio),
             decision,
         })
@@ -87,6 +95,9 @@ pub struct ContextWindowEvaluation {
     pub used_tokens: Option<u64>,
     /// 当前模型服务显式配置的上下文窗口。
     pub context_window_tokens: u64,
+    /// 当前模式独立声明的输入上限；未知时为空。
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
     /// `used_tokens / context_window_tokens`；usage 不可用时为空。
     pub used_ratio: Option<f64>,
     /// 本次判断结论。
@@ -131,6 +142,9 @@ pub enum ContextWindowError {
     /// 模型服务必须显式提供非零上下文窗口。
     #[error("model context window must be greater than zero")]
     ZeroContextWindow,
+    /// 独立输入上限必须为正整数，且不能超过当前上下文窗口。
+    #[error("model input limit must be positive and within the context window")]
+    InvalidInputLimit,
 }
 
 #[cfg(test)]
@@ -150,6 +164,7 @@ mod tests {
     struct WindowModel {
         capabilities: ModelCapabilities,
         context_window_tokens: u64,
+        max_input_tokens: Option<u64>,
     }
 
     impl ModelService for WindowModel {
@@ -159,6 +174,10 @@ mod tests {
 
         fn context_window_tokens(&self) -> u64 {
             self.context_window_tokens
+        }
+
+        fn max_input_tokens(&self) -> Option<u64> {
+            self.max_input_tokens
         }
 
         fn stream(
@@ -176,6 +195,7 @@ mod tests {
         WindowModel {
             capabilities: ModelCapabilities::default(),
             context_window_tokens,
+            max_input_tokens: None,
         }
     }
 
@@ -299,10 +319,42 @@ mod tests {
             ContextWindowEvaluation {
                 used_tokens: Some(80),
                 context_window_tokens: 100,
+                max_input_tokens: None,
                 used_ratio: Some(0.8),
                 decision: ContextWindowDecision::CompactionRequired,
             }
         );
+    }
+
+    #[test]
+    fn input_limit_does_not_change_the_context_compaction_threshold() {
+        let evaluator = ContextWindowEvaluator::new(0.8).unwrap();
+        let mut limited = model(1000);
+        limited.max_input_tokens = Some(100);
+        for (usage, expected) in [
+            (79, ContextWindowDecision::Ready),
+            (80, ContextWindowDecision::Ready),
+            (800, ContextWindowDecision::CompactionRequired),
+        ] {
+            let snapshot = ConversationSnapshot::new(vec![assistant("latest", Some(usage))]);
+            let result = evaluator.evaluate(&snapshot, &limited).unwrap();
+            assert_eq!(result.decision, expected);
+            assert_eq!(result.context_window_tokens, 1000);
+            assert_eq!(result.max_input_tokens, Some(100));
+            assert_eq!(result.used_ratio, Some(usage as f64 / 1000.0));
+        }
+        let missing = ConversationSnapshot::new(vec![assistant("latest", None)]);
+        assert_eq!(
+            evaluator.evaluate(&missing, &limited).unwrap().decision,
+            ContextWindowDecision::UsageUnavailable
+        );
+        for invalid in [0, 1001] {
+            limited.max_input_tokens = Some(invalid);
+            assert_eq!(
+                evaluator.evaluate(&missing, &limited),
+                Err(ContextWindowError::InvalidInputLimit)
+            );
+        }
     }
 
     #[test]
@@ -355,6 +407,7 @@ mod tests {
             ContextWindowEvaluation {
                 used_tokens: None,
                 context_window_tokens: 100,
+                max_input_tokens: None,
                 used_ratio: None,
                 decision: ContextWindowDecision::UsageUnavailable,
             }

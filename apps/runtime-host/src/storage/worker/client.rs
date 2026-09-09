@@ -84,7 +84,16 @@ pub(crate) struct LocalRuntimeStore {
 }
 
 impl LocalRuntimeStore {
+    #[cfg(test)]
     pub(crate) async fn open(runtime_home: &Path, capacity: usize) -> Result<Self, StoreError> {
+        Self::open_with_progress(runtime_home, capacity, None).await
+    }
+
+    pub(crate) async fn open_with_progress(
+        runtime_home: &Path,
+        capacity: usize,
+        progress: Option<tokio::sync::watch::Sender<crate::storage::DatabaseStartupProgress>>,
+    ) -> Result<Self, StoreError> {
         if capacity == 0 {
             return Err(StoreError::new(
                 StoreErrorKind::InvalidInput,
@@ -96,7 +105,7 @@ impl LocalRuntimeStore {
         let runtime_home = PathBuf::from(runtime_home);
         let worker = thread::Builder::new()
             .name(WORKER_NAME.to_owned())
-            .spawn(move || run_worker(runtime_home, receiver, ready_sender))
+            .spawn(move || run_worker(runtime_home, receiver, ready_sender, progress))
             .map_err(|source| {
                 StoreError::with_source(
                     StoreErrorKind::Unavailable,
@@ -183,6 +192,92 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn load_providers(&self) -> StoreFuture<'_, Vec<assistant_runtime::StoredProvider>> {
+        Box::pin(async move { self.request(|reply| Command::LoadProviders { reply }).await })
+    }
+    fn put_provider(&self, provider: assistant_runtime::StoredProvider) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::PutProvider { provider, reply })
+                .await
+        })
+    }
+    fn remove_provider(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        Box::pin(async move {
+            self.request(|reply| Command::RemoveProvider { id, reply })
+                .await
+        })
+    }
+    fn provider_usage(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        Box::pin(async move {
+            self.request(|reply| Command::ProviderUsage { id, reply })
+                .await
+        })
+    }
+    fn load_model_settings(&self) -> StoreFuture<'_, assistant_protocol::ModelSettings> {
+        Box::pin(async move {
+            self.request(|reply| Command::LoadModelSettings { reply })
+                .await
+        })
+    }
+    fn save_model_settings(
+        &self,
+        settings: assistant_protocol::ModelSettings,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::SaveModelSettings { settings, reply })
+                .await
+        })
+    }
+    fn get_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ModelFixedConfig>> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetModelFixedConfig { selection, reply })
+                .await
+        })
+    }
+    fn list_model_fixed_configs(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ModelFixedConfig>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListModelFixedConfigs {
+                id,
+                offset,
+                limit,
+                reply,
+            })
+            .await
+        })
+    }
+    fn put_model_fixed_config(
+        &self,
+        config: assistant_protocol::ModelFixedConfig,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::PutModelFixedConfig { config, reply })
+                .await
+        })
+    }
+    fn reset_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ResetModelFixedConfig { selection, reply })
+                .await
+        })
+    }
+
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,

@@ -32,7 +32,7 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     );
     let created = first_client.runtime(
         "create_session",
-        json!({ "title": "Offline acceptance", "model_key": "fixture" }),
+        json!({ "title": "Offline acceptance", "model_selection":null }),
     );
     let session_id = string(&created["session"]["session_id"]);
 
@@ -199,11 +199,13 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
         "cancelled"
     );
 
+    let mut selection = client.runtime("get_model_settings", json!({}))["default_model"].clone();
+    selection["model_id"] = json!("offline-alternate");
     let changed = client.runtime(
         "set_session_model",
-        json!({ "session_id": session_id, "model_key": "alternate" }),
+        json!({ "session_id": session_id, "model_selection": selection }),
     );
-    assert_eq!(changed["session"]["model_key"], "alternate");
+    assert_eq!(changed["session"]["model_selection"], selection);
     let before_reentry = client.conversation(&session_id);
     let target_message_id = first_user_message_id(&before_reentry);
     let replacement = client.runtime(
@@ -323,16 +325,16 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
     let database = runtime_home.join("data/runtime.sqlite3");
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open acceptance database read-only phase");
-    let (lifecycle, model_key, generation, message_count): (String, String, i64, i64) = connection
+    let (lifecycle, model_id, generation, message_count): (String, String, i64, i64) = connection
         .query_row(
-            "SELECT lifecycle, model_key, body_generation, message_count
+            "SELECT lifecycle, model_id, body_generation, message_count
              FROM sessions WHERE session_id = ?1",
             [session_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("session row");
     assert_eq!(lifecycle, "active");
-    assert_eq!(model_key, "alternate");
+    assert_eq!(model_id, "offline-alternate");
     assert!(generation > 1);
     assert_eq!(message_count, 2);
     for (table, expected) in [("inputs", 1_i64), ("runs", 1), ("run_message_refs", 2)] {

@@ -4,12 +4,11 @@
 //! 可以持有 secret；`ConfigProjection` 服务于查询和未来应用协议，只能包含脱敏事实。
 //! 两者不通过通用 Serialize 相互转换，避免新增字段时意外把 credential 带出进程边界。
 
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{fmt, time::Duration};
 
 use agent_core::{ExecutionBudget, GuardrailConfig};
 use agent_model::{GenerationConfig, ModelRetryPolicy};
 use agent_types::ProviderId;
-use assistant_protocol::ModelKey;
 
 use super::source::ConfigSourceFailureKind;
 
@@ -43,33 +42,16 @@ pub enum ConfigIssueCode {
     UnknownField,
     /// 必填字段缺失。
     MissingField,
-    /// 模型 key 不符合约定形式。
-    InvalidModelKey,
-    /// 单个模型表无法解释或字段值无效。
-    InvalidModel,
-    /// 协议不受当前 schema 支持。
-    UnsupportedProtocol,
-    /// Provider 标识不符合当前 schema 的稳定 key 形式。
-    InvalidProvider,
-    /// endpoint 不满足安全 URL 约束。
-    InvalidEndpoint,
-    /// API Key 缺失或格式无效。
-    MissingCredential,
     /// token、超时或执行上限无效。
     InvalidLimit,
     /// Runtime/Agent 策略无效。
     InvalidPolicy,
-    /// 模型协议 Adapter 与 Agent 全局请求参数不兼容。
-    UnsupportedProfileCombination,
-    /// 默认 key 不存在或指向无效模型。
-    DefaultModelUnavailable,
 }
 
 /// 一条不包含原始 TOML、credential 或底层错误文本的安全诊断。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigIssue {
     pub(super) code: ConfigIssueCode,
-    pub(super) model_key: Option<ModelKey>,
     pub(super) message: &'static str,
 }
 
@@ -77,11 +59,6 @@ impl ConfigIssue {
     /// 稳定诊断分类。
     pub fn code(&self) -> ConfigIssueCode {
         self.code
-    }
-
-    /// 诊断所属的合法模型 key；全局或非法 key 诊断为 None。
-    pub fn model_key(&self) -> Option<&ModelKey> {
-        self.model_key.as_ref()
     }
 
     /// 可安全展示的固定消息。
@@ -104,22 +81,6 @@ impl ModelProtocol {
         match self {
             Self::OpenAiChatCompletions => "openai_chat_completions",
             Self::OpenAiResponses => "openai_responses",
-        }
-    }
-
-    pub(crate) fn parse_config(value: &str) -> Option<Self> {
-        match value {
-            "openai_chat_completions" | "chat_completions" => Some(Self::OpenAiChatCompletions),
-            "openai_responses" => Some(Self::OpenAiResponses),
-            _ => None,
-        }
-    }
-
-    pub(super) fn parse_catalog(value: &str) -> Option<Self> {
-        match value {
-            "openai_chat_completions" => Some(Self::OpenAiChatCompletions),
-            "openai_responses" => Some(Self::OpenAiResponses),
-            _ => None,
         }
     }
 }
@@ -260,7 +221,6 @@ impl fmt::Debug for ModelSecret {
 /// 该类型不实现 Debug/Serialize；只有明确的只读 getter 可跨越配置编译边界。它同时保留
 /// 模型静态硬上限和已计算的 generation，使后续 Run 不必重新解释配置覆盖规则。
 pub struct ResolvedModelConfig {
-    pub(super) key: ModelKey,
     pub(super) display_name: String,
     pub(super) protocol: ModelProtocol,
     pub(super) provider: ProviderId,
@@ -268,17 +228,13 @@ pub struct ResolvedModelConfig {
     pub(super) model: String,
     pub(super) api_key: ModelSecret,
     pub(super) context_window_tokens: u64,
+    pub(super) max_input_tokens: Option<u64>,
     pub(super) max_output_tokens: u32,
     pub(super) generation: GenerationConfig,
-    pub(super) capabilities: super::catalog::ResolvedModelCapabilities,
+    pub(super) capabilities: super::capabilities::ResolvedModelCapabilities,
 }
 
 impl ResolvedModelConfig {
-    /// 用户配置的稳定 key。
-    pub fn key(&self) -> &ModelKey {
-        &self.key
-    }
-
     /// 用户可见名称。
     pub fn display_name(&self) -> &str {
         &self.display_name
@@ -309,9 +265,14 @@ impl ResolvedModelConfig {
         self.api_key.expose()
     }
 
-    /// 模型静态上下文窗口上限。
+    /// 当前编译模型的上下文窗口上限。
     pub fn context_window_tokens(&self) -> u64 {
         self.context_window_tokens
+    }
+
+    /// 当前思考模式的独立输入上限；未知时不从上下文窗口猜测一个值。
+    pub fn max_input_tokens(&self) -> Option<u64> {
+        self.max_input_tokens
     }
 
     /// 模型声明的单轮最大输出上限。
@@ -325,31 +286,28 @@ impl ResolvedModelConfig {
     }
 
     /// 静态目录、用户 override 与协议基线合并后的唯一能力事实。
-    pub fn capabilities(&self) -> &super::catalog::ResolvedModelCapabilities {
+    pub fn capabilities(&self) -> &super::capabilities::ResolvedModelCapabilities {
         &self.capabilities
     }
 }
 
 /// 已通过顶层与全局校验的配置快照。
 ///
-/// Degraded 状态也会拥有本类型：models 只收录有效条目，default_model 可以合法但暂时不可用。
-/// Missing/Invalid 则完全没有快照，避免回退到旧 credential 或半解析的全局策略。
+/// 文件缺失使用明确的全局缺省值；无效文件不回退旧快照。模型是否可用由数据库模型准备判断。
 pub struct ResolvedConfig {
     pub(super) schema_version: u32,
-    pub(super) default_model: Option<ModelKey>,
     pub(super) transport: RuntimeModelTransportConfig,
+    pub(super) generation: GenerationConfig,
     pub(super) retry_policy: Option<ModelRetryPolicy>,
     pub(super) budget: ExecutionBudget,
     pub(super) guardrails: GuardrailConfig,
     pub(super) delegation: DelegationConfig,
     pub(super) mcp: McpRuntimeConfig,
     pub(super) vision: Option<VisionConfig>,
-    pub(super) models: BTreeMap<ModelKey, ResolvedModelConfig>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisionConfig {
-    pub model_key: ModelKey,
     pub timeout: Duration,
     pub max_output_tokens: u32,
 }
@@ -360,14 +318,14 @@ impl ResolvedConfig {
         self.schema_version
     }
 
-    /// 已通过 key 形式校验的默认模型；它仍可能不在有效模型 map 中。
-    pub fn default_model(&self) -> Option<&ModelKey> {
-        self.default_model.as_ref()
-    }
-
     /// 全局模型传输配置。
     pub fn transport(&self) -> RuntimeModelTransportConfig {
         self.transport
+    }
+
+    /// 模型无关的请求预算；执行准备时才与所选模型的生效模式限制组合。
+    pub fn generation(&self) -> &GenerationConfig {
+        &self.generation
     }
 
     /// 显式有限重试策略；None 表示不启用隐藏重试。
@@ -398,54 +356,6 @@ impl ResolvedConfig {
     pub fn vision(&self) -> Option<&VisionConfig> {
         self.vision.as_ref()
     }
-
-    /// 按 key 确定性排序的有效模型集合。
-    pub fn models(&self) -> &BTreeMap<ModelKey, ResolvedModelConfig> {
-        &self.models
-    }
-
-    /// 查询一条有效模型配置。
-    pub fn model(&self, key: &ModelKey) -> Option<&ResolvedModelConfig> {
-        self.models.get(key)
-    }
-}
-
-/// 单个模型的脱敏配置投影。
-///
-/// 投影允许表达无效模型，因此大多数字段是 Option；`api_key_configured` 只说明本地格式通过，
-/// 不说明凭证已经联网验证。任何情况下都不能从本类型还原 API Key。
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModelConfigProjection {
-    /// 合法模型 key；非法 key 不回显原始表名。
-    pub model_key: Option<ModelKey>,
-    /// 显示名称；无效 key 且无显式名称时使用固定占位符。
-    pub display_name: String,
-    /// 原始安全协议名称。
-    pub protocol: Option<String>,
-    /// 原始安全 Provider 名称。
-    pub provider: Option<String>,
-    /// 只有通过 userinfo/query/fragment 校验后才投影。
-    pub endpoint: Option<String>,
-    /// Provider 模型名。
-    pub model: Option<String>,
-    /// 模型上下文窗口上限。
-    pub context_window_tokens: Option<u64>,
-    /// 模型单轮最大输出上限。
-    pub max_output_tokens: Option<u32>,
-    /// Agent 全局请求的最大输出值。
-    pub agent_max_output_tokens: Option<u32>,
-    /// 两个输出维度取最小值后的结果。
-    pub effective_max_output_tokens: Option<u32>,
-    /// 已编译能力是否支持原生图片输入；无效模型保持 false。
-    pub supports_image_input: bool,
-    /// 只表示 API Key 已通过本地非空格式校验，不包含其值。
-    pub api_key_configured: bool,
-    /// 是否对应配置中的默认 key。
-    pub is_default: bool,
-    /// 是否已进入有效模型 map。
-    pub is_valid: bool,
-    /// 本模型的安全诊断。
-    pub issues: Vec<ConfigIssue>,
 }
 
 /// 配置状态查询可使用的整体脱敏投影。
@@ -458,14 +368,8 @@ pub struct ConfigProjection {
     pub state: ConfigState,
     /// 成功读取到的 schema version。
     pub schema_version: Option<u32>,
-    /// 合法的默认模型 key。
-    pub default_model: Option<ModelKey>,
-    /// 形式合法的辅助视觉模型 key；目标模型无效时仍保留以便诊断和修复。
-    pub auxiliary_vision_model: Option<ModelKey>,
     /// 已成功编译的委派上限；全局配置无效或缺失时不存在。
     pub delegation: Option<DelegationConfig>,
-    /// 按配置 key 确定性排序的模型投影。
-    pub models: Vec<ModelConfigProjection>,
     /// 全部安全诊断。
     pub issues: Vec<ConfigIssue>,
 }
@@ -473,7 +377,7 @@ pub struct ConfigProjection {
 /// 一次纯配置编译的完整结果。
 ///
 /// `active` 与 `projection` 同时返回，调用方无需从展示数据反向构造执行配置。状态与 active
-/// 的不变量是：Missing/Invalid 为 None，Degraded/Ready 为 Some。
+/// 无效文件没有 active；文件缺失使用产品全局缺省值，仍通过 Missing 表示文件状态。
 pub struct ConfigCompilation {
     pub(super) state: ConfigState,
     pub(super) active: Option<ResolvedConfig>,
@@ -485,19 +389,12 @@ impl ConfigCompilation {
     ///
     /// 文件缺失不是 TOML 错误，也不产生伪造 issue；Runtime 可以正常启动并通过状态查询提示。
     pub fn missing() -> Self {
-        Self {
-            state: ConfigState::Missing,
-            active: None,
-            projection: ConfigProjection {
-                state: ConfigState::Missing,
-                schema_version: None,
-                default_model: None,
-                auxiliary_vision_model: None,
-                delegation: None,
-                models: Vec::new(),
-                issues: Vec::new(),
-            },
-        }
+        // 无文件使用产品已声明的全局缺省值；缺少模型由独立模型设置诊断。
+        let mut compilation = super::compile_runtime_config("schema_version = 1\n");
+        compilation.state = ConfigState::Missing;
+        compilation.projection.state = ConfigState::Missing;
+        compilation.projection.schema_version = None;
+        compilation
     }
 
     /// 构造“配置源存在但无法安全交付文档”的 fail-closed 结果。
@@ -506,21 +403,14 @@ impl ConfigCompilation {
             ConfigSourceFailureKind::Unsafe => ConfigIssueCode::UnsafeConfigSource,
             ConfigSourceFailureKind::Read => ConfigIssueCode::ConfigReadFailed,
         };
-        let issue = ConfigIssue {
-            code,
-            model_key: None,
-            message,
-        };
+        let issue = ConfigIssue { code, message };
         Self {
             state: ConfigState::Invalid,
             active: None,
             projection: ConfigProjection {
                 state: ConfigState::Invalid,
                 schema_version: None,
-                default_model: None,
-                auxiliary_vision_model: None,
                 delegation: None,
-                models: Vec::new(),
                 issues: vec![issue],
             },
         }
@@ -531,7 +421,7 @@ impl ConfigCompilation {
         self.state
     }
 
-    /// 已形成的有效快照；Missing/Invalid 时为 None。
+    /// 已形成的有效快照；Invalid 时为 None。
     pub fn active(&self) -> Option<&ResolvedConfig> {
         self.active.as_ref()
     }

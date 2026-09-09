@@ -8,7 +8,7 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelKey, ReasoningEffortKey, RunId,
+    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelSelection, ReasoningEffortKey, RunId,
     RunSnapshot, SessionCompactionSnapshot, SessionId, SessionLifecycle, SessionSummary,
     SessionTitleGenerationSnapshot, SessionTitleOrigin,
 };
@@ -47,7 +47,9 @@ pub(crate) struct SessionState {
     pub(crate) title: String,
     pub(crate) is_pinned: bool,
     pub(crate) title_origin: SessionTitleOrigin,
-    pub(crate) model_key: ModelKey,
+    pub(crate) model_selection: Option<ModelSelection>,
+    /// 当前进程已确定的执行参数，供标题、压缩和能力检查复用；不保存在线列表、不入库。
+    pub(crate) model_binding: Option<Arc<crate::config::PreparedModel>>,
     pub(crate) reasoning_effort: Option<ReasoningEffortKey>,
     pub(crate) current_variant: AgentVariant,
     pub(crate) approval_mode: ApprovalMode,
@@ -195,7 +197,8 @@ impl SessionController {
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
-                model_key: stored.model_key,
+                model_selection: stored.model_selection,
+                model_binding: None,
                 reasoning_effort: stored.reasoning_effort,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
@@ -325,7 +328,8 @@ impl SessionController {
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
-                model_key: stored.model_key,
+                model_selection: stored.model_selection,
+                model_binding: None,
                 reasoning_effort: stored.reasoning_effort,
                 current_variant: stored.current_variant,
                 approval_mode: stored.approval_mode,
@@ -390,7 +394,7 @@ impl SessionController {
         Ok(SessionSummary {
             session_id: self.id.clone(),
             title: state.title.clone(),
-            model_key: state.model_key.clone(),
+            model_selection: state.model_selection.clone(),
             reasoning_effort: state.reasoning_effort,
             lifecycle: state.lifecycle,
             role: match state.role {
@@ -593,8 +597,8 @@ impl SessionController {
         &self.id
     }
 
-    pub(crate) fn model_key(&self) -> RuntimeResult<ModelKey> {
-        Ok(self.lock_state()?.model_key.clone())
+    pub(crate) fn model_selection(&self) -> RuntimeResult<Option<ModelSelection>> {
+        Ok(self.lock_state()?.model_selection.clone())
     }
 
     pub(crate) fn current_system_prompt(&self) -> RuntimeResult<SystemPromptSnapshot> {

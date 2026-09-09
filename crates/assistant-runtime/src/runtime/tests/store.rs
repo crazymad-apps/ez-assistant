@@ -117,6 +117,60 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>> {
+        self.inner.load_providers()
+    }
+    fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()> {
+        self.inner.put_provider(provider)
+    }
+    fn remove_provider(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        self.inner.remove_provider(id)
+    }
+    fn provider_usage(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        self.inner.provider_usage(id)
+    }
+    fn load_model_settings(&self) -> StoreFuture<'_, assistant_protocol::ModelSettings> {
+        self.inner.load_model_settings()
+    }
+    fn save_model_settings(
+        &self,
+        settings: assistant_protocol::ModelSettings,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.save_model_settings(settings)
+    }
+    fn get_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ModelFixedConfig>> {
+        self.inner.get_model_fixed_config(selection)
+    }
+    fn list_model_fixed_configs(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ModelFixedConfig>> {
+        self.inner.list_model_fixed_configs(id, offset, limit)
+    }
+    fn put_model_fixed_config(
+        &self,
+        config: assistant_protocol::ModelFixedConfig,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.put_model_fixed_config(config)
+    }
+    fn reset_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.reset_model_fixed_config(selection)
+    }
+
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,

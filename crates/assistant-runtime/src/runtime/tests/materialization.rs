@@ -5,7 +5,7 @@ fn manifest(message: &str) -> assistant_protocol::SessionMaterializationManifest
         idempotency_key: assistant_protocol::IdempotencyKey::new("materialization-runtime-key")
             .expect("key"),
         workspace_id: None,
-        model_key: None,
+        model_selection: None,
         reasoning_effort: None,
         variant: assistant_protocol::AgentVariant::Build,
         approval_mode: assistant_protocol::ApprovalMode::Ask,

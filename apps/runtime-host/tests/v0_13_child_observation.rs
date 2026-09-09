@@ -21,7 +21,7 @@ fn parallel_children_survive_archive_restore_and_formal_host_restart() {
     let mut first = first_host.connect();
     let session_id = first.runtime(
         "create_session",
-        json!({ "title": "Parallel child restart", "model_key": "fixture" }),
+        json!({ "title": "Parallel child restart", "model_selection":null }),
     )["session"]["session_id"]
         .as_str()
         .expect("session id")
@@ -120,7 +120,7 @@ fn killed_host_interrupts_child_and_repairs_the_parent_delegate_result_without_r
     let mut first = first_host.connect();
     let session_id = first.runtime(
         "create_session",
-        json!({ "title": "Interrupted child", "model_key": "fixture" }),
+        json!({ "title": "Interrupted child", "model_selection":null }),
     )["session"]["session_id"]
         .as_str()
         .expect("session id")
@@ -228,7 +228,7 @@ fn child_query_cancel_and_product_view_use_the_formal_host_contract() {
         "create_session",
         json!({
             "title": "Child observation",
-            "model_key": "fixture"
+            "model_selection":null
         }),
     )["session"]["session_id"]
         .as_str()

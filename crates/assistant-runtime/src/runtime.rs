@@ -14,6 +14,7 @@ mod materialization;
 mod mcp;
 mod memory;
 mod model;
+mod model_management;
 mod permission;
 pub(crate) mod product;
 mod quote;
@@ -46,19 +47,15 @@ use agent_sdk::ContextWindowEvaluator;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CancelRunRequest, CancelRunResult,
-    ConfigurationMutationResult, ConfigurationStatus, CreateModelRequest, CreateSessionRequest,
-    CreateSessionResult, DeleteConfirmationToken, DeleteModelRequest, DeleteSessionImpact,
-    DeviceId, GetConfigStatusRequest, GetConfigStatusResult, GetModelRequest, GetModelResult,
-    GetRunRequest, GetRunResult, GetSessionRequest, GetSessionResult, ListModelsRequest,
-    ListModelsResult, ListSessionsRequest, ListSessionsResult, ModelCatalogEntrySnapshot,
-    ModelCatalogSnapshot, ReloadConfigRequest, ReloadConfigResult, RuntimeEvent,
-    RuntimeEventEnvelope, RuntimeLifecycle, SessionId, SessionSummary,
-    SetAuxiliaryVisionModelRequest, SetDefaultModelRequest, UpdateModelRequest, WorkspaceId,
+    ConfigurationStatus, CreateSessionRequest, CreateSessionResult, DeleteConfirmationToken,
+    DeleteSessionImpact, DeviceId, GetConfigStatusRequest, GetConfigStatusResult, GetRunRequest,
+    GetRunResult, GetSessionRequest, GetSessionResult, ListSessionsRequest, ListSessionsResult,
+    ReloadConfigRequest, ReloadConfigResult, RuntimeEvent, RuntimeEventEnvelope, RuntimeLifecycle,
+    SessionId, SessionSummary, WorkspaceId,
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use self::model::resolve_session_model_key;
 use self::recovery::recover_registries;
 use self::tasks::RuntimeTasks;
 use crate::{
@@ -66,9 +63,7 @@ use crate::{
     RunToolFactory, RuntimeConfig, RuntimeConfigSource, RuntimeError, RuntimeResult, RuntimeStore,
     SessionEnvironmentFactory, SessionEnvironmentFactoryRequest, StoreErrorKind, StoredWorkspace,
     WorkspaceEnvironmentSource,
-    config::{
-        ConfigRegistry, ConfigSnapshot, project_model_by_key, project_models, project_status,
-    },
+    config::{ConfigRegistry, ConfigSnapshot, project_status},
     delegation::ChildTaskRegistry,
     observation::ObservationCoordinator,
     permission::{PermissionCoordinator, PermissionFileScope, VolatilePermissionFileStore},
@@ -108,7 +103,7 @@ pub struct AssistantRuntime {
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: AsyncRwLock<()>,
-    model_binding_gate: AsyncRwLock<()>,
+    model_binding_gate: Arc<AsyncRwLock<()>>,
     workspace_mutation_gate: AsyncMutex<()>,
     device_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
@@ -156,7 +151,6 @@ impl AssistantRuntime {
         Self::from_recovered(
             config,
             config_source,
-            Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
             Arc::new(crate::skill::EmptySkillPackageSource),
@@ -185,7 +179,6 @@ impl AssistantRuntime {
         Self::open_with_recall_key(
             config,
             config_source,
-            Arc::new(crate::ModelCatalog::empty()),
             model_factory,
             session_environment_factory,
             Arc::new(crate::skill::EmptySkillPackageSource),
@@ -203,7 +196,6 @@ impl AssistantRuntime {
     pub async fn open_with_recall_key(
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
-        model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         skill_package_source: Arc<dyn crate::SkillPackageSource>,
@@ -223,7 +215,6 @@ impl AssistantRuntime {
         let runtime = Self::from_recovered(
             config,
             config_source,
-            model_catalog,
             model_factory,
             session_environment_factory,
             skill_package_source,
@@ -234,6 +225,7 @@ impl AssistantRuntime {
             recovered,
             Arc::new(crate::HmacRecallReferenceCodec::new(recall_reference_key)),
         )?;
+        runtime.restore_model_settings().await?;
         // 重启仅恢复可查询状态；历史标题任务等待用户后续操作，不自动调用模型。
         Ok(runtime)
     }
@@ -242,7 +234,6 @@ impl AssistantRuntime {
     fn from_recovered(
         config: RuntimeConfig,
         config_source: Arc<dyn RuntimeConfigSource>,
-        model_catalog: Arc<crate::ModelCatalog>,
         model_factory: Arc<dyn ModelServiceFactory>,
         session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
         skill_package_source: Arc<dyn crate::SkillPackageSource>,
@@ -276,10 +267,10 @@ impl AssistantRuntime {
             delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
             operation_gate: AsyncRwLock::new(()),
-            model_binding_gate: AsyncRwLock::new(()),
+            model_binding_gate: Arc::new(AsyncRwLock::new(())),
             workspace_mutation_gate: AsyncMutex::new(()),
             device_mutation_gate: AsyncMutex::new(()),
-            config_registry: Arc::new(ConfigRegistry::new(config_source, model_catalog)),
+            config_registry: Arc::new(ConfigRegistry::new(config_source)),
             permission_coordinator,
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
@@ -358,41 +349,6 @@ impl AssistantRuntime {
         })
     }
 
-    /// 按配置中的确定性顺序列出全部模型脱敏投影。
-    pub fn list_models(&self, _request: ListModelsRequest) -> RuntimeResult<ListModelsResult> {
-        let snapshot = self.config_registry.snapshot()?;
-        let catalog = self.config_registry.catalog();
-        Ok(ListModelsResult {
-            models: project_models(snapshot.projection()),
-            catalog: ModelCatalogSnapshot {
-                revision: catalog.revision().to_owned(),
-                entries: catalog
-                    .routes()
-                    .iter()
-                    .map(|route| ModelCatalogEntrySnapshot {
-                        provider: route.provider.as_str().to_owned(),
-                        provider_label: route.provider_label.clone(),
-                        protocol: route.protocol.as_str().to_owned(),
-                        protocol_label: route.protocol_label.clone(),
-                        model_ids: route.model_ids.clone(),
-                    })
-                    .collect(),
-            },
-        })
-    }
-
-    /// 查询指定 model key 的脱敏投影，包括无效模型的安全诊断。
-    pub fn get_model(&self, request: GetModelRequest) -> RuntimeResult<GetModelResult> {
-        let snapshot = self.config_registry.snapshot()?;
-        let model =
-            project_model_by_key(snapshot.projection(), &request.model_key).ok_or_else(|| {
-                RuntimeError::ModelNotFound {
-                    model_key: request.model_key,
-                }
-            })?;
-        Ok(GetModelResult { model })
-    }
-
     /// 从唯一配置源重新加载并原子替换快照；配置错误作为正常诊断结果返回。
     pub async fn reload_config(
         &self,
@@ -401,6 +357,7 @@ impl AssistantRuntime {
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
         let snapshot = self.config_registry.reload().await?;
+        drop(_binding);
         let _ = self.ensure_controller_session().await;
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(ReloadConfigResult {
@@ -408,176 +365,12 @@ impl AssistantRuntime {
         })
     }
 
-    pub async fn create_model(
-        &self,
-        request: CreateModelRequest,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.write().await;
-        self.ensure_running()?;
-        let snapshot = self
-            .config_registry
-            .mutate(
-                request.expected_revision,
-                crate::config::ConfigMutation::Create {
-                    model: request.model,
-                    set_default: request.set_default,
-                },
-            )
-            .await?;
-        self.configuration_mutated(&snapshot).await
-    }
-
-    pub async fn update_model(
-        &self,
-        request: UpdateModelRequest,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.write().await;
-        self.ensure_running()?;
-        self.ensure_model_not_in_flight(&request.model.model_key)
-            .await?;
-        let snapshot = self
-            .config_registry
-            .mutate(
-                Some(request.expected_revision),
-                crate::config::ConfigMutation::Update {
-                    model: request.model,
-                    set_default: request.set_default,
-                },
-            )
-            .await?;
-        self.configuration_mutated(&snapshot).await
-    }
-
-    pub async fn delete_model(
-        &self,
-        request: DeleteModelRequest,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.write().await;
-        self.ensure_running()?;
-        self.ensure_model_deletable(&request.model_key).await?;
-        let snapshot = self
-            .config_registry
-            .mutate(
-                Some(request.expected_revision),
-                crate::config::ConfigMutation::Delete {
-                    model_key: request.model_key,
-                    replacement_default: request.replacement_default,
-                },
-            )
-            .await?;
-        self.configuration_mutated(&snapshot).await
-    }
-
-    pub async fn set_default_model(
-        &self,
-        request: SetDefaultModelRequest,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.write().await;
-        self.ensure_running()?;
-        let snapshot = self
-            .config_registry
-            .mutate(
-                Some(request.expected_revision),
-                crate::config::ConfigMutation::SetDefault {
-                    model_key: request.model_key,
-                },
-            )
-            .await?;
-        self.configuration_mutated(&snapshot).await
-    }
-
-    pub async fn set_auxiliary_vision_model(
-        &self,
-        request: SetAuxiliaryVisionModelRequest,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.write().await;
-        self.ensure_running()?;
-        let snapshot = self
-            .config_registry
-            .mutate(
-                Some(request.expected_revision),
-                crate::config::ConfigMutation::SetAuxiliaryVision {
-                    model_key: request.model_key,
-                },
-            )
-            .await?;
-        self.configuration_mutated(&snapshot).await
-    }
-
-    async fn configuration_mutated(
-        &self,
-        snapshot: &ConfigSnapshot,
-    ) -> RuntimeResult<ConfigurationMutationResult> {
-        let _ = self.ensure_controller_session().await;
-        self.publish(RuntimeEvent::ConfigChanged);
-        Ok(ConfigurationMutationResult {
-            status: self.configuration_status(snapshot),
-            models: project_models(snapshot.projection()),
-        })
-    }
-
-    async fn ensure_model_not_in_flight(
-        &self,
-        model_key: &assistant_protocol::ModelKey,
-    ) -> RuntimeResult<()> {
-        let mut offset = 0;
-        loop {
-            let rows = self
-                .query_session_summaries(crate::SessionSummaryQuery {
-                    filter: assistant_protocol::SessionListFilter::All,
-                    session_id: None,
-                    role: None,
-                    query: None,
-                    offset,
-                    limit: 200,
-                })
-                .await?;
-            for summary in &rows {
-                if &summary.model_key == model_key
-                    && (summary.active_run_id.is_some() || summary.queued_input_count > 0)
-                {
-                    return Err(RuntimeError::InvalidRequest {
-                        reason: "model is used by an active or queued run",
-                    });
-                }
-            }
-            if rows.len() < 200 {
-                break;
-            }
-            offset += 200;
-        }
-        Ok(())
-    }
-
-    async fn ensure_model_deletable(
-        &self,
-        model_key: &assistant_protocol::ModelKey,
-    ) -> RuntimeResult<()> {
-        let snapshot = self.config_registry.snapshot()?;
-        if snapshot
-            .active()
-            .and_then(|config| config.vision())
-            .is_some_and(|vision| &vision.model_key == model_key)
-        {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "model is configured as the auxiliary vision model",
-            });
-        }
-        self.ensure_model_not_in_flight(model_key).await
-    }
-
-    /// 创建一个带初始 model key、冻结 System Prompt 和空 Conversation 的 Session。
+    /// 创建可跟随默认或显式选择模型的 Session，冻结 System Prompt 并保存空 Conversation。
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
     ) -> RuntimeResult<CreateSessionResult> {
         let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
         let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
@@ -599,7 +392,20 @@ impl AssistantRuntime {
             ),
         };
         let config_snapshot = self.config_registry.snapshot()?;
-        let model_key = resolve_session_model_key(&config_snapshot, request.model_key)?;
+        let model_selection = request.model_selection;
+        let prepared_model = match model_selection.as_ref() {
+            Some(selection) => Some(
+                self.config_registry
+                    .prepare_model(
+                        &config_snapshot,
+                        Some(selection),
+                        self.store.as_ref(),
+                        self.model_factory.as_ref(),
+                    )
+                    .await?,
+            ),
+            None => None,
+        };
 
         let session_id = {
             let sessions =
@@ -640,13 +446,17 @@ impl AssistantRuntime {
             .prepare_session_skill_catalog(workspace.as_ref().map(workspace_directories))
             .await?;
         let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
+        let _binding = self.model_binding_gate.read().await;
+        if let Some(prepared) = &prepared_model {
+            prepared.ensure_current(&self.config_registry)?;
+        }
         let stored = self
             .store
             .create_session(NewStoredSession {
                 session_id: session_id.clone(),
                 title,
                 title_origin,
-                model_key,
+                model_selection,
                 reasoning_effort: None,
                 system_prompt,
 
@@ -709,7 +519,7 @@ impl AssistantRuntime {
             .create_session_inner(
                 CreateSessionRequest {
                     title: None,
-                    model_key: None,
+                    model_selection: None,
                     workspace_id: None,
                 },
                 crate::SessionRole::Controller,

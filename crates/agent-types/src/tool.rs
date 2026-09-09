@@ -368,9 +368,12 @@ impl<'de> Deserialize<'de> for ToolResultContent {
 /// [`ToolResultContent`] 表达，Provider Adapter 必须忽略本字段。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolExecutionMetadata {
-    /// 执行该工具内部模型调用的配置标识；普通工具保持为空。
+    /// 宿主提供的模型服务来源标识；只携带不透明标识，不包含地址或凭据。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_key: Option<String>,
+    pub model_provider: Option<String>,
+    /// 服务来源内的原始模型 ID，不套用宿主旧配置 key 的命名约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /// 工具执行内部调用的墙钟耗时。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,

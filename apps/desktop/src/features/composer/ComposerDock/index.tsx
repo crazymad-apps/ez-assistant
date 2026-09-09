@@ -1,5 +1,5 @@
 import { observer } from "mobx-react-lite";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ApprovalDecision,
   GoalStateSnapshot,
@@ -18,6 +18,7 @@ import { Tooltip } from "../../../components/Tooltip";
 import type { NewSessionDraftKey } from "../../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
+import { ComposerNotice } from "./ComposerNotice";
 import { AttachmentDetailDialog } from "./AttachmentDetailDialog";
 import { QuoteDetailDialog } from "../../conversation/QuoteDetailDialog";
 import {
@@ -28,6 +29,7 @@ import {
 import { ExecutionSettingsPopover } from "./ExecutionSettingsPopover";
 import { GoalStatusRow } from "./GoalStatusRow";
 import { ModelSettingsPopover } from "./ModelSettingsPopover";
+import { useDraftModelEfforts } from "./useDraftModelEfforts";
 import { OutputHostingMenu } from "./OutputHostingMenu";
 import { QueueDrawer } from "./QueueDrawer";
 import { queuePresentation } from "./queuePresentation";
@@ -88,13 +90,6 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   });
   const quotes = store.composer_quotes.get(session_id);
 
-  const model_options = useMemo(() =>
-    (application?.models ?? []).flatMap((model) => model.model_key && model.is_valid ? [{
-      value: model.model_key,
-      label: model.display_name,
-      description: [model.provider ?? model.protocol, model.model, model.context_window_tokens ? formatCompact(model.context_window_tokens) : null]
-        .filter(Boolean).join(" · "),
-    }] : []), [application?.models]);
 
   const slash_query = draft.startsWith("/") && !draft.includes("\n") ? draft.toLocaleLowerCase() : null;
   const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
@@ -161,8 +156,9 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
 
   const is_archived = session.lifecycle === "archived";
   const is_idle_for_model = !session.active_run_id && session_view.queue.items.length === 0;
-  const selected_model_key = session_view.composer_capabilities.selected_model_key ?? null;
-  const model_required = selected_model_key === null;
+  const selected_model = session_view.composer_capabilities.selected_model ?? null;
+  const model_error = session_view.composer_capabilities.model_error;
+  const model_required = selected_model === null || Boolean(model_error);
   const is_control_command = parseSessionCommand(draft).type !== "not_command";
   const queue_presentation = queuePresentation(session_view.queue, session.active_run_id);
   const manual_compaction = session.active_compaction?.trigger.type === "manual"
@@ -406,22 +402,26 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
           work_plan={session_view.work_plan}
         />
       )}
+      {model_error && (
+        <ComposerNotice tone="error" action={{ label: "配置模型", onClick: () => store.settings.open("models") }}>
+          {model_error.message}
+        </ComposerNotice>
+      )}
       {store.interaction_error && (
-        <div className={styles.error_notice} role="alert">
-          <span>{store.interaction_error}</span>
-          <button aria-label="关闭错误提示" onClick={() => store.clearInteractionError()} type="button"><Icon name="x" size={14} /></button>
-        </div>
+        <ComposerNotice tone="error" dismiss={{ label: "关闭错误提示", onClick: () => store.clearInteractionError() }}>
+          {store.interaction_error}
+        </ComposerNotice>
       )}
       {store.session_notice?.session_id === session.session_id && (
-        <div className={styles.session_notice} data-tone={store.session_notice.tone} role="status">
-          <span>{store.session_notice.message}</span>
-          <div className={styles.session_notice_actions}>
-            {store.session_notice.action === "retry_title" && (
-              <button className={styles.session_notice_action} onClick={() => void store.generateSessionTitle(session.session_id)} type="button">重试</button>
-            )}
-            <button aria-label="关闭状态提示" onClick={() => store.clearSessionNotice(session.session_id)} type="button"><Icon name="x" size={14} /></button>
-          </div>
-        </div>
+        <ComposerNotice
+          tone={store.session_notice.tone}
+          action={store.session_notice.action === "retry_title"
+            ? { label: "重试", onClick: () => void store.generateSessionTitle(session.session_id) }
+            : undefined}
+          dismiss={{ label: "关闭状态提示", onClick: () => store.clearSessionNotice(session.session_id) }}
+        >
+          {store.session_notice.message}
+        </ComposerNotice>
       )}
       {!read_only && session_view.title_generation?.trigger === "manual" && (
         <div className={styles.compaction_status} role="status">
@@ -588,14 +588,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
-              model_display_name={selected_model_key
-                ? modelDisplayName(application, selected_model_key)
-                : "未选择模型"}
-              model_key={selected_model_key}
-              model_options={model_options}
+              model_display_name={selected_model
+                ? modelDisplayName(application, selected_model)
+                : "选择模型"}
+              selection={session.model_selection}
+              providers={application?.providers ?? []}
               model_switch_disabled_reason={is_idle_for_model ? undefined : "存在活动运行或排队输入时不能切换模型"}
               on_effort_change={(effort) => store.setSessionReasoningEffort(session.session_id, effort)}
-              on_model_change={(model_key) => store.setSessionModel(session.session_id, model_key)}
+              on_model_change={(selection) => store.setSessionModel(session.session_id, selection)}
               on_open_change={(open) => {
                 setShowHelp(false);
                 if (open) setInitialSettingsCategory(null);
@@ -656,13 +656,6 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
     on_error: (message) => store.showInteractionError(message),
     owner_key: draft_key,
   });
-  const model_options = useMemo(() =>
-    (application?.models ?? []).flatMap((model) => model.model_key && model.is_valid ? [{
-      value: model.model_key,
-      label: model.display_name,
-      description: [model.provider ?? model.protocol, model.model, model.context_window_tokens ? formatCompact(model.context_window_tokens) : null]
-        .filter(Boolean).join(" · "),
-    }] : []), [application?.models]);
   const selected_skill = draft?.selected_skill_name ? { name: draft.selected_skill_name } : null;
   const slash_query = draft?.text.startsWith("/") && !draft.text.includes("\n")
     ? draft.text.toLocaleLowerCase()
@@ -690,9 +683,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   }, [draft_key, store]);
   useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
 
+  const draft_model = draft?.model_selection ?? application?.model_settings.default_model ?? null;
+  const effort_options = useDraftModelEfforts(draft_model, active_overlay === "model");
+
   if (!draft) return null;
   const current_draft = draft;
-  const model_required = draft.model_key === null;
+  const model_required = draft_model === null;
   const can_send = Boolean(draft.text.trim() || draft.attachments.length || draft.quotes.length);
 
   function updateOverlay(overlay: "execution" | "model", open: boolean) {
@@ -768,10 +764,9 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   return (
     <div className={styles.dock}>
       {store.interaction_error && (
-        <div className={styles.error_notice} role="alert">
-          <span>{store.interaction_error}</span>
-          <button aria-label="关闭错误提示" onClick={() => store.clearInteractionError()} type="button"><Icon name="x" size={14} /></button>
-        </div>
+        <ComposerNotice tone="error" dismiss={{ label: "关闭错误提示", onClick: () => store.clearInteractionError() }}>
+          {store.interaction_error}
+        </ComposerNotice>
       )}
       <section className={styles.composer}>
         <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
@@ -861,17 +856,17 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
           <ModelSettingsPopover
             disabled={store.composer_pending}
             effort={draft.reasoning_effort}
-            effort_options={[]}
+            effort_options={effort_options}
             initial_category={null}
-            model_display_name={draft.model_key ? modelDisplayName(application, draft.model_key) : "未选择模型"}
-            model_key={draft.model_key}
-            model_options={model_options}
+            model_display_name={draft_model ? modelDisplayName(application, draft_model) : "选择模型"}
+            selection={draft.model_selection}
+            providers={application?.providers ?? []}
             on_effort_change={(effort) => {
               store.new_session_drafts.updateReasoningEffort(draft_key, effort);
               return Promise.resolve(true);
             }}
-            on_model_change={(model_key) => {
-              store.new_session_drafts.updateModel(draft_key, model_key);
+            on_model_change={(selection) => {
+              store.new_session_drafts.updateModel(draft_key, selection);
               return Promise.resolve(true);
             }}
             on_open_change={(open) => updateOverlay("model", open)}
@@ -1065,8 +1060,9 @@ function resizeTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.height = `${Math.min(line_height * 8, Math.max(line_height * 2, textarea.scrollHeight))}px`;
 }
 
-function modelDisplayName(application: ReturnType<typeof useRootStore>["projection"]["application"], model_key: string): string {
-  return application?.models.find((model) => model.model_key === model_key)?.display_name ?? model_key;
+function modelDisplayName(application: ReturnType<typeof useRootStore>["projection"]["application"], selection: import("../../../generated/assistant-protocol").ModelSelection): string {
+  const provider = application?.providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
+  return `${provider?.connection.display_name ?? "服务商已删除"} / ${selection.model_id}`;
 }
 
 function attachmentStateLabel(attachment: ComposerAttachment): string {

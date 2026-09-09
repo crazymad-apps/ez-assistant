@@ -122,7 +122,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
                 />
                 <div className={styles.paired_device_summary}>
                   {editing_device === device.device_id ? (
-                    <input
+                    <input placeholder="请输入"
                       aria-label={`设备名称 ${device.display_name}`}
                       autoFocus
                       maxLength={80}

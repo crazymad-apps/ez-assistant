@@ -324,9 +324,11 @@ fn user_images_keep_their_original_message_position() {
 
 #[test]
 fn official_function_output_parts_carry_native_tool_images() {
-    let (request, _image, images) = tool_image_request();
-    let adapter = ResponsesProtocolAdapter::openai()
-        .with_tool_image_projection(agent_model::ToolImageProjection::NativeFunctionOutput);
+    let (mut request, _image, images) = tool_image_request();
+    request.reasoning = Some(agent_model::ReasoningConfig {
+        effort: Some(agent_model::ReasoningEffort::Medium),
+    });
+    let adapter = ResponsesProtocolAdapter::openai();
     let value = serde_json::to_value(
         encode_request_with_images(&request, &images, &adapter, "gpt-test").expect("native output"),
     )
@@ -335,6 +337,8 @@ fn official_function_output_parts_carry_native_tool_images() {
     assert_eq!(value["input"][2]["type"], "function_call_output");
     assert_eq!(value["input"][2]["output"][0]["type"], "input_text");
     assert_eq!(value["input"][2]["output"][1]["type"], "input_image");
+    assert_eq!(value["reasoning"]["effort"], "medium");
+    assert_eq!(value["reasoning"]["summary"], "auto");
 }
 
 #[test]
@@ -861,7 +865,7 @@ fn compatible_corrupt_state_fails_while_null_encrypted_content_stays_normalized(
         "responses.reasoning_item",
         "application/json",
         1,
-        part_id("rs_bad:content:0"),
+        Some(part_id("rs_bad:content:0")),
         exact.route_fingerprint.clone().expect("bound route"),
         b"not-json".to_vec(),
     )
@@ -1123,4 +1127,64 @@ async fn service_turns_midstream_transport_and_post_terminal_data_into_one_failu
     let collected = EventCollector::collect_validated(stream).await;
     assert!(matches!(collected.assert_failed(), ModelError::Protocol(_)));
     assert_eq!(collected.terminals().count(), 1);
+}
+
+#[test]
+fn opaque_reasoning_without_summary_survives_tool_round_trip() {
+    let adapter = bound_adapter(
+        ResponsesProtocolAdapter::openai(),
+        "https://api.openai.com/v1",
+        "gpt-test",
+    );
+    let raw = json!({"id":"rs_private","type":"reasoning","summary":[],"encrypted_content":"opaque-cipher","status":"completed"});
+    let call = json!({"id":"fc_test","type":"function_call","call_id":"call_test","name":"status","arguments":"{}"});
+    let values = [
+        json!({"type":"response.created","response":{"id":"resp_test","model":"gpt-test"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"rs_private","type":"reasoning","summary":[]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":raw}),
+        json!({"type":"response.output_item.added","output_index":1,"item":call}),
+        json!({"type":"response.output_item.done","output_index":1,"item":call}),
+        json!({"type":"response.completed","response":{"id":"resp_test","model":"gpt-test"}}),
+    ];
+    let sse = values
+        .iter()
+        .map(|v| format!("data: {v}\n\n"))
+        .collect::<String>();
+    let events = feed_sse_with_adapter(&sse, adapter.clone(), "gpt-test")
+        .expect("state-only reasoning stream");
+    let ModelEvent::TurnFinished { message } = events.last().expect("terminal") else {
+        panic!("missing terminal")
+    };
+    assert!(
+        matches!(message.parts.as_slice(), [AssistantPart::ProviderState(state), AssistantPart::ToolCall(_)] if state.related_part_id().is_none())
+    );
+    let restored: AssistantMessage = serde_json::from_value(serde_json::to_value(message).unwrap())
+        .expect("persisted state without summary");
+    let history = request(vec![
+        user("u_test", "check status"),
+        ConversationMessage::Assistant(restored),
+        ConversationMessage::Tool(ToolMessage {
+            id: message_id("t_test"),
+            result: ToolResult {
+                call_id: call_id("call_test"),
+                status: ToolResultStatus::Success,
+                content: ToolResultContent::parts(vec![ToolResultPart::text("OK")]).unwrap(),
+                metadata: None,
+            },
+        }),
+    ]);
+    let wire = serde_json::to_value(
+        encode_request_with_images(
+            &history,
+            &agent_model::PreparedModelImages::default(),
+            &adapter,
+            "gpt-test",
+        )
+        .expect("follow-up encoding"),
+    )
+    .unwrap();
+    assert_eq!(wire["input"][1], raw);
+    assert_eq!(wire["input"][2]["type"], "function_call");
+    assert_eq!(wire["input"][3]["type"], "function_call_output");
+    assert_eq!(wire["input"].as_array().unwrap().len(), 4);
 }

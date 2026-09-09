@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { usePresence } from "../../../components/Presence";
+import { usePresence } from "../Presence";
 
 type AnchoredOverlayProps = Readonly<{
   aria_label: string;
@@ -21,7 +21,7 @@ type AnchoredOverlayProps = Readonly<{
   trigger_ref: RefObject<HTMLElement | null>;
 }>;
 
-/** Composer 私有浮层定位器；权威业务状态仍由 Runtime 快照提供。 */
+/** 基于锚点定位浮层，统一 Portal、退场和视口边界。 */
 export function AnchoredOverlay(props: AnchoredOverlayProps) {
   const open = props.open ?? true;
   const presence = usePresence(open, 90);

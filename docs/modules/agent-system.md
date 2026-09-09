@@ -468,8 +468,10 @@ Pinned Memory 在 Session 创建前渲染并成为冻结 system prefix；Memory 
 普通 Tool Result 进入规范对话。Context 不读写 Store 或 Source，不自动把当前对话转成
 长期记忆；记忆能力也不直接修改规范会话。
 
-已确定的正式层级边界是：模型服务显式提供 `context_window_tokens`；共享 Context
-Window Evaluator 只使用最近完整 Provider Result 的 `total_tokens` 计算窗口比例；
+已确定的正式层级边界是：模型服务显式提供 `context_window_tokens` 和当前模式可选的
+`max_input_tokens`；共享 Context Window Evaluator 使用最近完整 Provider Result 的
+`total_tokens` 和实际上下文窗口判断压缩阈值，并按既有规则计入不透明状态重放预算。
+独立输入限制不增加提前压缩策略；缺失 usage 时不增加隐藏 TokenEstimator；
 Core 在每个 Model Step 前执行该判断；Provider/Model 层只报告 provider-neutral
 Context Overflow；Core 将 Run 内预算阈值或 Overflow 转换为 CompactionRequired
 可靠终态。Core 和 Provider 均不得在原执行内隐藏压缩或流建立后的重试；显式装配的模型

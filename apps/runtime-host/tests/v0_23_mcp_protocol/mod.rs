@@ -48,6 +48,7 @@ fn formal_host_mcp_auth_failure_is_redacted_and_draft_is_not_saved() {
     configure(home.path(), &fixture, "openai_chat_completions", "http");
     let host = HostProcess::start(home.path());
     let mut client = host.connect();
+    wait_for_mcp(&mut client);
     let before = client.runtime("get_mcp_configuration", json!({}));
     let result = client.runtime("test_mcp_server", json!({"test_id":"bad-auth","server":{
         "server_key":"candidate","display_name":"Candidate","description":"Offline auth rejection","enabled":true,
@@ -93,7 +94,7 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
     );
     let session = client.runtime(
         "create_session",
-        json!({"title":"M8 MCP wire", "model_key":"fixture"}),
+        json!({"title":"M8 MCP wire", "model_selection":null}),
     );
     let session_id = session["session"]["session_id"]
         .as_str()
@@ -214,34 +215,28 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
 }
 
 fn configure(home: &Path, fixture: &WireFixture, protocol: &str, transport: &str) {
-    let projection = if protocol == "openai_responses" {
-        "native_function_output"
+    let responses = protocol == "openai_responses";
+    let projection = if responses {
+        "native_tool_result"
     } else {
-        "aggregated_user_input"
+        "follow_up_user_message"
     };
-    fs::write(
-        home.join("config.toml"),
-        format!(
-            r#"schema_version = 1
-default_model = "fixture"
-[models.fixture]
-protocol = "{protocol}"
-provider = "fixture"
-endpoint = "{}"
-model = "offline-mcp"
-api_key = "{MODEL_SECRET}"
-context_window_tokens = 32768
-max_output_tokens = 4096
-[models.fixture.capabilities]
-tool_calls = true
-streaming = true
-image_input = true
-tool_image_projection = "{projection}"
-"#,
-            fixture.server.endpoint()
-        ),
-    )
-    .expect("write isolated config");
+    let mut parameters = crate::support::model_parameters(true, false, projection);
+    parameters["context_window_tokens"]["value"] = json!(32768);
+    crate::support::write_model_fixture(
+        home,
+        vec![crate::support::provider_fixture(
+            fixture.server.endpoint(),
+            MODEL_SECRET,
+            "openai",
+            if responses {
+                "responses"
+            } else {
+                "chat_completions"
+            },
+            vec![json!({"model_id":"offline-mcp", "parameters":parameters, "purpose":"default"})],
+        )],
+    );
     let mut server = if transport == "http" {
         json!({"url":format!("{}/mcp",fixture.server.endpoint()),"headers":{"Authorization":SECRET}})
     } else {
@@ -330,9 +325,53 @@ fn scan_data(path: &Path) {
         if kind.is_dir() {
             scan_data(&entry.path());
         } else if kind.is_file() {
-            assert_clean(&fs::read(entry.path()).expect("read isolated data"));
+            match entry.file_name().to_str() {
+                Some("runtime.sqlite3") => scan_database(&entry.path()),
+                // WAL/SHM 是同一库的物理页，统一由只读连接检查逻辑内容。
+                Some("runtime.sqlite3-wal" | "runtime.sqlite3-shm") => {}
+                _ => assert_clean(&fs::read(entry.path()).expect("read isolated data")),
+            }
         }
     }
+}
+
+/// 唯一允许保存模型密钥的位置是 providers.api_key；其余表和列继续逐值核验。
+fn scan_database(path: &Path) {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut tables = db
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
+        .unwrap();
+    let names = tables
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut credentials = 0;
+    for name in names {
+        let quoted = name.replace('"', "\"\"");
+        let mut statement = db.prepare(&format!("SELECT * FROM \"{quoted}\"")).unwrap();
+        let columns = statement
+            .column_names()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for (index, column) in columns.iter().enumerate() {
+                if name == "providers" && column == "api_key" {
+                    assert_eq!(row.get::<_, String>(index).unwrap(), MODEL_SECRET);
+                    credentials += 1;
+                    continue;
+                }
+                match row.get_ref(index).unwrap() {
+                    rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes) => assert_clean(bytes),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(credentials, 1, "one explicitly configured model credential");
 }
 
 fn wait_for_mcp(client: &mut Client) {

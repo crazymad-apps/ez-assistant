@@ -115,11 +115,15 @@ pub(in crate::http) async fn download_session_file(
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<PreviewSessionResourceFileRequest>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let id = match SessionId::new(session_id) {
         Ok(id) => id,
         Err(_) => return resource_error(invalid_request("会话标识无效。")),
     };
-    let root = match state
+    let root = match services
         .runtime
         .resolve_session_resource_root(&id, &request.locator.root)
         .await
@@ -194,6 +198,10 @@ pub(in crate::http) async fn download_attachment(
     State(state): State<HttpState>,
     RoutePath((session, attachment)): RoutePath<(String, String)>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     use assistant_protocol::{AttachmentId, AttachmentState, GetAttachmentRequest};
     let request = match (SessionId::new(session), AttachmentId::new(attachment)) {
         (Ok(session_id), Ok(attachment_id)) => GetAttachmentRequest {
@@ -202,7 +210,7 @@ pub(in crate::http) async fn download_attachment(
         },
         _ => return resource_error(invalid_request("附件标识无效。")),
     };
-    let attachment = match state.runtime.get_attachment(request).await {
+    let attachment = match services.runtime.get_attachment(request).await {
         Ok(result) if result.attachment.state == AttachmentState::Ready => result.attachment,
         Ok(_) => return resource_error(resource_unavailable()),
         Err(error) => return resource_error(error.to_protocol_info()),
@@ -242,8 +250,12 @@ async fn download_tool(
     message: assistant_protocol::MessageId,
     resource: assistant_protocol::ResourceRefId,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let resource_id = resource.clone();
-    match state
+    match services
         .runtime
         .resolve_tool_file_resource(&owner, &message, &resource)
         .await

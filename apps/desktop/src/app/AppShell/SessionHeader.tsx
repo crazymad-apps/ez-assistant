@@ -157,7 +157,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
       </div>
       <div className={styles.session_title_slot}>
         {editing && session ? (
-          <input
+          <input placeholder="请输入"
             aria-label="会话标题"
             autoFocus
             className={styles.session_title_input}
@@ -247,7 +247,6 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 onSelect={() => {
                   if (isDraftCustomized(
                     new_session_draft,
-                    store.projection.application?.configuration.default_model ?? null,
                   )) {
                     setClearOpen(true);
                   } else {

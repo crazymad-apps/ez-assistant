@@ -43,6 +43,7 @@ struct QueueDriverContext {
     session_loader: Arc<super::session_loading::SessionLoader>,
     workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
+    model_binding_gate: Arc<tokio::sync::RwLock<()>>,
     permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn crate::ModelServiceFactory>,
@@ -90,6 +91,7 @@ impl AssistantRuntime {
             session_loader: self.session_loader.clone(),
             workspaces: self.workspaces.clone(),
             config_registry: self.config_registry.clone(),
+            model_binding_gate: self.model_binding_gate.clone(),
             permission_coordinator: self.permission_coordinator.clone(),
             approval_registry: self.approval_registry.clone(),
             model_factory: self.model_factory.clone(),
@@ -282,7 +284,13 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 fault_locked_driver(&mut state);
                 return;
             };
-            (input_id, input, run.snapshot())
+            (
+                input_id,
+                input,
+                run.snapshot(),
+                state.body_generation,
+                state.model_selection.clone(),
+            )
         };
         let model_diagnostics = Arc::new(RunModelDiagnostics::new(
             session.id().clone(),
@@ -290,18 +298,24 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             context.events.clone(),
         ));
         let run_cancellation = context.root_cancellation.child_token();
-        let skill_catalog = super::skills::prepare_current_catalog(
-            context.store.as_ref(),
-            context.skill_package_source.as_ref(),
-            &context.workspaces,
-            session.environment().workspace_id.as_ref(),
-        )
-        .await;
-        let start_error = match context.config_registry.snapshot().and_then(|config| {
+        // 先订阅再释放门禁，避免错过取消／置顶；事件只唤醒检查，队首仍以 Session 状态为准。
+        let mut preparation_events = context.events.subscribe();
+        // 准备只读取配置和目录；唯一队列驱动仍保留消费权，但不阻塞入队、取消或置顶。
+        drop(mutation);
+        let preparation = async {
+            let skill_catalog = super::skills::prepare_current_catalog(
+                context.store.as_ref(),
+                context.skill_package_source.as_ref(),
+                &context.workspaces,
+                session.environment().workspace_id.as_ref(),
+            )
+            .await;
+            let config = context.config_registry.snapshot()?;
             let controller_tools = controller_tool_coordinator_from(&context);
             compile_run_agent(
                 session.clone(),
                 &config,
+                &context.config_registry,
                 RunCompilationResources {
                     skill_catalog: skill_catalog?,
                     model_factory: context.model_factory.as_ref(),
@@ -336,9 +350,73 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 },
                 Some(model_diagnostics.clone()),
             )
-        }) {
+            .await
+        };
+        // 这里尚未领取 Input 或写入正文；丢弃目录读取 future 不丢失持久化进度。
+        let prepared = {
+            tokio::pin!(preparation);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = context.root_cancellation.cancelled() => {
+                        finish_driver(&session);
+                        return;
+                    }
+                    event = preparation_events.recv() => {
+                        let relevant = match event {
+                            Ok(envelope) => matches!(envelope.event,
+                                RuntimeEvent::QueueChanged { session_id, .. } if &session_id == session.id()),
+                            // 观察事件允许丢失；发生 lag 时重新核对权威队首。
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                finish_driver(&session);
+                                return;
+                            }
+                        };
+                        if relevant && !session.lock_state().is_ok_and(|state|
+                            state.next_runnable_input().as_ref() == Some(&next.0)
+                        ) {
+                            break None;
+                        }
+                    }
+                    result = &mut preparation => break Some(result),
+                }
+            }
+        };
+        let Some(prepared) = prepared else {
+            continue;
+        };
+        // 与设置命令保持相同顺序：配置接纳门禁 → Session mutation。
+        let binding = context.model_binding_gate.read().await;
+        let mutation = session.mutation().await;
+        if context.root_cancellation.is_cancelled() {
+            finish_driver(&session);
+            return;
+        }
+        let still_current = session.lock_state().is_ok_and(|state| {
+            !state.is_faulted
+                && state.active_run.is_none()
+                && state.active_compaction.is_none()
+                && state.next_runnable_input().as_ref() == Some(&next.0)
+                && state
+                    .inputs
+                    .get(&next.0)
+                    .is_some_and(|input| input.latest_run_id == next.2.run_id)
+                && state.body_generation == next.3
+                && state.model_selection == next.4
+        });
+        if !still_current {
+            // 取消、暂停或置顶使本次准备失效，不得为旧 Run 写入失败或用户正文。
+            continue;
+        }
+        let prepared = prepared.and_then(|compiled| {
+            compiled.ensure_models_current(&context.config_registry)?;
+            Ok(compiled)
+        });
+        let start_error = match prepared {
             Ok(compiled) => {
                 let super::model::CompiledRunParts {
+                    model_binding,
                     agent,
                     authorizer,
                     compactor,
@@ -348,6 +426,9 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     can_speak,
                     disclosure_context,
                 } = compiled.into_parts();
+                if let Ok(mut state) = session.lock_state() {
+                    state.model_binding = Some(model_binding);
+                }
                 let message = if next.1.stored.state == StoredInputState::Queued {
                     let plan = match session.lock_state() {
                         Ok(state) => state.work_plan.clone(),
@@ -507,6 +588,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 }
                 // 领取提交完成后立即释放变更门禁；supervisor 的终态结算还要再次取得同一门禁。
                 drop(mutation);
+                drop(binding);
                 let recorder = Arc::new(RuntimeRecorder::new(
                     session.clone(),
                     next.2.run_id.clone(),

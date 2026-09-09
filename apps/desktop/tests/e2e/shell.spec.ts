@@ -124,7 +124,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expectResponsiveLayouts(page);
   await expectSettingsScrollWithoutFlicker(page);
-  await expectModelCatalogForm(page);
+  await expectProviderConnectionForm(page);
   await expectDeviceGatewayManagement(page);
   const navigation = page.getByRole("complementary", { name: "会话导航" });
   const session_header = page.locator('header[aria-label="会话标题栏"]');
@@ -409,32 +409,25 @@ async function expectSettingsScrollWithoutFlicker(page: Page): Promise<void> {
   await settings.getByRole("button", { name: "关闭设置" }).click();
 }
 
-async function expectModelCatalogForm(page: Page): Promise<void> {
+async function expectProviderConnectionForm(page: Page): Promise<void> {
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
   await settings.getByRole("button", { name: "模型", exact: true }).click();
-  await settings.getByRole("button", { name: "添加模型" }).click();
-  await expect(settings.getByRole("button", { name: "选择接口协议" })).toContainText(
-    "Chat Completions（OpenAI Compatible）",
-  );
-
-  const provider = settings.getByRole("combobox", { name: "供应商（Provider）" });
+  await settings.getByRole("button", { name: "添加服务商" }).click();
+  const provider = settings.getByRole("button", { name: "服务商类型" });
   await provider.click();
-  const provider_options = page.getByRole("listbox", { name: "供应商（Provider）" });
-  await expect(provider_options.getByRole("option")).toHaveCount(5);
-  await expect(provider_options.getByRole("option", { name: /Moonshot（Kimi）/ })).toBeVisible();
-  const trigger_width = await provider.evaluate((element) => element.parentElement?.getBoundingClientRect().width ?? 0);
+  const provider_options = page.getByRole("listbox", { name: "服务商类型" });
+  await expect(provider_options.getByRole("option")).toHaveCount(7);
+  await expect(provider_options.getByRole("option", { name: "Kimi / Moonshot" })).toBeVisible();
+  const trigger_width = await provider.evaluate((element) => element.getBoundingClientRect().width);
   const popup_width = await provider_options.evaluate((element) => element.getBoundingClientRect().width);
   expect(popup_width).toBeGreaterThanOrEqual(trigger_width);
-
-  await provider_options.getByRole("option", { name: /Moonshot（Kimi）/ }).click();
-  await expect(provider).toHaveValue("moonshot");
-  const model = settings.getByRole("combobox", { name: "模型 ID" });
-  await model.click();
-  await expect(page.getByRole("option", { name: "kimi-k3" })).toBeVisible();
+  await provider_options.getByRole("option", { name: "Kimi / Moonshot" }).click();
+  await expect(provider).toContainText("Kimi / Moonshot");
+  await expect(settings.getByLabel("API Key", { exact: true })).toHaveValue("");
 
   await settings.getByRole("button", { name: "取消" }).click();
-  const discard_dialog = page.getByRole("dialog", { name: "放弃未保存的模型修改？" });
+  const discard_dialog = page.getByRole("dialog", { name: "放弃未保存的修改？" });
   await expect(discard_dialog).toBeVisible();
   await discard_dialog.getByRole("button", { name: "放弃修改" }).click();
   await expect(discard_dialog).toBeHidden();

@@ -1,4 +1,4 @@
-//! 与模型设置共享同一配置来源及 CAS，只编辑 Host 所有的访问节。
+//! 与全局策略共享同一配置来源及 CAS，只编辑 Host 所有的访问节。
 
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub(super) struct AccessDocument {
 pub(super) async fn load(source: &dyn RuntimeConfigSource) -> Result<AccessDocument, AccessError> {
     let (document, revision) = match source.load().await {
         ConfigSourceLoad::Missing => (
-            "schema_version = 1\ndefault_model = \"\"\n"
+            "schema_version = 1\n"
                 .parse::<DocumentMut>()
                 .expect("static TOML"),
             None,
@@ -141,6 +141,22 @@ mod tests {
         assert!(!configuration.public.remote_enabled);
         assert!(configuration.password_hash.is_none());
         assert!(validate(&configuration.public).is_ok());
+    }
+
+    #[tokio::test]
+    async fn initial_access_settings_do_not_reintroduce_obsolete_model_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let source = LocalConfigSource::new(path.clone());
+        save(&source, load(&source).await.unwrap()).await.unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        let document = contents.parse::<DocumentMut>().unwrap();
+        assert!(document.get("default_model").is_none());
+        assert!(document.get("models").is_none());
+        assert_eq!(
+            assistant_runtime::compile_runtime_config(&contents).state(),
+            assistant_runtime::ConfigState::Ready
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 use agent_model::ModelError;
 use agent_sdk::AgentBuildError;
 use assistant_protocol::{
-    ApprovalId, AttachmentId, ChildTaskId, GoalId, InputId, ModelKey, RunId, RuntimeErrorCode,
+    ApprovalId, AttachmentId, ChildTaskId, GoalId, InputId, RunId, RuntimeErrorCode,
     RuntimeErrorInfo, RuntimeLifecycle, SessionId, WorkspaceId,
 };
 use thiserror::Error;
@@ -175,12 +175,6 @@ pub enum RuntimeError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// 用户指定的模型 key 不存在。
-    #[error("model `{model_key}` was not found")]
-    ModelNotFound { model_key: ModelKey },
-    /// 模型条目存在但当前静态配置无效。
-    #[error("model `{model_key}` is unavailable")]
-    ModelUnavailable { model_key: ModelKey },
     /// Host 无法从已校验配置构造具体模型服务。
     #[error("model service could not be created")]
     ModelBuildFailed {
@@ -409,13 +403,6 @@ impl RuntimeError {
             Self::ContextCompactionFailed { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ContextCompactionFailed,
                 "session context compaction failed",
-            ),
-            Self::ModelNotFound { .. } => {
-                RuntimeErrorInfo::new(RuntimeErrorCode::ModelNotFound, "model was not found")
-            }
-            Self::ModelUnavailable { .. } => RuntimeErrorInfo::new(
-                RuntimeErrorCode::ModelUnavailable,
-                "model configuration is unavailable",
             ),
             Self::ModelBuildFailed { .. } | Self::AgentBuildFailed { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ModelBuildFailed,

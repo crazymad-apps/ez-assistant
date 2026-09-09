@@ -17,7 +17,7 @@ export async function bootstrapWebRuntime(): Promise<RuntimeBootstrap> {
     fetch("/auth/session", { credentials: "same-origin", redirect: "error", cache: "no-store" }).then(readResponse) as Promise<HostLoginResult>,
     fetch("/capabilities", { credentials: "same-origin", redirect: "error", cache: "no-store" }).then(readResponse) as Promise<RuntimeHostCapabilities>,
   ]);
-  if (capabilities.protocol_version !== 2 || !capabilities.features?.includes("web_login")) {
+  if (capabilities.protocol_version !== 3 || !capabilities.features?.includes("web_login")) {
     throw new Error("页面与 Host 版本不一致，请使用同一版本的应用。");
   }
   return { base_url: window.location.origin, instance_id: session.instance_id, access_token: "", capabilities, started_runtime: false, authentication: "web" };

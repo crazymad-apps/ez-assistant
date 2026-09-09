@@ -40,18 +40,18 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
     <div className={styles.target}>
       {connection.target === "local" ? <div className={styles.local}>
         <span className={styles.device}><Icon name="terminal" size={21} /></span>
-        <div><strong>这台电脑</strong><p>{connection.local_state === "ready" ? "本机 Runtime 已就绪" : connection.local_state === "starting" ? "正在静默启动 Runtime…" : "本机 Runtime 启动失败"}</p></div>
+        <div><strong>这台电脑</strong><p>{connection.local_state === "ready" ? "本机 Runtime 可连接" : connection.local_state === "starting" ? "正在静默启动 Runtime…" : "本机 Runtime 启动失败"}</p></div>
         <span className={styles.status} data-ready={connection.local_state === "ready"} />
       </div> : <div className={styles.remote}>
         <label htmlFor="runtime-origin">Host 地址</label>
         <input id="runtime-origin" autoComplete="url" placeholder="http://192.168.1.20:7240" value={origin} onBlur={() => void readPassword()} onChange={(event) => { read_owner.current += 1; setOrigin(event.target.value); setPassword(""); setRemember(false); setNotice(null); }} required />
         <label htmlFor="runtime-password">访问密码</label>
-        <input id="runtime-password" type="password" autoComplete="off" value={password} onChange={(event) => { read_owner.current += 1; setPassword(event.target.value); }} required />
+        <input placeholder="请输入" id="runtime-password" type="password" autoComplete="off" value={password} onChange={(event) => { read_owner.current += 1; setPassword(event.target.value); }} required />
         {keychain && <label className={styles.remember}><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住密码</label>}
       </div>}
     </div>
     {settings && <p className={styles.hint}>切换将丢弃未发送草稿，并关闭当前客户端的临时资源。</p>}
-    <Button className={styles.submit} size="large" variant="primary" type="submit" disabled={already_connected || connection.pending || (connection.target === "remote" && (!origin.trim() || !password))}>{connection.pending ? connection.progress : already_connected ? "当前连接" : settings ? "切换 Runtime" : connection.target === "local" ? "进入工作空间" : "连接 Runtime"}<span aria-hidden="true">→</span></Button>
+    <Button className={styles.submit} size="large" variant="primary" type="submit" disabled={already_connected || connection.pending || (connection.target === "remote" && (!origin.trim() || !password))}>{connection.pending ? current?.error_message ?? connection.progress : already_connected ? "当前连接" : settings ? "切换 Runtime" : connection.target === "local" ? "进入工作空间" : "连接 Runtime"}<span aria-hidden="true">→</span></Button>
     <div className={styles.feedback} aria-live="polite">
       {error && <p className={styles.error} role="alert">{error}</p>}
       {local_failed && <Button size="small" onClick={() => void connection.startLocal().catch(() => undefined)}>重试启动</Button>}

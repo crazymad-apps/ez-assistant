@@ -30,6 +30,12 @@ pub trait ModelService: Send + Sync {
     /// 调用方为当前服务绑定模型配置的上下文窗口上限。
     fn context_window_tokens(&self) -> u64;
 
+    /// 当前服务绑定模式的独立输入上限；未声明时为空，不从上下文窗口推测。
+    /// 上层窗口预检使用该值；它不是 Token 计数器，也不改变请求或截断内容。
+    fn max_input_tokens(&self) -> Option<u64> {
+        None
+    }
+
     /// 发起一次 Provider Turn。
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_>;
 }

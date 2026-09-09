@@ -1,0 +1,31 @@
+.notice {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 5px 8px 5px 10px;
+  border: 1px solid var(--ez-border);
+  border-radius: 8px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font-size: var(--ez-font-base);
+
+  &[data-tone="error"] { border-color: #f2caca; color: var(--ez-danger); }
+  &[data-tone="success"] { border-color: #bcdcc5; color: var(--ez-success); }
+  &[data-tone="warning"] { border-color: #ead6a7; }
+}
+
+.message {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}

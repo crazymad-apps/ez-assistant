@@ -25,9 +25,8 @@ use agent_types::{
 use assistant_protocol::{
     ApprovalSnapshot, ConnectionValidationFailure, ConnectionValidationFailureKind,
     ConnectionValidationOutcome, GetSessionViewRequest, InterruptRunRequest,
-    ListPendingApprovalsRequest, ModelConnectionTarget, RunId, SetSessionApprovalModeRequest,
-    SetSessionModelRequest, ShutdownRuntimeRequest, SubmitInputRequest,
-    ValidateModelConnectionRequest,
+    ListPendingApprovalsRequest, RunId, SetSessionApprovalModeRequest, SetSessionModelRequest,
+    ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
 };
 use serde_json::json;
 use tokio::sync::{Barrier, Notify, broadcast::error::RecvError};
@@ -46,19 +45,9 @@ use crate::{
     SessionExecutionEnvironment,
 };
 
-const TEST_CONFIG: &str = r#"
-schema_version = 1
-default_model = "fixture"
+const TEST_CONFIG: &str = "schema_version = 1\n";
 
-[models.fixture]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "https://api.example.test/v1"
-model = "fixture-model"
-api_key = "unique-test-secret-9f1ca2"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#;
+mod model_fixture;
 
 struct MissingConfigSource;
 
@@ -231,9 +220,7 @@ fn test_config_revision(document: &str) -> String {
 
 fn configured_validation_request() -> ValidateModelConnectionRequest {
     ValidateModelConnectionRequest {
-        target: ModelConnectionTarget::Configured {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
-        },
+        selection: test_model_selection("fixture"),
     }
 }
 
@@ -406,6 +393,13 @@ impl StaticModelFactory {
 }
 
 impl ModelServiceFactory for StaticModelFactory {
+    fn discover_models<'a>(
+        &'a self,
+        _request: crate::ModelDiscoveryRequest<'a>,
+    ) -> crate::ModelDiscoveryFuture<'a> {
+        model_fixture::discovery()
+    }
+
     fn create_model(
         &self,
         _request: ModelServiceFactoryRequest<'_>,
@@ -433,6 +427,13 @@ impl RecordingModelFactory {
 }
 
 impl ModelServiceFactory for RecordingModelFactory {
+    fn discover_models<'a>(
+        &'a self,
+        _request: crate::ModelDiscoveryRequest<'a>,
+    ) -> crate::ModelDiscoveryFuture<'a> {
+        model_fixture::discovery()
+    }
+
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
@@ -476,6 +477,13 @@ impl FailOnceModelFactory {
 }
 
 impl ModelServiceFactory for FailOnceModelFactory {
+    fn discover_models<'a>(
+        &'a self,
+        _request: crate::ModelDiscoveryRequest<'a>,
+    ) -> crate::ModelDiscoveryFuture<'a> {
+        model_fixture::discovery()
+    }
+
     fn create_model(
         &self,
         _request: ModelServiceFactoryRequest<'_>,
@@ -595,6 +603,7 @@ fn runtime_with_run_tool_factory(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed_immediate(&runtime);
     runtime
 }
 
@@ -642,6 +651,7 @@ fn runtime_with_factories_and_config(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed_immediate(&runtime);
     runtime
 }
 
@@ -665,6 +675,9 @@ async fn runtime_with_store(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    if runtime.store.load_providers().await.unwrap().is_empty() {
+        model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
+    }
     runtime
 }
 
@@ -688,6 +701,9 @@ async fn runtime_with_store_and_child_workspaces(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    if runtime.store.load_providers().await.unwrap().is_empty() {
+        model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
+    }
     runtime
 }
 
@@ -697,28 +713,6 @@ fn empty_model() -> Arc<dyn ModelService> {
         8_192,
         [],
     ))
-}
-
-fn config_with_api_key(api_key: &str) -> String {
-    TEST_CONFIG.replace("unique-test-secret-9f1ca2", api_key)
-}
-
-fn model_input(
-    key: &str,
-    endpoint: &str,
-    credential: assistant_protocol::ModelCredentialChange,
-) -> assistant_protocol::ModelConfigurationInput {
-    assistant_protocol::ModelConfigurationInput {
-        model_key: assistant_protocol::ModelKey::new(key).expect("model key"),
-        display_name: key.to_owned(),
-        protocol: "chat_completions".to_owned(),
-        provider: "fixture".to_owned(),
-        endpoint: endpoint.to_owned(),
-        model: format!("{key}-model"),
-        context_window_tokens: 8_192,
-        max_output_tokens: 4_096,
-        credential,
-    }
 }
 
 fn model_capabilities(has_tools: bool) -> ModelCapabilities {
@@ -901,3 +895,14 @@ mod work_plan;
 mod workspace;
 
 mod startup;
+
+mod model_management;
+
+// 显式的新模型引用夹具；不解析或转换旧 TOML 模型 key。
+fn test_model_selection(model_id: &str) -> assistant_protocol::ModelSelection {
+    assistant_protocol::ModelSelection {
+        provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-fixture")
+            .unwrap(),
+        model_id: model_id.to_owned(),
+    }
+}

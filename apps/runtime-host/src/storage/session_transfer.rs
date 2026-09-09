@@ -278,15 +278,15 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
+                        session_id, title, model_id, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin,
-                        materialization_key, automatic_title_pending
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12, ?13, ?14)",
+                        materialization_key, automatic_title_pending, model_provider_instance_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12, ?13, ?14, ?15)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
-                        fork.session.model_key.as_str(),
+                        fork.session.model_selection.as_ref().map(|selection| selection.model_id.as_str()),
                         fork.session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
                         skill_catalog_json,
@@ -307,6 +307,7 @@ impl StorageEngine {
                             .as_ref()
                             .map(|key| key.as_str()),
                         i64::from(fork.session.automatic_title_pending),
+                        fork.session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
                     ],
                 )
                 .map_err(|source| {
@@ -434,7 +435,7 @@ impl StorageEngine {
             session: StoredSession {
                 session_id: fork.session.session_id,
                 title: fork.session.title,
-                model_key: fork.session.model_key,
+                model_selection: fork.session.model_selection,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
 

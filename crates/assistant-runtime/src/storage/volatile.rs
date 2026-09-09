@@ -78,6 +78,10 @@ struct VolatileCompactionReceipt {
 
 #[derive(Default)]
 struct State {
+    providers: BTreeMap<assistant_protocol::ProviderInstanceId, crate::StoredProvider>,
+    model_settings: assistant_protocol::ModelSettings,
+    fixed_models:
+        BTreeMap<assistant_protocol::ModelSelection, assistant_protocol::ModelFixedConfig>,
     devices: BTreeMap<assistant_protocol::DeviceId, PairedDevice>,
     persona: PersonaSnapshot,
     pinned_collection_revision: u64,
@@ -114,6 +118,118 @@ pub(crate) struct VolatileRuntimeStore {
 }
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>> {
+        Box::pin(async move { Ok(self.lock()?.providers.values().cloned().collect()) })
+    }
+    fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.lock()?
+                .providers
+                .insert(provider.provider_instance_id.clone(), provider);
+            Ok(())
+        })
+    }
+    fn remove_provider(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let usage = state.provider_usage(&id);
+            state.providers.remove(&id);
+            state
+                .fixed_models
+                .retain(|key, _| key.provider_instance_id != id);
+            Ok(usage)
+        })
+    }
+    fn provider_usage(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+    ) -> StoreFuture<'_, assistant_protocol::ProviderUsage> {
+        Box::pin(async move { Ok(self.lock()?.provider_usage(&id)) })
+    }
+    fn load_model_settings(&self) -> StoreFuture<'_, assistant_protocol::ModelSettings> {
+        Box::pin(async move { Ok(self.lock()?.model_settings.clone()) })
+    }
+    fn save_model_settings(
+        &self,
+        settings: assistant_protocol::ModelSettings,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.lock()?.model_settings = settings;
+            Ok(())
+        })
+    }
+    fn get_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ModelFixedConfig>> {
+        Box::pin(async move { Ok(self.lock()?.fixed_models.get(&selection).cloned()) })
+    }
+    fn list_model_fixed_configs(
+        &self,
+        id: assistant_protocol::ProviderInstanceId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::ModelFixedConfig>> {
+        Box::pin(async move {
+            Ok(self
+                .lock()?
+                .fixed_models
+                .values()
+                .filter(|config| config.selection.provider_instance_id == id)
+                .skip(offset as usize)
+                .take(limit.min(200) as usize)
+                .cloned()
+                .collect())
+        })
+    }
+    fn put_model_fixed_config(
+        &self,
+        config: assistant_protocol::ModelFixedConfig,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            crate::validate_fixed_model_parameters(&config.parameters).map_err(|_| {
+                StoreError::new(
+                    StoreErrorKind::InvalidData,
+                    "fixed model parameters are inconsistent",
+                )
+            })?;
+            let mut state = self.lock()?;
+            if !state
+                .providers
+                .contains_key(&config.selection.provider_instance_id)
+            {
+                return Err(StoreError::new(
+                    StoreErrorKind::Conflict,
+                    "provider does not exist",
+                ));
+            }
+            if state
+                .fixed_models
+                .get(&config.selection)
+                .is_some_and(|existing| existing.origin != config.origin)
+            {
+                return Err(StoreError::new(
+                    StoreErrorKind::Conflict,
+                    "model origin cannot change",
+                ));
+            }
+            state.fixed_models.insert(config.selection.clone(), config);
+            Ok(())
+        })
+    }
+    fn reset_model_fixed_config(
+        &self,
+        selection: assistant_protocol::ModelSelection,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.lock()?.fixed_models.remove(&selection);
+            Ok(())
+        })
+    }
+
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
@@ -1467,7 +1583,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 session_id: session.session_id.clone(),
                 title: session.title,
                 title_origin: session.title_origin,
-                model_key: session.model_key,
+                model_selection: session.model_selection,
                 reasoning_effort: session.reasoning_effort,
                 system_prompt: session.system_prompt,
 
@@ -1914,7 +2030,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 session_id: fork.session.session_id.clone(),
                 title: fork.session.title,
                 title_origin: fork.session.title_origin,
-                model_key: fork.session.model_key,
+                model_selection: fork.session.model_selection,
                 reasoning_effort: fork.session.reasoning_effort,
                 system_prompt: fork.session.system_prompt,
 
@@ -3890,7 +4006,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             if session.lifecycle != StoredSessionLifecycle::Active {
                 return Err(conflict("session is archived"));
             }
-            session.model_key = change.model_key;
+            session.model_selection = change.model_selection;
             session.reasoning_effort = change.reasoning_effort;
             Ok(())
         })
@@ -4776,7 +4892,7 @@ fn stored_session(session: NewStoredSession) -> StoredSession {
         session_id: session.session_id,
         title: session.title,
         title_origin: session.title_origin,
-        model_key: session.model_key,
+        model_selection: session.model_selection,
         reasoning_effort: session.reasoning_effort,
         system_prompt: session.system_prompt,
 
@@ -4832,7 +4948,7 @@ fn materialization_semantically_matches(
     existing_files.sort_unstable();
     candidate_files.sort_unstable();
     existing.title == candidate.session.title
-        && existing.model_key == candidate.session.model_key
+        && existing.model_selection == candidate.session.model_selection
         && existing.reasoning_effort == candidate.session.reasoning_effort
         && existing.environment.workspace_id == candidate.session.environment.workspace_id
         && (existing.environment.workspace_id.is_none()
@@ -4964,6 +5080,40 @@ fn pause_running_goals_for_recovery(
         goal.pause_reason = Some(StoredGoalPauseReason::RecoveryRequired);
     }
     Ok(())
+}
+
+impl State {
+    fn provider_usage(
+        &self,
+        id: &assistant_protocol::ProviderInstanceId,
+    ) -> assistant_protocol::ProviderUsage {
+        let references = |selection: &Option<assistant_protocol::ModelSelection>| {
+            selection
+                .as_ref()
+                .is_some_and(|selection| &selection.provider_instance_id == id)
+        };
+        let sessions = self
+            .sessions
+            .values()
+            .filter(|session| references(&session.model_selection));
+        assistant_protocol::ProviderUsage {
+            default_model: references(&self.model_settings.default_model),
+            vision_model: references(&self.model_settings.vision_model),
+            session_count: sessions.clone().count() as u64,
+            fixed_config_count: self
+                .fixed_models
+                .keys()
+                .filter(|selection| &selection.provider_instance_id == id)
+                .count() as u64,
+            sessions: sessions
+                .take(20)
+                .map(|session| assistant_protocol::ProviderSessionUsage {
+                    session_id: session.session_id.clone(),
+                    title: session.title.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

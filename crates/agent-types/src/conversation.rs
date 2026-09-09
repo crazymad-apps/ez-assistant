@@ -26,7 +26,7 @@ impl ConversationSnapshot {
 
     /// 严格校验快照内所有 Tool Call 与 Tool Result 的双向配对和顺序。
     ///
-    /// 每个 ToolCallId 必须全局唯一；含 Tool Call 的 AssistantMessage 后必须立即按
+    /// 每个 ToolCallId 在同一压缩边界内必须唯一；含 Tool Call 的 AssistantMessage 后必须立即按
     /// 声明顺序出现恰好一个对应 ToolMessage，才能开始下一条非 Tool 消息。
     pub fn validate_tool_exchange_pairs(&self) -> Result<(), ConversationValidationError> {
         let mut seen_calls = HashSet::new();
@@ -82,6 +82,13 @@ impl ConversationSnapshot {
                         });
                     }
 
+                    // 摘要之前的消息不再进入后续模型请求，不能占用新上下文的调用 ID。
+                    // 必须先确认上一批结果完整，不能用摘要掩盖未配对的调用。
+                    if matches!(message, ConversationMessage::ContextSummary(_)) {
+                        seen_calls.clear();
+                        completed_calls.clear();
+                    }
+
                     if let ConversationMessage::Assistant(message) = non_tool {
                         for part in &message.parts {
                             if let AssistantPart::ToolCall(call) = part {
@@ -102,6 +109,41 @@ impl ConversationSnapshot {
             return Err(ConversationValidationError::MissingToolResult {
                 call_id: missing.clone(),
             });
+        }
+        Ok(())
+    }
+
+    /// 在接纳响应和执行工具前，核对本次请求快照与响应中的调用 ID。
+    ///
+    /// 只消费调用方实际发送的快照；不读取持久化历史、不修改 ID，也不要求响应已有工具结果。
+    ///
+    /// # Errors
+    /// 响应内部重复，或响应与请求快照内任一工具调用重复时返回错误。
+    pub fn validate_response_tool_call_ids(
+        &self,
+        response: &AssistantMessage,
+    ) -> Result<(), ConversationValidationError> {
+        let mut seen = self
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::Assistant(message) => Some(message),
+                _ => None,
+            })
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(&call.id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        for part in &response.parts {
+            if let AssistantPart::ToolCall(call) = part
+                && !seen.insert(&call.id)
+            {
+                return Err(ConversationValidationError::DuplicateToolCallId {
+                    call_id: call.id.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -512,7 +554,7 @@ impl OpaqueProviderState {
         )
     }
 
-    /// 创建绑定到规范 reasoning Part 和精确模型路由的不透明状态。
+    /// 创建绑定精确模型路由的不透明状态；没有可见文本时不关联规范 Part。
     #[allow(clippy::too_many_arguments)]
     pub fn new_routed(
         provider: ProviderId,
@@ -520,7 +562,7 @@ impl OpaqueProviderState {
         state_type: impl Into<String>,
         media_type: impl Into<String>,
         format_version: u32,
-        related_part_id: PartId,
+        related_part_id: Option<PartId>,
         route_fingerprint: impl Into<String>,
         payload: Vec<u8>,
     ) -> Result<Self, ProviderStateError> {
@@ -530,7 +572,7 @@ impl OpaqueProviderState {
             state_type,
             media_type,
             format_version,
-            Some(related_part_id),
+            related_part_id,
             Some(route_fingerprint.into()),
             payload,
         )
@@ -558,7 +600,7 @@ impl OpaqueProviderState {
         if format_version == 0 {
             return Err(ProviderStateError::InvalidFormatVersion);
         }
-        if related_part_id.is_some() != route_fingerprint.is_some() {
+        if related_part_id.is_some() && route_fingerprint.is_none() {
             return Err(ProviderStateError::IncompleteRouteBinding);
         }
         if route_fingerprint
@@ -607,7 +649,7 @@ impl OpaqueProviderState {
         self.format_version
     }
 
-    /// 返回该状态绑定的规范 reasoning Part；旧状态没有此绑定。
+    /// 返回关联的规范 reasoning Part；纯加密状态和旧状态可能没有文本关联。
     pub fn related_part_id(&self) -> Option<&PartId> {
         self.related_part_id.as_ref()
     }
@@ -817,6 +859,45 @@ mod tests {
                 call_id: id("call_1"),
             })
         );
+    }
+
+    #[test]
+    fn tool_call_scope_resets_at_summary_without_hiding_incomplete_exchanges() {
+        let summary = ConversationMessage::ContextSummary(ContextSummaryMessage {
+            id: id("summary"),
+            text: "compacted history".to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+        });
+        let before = tool_call_message("before", &["call_1"]);
+        let after = tool_call_message("after", &["call_1"]);
+        let history = ConversationSnapshot::new(vec![
+            before.clone(),
+            tool_result_message("result_before", "call_1"),
+            summary.clone(),
+            after.clone(),
+            tool_result_message("result_after", "call_1"),
+        ]);
+        assert_eq!(history.validate_tool_exchange_pairs(), Ok(()));
+        assert!(matches!(
+            ConversationSnapshot::new(vec![before, summary.clone()]).validate_tool_exchange_pairs(),
+            Err(ConversationValidationError::MissingToolResult { .. })
+        ));
+        let ConversationMessage::Assistant(response) = after else {
+            unreachable!()
+        };
+        let request = ConversationSnapshot::new(vec![summary]);
+        assert_eq!(request.validate_response_tool_call_ids(&response), Ok(()));
+        let ConversationMessage::Assistant(duplicate_batch) =
+            tool_call_message("batch", &["call_1", "call_1"])
+        else {
+            unreachable!()
+        };
+        assert!(matches!(
+            request.validate_response_tool_call_ids(&duplicate_batch),
+            Err(ConversationValidationError::DuplicateToolCallId { .. })
+        ));
     }
 
     #[test]
@@ -1105,7 +1186,7 @@ mod tests {
             "responses.reasoning_item",
             "application/json",
             1,
-            id("reasoning_1"),
+            Some(id("reasoning_1")),
             "a".repeat(64),
             br#"{"encrypted_content":"secret-marker"}"#.to_vec(),
         )
@@ -1146,7 +1227,7 @@ mod tests {
                 "responses.reasoning_item",
                 "application/json",
                 1,
-                id("reasoning_1"),
+                Some(id("reasoning_1")),
                 "not-a-fingerprint",
                 Vec::new(),
             ),

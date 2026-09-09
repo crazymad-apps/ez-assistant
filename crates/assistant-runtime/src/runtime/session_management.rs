@@ -1,6 +1,9 @@
 //! Session 生命周期、模型切换、Run 列表与破坏性历史重新输入。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart};
 use assistant_protocol::{
@@ -19,10 +22,7 @@ use assistant_protocol::{
 
 use super::{
     AssistantRuntime,
-    model::{
-        RunAuthorizationInput, RunCompilationResources, compile_run_agent,
-        resolve_session_model_key,
-    },
+    model::{RunAuthorizationInput, RunCompilationResources, compile_run_agent},
     now_ms,
 };
 use crate::{
@@ -57,7 +57,7 @@ impl AssistantRuntime {
         let (
             source_generation,
             title,
-            model_key,
+            model_selection,
             reasoning_effort,
             current_variant,
             approval_mode,
@@ -71,7 +71,7 @@ impl AssistantRuntime {
             (
                 state.body_generation,
                 state.title.clone(),
-                state.model_key.clone(),
+                state.model_selection.clone(),
                 state.reasoning_effort,
                 state.current_variant,
                 state.approval_mode,
@@ -313,7 +313,7 @@ impl AssistantRuntime {
                     session_id: session_id.clone(),
                     title: fork_title(&title),
                     title_origin: SessionTitleOrigin::Generated,
-                    model_key,
+                    model_selection,
                     reasoning_effort,
                     system_prompt: prepared.system_prompt,
 
@@ -899,32 +899,49 @@ impl AssistantRuntime {
         request: SetSessionModelRequest,
     ) -> RuntimeResult<SetSessionModelResult> {
         let _operation = self.operation_gate.read().await;
-        let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
+        let snapshot = self.config_registry.snapshot()?;
+        let prepared = match request.model_selection.as_ref() {
+            Some(selection) => Some(
+                self.config_registry
+                    .prepare_model(
+                        &snapshot,
+                        Some(selection),
+                        self.store.as_ref(),
+                        self.model_factory.as_ref(),
+                    )
+                    .await?,
+            ),
+            None => None,
+        };
+        let _binding = self.model_binding_gate.read().await;
+        if let Some(model) = &prepared {
+            model.ensure_current(&self.config_registry)?;
+        }
         let session = self.session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
         session.ensure_idle()?;
-        let snapshot = self.config_registry.snapshot()?;
-        let model_key = resolve_session_model_key(&snapshot, Some(request.model_key))?;
         let current_effort = session.lock_state()?.reasoning_effort;
-        let model = snapshot
-            .model(&model_key)
-            .ok_or_else(|| RuntimeError::ModelUnavailable {
-                model_key: model_key.clone(),
-            })?;
-        if session.lock_state()?.goal.is_some() && !model.capabilities().tool_calls {
+        if session.lock_state()?.goal.is_some()
+            && prepared
+                .as_ref()
+                .is_some_and(|model| !model.model.capabilities().tool_calls)
+        {
             return Err(RuntimeError::GoalUnsupportedByModel {
                 session_id: request.session_id.clone(),
             });
         }
-        let reasoning_effort = downgrade_effort(current_effort, model.capabilities());
+        let reasoning_effort = prepared
+            .as_ref()
+            .and_then(|model| downgrade_effort(current_effort, model.model.capabilities()));
+        let model_selection = request.model_selection;
         let changed_at_ms = now_ms()?;
         self.store
             .set_session_model(ModelChange {
                 session_id: request.session_id.clone(),
-                model_key: model_key.clone(),
+                model_selection: model_selection.clone(),
                 reasoning_effort,
                 changed_at_ms,
             })
@@ -932,7 +949,8 @@ impl AssistantRuntime {
             .map_err(|source| RuntimeError::from_store("change session model", source))?;
         {
             let mut state = session.lock_state()?;
-            state.model_key = model_key;
+            state.model_selection = model_selection;
+            state.model_binding = prepared.map(Arc::new);
             state.reasoning_effort = reasoning_effort;
         }
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
@@ -950,18 +968,35 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let session = self.session(&request.session_id).await?;
+        let model_selection = session.model_selection()?;
+        let prepared = if request.effort.is_some() {
+            Some(
+                super::model::resolve_session_model(
+                    &self.config_registry,
+                    &session,
+                    model_selection.as_ref(),
+                    self.store.as_ref(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let _binding = self.model_binding_gate.read().await;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
-        let model_key = session.model_key()?;
-        let snapshot = self.config_registry.snapshot()?;
-        let model = snapshot
-            .model(&model_key)
-            .ok_or_else(|| RuntimeError::ModelUnavailable { model_key })?;
-        if request
-            .effort
-            .is_some_and(|effort| !supports_effort(model.capabilities(), effort))
-        {
+        if session.model_selection()? != model_selection {
+            return Err(RuntimeError::ConfigurationConflict);
+        }
+        if let Some(prepared) = &prepared {
+            prepared.ensure_current(&self.config_registry)?;
+        }
+        if request.effort.is_some_and(|effort| {
+            prepared
+                .as_ref()
+                .is_none_or(|model| !supports_effort(model.model.capabilities(), effort))
+        }) {
             return Err(RuntimeError::InvalidRequest {
                 reason: "reasoning effort is not supported by the current model",
             });
@@ -1164,6 +1199,7 @@ impl AssistantRuntime {
         let _prepared_agent = compile_run_agent(
             session.clone(),
             &config,
+            &self.config_registry,
             RunCompilationResources {
                 skill_catalog: self.current_skill_catalog(&session).await?,
                 model_factory: self.model_factory.as_ref(),
@@ -1191,7 +1227,8 @@ impl AssistantRuntime {
                 cross_session: None,
             },
             None,
-        )?;
+        )
+        .await?;
         let changed_at_ms = now_ms()?;
         let rewritten_goal = current_goal
             .map(|goal| {
@@ -1371,6 +1408,7 @@ mod effort_tests {
         crate::ResolvedModelCapabilities {
             image_input: false,
             reasoning: Some(ResolvedReasoningCapability {
+                mode: assistant_protocol::ModelReasoningMode::Optional,
                 efforts: keys
                     .iter()
                     .copied()

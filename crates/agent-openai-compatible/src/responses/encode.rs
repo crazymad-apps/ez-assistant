@@ -185,6 +185,7 @@ pub(super) fn encode_request_with_images(
         .as_ref()
         .and_then(|reasoning| reasoning.effort.as_ref())
         .map(|effort| ResponsesReasoningConfig {
+            summary: adapter.reasoning_summary,
             effort: adapter
                 .reasoning_effort_values
                 .get(effort)
@@ -324,15 +325,14 @@ fn encode_assistant_message(
                 "Responses provider state exceeds the per-turn byte limit".to_owned(),
             ));
         }
-        let related_part_id = state.related_part_id().ok_or_else(|| {
-            ModelError::Protocol(
-                "compatible Responses provider state has no related part".to_owned(),
-            )
-        })?;
         let (item, raw_parts) = decode_opaque_reasoning_item(state.payload())?;
-        if !raw_parts.iter().any(|(id, _)| id == related_part_id) {
+        let valid_binding = match state.related_part_id() {
+            Some(related) => raw_parts.iter().any(|(id, _)| id == related),
+            None => raw_parts.is_empty(),
+        };
+        if !valid_binding {
             return Err(ModelError::Protocol(
-                "Responses provider state is not bound to one of its reasoning parts".to_owned(),
+                "Responses provider state is not bound to its reasoning parts".to_owned(),
             ));
         }
         for (id, text) in raw_parts {
@@ -353,7 +353,14 @@ fn encode_assistant_message(
     // Chat Completions 的单个 Assistant Message 可能按流事件到达顺序保存为
     // `tool_call -> reasoning/text -> tool_call`。Responses 会把中间的 reasoning/message
     // 解释为工具调用批次边界，因此必须按同一规范 Turn 的语义分组后再投影。
-    for part in &message.parts {
+    for (part_index, part) in message.parts.iter().enumerate() {
+        // 无摘要的加密 item 仍按原位置回放；有摘要的 item 已在对应 Reasoning Part 输出。
+        if let AssistantPart::ProviderState(_) = part {
+            if let Some(item) = opaque_items.remove(&part_index) {
+                input.push(item);
+            }
+            continue;
+        }
         let AssistantPart::Reasoning(part) = part else {
             continue;
         };
@@ -465,11 +472,6 @@ fn decode_opaque_reasoning_item(
         ));
     }
     let parts = normalized_reasoning_parts(&id, &summary, content.as_ref())?;
-    if parts.is_empty() {
-        return Err(ModelError::Protocol(
-            "reasoning provider state has no normalized text part".to_owned(),
-        ));
-    }
     Ok((
         ResponsesInputItem::Reasoning {
             id: Some(id),

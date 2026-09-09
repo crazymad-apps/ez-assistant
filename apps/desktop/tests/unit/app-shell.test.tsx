@@ -323,11 +323,9 @@ function applicationSnapshot(): ApplicationSnapshot {
       revision: "fixture-revision",
       state: "ready",
       schema_version: 1,
-      default_model: "fixture",
-      auxiliary_vision_model: null,
       issues: [],
     },
-    models: [],
+    providers: [], model_settings: { default_model: null, vision_model: null },
     workspaces: [],
     active_sessions: [
       sessionSummary("session-1", "First session", 2),
@@ -351,7 +349,7 @@ function sessionSummary(session_id: string, title: string, updated_at_ms: number
   return {
     session_id,
     title,
-    model_key: "fixture",
+    model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
     lifecycle: "active",
     role: "standard",
     current_variant: "build",

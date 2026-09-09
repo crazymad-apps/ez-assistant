@@ -20,6 +20,9 @@ pub enum ExecutionError {
     /// 模型调用失败（建立前失败或流中受控失败）。
     #[error(transparent)]
     Model(#[from] ModelError),
+    /// 模型响应的工具调用 ID 与本次请求快照或同一响应内其他调用重复；尚未写入或执行工具。
+    #[error("model response contains a duplicate tool call id; please retry")]
+    DuplicateToolCallId,
     /// 上下文窗口配置不满足共享 Evaluator 约束。
     #[error(transparent)]
     ContextWindow(#[from] ContextWindowError),
@@ -64,6 +67,7 @@ mod tests {
     fn execution_error_round_trips_serde() {
         let errors = vec![
             ExecutionError::Internal,
+            ExecutionError::DuplicateToolCallId,
             ExecutionError::Model(ModelError::Cancelled),
             ExecutionError::Model(ModelError::Provider {
                 message: "upstream rejected the request".to_owned(),

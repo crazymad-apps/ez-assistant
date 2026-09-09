@@ -202,7 +202,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
     let source = runtime
         .create_session(CreateSessionRequest {
             title: Some("Source".to_owned()),
-            model_key: None,
+            model_selection: None,
             workspace_id: None,
         })
         .await
@@ -249,7 +249,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
 
     assert_ne!(forked.session_id, source.session_id);
     assert_eq!(forked.title, "Source（分支）");
-    assert_eq!(forked.model_key, source.model_key);
+    assert_eq!(forked.model_selection, source.model_selection);
     assert_eq!(forked.message_count, 2);
     let forked_conversation = runtime
         .conversation_snapshot(&forked.session_id)
@@ -672,14 +672,9 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
 }
 
 #[tokio::test]
-async fn model_switch_changes_only_the_key_and_requires_an_idle_active_session() {
+async fn model_switch_changes_only_the_reference_and_requires_an_idle_active_session() {
     let runtime = runtime(empty_model());
-    runtime.config_registry.replace_document_for_test(
-        &TEST_CONFIG.replace(
-            "max_output_tokens = 4096",
-            "max_output_tokens = 4096\n\n[models.alternate]\nprotocol = \"chat_completions\"\nprovider = \"fixture\"\nendpoint = \"https://api.example.test/v1\"\nmodel = \"alternate-model\"\napi_key = \"alternate-secret\"\ncontext_window_tokens = 8192\nmax_output_tokens = 4096",
-        ),
-    );
+    model_fixture::save_fixed(&runtime, "alternate", model_fixture::parameters()).await;
     let created = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -695,11 +690,14 @@ async fn model_switch_changes_only_the_key_and_requires_an_idle_active_session()
     let changed = runtime
         .set_session_model(SetSessionModelRequest {
             session_id: session_id.clone(),
-            model_key: assistant_protocol::ModelKey::new("alternate").expect("model key"),
+            model_selection: Some(test_model_selection("alternate")),
         })
         .await
         .expect("change model");
-    assert_eq!(changed.session.model_key.as_str(), "alternate");
+    assert_eq!(
+        changed.session.model_selection,
+        Some(test_model_selection("alternate"))
+    );
     assert_eq!(
         runtime
             .session_for_test(&session_id)
@@ -719,7 +717,7 @@ async fn model_switch_changes_only_the_key_and_requires_an_idle_active_session()
         runtime
             .set_session_model(SetSessionModelRequest {
                 session_id,
-                model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
+                model_selection: Some(test_model_selection("fixture")),
             })
             .await,
         Err(RuntimeError::SessionArchived { .. })
@@ -802,7 +800,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
         runtime
             .set_session_model(SetSessionModelRequest {
                 session_id: session_id.clone(),
-                model_key: assistant_protocol::ModelKey::new("fixture").expect("model key"),
+                model_selection: Some(test_model_selection("fixture")),
             })
             .await,
         Err(RuntimeError::SessionNotIdle { .. })

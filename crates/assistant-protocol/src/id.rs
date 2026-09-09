@@ -6,7 +6,6 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 use ts_rs::TS;
 
-const MAX_MODEL_KEY_BYTES: usize = 64;
 const MAX_MCP_SERVER_KEY_BYTES: usize = 64;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
@@ -96,6 +95,11 @@ macro_rules! define_identifier {
         }
     };
 }
+
+define_identifier!(
+    /// 用户配置的服务商连接实例；与厂商类型不同。
+    ProviderInstanceId, "provider instance id"
+);
 
 define_identifier!(
     /// Runtime 中一个会话的不透明标识。
@@ -202,101 +206,6 @@ impl fmt::Display for IdempotencyKey {
 }
 
 impl<'de> Deserialize<'de> for IdempotencyKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(D::Error::custom)
-    }
-}
-
-/// 用户配置中模型条目的稳定 key 校验错误。
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ModelKeyError {
-    /// key 不能为空。
-    #[error("model_key must not be empty")]
-    Empty,
-    /// key 最多包含 64 个 ASCII 字节。
-    #[error("model_key must not exceed 64 ASCII characters")]
-    TooLong,
-    /// 首字符必须是 ASCII 字母或数字。
-    #[error("model_key must start with an ASCII letter or digit")]
-    InvalidStart,
-    /// 后续字符只能是 ASCII 字母、数字、点号、连字符或下划线。
-    #[error("model_key may contain only ASCII letters, digits, dots, hyphens, and underscores")]
-    InvalidCharacter,
-}
-
-/// 用户为模型配置指定的稳定业务 key；它不是 Runtime 生成的内部 ID。
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
-#[ts(export_to = "assistant-protocol.ts")]
-pub struct ModelKey(String);
-
-impl ModelKey {
-    /// 按 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` 校验并构造 key。
-    pub fn new(value: impl Into<String>) -> Result<Self, ModelKeyError> {
-        let value = value.into();
-        let bytes = value.as_bytes();
-        let Some(first) = bytes.first() else {
-            return Err(ModelKeyError::Empty);
-        };
-        if bytes.len() > MAX_MODEL_KEY_BYTES {
-            return Err(ModelKeyError::TooLong);
-        }
-        if !first.is_ascii_alphanumeric() {
-            return Err(ModelKeyError::InvalidStart);
-        }
-        if !bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return Err(ModelKeyError::InvalidCharacter);
-        }
-        Ok(Self(value))
-    }
-
-    /// 读取配置 key 的原始字符串。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for ModelKey {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for ModelKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ModelKey {
-    type Err = ModelKeyError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for ModelKey {
-    type Error = ModelKeyError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<ModelKey> for String {
-    fn from(value: ModelKey) -> Self {
-        value.0
-    }
-}
-
-impl<'de> Deserialize<'de> for ModelKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -516,46 +425,6 @@ mod tests {
             .expect("serialize confirmation token"),
             "delete-token-1"
         );
-    }
-
-    #[test]
-    fn model_key_enforces_the_configuration_grammar() {
-        for valid in ["a", "A1", "deepseek-chat", "local_model", "qwen3.8-max"] {
-            let key = ModelKey::new(valid).expect("valid model key");
-            assert_eq!(key.as_str(), valid);
-        }
-
-        assert_eq!(ModelKey::new("").unwrap_err(), ModelKeyError::Empty);
-        assert_eq!(
-            ModelKey::new("-model").unwrap_err(),
-            ModelKeyError::InvalidStart
-        );
-        assert_eq!(
-            ModelKey::new("model key").unwrap_err(),
-            ModelKeyError::InvalidCharacter
-        );
-        assert_eq!(
-            ModelKey::new("模型").unwrap_err(),
-            ModelKeyError::InvalidStart
-        );
-        assert_eq!(
-            ModelKey::new("a".repeat(65)).unwrap_err(),
-            ModelKeyError::TooLong
-        );
-    }
-
-    #[test]
-    fn model_key_uses_a_validated_transparent_wire_shape() {
-        let key = ModelKey::new("deepseek-chat").expect("valid model key");
-        assert_eq!(
-            serde_json::to_string(&key).expect("serialize"),
-            "\"deepseek-chat\""
-        );
-        assert_eq!(
-            serde_json::from_str::<ModelKey>("\"deepseek-chat\"").expect("deserialize"),
-            key
-        );
-        assert!(serde_json::from_str::<ModelKey>("\"invalid key\"").is_err());
     }
 
     #[test]

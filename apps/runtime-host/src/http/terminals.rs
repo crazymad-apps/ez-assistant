@@ -110,6 +110,9 @@ pub(crate) async fn directory(
             locator,
         } => {
             let session = state
+                .startup
+                .services()
+                .map_err(|_| fail())?
                 .runtime
                 .get_session(GetSessionRequest {
                     session_id: session_id.clone(),
@@ -118,6 +121,9 @@ pub(crate) async fn directory(
                 .map_err(|_| fail())?
                 .session;
             let root = state
+                .startup
+                .services()
+                .map_err(|_| fail())?
                 .runtime
                 .resolve_session_resource_root(session_id, &locator.root)
                 .await
@@ -135,6 +141,9 @@ pub(crate) async fn directory(
         }
         UserTerminalSource::Workspace { workspace_id } => {
             let workspace = state
+                .startup
+                .services()
+                .map_err(|_| fail())?
                 .runtime
                 .get_workspace(GetWorkspaceRequest {
                     workspace_id: workspace_id.clone(),
@@ -155,6 +164,9 @@ pub(crate) async fn directory(
     };
     if let Some(id) = &origin.workspace {
         let workspace = state
+            .startup
+            .services()
+            .map_err(|_| fail())?
             .runtime
             .get_workspace(GetWorkspaceRequest {
                 workspace_id: id.clone(),

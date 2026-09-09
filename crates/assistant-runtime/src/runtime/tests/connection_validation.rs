@@ -59,7 +59,7 @@ async fn connection_validation_uses_only_the_fixed_minimal_request_and_creates_n
 }
 
 #[tokio::test]
-async fn candidate_connection_validation_uses_unsaved_form_values_without_persisting_them() {
+async fn connection_validation_uses_saved_provider_without_rewriting_global_config() {
     let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
     let model: Arc<dyn ModelService> = Arc::new(ScriptedModelService::completing(
         model_capabilities(false),
@@ -81,20 +81,13 @@ async fn candidate_connection_validation_uses_unsaved_form_values_without_persis
         .expect("initial reload");
     let original = source.document.lock().expect("source lock").clone();
 
+    model_fixture::seed(&runtime, "saved-provider-secret").await;
     let result = runtime
-        .validate_model_connection(ValidateModelConnectionRequest {
-            target: ModelConnectionTarget::Candidate(model_input(
-                "candidate",
-                "https://api.example.test/v1",
-                assistant_protocol::ModelCredentialChange::Replace(
-                    assistant_protocol::SecretValue::new("candidate-secret".to_owned()),
-                ),
-            )),
-        })
+        .validate_model_connection(configured_validation_request())
         .await
-        .expect("candidate validation result");
+        .expect("saved model validation");
     assert_eq!(result.outcome, ConnectionValidationOutcome::Succeeded);
-    assert_eq!(factory.api_keys(), ["candidate-secret"]);
+    assert_eq!(factory.api_keys(), ["saved-provider-secret"]);
     assert_eq!(*source.document.lock().expect("source lock"), original);
 }
 
@@ -118,13 +111,17 @@ async fn deepseek_connection_validation_injects_only_its_required_protocol_optio
         ToolSetSnapshot::default(),
         32,
     );
-    let deepseek_config = TEST_CONFIG
-        .replace("provider = \"fixture\"", "provider = \"deepseek\"")
-        .replace("max_output_tokens = 4096", "max_output_tokens = 8")
-        + "\n[models.fixture.capabilities.reasoning]\nenabled = true\n";
-    runtime
-        .config_registry
-        .replace_document_for_test(&deepseek_config);
+    let mut provider = model_fixture::provider("fixture-secret");
+    provider.connection.provider_type = assistant_protocol::ProviderType::Deepseek;
+    runtime.store.put_provider(provider).await.unwrap();
+    let mut parameters = model_fixture::parameters();
+    parameters.max_output_tokens =
+        assistant_protocol::ModelTokenLimit::Known(8.try_into().unwrap());
+    parameters.reasoning = assistant_protocol::ModelFeatureSupport::Supported;
+    parameters.reasoning_mode = assistant_protocol::ModelReasoningMode::Optional;
+    parameters.reasoning_efforts = Some(Default::default());
+    model_fixture::save_fixed(&runtime, "fixture", parameters).await;
+    runtime.restore_model_settings().await.unwrap();
 
     let result = runtime
         .validate_model_connection(configured_validation_request())
@@ -144,79 +141,75 @@ async fn deepseek_connection_validation_injects_only_its_required_protocol_optio
 }
 
 #[test]
-fn kimi_k3_protocol_options_do_not_send_the_removed_thinking_switch() {
-    let provider = ProviderId::new("moonshot").expect("provider id");
-    let capabilities = crate::ResolvedModelCapabilities {
-        image_input: true,
-        reasoning: Some(crate::ResolvedReasoningCapability {
-            efforts: Vec::new(),
-            default_effort: None,
-        }),
-        tool_calls: true,
-        tool_image_projection: agent_model::ToolImageProjection::Unsupported,
-        tool_choice: agent_model::ToolChoiceCapabilities::all(),
-        streaming: true,
-    };
-
-    for model_id in ["kimi-k3", "k3"] {
-        let (reasoning, k3_options) = crate::runtime::model::protocol_request_options(
+fn moonshot_switch_follows_declared_reasoning_mode_without_model_name_matching() {
+    use assistant_protocol::ModelReasoningMode;
+    let provider = ProviderId::new("moonshot").unwrap();
+    for mode in [ModelReasoningMode::Always, ModelReasoningMode::Optional] {
+        let capabilities = crate::ResolvedModelCapabilities {
+            image_input: true,
+            reasoning: Some(crate::ResolvedReasoningCapability {
+                mode,
+                efforts: Vec::new(),
+                default_effort: None,
+            }),
+            tool_calls: true,
+            tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+            tool_choice: agent_model::ToolChoiceCapabilities::all(),
+            streaming: true,
+        };
+        let (reasoning, options) = crate::runtime::model::protocol_request_options(
             &provider,
             crate::ModelProtocol::OpenAiChatCompletions,
-            model_id,
             &capabilities,
             None,
         )
-        .expect("K3 protocol options");
+        .unwrap();
         assert_eq!(reasoning, Some(ReasoningConfig { effort: None }));
-        assert!(k3_options.is_empty());
+        if mode == ModelReasoningMode::Always {
+            assert!(options.is_empty());
+        } else {
+            assert_eq!(
+                options.get("moonshot"),
+                Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
+            );
+        }
     }
-
-    let (_, k2_options) = crate::runtime::model::protocol_request_options(
-        &provider,
-        crate::ModelProtocol::OpenAiChatCompletions,
-        "kimi-k2.6",
-        &capabilities,
-        None,
-    )
-    .expect("K2 protocol options");
-    assert_eq!(
-        k2_options.get("moonshot"),
-        Some(&serde_json::json!({"thinking": {"type": "enabled"}}))
-    );
 }
 
 #[test]
-fn qwen38_protocol_options_enable_and_preserve_thinking() {
-    let provider = ProviderId::new("dashscope").expect("provider id");
-    let capabilities = crate::ResolvedModelCapabilities {
-        image_input: true,
-        reasoning: Some(crate::ResolvedReasoningCapability {
-            efforts: Vec::new(),
-            default_effort: None,
-        }),
-        tool_calls: true,
-        tool_image_projection: agent_model::ToolImageProjection::Unsupported,
-        tool_choice: agent_model::ToolChoiceCapabilities::all(),
-        streaming: true,
-    };
+fn dashscope_protocol_options_enable_and_preserve_thinking() {
+    for provider_name in ["dashscope_api", "dashscope_plan"] {
+        let provider = ProviderId::new(provider_name).expect("provider id");
+        let capabilities = crate::ResolvedModelCapabilities {
+            image_input: true,
+            reasoning: Some(crate::ResolvedReasoningCapability {
+                mode: assistant_protocol::ModelReasoningMode::Optional,
+                efforts: Vec::new(),
+                default_effort: None,
+            }),
+            tool_calls: true,
+            tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+            tool_choice: agent_model::ToolChoiceCapabilities::all(),
+            streaming: true,
+        };
 
-    let (reasoning, options) = crate::runtime::model::protocol_request_options(
-        &provider,
-        crate::ModelProtocol::OpenAiChatCompletions,
-        "qwen3.8-max",
-        &capabilities,
-        None,
-    )
-    .expect("Qwen 3.8 protocol options");
+        let (reasoning, options) = crate::runtime::model::protocol_request_options(
+            &provider,
+            crate::ModelProtocol::OpenAiChatCompletions,
+            &capabilities,
+            None,
+        )
+        .expect("Qwen 3.8 protocol options");
 
-    assert_eq!(reasoning, Some(ReasoningConfig { effort: None }));
-    assert_eq!(
-        options.get("dashscope"),
-        Some(&serde_json::json!({
-            "enable_thinking": true,
-            "preserve_thinking": true
-        }))
-    );
+        assert_eq!(reasoning, Some(ReasoningConfig { effort: None }));
+        assert_eq!(
+            options.get(provider_name),
+            Some(&serde_json::json!({
+                "enable_thinking": true,
+                "preserve_thinking": true
+            }))
+        );
+    }
 }
 
 #[tokio::test]
@@ -332,8 +325,8 @@ async fn connection_validation_reuses_retry_policy_and_rejects_malformed_streams
     let retry_runtime = runtime(retry_model.clone());
     retry_runtime.config_registry.replace_document_for_test(
         &TEST_CONFIG.replace(
-            "default_model = \"fixture\"",
-            "default_model = \"fixture\"\n\n[runtime.model_retry]\nretry_on = [\"connection\"]\ndelays_ms = [1]\nmax_retry_after_ms = 10",
+            "schema_version = 1",
+            "schema_version = 1\n\n[runtime.model_retry]\nretry_on = [\"connection\"]\ndelays_ms = [1]\nmax_retry_after_ms = 10",
         ),
     );
     let retried = retry_runtime
@@ -368,8 +361,8 @@ async fn connection_validation_enforces_timeout_and_shutdown_cancellation() {
     }));
     timeout_runtime.config_registry.replace_document_for_test(
         &TEST_CONFIG.replace(
-            "default_model = \"fixture\"",
-            "default_model = \"fixture\"\n\n[runtime.model_transport]\nconnect_timeout_ms = 1\nrequest_timeout_ms = 10",
+            "schema_version = 1",
+            "schema_version = 1\n\n[runtime.model_transport]\nconnect_timeout_ms = 1\nrequest_timeout_ms = 10",
         ),
     );
     let timed_out = tokio::time::timeout(

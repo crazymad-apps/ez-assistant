@@ -1,11 +1,11 @@
 use super::*;
 
 #[tokio::test]
-async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
+async fn reload_and_start_race_keeps_database_credentials_independent() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let source = Arc::new(GatedConfigSource {
-        document: config_with_api_key("new-key"),
+        document: "schema_version=1\n[runtime.model_transport]\nrequest_timeout_ms=10000".into(),
         entered: entered.clone(),
         release: release.clone(),
     });
@@ -30,7 +30,8 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
     ));
     runtime
         .config_registry
-        .replace_document_for_test(&config_with_api_key("old-key"));
+        .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "old-key").await;
     let before_reload = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -115,11 +116,11 @@ async fn reload_and_start_race_observes_one_complete_configuration_snapshot() {
         .status,
         assistant_protocol::RunStatus::Completed
     );
-    assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
+    assert_eq!(factory.api_keys(), ["old-key", "old-key"]);
 }
 
 #[tokio::test]
-async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
+async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_fall_back() {
     let entered = Arc::new(Notify::new());
     let cleanup = Arc::new(Notify::new());
     let mut registry = ToolRegistry::new();
@@ -144,7 +145,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         8_192,
         assistant_text("assistant-final", "new credential run"),
     ));
-    let source = Arc::new(MutableConfigSource::new(config_with_api_key("old-key")));
+    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.into()));
     let factory = Arc::new(RecordingModelFactory::new([first_model, second_model]));
     let runtime = AssistantRuntime::new(
         RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
@@ -154,6 +155,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         static_run_tool_factory(registry.snapshot()),
         Arc::new(TestChildWorkspaceFactory::default()),
     );
+    model_fixture::seed(&runtime, "old-key").await;
     assert_eq!(
         runtime
             .reload_config(ReloadConfigRequest::default())
@@ -192,7 +194,16 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
         .await
         .expect("first run remains active");
 
-    source.replace(Some(config_with_api_key("new-key")));
+    runtime
+        .update_provider(assistant_protocol::UpdateProviderRequest {
+            provider_instance_id: test_model_selection("fixture").provider_instance_id,
+            connection: model_fixture::provider("unused").connection,
+            credential: assistant_protocol::ProviderCredentialChange::Replace(
+                assistant_protocol::SecretValue::new("new-key".into()),
+            ),
+        })
+        .await
+        .unwrap();
     assert_eq!(
         runtime
             .reload_config(ReloadConfigRequest::default())
@@ -224,33 +235,31 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
     );
     assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
 
-    // 配置消失后立刻 fail-closed；既有活动 Run 仍可按原 cancellation 路径结算。
-    source.replace(None);
+    // 全局配置损坏后不可接受新模型执行；既有活动 Run 仍可正常取消结算。
+    source.replace(Some("invalid global TOML".into()));
     assert_eq!(
         runtime
             .reload_config(ReloadConfigRequest::default())
             .await
-            .expect("missing reload")
+            .expect("invalid reload")
             .status
             .state,
-        assistant_protocol::ConfigurationState::Missing
+        assistant_protocol::ConfigurationState::Invalid
     );
-    assert!(matches!(
-        runtime
-            .submit_input(SubmitInputRequest {
-                mode: assistant_protocol::SubmitInputMode::Normal,
-                variant: assistant_protocol::AgentVariant::Build,
-                session_id: second.session.session_id.clone(),
-                message: "must not use stale key".to_owned(),
-                attachment_ids: Vec::new(),
-                quotes: Vec::new(),
-                skill_name: None,
-                mcp_server_key: None,
-                idempotency_key: None,
-            })
-            .await,
-        Err(RuntimeError::ModelUnavailable { .. })
-    ));
+    let rejected_run = runtime
+        .submit_input(test_input(
+            &second.session.session_id,
+            "must not use stale key",
+        ))
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(
+        wait_for_terminal(&runtime, &second.session.session_id, &rejected_run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
     assert_eq!(
         runtime
             .get_session(GetSessionRequest {
@@ -260,7 +269,7 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             .expect("session after rejected input")
             .session
             .queued_input_count,
-        0
+        1
     );
     assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
 
@@ -279,100 +288,6 @@ async fn reload_changes_only_future_run_compilation_and_never_falls_back() {
             .await
             .status,
         assistant_protocol::RunStatus::Cancelled
-    );
-}
-
-#[tokio::test]
-async fn configuration_queries_are_complete_and_never_project_secrets() {
-    let document = format!(
-        r#"{TEST_CONFIG}
-
-[models.invalid]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "https://api.example.test/v1"
-model = "invalid-model"
-context_window_tokens = 8192
-max_output_tokens = 4096
-"#
-    );
-    let source = Arc::new(MutableConfigSource::new(document));
-    let runtime = AssistantRuntime::new(
-        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
-        source.clone(),
-        Arc::new(StaticModelFactory::new(empty_model())),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(ToolSetSnapshot::default()),
-        Arc::new(TestChildWorkspaceFactory::default()),
-    );
-    let reloaded = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("reload");
-    assert_eq!(
-        reloaded.status.state,
-        assistant_protocol::ConfigurationState::Degraded
-    );
-    assert_eq!(
-        reloaded.status.config_path.as_deref(),
-        Some("/private/runtime/config.toml")
-    );
-
-    let models = runtime
-        .list_models(ListModelsRequest::default())
-        .expect("models");
-    assert_eq!(models.models.len(), 2);
-    let invalid_key = assistant_protocol::ModelKey::new("invalid").expect("model key");
-    let invalid = runtime
-        .get_model(GetModelRequest {
-            model_key: invalid_key.clone(),
-        })
-        .expect("invalid model remains queryable")
-        .model;
-    assert!(!invalid.is_valid);
-    assert!(invalid.issues.iter().any(|issue| {
-        issue.code == assistant_protocol::ConfigurationIssueCode::MissingCredential
-            && issue.model_key.as_ref() == Some(&invalid_key)
-    }));
-    let serialized = serde_json::to_string(&(reloaded, models, invalid)).expect("serialize");
-    assert!(!serialized.contains("unique-test-secret-9f1ca2"));
-    assert!(!serialized.contains("api_key\":"));
-
-    let missing = assistant_protocol::ModelKey::new("missing").expect("model key");
-    assert!(matches!(
-        runtime.get_model(GetModelRequest {
-            model_key: missing.clone(),
-        }),
-        Err(RuntimeError::ModelNotFound { model_key }) if model_key == missing
-    ));
-
-    source.replace(Some(
-        "schema_version = 1\ndefault_model = \"fixture\"\napi_key = \"unique-test-secret-9f1ca2\"\n[".to_owned(),
-    ));
-    let invalid_reload = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("invalid config is a diagnostic result");
-    assert_eq!(
-        invalid_reload.status.state,
-        assistant_protocol::ConfigurationState::Invalid
-    );
-    assert!(
-        invalid_reload.status.issues.iter().any(|issue| {
-            issue.code == assistant_protocol::ConfigurationIssueCode::InvalidSyntax
-        })
-    );
-    assert!(
-        runtime
-            .list_models(ListModelsRequest::default())
-            .expect("invalid list")
-            .models
-            .is_empty()
-    );
-    assert!(
-        !serde_json::to_string(&invalid_reload)
-            .expect("serialize invalid reload")
-            .contains("unique-test-secret-9f1ca2")
     );
 }
 
@@ -428,325 +343,205 @@ async fn missing_and_unsafe_sources_are_normal_query_results() {
 }
 
 #[tokio::test]
-async fn model_mutations_use_revision_cas_and_never_publish_invalid_candidates() {
-    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
-    let runtime = AssistantRuntime::new(
-        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
-        source.clone(),
-        Arc::new(StaticModelFactory::new(empty_model())),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(ToolSetSnapshot::default()),
-        Arc::new(TestChildWorkspaceFactory::default()),
-    );
-    let initial = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("initial reload");
-    let initial_revision = initial.status.revision.expect("initial revision");
-
-    let created = runtime
-        .create_model(CreateModelRequest {
-            model: model_input(
-                "secondary",
-                "https://api.example.test/v1",
-                assistant_protocol::ModelCredentialChange::Replace(
-                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
-                ),
-            ),
-            expected_revision: Some(initial_revision),
-            set_default: false,
-        })
-        .await
-        .expect("create model");
-    let created_revision = created.status.revision.clone().expect("created revision");
-    assert!(created.models.iter().any(|model| {
-        model
-            .model_key
-            .as_ref()
-            .is_some_and(|key| key.as_str() == "secondary")
-            && model.is_valid
-    }));
-    let serialized = serde_json::to_string(&created).expect("serialize mutation result");
-    assert!(!serialized.contains("secondary-secret"));
-
-    let persisted_before_invalid = source.document.lock().expect("source lock").clone();
-    let invalid = runtime
-        .create_model(CreateModelRequest {
-            model: model_input(
-                "invalid",
-                "https://api.example.test/v1?credential=unsafe",
-                assistant_protocol::ModelCredentialChange::Replace(
-                    assistant_protocol::SecretValue::new("must-not-persist".to_owned()),
-                ),
-            ),
-            expected_revision: Some(created_revision.clone()),
-            set_default: false,
-        })
-        .await;
-    assert!(matches!(invalid, Err(RuntimeError::InvalidRequest { .. })));
-    assert_eq!(
-        *source.document.lock().expect("source lock"),
-        persisted_before_invalid
-    );
-
-    let mut external = persisted_before_invalid.expect("persisted document");
-    external.push_str("\n# external edit\n");
-    source.replace(Some(external.clone()));
-    let secondary = assistant_protocol::ModelKey::new("secondary").expect("secondary key");
-    let conflict = runtime
-        .set_default_model(SetDefaultModelRequest {
-            model_key: secondary,
-            expected_revision: created_revision,
-        })
-        .await;
-    assert!(matches!(conflict, Err(RuntimeError::ConfigurationConflict)));
-    assert_eq!(
+async fn provider_queries_are_redacted_and_invalid_updates_do_not_overwrite_storage() {
+    let runtime = runtime(empty_model());
+    let before = runtime.store.load_providers().await.unwrap();
+    let mut invalid = before[0].connection.clone();
+    invalid.endpoint = "https://api.example.test/v1?credential=unsafe".into();
+    assert!(
         runtime
-            .get_config_status(GetConfigStatusRequest::default())
-            .expect("status after conflict")
-            .status
-            .revision,
-        Some(test_config_revision(&external))
+            .update_provider(assistant_protocol::UpdateProviderRequest {
+                provider_instance_id: before[0].provider_instance_id.clone(),
+                connection: invalid,
+                credential: assistant_protocol::ProviderCredentialChange::Replace(
+                    assistant_protocol::SecretValue::new("must-not-persist".into())
+                ),
+            })
+            .await
+            .is_err()
     );
+    assert_eq!(runtime.store.load_providers().await.unwrap(), before);
+    let projection = serde_json::to_string(&(
+        runtime.list_providers().unwrap(),
+        runtime.get_model_settings().unwrap(),
+        runtime
+            .get_config_status(GetConfigStatusRequest {})
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(!projection.contains("unique-test-secret-9f1ca2"));
+    assert!(!projection.contains("must-not-persist"));
 }
 
 #[tokio::test]
-async fn deleting_an_idle_session_model_preserves_history_and_requires_reselection() {
-    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
-    let runtime = AssistantRuntime::new(
-        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
-        source,
-        Arc::new(StaticModelFactory::new(empty_model())),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(ToolSetSnapshot::default()),
-        Arc::new(TestChildWorkspaceFactory::default()),
-    );
-    let loaded = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("reload");
+async fn deleting_an_idle_session_provider_preserves_history_and_requires_reselection() {
+    let runtime = runtime(empty_model());
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
-        .expect("session");
-    let created = runtime
-        .create_model(CreateModelRequest {
-            model: model_input(
-                "secondary",
-                "https://api.example.test/v1",
-                assistant_protocol::ModelCredentialChange::Replace(
-                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
-                ),
-            ),
-            expected_revision: loaded.status.revision,
-            set_default: false,
-        })
-        .await
-        .expect("create replacement");
-
+        .unwrap()
+        .session;
     runtime
-        .delete_model(DeleteModelRequest {
-            model_key: assistant_protocol::ModelKey::new("fixture").expect("fixture key"),
-            expected_revision: created.status.revision.expect("created revision"),
-            replacement_default: Some(
-                assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
-            ),
+        .set_session_model(SetSessionModelRequest {
+            session_id: session.session_id.clone(),
+            model_selection: Some(test_model_selection("fixture")),
         })
         .await
-        .expect("idle session does not block deletion");
-
+        .unwrap();
+    let usage = runtime
+        .delete_provider(test_model_selection("fixture").provider_instance_id)
+        .await
+        .unwrap();
+    assert_eq!(usage.session_count, 1);
+    assert_eq!(usage.fixed_config_count, 1);
+    assert!(usage.default_model);
     let view = runtime
         .get_session_view(GetSessionViewRequest {
-            session_id: session.session.session_id.clone(),
+            session_id: session.session_id.clone(),
         })
         .await
-        .expect("history remains readable")
+        .unwrap()
         .snapshot
         .value;
-    assert_eq!(view.session.model_key.as_str(), "fixture");
-    assert!(view.composer_capabilities.selected_model_key.is_none());
-    assert!(matches!(
+    assert_eq!(
+        view.session.model_selection,
+        Some(test_model_selection("fixture"))
+    );
+    assert!(view.composer_capabilities.model_error.is_some());
+    let failed = runtime
+        .submit_input(test_input(&session.session_id, "cannot execute"))
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session_id, &failed.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    assert!(
         runtime
-            .submit_input(SubmitInputRequest {
-                mode: assistant_protocol::SubmitInputMode::Normal,
-                variant: assistant_protocol::AgentVariant::Build,
-                session_id: session.session.session_id.clone(),
-                message: "must not be accepted".to_owned(),
-                attachment_ids: Vec::new(),
-                quotes: Vec::new(),
-                skill_name: None,
-                mcp_server_key: None,
-                idempotency_key: None,
-            })
-            .await,
-        Err(RuntimeError::ModelUnavailable { .. })
-    ));
+            .conversation_snapshot(&session.session_id)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    let retained = runtime
+        .get_session(GetSessionRequest {
+            session_id: session.session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .session;
+    assert_eq!(retained.queued_input_count, 1);
+    runtime
+        .cancel_queued_input(assistant_protocol::CancelQueuedInputRequest {
+            session_id: session.session_id.clone(),
+            input_id: failed.input_id,
+        })
+        .await
+        .unwrap();
+    let replacement = runtime
+        .create_provider(assistant_protocol::CreateProviderRequest {
+            connection: model_fixture::provider("unused").connection,
+            credential: assistant_protocol::ProviderCredentialChange::Replace(
+                assistant_protocol::SecretValue::new("replacement-secret".into()),
+            ),
+        })
+        .await
+        .unwrap();
+    let selection = assistant_protocol::ModelSelection {
+        provider_instance_id: replacement.provider_instance_id,
+        model_id: "fixture".into(),
+    };
+    runtime
+        .save_model_fixed_config(assistant_protocol::SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Online,
+            selection: selection.clone(),
+            parameters: model_fixture::parameters(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .set_session_model(SetSessionModelRequest {
+            session_id: session.session_id.clone(),
+            model_selection: Some(selection.clone()),
+        })
+        .await
+        .unwrap();
     assert_eq!(
         runtime
             .get_session(GetSessionRequest {
-                session_id: session.session.session_id.clone(),
+                session_id: session.session_id
             })
             .await
-            .expect("session after rejected input")
+            .unwrap()
             .session
-            .queued_input_count,
-        0
-    );
-
-    runtime
-        .set_session_model(SetSessionModelRequest {
-            session_id: session.session.session_id.clone(),
-            model_key: assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
-        })
-        .await
-        .expect("select replacement model");
-    let selected = runtime
-        .get_session_view(GetSessionViewRequest {
-            session_id: session.session.session_id,
-        })
-        .await
-        .expect("selected session view")
-        .snapshot
-        .value
-        .composer_capabilities
-        .selected_model_key;
-    assert_eq!(
-        selected.as_ref().map(assistant_protocol::ModelKey::as_str),
-        Some("secondary")
+            .model_selection,
+        Some(selection)
     );
 }
 
 #[tokio::test]
-async fn deleting_a_model_used_by_a_running_run_is_rejected() {
+async fn deleting_a_provider_does_not_interrupt_an_already_started_run() {
     let entered = Arc::new(Notify::new());
-    let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
-    let runtime = AssistantRuntime::new(
-        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
-        source,
-        Arc::new(StaticModelFactory::new(Arc::new(CancellationAwareModel {
-            capabilities: model_capabilities(false),
-            entered: entered.clone(),
-        }))),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(ToolSetSnapshot::default()),
-        Arc::new(TestChildWorkspaceFactory::default()),
-    );
-    let loaded = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("reload");
-    let created = runtime
-        .create_model(CreateModelRequest {
-            model: model_input(
-                "secondary",
-                "https://api.example.test/v1",
-                assistant_protocol::ModelCredentialChange::Replace(
-                    assistant_protocol::SecretValue::new("secondary-secret".to_owned()),
-                ),
-            ),
-            expected_revision: loaded.status.revision,
-            set_default: false,
-        })
-        .await
-        .expect("create replacement");
+    let runtime = runtime(Arc::new(CancellationAwareModel {
+        capabilities: model_capabilities(false),
+        entered: entered.clone(),
+    }));
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
-        .expect("session");
+        .unwrap()
+        .session;
     let run = runtime
-        .submit_input(SubmitInputRequest {
-            mode: assistant_protocol::SubmitInputMode::Normal,
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: session.session.session_id.clone(),
-            message: "running".to_owned(),
-            attachment_ids: Vec::new(),
-            quotes: Vec::new(),
-            skill_name: None,
-            mcp_server_key: None,
-            idempotency_key: None,
-        })
+        .submit_input(test_input(&session.session_id, "running"))
         .await
-        .expect("run");
+        .unwrap()
+        .run;
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
-        .expect("model entered");
-
-    assert!(matches!(
-        runtime
-            .delete_model(DeleteModelRequest {
-                model_key: assistant_protocol::ModelKey::new("fixture").expect("fixture key"),
-                expected_revision: created.status.revision.expect("created revision"),
-                replacement_default: Some(
-                    assistant_protocol::ModelKey::new("secondary").expect("secondary key"),
-                ),
-            })
-            .await,
-        Err(RuntimeError::InvalidRequest { .. })
-    ));
-
+        .unwrap();
     runtime
-        .interrupt_run(InterruptRunRequest {
-            session_id: session.session.session_id.clone(),
-            run_id: run.run.run_id.clone(),
+        .delete_provider(test_model_selection("fixture").provider_instance_id)
+        .await
+        .unwrap();
+    let current = runtime
+        .get_run(GetRunRequest {
+            session_id: session.session_id.clone(),
+            run_id: run.run_id.clone(),
         })
         .await
-        .expect("interrupt");
+        .unwrap()
+        .run;
+    assert!(!current.status.is_terminal());
+    assert!(!current.cancel_requested);
+    runtime
+        .interrupt_run(InterruptRunRequest {
+            session_id: session.session_id.clone(),
+            run_id: run.run_id.clone(),
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        wait_for_terminal(&runtime, &session.session.session_id, &run.run.run_id)
+        wait_for_terminal(&runtime, &session.session_id, &run.run_id)
             .await
             .status,
         assistant_protocol::RunStatus::Cancelled
     );
 }
 
-#[tokio::test]
-async fn auxiliary_vision_model_mutation_is_capability_checked_and_clearable() {
-    let document = format!("{TEST_CONFIG}\n[models.fixture.capabilities]\nimage_input = true\n");
-    let source = Arc::new(MutableConfigSource::new(document));
-    let runtime = AssistantRuntime::new(
-        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
-        source.clone(),
-        Arc::new(StaticModelFactory::new(empty_model())),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(ToolSetSnapshot::default()),
-        Arc::new(TestChildWorkspaceFactory::default()),
-    );
-    let loaded = runtime
-        .reload_config(ReloadConfigRequest::default())
-        .await
-        .expect("reload");
-    let selected = runtime
-        .set_auxiliary_vision_model(assistant_protocol::SetAuxiliaryVisionModelRequest {
-            model_key: Some(assistant_protocol::ModelKey::new("fixture").expect("key")),
-            expected_revision: loaded.status.revision.expect("revision"),
-        })
-        .await
-        .expect("select auxiliary vision model");
-    assert_eq!(
-        selected
-            .status
-            .auxiliary_vision_model
-            .as_ref()
-            .map(assistant_protocol::ModelKey::as_str),
-        Some("fixture")
-    );
-    assert!(selected.models[0].supports_image_input);
-
-    let cleared = runtime
-        .set_auxiliary_vision_model(assistant_protocol::SetAuxiliaryVisionModelRequest {
-            model_key: None,
-            expected_revision: selected.status.revision.expect("revision"),
-        })
-        .await
-        .expect("clear auxiliary vision model");
-    assert!(cleared.status.auxiliary_vision_model.is_none());
-    assert!(
-        !source
-            .document
-            .lock()
-            .expect("source lock")
-            .as_deref()
-            .expect("document")
-            .contains("[agent.vision]")
-    );
+fn test_input(session_id: &SessionId, message: &str) -> SubmitInputRequest {
+    SubmitInputRequest {
+        session_id: session_id.clone(),
+        message: message.into(),
+        mode: assistant_protocol::SubmitInputMode::Normal,
+        variant: assistant_protocol::AgentVariant::Build,
+        attachment_ids: Vec::new(),
+        quotes: Vec::new(),
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: None,
+    }
 }

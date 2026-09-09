@@ -91,6 +91,18 @@ pub(super) async fn authorize(
             origin.as_deref(),
         );
     }
+    if !matches!(
+        request.uri().path(),
+        "/auth/login"
+            | "/auth/logout"
+            | "/auth/session"
+            | "/health"
+            | "/capabilities"
+            | "/commands"
+    ) && state.startup.services().is_err()
+    {
+        return with_cors(HttpError::unavailable().into_response(), origin.as_deref());
+    }
     let streaming_response =
         request.uri().path() != "/commands" && !request.uri().path().starts_with("/auth/");
     request.extensions_mut().insert(permit.clone());

@@ -1,14 +1,11 @@
-//! Runtime 构造配置与用户模型配置的解析、编译边界。
-//!
-//! `schema` 只接收 TOML 形状，`compile` 处理全局状态，`model` 隔离逐模型错误，`domain`
-//! 分开执行快照与安全投影。`source`/`registry` 管理读取边界和 reload 生命周期；真实文件权限
-//! 检查仍属于生产 Host，不能进入纯编译模块。
+//! Runtime 全局策略、数据库模型执行编译和配置源边界。
+//! schema/compile 只解释全局 TOML；managed_model 编译在线或固定参数；registry 是配置唯一 owner。
 
-mod catalog;
+mod capabilities;
 mod compile;
 mod domain;
-mod editor;
-mod model;
+mod managed_model;
+pub(crate) mod model_templates;
 mod protocol;
 mod registry;
 mod schema;
@@ -16,28 +13,24 @@ mod source;
 
 use std::{num::NonZeroUsize, time::Duration};
 
-pub use catalog::{
-    ModelCatalog, ModelCatalogError, ModelCatalogRoute, ReasoningEffortKey,
-    ReasoningEffortWireValue, ResolvedModelCapabilities, ResolvedReasoningCapability,
-    ResolvedReasoningEffort,
+pub use capabilities::{
+    ReasoningEffortKey, ReasoningEffortWireValue, ResolvedModelCapabilities,
+    ResolvedReasoningCapability, ResolvedReasoningEffort,
 };
-pub use compile::{compile_runtime_config, compile_runtime_config_with_catalog};
+pub use compile::compile_runtime_config;
 pub use domain::{
     ConfigCompilation, ConfigIssue, ConfigIssueCode, ConfigProjection, ConfigState,
-    DelegationConfig, McpRuntimeConfig, ModelConfigProjection, ModelProtocol, ResolvedConfig,
-    ResolvedModelConfig, RuntimeModelTransportConfig,
+    DelegationConfig, McpRuntimeConfig, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
+    RuntimeModelTransportConfig,
 };
 pub use source::{
     ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
     ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture, RuntimeConfigSource,
 };
 
-pub(crate) use editor::{ConfigMutation, edit_config_document};
-pub(crate) use protocol::{project_model_by_key, project_models, project_status};
-pub(crate) use registry::{ConfigRegistry, ConfigSnapshot};
-
-#[cfg(test)]
-mod tests;
+pub(crate) use managed_model::{PreparedModel, resolve_provider_protocol};
+pub(crate) use protocol::project_status;
+pub(crate) use registry::{ConfigRegistry, ConfigSnapshot, ManagedModels};
 
 /// Assistant Runtime 初始化版本所需的最小进程内配置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

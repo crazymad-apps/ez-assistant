@@ -1,6 +1,6 @@
 //! 显式模型连接验证的固定请求、流消费与安全结果投影。
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use agent_model::{
     GenerationConfig, LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest,
@@ -12,7 +12,7 @@ use agent_types::{
 };
 use assistant_protocol::{
     ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    ModelConnectionTarget, ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -30,32 +30,53 @@ impl AssistantRuntime {
         request: ValidateModelConnectionRequest,
     ) -> RuntimeResult<ValidateModelConnectionResult> {
         self.ensure_running()?;
-        let (snapshot, model_key) = match request.target {
-            ModelConnectionTarget::Configured { model_key } => {
-                (self.config_registry.snapshot()?, model_key)
+        let cancellation = self.root_cancellation.child_token();
+        // 探测的总时限包含模型准备，不能受正式推理的长超时影响。
+        let validation =
+            self.validate_model_connection_inner(request.clone(), cancellation.clone());
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(RuntimeError::RuntimeNotRunning {
+                lifecycle: self.lifecycle()?,
+            }),
+            result = tokio::time::timeout(Duration::from_secs(30), validation) => {
+                match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        cancellation.cancel();
+                        Ok(validation_failed(request.selection, ConnectionValidationFailureKind::Timeout))
+                    }
+                }
             }
-            ModelConnectionTarget::Candidate(model) => {
-                let model_key = model.model_key.clone();
-                (
-                    self.config_registry.candidate_snapshot(model).await?,
-                    model_key,
-                )
-            }
-        };
-        let compiled = match self.compile_model_service(&snapshot, &model_key) {
+        }
+    }
+
+    async fn validate_model_connection_inner(
+        &self,
+        request: ValidateModelConnectionRequest,
+        cancellation: CancellationToken,
+    ) -> RuntimeResult<ValidateModelConnectionResult> {
+        let snapshot = self.config_registry.snapshot()?;
+        let selection = request.selection;
+        let prepared = self
+            .config_registry
+            .prepare_model(
+                &snapshot,
+                Some(&selection),
+                self.store.as_ref(),
+                self.model_factory.as_ref(),
+            )
+            .await?;
+        let compiled = match super::model::compile_resolved_model_service(
+            &snapshot,
+            &prepared.model,
+            self.model_factory.as_ref(),
+            None,
+        ) {
             Ok(compiled) => compiled,
-            // 已有有效模型配置但 Host 无法构造服务，属于本次连接验证结果；
-            // 顶层配置不可用、key 不存在或条目无效仍使用 Runtime 结构化错误。
             Err(RuntimeError::ModelBuildFailed { .. }) => {
                 return Ok(validation_failed(
-                    model_key,
-                    ConnectionValidationFailureKind::Configuration,
-                ));
-            }
-            Err(RuntimeError::ModelUnavailable { .. })
-            | Err(RuntimeError::ConfigurationUnavailable) => {
-                return Ok(validation_failed(
-                    model_key,
+                    selection,
                     ConnectionValidationFailureKind::Configuration,
                 ));
             }
@@ -64,11 +85,9 @@ impl AssistantRuntime {
         let model_request = connection_validation_request(
             &compiled.provider,
             compiled.protocol,
-            &compiled.model_id,
             &compiled.capabilities,
             compiled.max_output_tokens,
         )?;
-        let cancellation = self.root_cancellation.child_token();
         let validation =
             consume_validation_stream(compiled.model, model_request, cancellation.clone());
         let outcome = tokio::select! {
@@ -92,7 +111,7 @@ impl AssistantRuntime {
 
         match outcome {
             Ok(()) => Ok(ValidateModelConnectionResult {
-                model_key,
+                selection,
                 outcome: ConnectionValidationOutcome::Succeeded,
             }),
             Err(ModelError::Cancelled) => Err(RuntimeError::RuntimeNotRunning {
@@ -100,7 +119,7 @@ impl AssistantRuntime {
             }),
             Err(error) => {
                 let kind = connection_validation_failure_kind(&error);
-                Ok(validation_failed(model_key, kind))
+                Ok(validation_failed(selection, kind))
             }
         }
     }
@@ -110,12 +129,11 @@ impl AssistantRuntime {
 fn connection_validation_request(
     provider: &agent_types::ProviderId,
     protocol: crate::ModelProtocol,
-    model_id: &str,
     capabilities: &crate::ResolvedModelCapabilities,
     model_max_output_tokens: u32,
 ) -> RuntimeResult<ModelRequest> {
     let (reasoning, provider_options) =
-        protocol_request_options(provider, protocol, model_id, capabilities, None)?;
+        protocol_request_options(provider, protocol, capabilities, None)?;
     let user_message = UserMessage {
         origin: Default::default(),
         transcript_visibility: Default::default(),
@@ -196,7 +214,7 @@ fn connection_validation_failure_kind(error: &ModelError) -> ConnectionValidatio
 }
 
 fn validation_failed(
-    model_key: assistant_protocol::ModelKey,
+    selection: assistant_protocol::ModelSelection,
     kind: ConnectionValidationFailureKind,
 ) -> ValidateModelConnectionResult {
     let message = match kind {
@@ -223,7 +241,7 @@ fn validation_failed(
         }
     };
     ValidateModelConnectionResult {
-        model_key,
+        selection,
         outcome: ConnectionValidationOutcome::Failed(ConnectionValidationFailure {
             kind,
             message: message.to_owned(),

@@ -22,9 +22,10 @@
 - `RetryingModelService` 只包装 `stream()` 直接错误，策略必须显式且 attempt 有限；一旦
   获得事件流就透明返回，绝不重试后续失败。
 - 重试等待必须响应取消，复用完全相同的 `ModelRequest`，并透明委托 capabilities 与
-  context window；Core 不感知 attempt。
+  context window 与独立输入限制；Core 不感知 attempt。
 - `ModelService` 直接暴露当前实例绑定模型的 `context_window_tokens`；调用方不得按
-  provider/model 名称猜测窗口。
+  provider/model 名称猜测窗口。`max_input_tokens()` 提供当前实例绑定模式的可选输入上限；
+  未声明返回 None，不从窗口大小补值。ModelService 包装器必须透明转发这两个限制。
 - Provider 明确报告上下文过长时使用 provider-neutral `ContextOverflow`；建立前与
   流内仍遵守既有错误边界。
 - `GenerationConfig.max_output_tokens` 只表示本次请求的输出上限；是否能编码由具体

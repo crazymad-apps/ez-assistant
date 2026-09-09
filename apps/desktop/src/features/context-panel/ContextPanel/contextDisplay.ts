@@ -44,11 +44,10 @@ export function formatApprovalMode(mode: string | null | undefined): string {
   return mode === "ask" ? "询问" : mode === "auto" ? "自动" : "未记录";
 }
 
-export function formatModelIdentity(display_name: string | undefined, model_key: string | null | undefined): string {
-  if (display_name) {
-    return display_name;
-  }
-  return model_key ? `${model_key}（历史配置）` : "未记录";
+export function formatModelIdentity(selection: import("../../../generated/assistant-protocol").ModelSelection | null, providers: readonly import("../../../generated/assistant-protocol").ProviderSummary[]): string {
+  if (!selection) return "未配置默认模型";
+  const provider = providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
+  return `${provider?.connection.display_name ?? "服务商已删除"} / ${selection.model_id}`;
 }
 
 export function runStatusLabel(status: RunStatus): string {

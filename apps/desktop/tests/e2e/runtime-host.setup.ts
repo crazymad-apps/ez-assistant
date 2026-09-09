@@ -30,7 +30,6 @@ export default async function setupRuntimeHost(_config: FullConfig): Promise<() 
   await writeFile(
     join(runtime_home, "config.toml"),
     `schema_version = 1
-default_model = "fixture"
 
 [host_access]
 remote_enabled = false
@@ -38,23 +37,6 @@ scheme = "http"
 port = ${host_port}
 server_names = []
 
-[models.fixture]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "${provider.endpoint}/v1"
-model = "offline-model"
-api_key = "e2e-placeholder-not-a-real-secret"
-context_window_tokens = 8192
-max_output_tokens = 4096
-
-[models.alternate]
-protocol = "chat_completions"
-provider = "fixture"
-endpoint = "${provider.endpoint}/v1"
-model = "alternate-offline-model"
-api_key = "e2e-placeholder-not-a-real-secret"
-context_window_tokens = 16384
-max_output_tokens = 4096
 `,
   );
 
@@ -80,6 +62,24 @@ max_output_tokens = 4096
   try {
     const discovery = await waitForDiscovery(runtime_home, child, () => stderr);
     const capabilities = await getJson(`${discovery.address}/capabilities`, discovery.access_token);
+    // 通过正式新 API 构造测试连接和固定参数，不从旧 TOML 转换。
+    const provider_summary = await runtimeCommand(discovery, "create_provider", {
+      connection: { display_name: "离线测试服务商", provider_type: "local", endpoint: `${provider.endpoint}/v1`, protocol_preference: "chat_completions", models_path: "/v1/models", discovery_format: "openai" },
+      credential: { mode: "replace", value: "e2e-placeholder-not-a-real-secret" },
+    }) as { provider_instance_id: string };
+    for (const model_id of ["offline-model", "alternate-offline-model"]) {
+      await runtimeCommand(discovery, "save_model_fixed_config", {
+        selection: { provider_instance_id: provider_summary.provider_instance_id, model_id },
+        parameters: {
+          context_window_tokens: { state: "known", value: 16384 }, max_output_tokens: { state: "known", value: 4096 },
+          max_input_tokens: { state: "unknown" }, reasoning_max_input_tokens: { state: "unknown" }, reasoning_max_output_tokens: { state: "unknown" },
+          streaming: "supported", image_input: "unsupported", tool_calls: "supported", reasoning: "unsupported",
+          tool_choice: { auto: "supported", none: "supported", required: "supported", named: "supported" },
+          tool_image_projection: "unsupported", reasoning_mode: "unsupported", reasoning_efforts: {}, default_reasoning_effort: null,
+        },
+      });
+    }
+    await runtimeCommand(discovery, "set_default_model", { selection: { provider_instance_id: provider_summary.provider_instance_id, model_id: "offline-model" } });
     const registered = await runtimeCommand(
       discovery,
       "register_workspace",
@@ -91,7 +91,7 @@ max_output_tokens = 4096
     ) as { workspace: { workspace_id: string } };
     const created = await runtimeCommand(discovery, "create_session", {
       title: "M2 临时会话",
-      model_key: null,
+      model_selection: null,
       workspace_id: registered.workspace.workspace_id,
     }) as { session: { session_id: string } };
     await uploadAttachment(discovery, created.session.session_id);
@@ -143,6 +143,12 @@ type FakeProvider = Readonly<{
 async function startFakeProvider(): Promise<FakeProvider> {
   let response_sequence = 0;
   const server = createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ object: "list", data: [
+        { id: "offline-model", object: "model", owned_by: "fixture" }, { id: "alternate-offline-model", object: "model", owned_by: "fixture" },
+      ] }));
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404).end();
       return;
@@ -321,11 +327,11 @@ async function waitForDiscovery(
       const response = await fetch(`${discovery.address}/health`, {
         headers: { Authorization: `Bearer ${discovery.access_token}` },
       });
-      if (response.ok) {
+      if (response.ok && (await response.json() as { status: string }).status === "ready") {
         return discovery;
       }
     } catch {
-      // Discovery is published atomically after Runtime recovery; poll until it is visible.
+      // Discovery precedes recovery; wait for actual readiness before fixture commands.
     }
     await delay(40);
   }

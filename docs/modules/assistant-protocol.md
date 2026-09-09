@@ -306,3 +306,27 @@ Desktop/Web 与 Host 同版更新；分页字段不进入会话持久化，不�
 
 `McpRegistryChanged` 表示进程内 MCP 活动目录已发布；Desktop/Web 据此刷新服务列表与
 ApplicationSnapshot 能力。它不是配置写入、会话消息或执行授权，不写入历史 Conversation。
+
+## v0.25.1 启动与模型管理契约
+
+协议版本为 3。RuntimeHostHealth 的 starting/ready/unavailable 与阶段、数据库版本、目标版本及
+安全错误编码服务于启动诊断；匿名请求不能读取。startup_diagnostics 是客户端连接前置能力。
+服务商使用 ProviderInstanceId，模型使用 ModelSelection 二元引用；摘要只有 has_api_key，
+密钥修改复用显式 Unchanged/Replace/Clear 语义和 SecretValue 脱敏。标准化 ModelParameters 同时
+承载本次在线事实和用户固定值，来源另行标注；未知能力与非法限制不得用 false/0 表示。
+
+
+### v0.25.1 M3 服务商删除影响
+
+GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、固定记录数量和最多 20 条会话标题；
+数量包含归档与未加载会话，标题摘要不限制统计范围。DeleteProvider 返回相同结构，但数值取自
+实际删除事务。客户端不能把确认前的旧统计当成最终影响，也不能自行清空保留的模型引用。
+
+辅助识图详情的 auxiliary_model 使用 ModelSelection，与默认／会话引用一致；不再导出 ModelKey。
+历史工具元数据缺少新二元身份时不推测服务商，正常正文仍可显示。
+
+### v0.25.1 M3 手动来源与模型标签
+
+- ModelConfigOrigin（online/manual）随 ModelFixedConfig、ModelConfigurationDetail、保存请求传递，表示创建来源；不得从 ModelConfigurationSource（参数来源）推断。
+- GetModelConfigurationRequest 增量包含 origin，缺省 online；selection 字段在序列化中展开。manual 未保存草稿由 Runtime 返回模板参数；已有记录以存储来源为准。
+- DiscoveredModel.configuration 为 Runtime 计算的可选摘要（uses_template / requires_configuration），供列表标签展示，不改变服务商原始 metadata，不持久化目录。

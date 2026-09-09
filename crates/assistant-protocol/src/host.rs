@@ -3,11 +3,15 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Host 已完成 Runtime 恢复并可以接受已授权请求。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+/// 受认证的启动投影；版本未知用 None，安全错误码不包含配置正文或磁盘路径。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RuntimeHostHealth {
     pub status: RuntimeHostHealthStatus,
+    pub stage: Option<RuntimeHostStartupStage>,
+    pub database_version: Option<String>,
+    pub target_version: String,
+    pub error: Option<RuntimeHostStartupError>,
 }
 
 /// `/health` 的稳定就绪状态。
@@ -15,7 +19,34 @@ pub struct RuntimeHostHealth {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeHostHealthStatus {
+    Starting,
     Ready,
+    Unavailable,
+}
+
+/// 当前正在执行的初始化阶段，不表示百分比或预计耗时。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHostStartupStage {
+    DatabaseCheck,
+    DatabaseBackup,
+    DatabaseMigration,
+    Configuration,
+    Recovery,
+}
+
+/// 失败后只查询诊断；修复并重新启动 Host 才重新尝试初始化。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHostStartupError {
+    DatabaseUnavailable,
+    DatabaseNewer,
+    MigrationFailed,
+    BackupFailed,
+    ConfigurationInvalid,
+    InitializationFailed,
 }
 
 /// Host 可以逐项声明的产品能力；Desktop 只检查当前页面实际依赖的项目。
@@ -37,6 +68,7 @@ pub enum RuntimeHostFeature {
     HostAccess,
     WebLogin,
     UserTerminals,
+    StartupDiagnostics,
 }
 
 /// 当前 Host 实例公开给客户端的传输能力，不包含地址、Token 或业务状态。
@@ -62,10 +94,14 @@ mod tests {
     fn host_health_and_capabilities_round_trip_without_secrets() {
         let health = RuntimeHostHealth {
             status: RuntimeHostHealthStatus::Ready,
+            stage: None,
+            database_version: None,
+            target_version: "0.25.0".into(),
+            error: None,
         };
         assert_eq!(
             serde_json::to_string(&health).expect("health JSON"),
-            r#"{"status":"ready"}"#
+            r#"{"status":"ready","stage":null,"database_version":null,"target_version":"0.25.0","error":null}"#
         );
 
         let capabilities = RuntimeHostCapabilities {

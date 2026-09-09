@@ -139,7 +139,7 @@ async fn config_reload_ensures_one_controller_and_role_restricts_lifecycle_opera
 }
 
 #[tokio::test]
-async fn missing_configuration_keeps_controller_unavailable_without_a_placeholder_session() {
+async fn missing_configuration_allows_controller_setup_without_a_model() {
     let runtime = AssistantRuntime::new(
         RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
         Arc::new(MissingConfigSource),
@@ -158,10 +158,16 @@ async fn missing_configuration_keeps_controller_unavailable_without_a_placeholde
         .expect("application snapshot")
         .snapshot
         .value;
-    assert!(application.active_sessions.is_empty());
+    assert_eq!(application.active_sessions.len(), 1);
+    assert!(application.providers.is_empty());
+    assert!(application.model_settings.default_model.is_none());
+    let controller = &application.active_sessions[0];
+    assert!(controller.model_selection.is_none());
     assert_eq!(
         application.controller_availability,
-        assistant_protocol::ControllerAvailabilitySnapshot::Unavailable
+        assistant_protocol::ControllerAvailabilitySnapshot::Available {
+            session_id: controller.session_id.clone()
+        }
     );
     assert_eq!(application.additional_controller_count, 0);
 }
@@ -178,7 +184,7 @@ async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
     let first = runtime
         .create_session(CreateSessionRequest {
             title: Some("First".to_owned()),
-            model_key: None,
+            model_selection: None,
             workspace_id: None,
         })
         .await
@@ -228,7 +234,7 @@ async fn creates_one_frozen_system_prompt_and_empty_conversation_per_session() {
         .expect("system prompt")
         .clone();
     assert_ne!(first_prompt, second_prompt);
-    assert_eq!(first.session.model_key.as_str(), "fixture");
+    assert!(first.session.model_selection.is_none());
 }
 
 #[tokio::test]

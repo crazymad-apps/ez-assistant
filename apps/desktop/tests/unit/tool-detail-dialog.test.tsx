@@ -18,6 +18,19 @@ afterEach(() => {
 });
 
 describe("ToolDetailDialog", () => {
+  it("renders an auxiliary model ID containing provider path separators", () => {
+    render(<ToolDetailDialog detail={detailView({
+      tool_name: "inspect_images",
+      image_inspection: {
+        auxiliary_model: { provider_instance_id: "provider-instance", model_id: "org/vision:latest" },
+        elapsed_ms: 12,
+        usage: null,
+      },
+    })} error={null} is_loading={false} on_close={vi.fn()} />);
+    expect(screen.getByText("org/vision:latest")).toBeVisible();
+    expect(screen.getByText("12 ms")).toBeVisible();
+  });
+
   it("renders remote MCP identity and full arguments without a gateway request payload", () => {
     const arguments_json = JSON.stringify({ script: "完整参数".repeat(2000) });
     render(<ToolDetailDialog detail={detailView({

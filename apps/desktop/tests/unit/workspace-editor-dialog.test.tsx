@@ -19,7 +19,7 @@ describe("WorkspaceEditorDialog", () => {
         active_sessions_next_offset: null,
         archived_sessions_next_offset: null,
         configuration: { state: "ready" },
-        models: [],
+        providers: [], model_settings: { default_model: null, vision_model: null },
         workspaces: [{
           workspace_id: "workspace-1",
           label: "旧名称",
@@ -63,7 +63,7 @@ describe("WorkspaceEditorDialog", () => {
         active_sessions_next_offset: null,
         archived_sessions_next_offset: null,
         configuration: { state: "ready" },
-        models: [],
+        providers: [], model_settings: { default_model: null, vision_model: null },
         workspaces: [{
           workspace_id: "workspace-1",
           label: "项目",

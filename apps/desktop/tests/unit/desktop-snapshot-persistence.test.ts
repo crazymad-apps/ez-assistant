@@ -8,7 +8,13 @@ const stores: RootStore[] = [];
 const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: [], close_behavior: "hide_to_tray" };
 beforeEach(() => { vi.spyOn(RuntimeLifecycleCoordinator.prototype, "connect").mockResolvedValue(); bridge.load.mockResolvedValue(defaults); bridge.save.mockResolvedValue(undefined); });
 afterEach(async () => { for (const store of stores.splice(0)) { await store.flushPreferences(); store.dispose(); } vi.restoreAllMocks(); vi.clearAllMocks(); });
-function create() { const store = new RootStore(); stores.push(store); return store; }
+function create() {
+  const store = new RootStore();
+  vi.mocked(RuntimeLifecycleCoordinator.prototype.connect).mockImplementationOnce(async () => {
+    store.connection.markConnected("fixture", { protocol_version: 3, runtime_version: "test", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] });
+  });
+  stores.push(store); return store;
+}
 it("loads once before connecting and never saves the empty startup projection over the existing snapshot", async () => {
   let load!: (value: DesktopPreferences) => void;
   bridge.load.mockImplementationOnce(() => new Promise((resolve) => { load = resolve; }));

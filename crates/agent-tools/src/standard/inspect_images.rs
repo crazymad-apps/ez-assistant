@@ -30,7 +30,8 @@ pub struct ResolvedInspectImagesInput {
 #[derive(Debug, Serialize)]
 pub struct InspectImagesOutput {
     text: String,
-    model_key: String,
+    model_provider: String,
+    model_id: String,
     elapsed_ms: u64,
     usage: Option<agent_types::TokenUsage>,
 }
@@ -133,7 +134,8 @@ impl Tool for InspectImagesTool {
                 .map_err(|error| ToolError::execution(error.to_string()))?;
             Ok(InspectImagesOutput {
                 text: result.text,
-                model_key: result.model_key,
+                model_provider: result.model_provider,
+                model_id: result.model_id,
                 elapsed_ms: result.elapsed_ms,
                 usage: result.usage,
             })
@@ -142,7 +144,8 @@ impl Tool for InspectImagesTool {
 
     fn execution_metadata(output: &Self::Output) -> Option<agent_types::ToolExecutionMetadata> {
         Some(agent_types::ToolExecutionMetadata {
-            model_key: Some(output.model_key.clone()),
+            model_provider: Some(output.model_provider.clone()),
+            model_id: Some(output.model_id.clone()),
             elapsed_ms: Some(output.elapsed_ms),
             usage: output.usage.clone(),
         })
@@ -176,7 +179,8 @@ mod tests {
             Box::pin(async move {
                 Ok(ImageInspection {
                     text: format!("inspected {}", request.goal),
-                    model_key: "vision".to_owned(),
+                    model_provider: "provider-instance".to_owned(),
+                    model_id: "org/vision:latest".to_owned(),
                     elapsed_ms: 12,
                     usage: None,
                 })
@@ -289,13 +293,19 @@ mod tests {
     fn output_is_direct_text_not_structured_json() {
         let output = InspectImagesOutput {
             text: "finding".to_owned(),
-            model_key: "vision".to_owned(),
+            model_provider: "provider-instance".to_owned(),
+            model_id: "org/vision:latest".to_owned(),
             elapsed_ms: 12,
             usage: None,
         };
         assert_eq!(
-            InspectImagesTool::execution_metadata(&output).and_then(|metadata| metadata.model_key),
-            Some("vision".to_owned())
+            InspectImagesTool::execution_metadata(&output)
+                .and_then(|metadata| metadata.model_provider),
+            Some("provider-instance".to_owned())
+        );
+        assert_eq!(
+            InspectImagesTool::execution_metadata(&output).and_then(|metadata| metadata.model_id),
+            Some("org/vision:latest".to_owned())
         );
         assert_eq!(
             InspectImagesTool::encode_output(output).expect("output"),

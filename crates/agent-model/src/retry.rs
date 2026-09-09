@@ -151,6 +151,10 @@ impl ModelService for RetryingModelService {
         self.inner.context_window_tokens()
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         Box::pin(async move {
             let cancellation = context.cancellation.clone();

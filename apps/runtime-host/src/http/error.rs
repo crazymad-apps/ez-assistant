@@ -22,6 +22,7 @@ enum TransportErrorCode {
     InvalidRequest,
     Unauthorized,
     Forbidden,
+    RuntimeUnavailable,
 }
 
 #[derive(Serialize)]
@@ -30,6 +31,13 @@ struct ErrorBody {
 }
 
 impl HttpError {
+    pub(super) fn unavailable() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TransportErrorCode::RuntimeUnavailable,
+            "Host 尚未就绪，请查看启动状态。",
+        )
+    }
     pub(super) fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -141,5 +149,11 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::Timeout => StatusCode::REQUEST_TIMEOUT,
         RuntimeErrorCode::Cancelled | RuntimeErrorCode::McpTestCancelled => StatusCode::CONFLICT,
         RuntimeErrorCode::McpTestFailed => StatusCode::BAD_GATEWAY,
+    }
+}
+
+impl From<assistant_runtime::RuntimeError> for HttpError {
+    fn from(_: assistant_runtime::RuntimeError) -> Self {
+        Self::unavailable()
     }
 }

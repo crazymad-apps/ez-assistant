@@ -145,7 +145,7 @@ impl StorageEngine {
             assistant_protocol::SessionRoleSnapshot::Controller => "controller",
         });
         let mut statement = self.connection.prepare(
-            "SELECT s.session_id, s.title, s.model_key, s.reasoning_effort,
+            "SELECT s.session_id, s.title, json_array(s.model_provider_instance_id, s.model_id), s.reasoning_effort,
                     s.lifecycle, s.role, s.proxy_controller_session_id, s.proxy_changed_at_ms,
                     s.pc_output_device_id, d.display_name, s.current_variant, s.approval_mode,
                     r.workspace_id, s.message_count, s.created_at_ms, s.updated_at_ms,
@@ -228,8 +228,7 @@ impl StorageEngine {
             summaries.push(SessionSummary {
                 session_id: SessionId::new(id).map_err(|_| invalid_data("invalid session id"))?,
                 title,
-                model_key: assistant_protocol::ModelKey::new(model)
-                    .map_err(|_| invalid_data("invalid model key"))?,
+                model_selection: super::model_management::read_selection_json(&model)?,
                 reasoning_effort: parse_reasoning_effort(effort)?,
                 lifecycle: match lifecycle.as_str() {
                     "active" => assistant_protocol::SessionLifecycle::Active,

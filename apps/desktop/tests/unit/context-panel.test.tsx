@@ -1,3 +1,4 @@
+import { modelProvider, modelSelection } from "../support/modelManagement";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RootStore } from "../../src/stores/RootStore";
@@ -103,14 +104,14 @@ describe("ContextPanel", () => {
 
     const session_section = screen.getByRole("button", { name: "会话" });
     expect(session_section).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Fixture Model")).toBeVisible();
+    expect(screen.getByText("测试服务商 / fixture")).toBeVisible();
     expect(screen.getByText("图片理解").nextElementSibling).toHaveTextContent("辅助视觉模型");
     fireEvent.click(session_section);
     expect(session_section).toHaveAttribute("aria-expanded", "false");
-    const exiting_session = screen.getByText("Fixture Model").closest<HTMLElement>('[aria-hidden="true"]');
+    const exiting_session = screen.getByText("测试服务商 / fixture").closest<HTMLElement>('[aria-hidden="true"]');
     expect(exiting_session).not.toBeNull();
     if (exiting_session) fireEvent.transitionEnd(exiting_session);
-    expect(screen.queryByText("Fixture Model")).not.toBeInTheDocument();
+    expect(screen.queryByText("测试服务商 / fixture")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /运行 #1/ }));
     await waitFor(() => expect(locate).toHaveBeenCalledWith("session-1", "run-1"));
@@ -236,10 +237,10 @@ describe("ContextPanel", () => {
       observed_sequence: 2,
       value: {
         ...application,
-        models: [],
+        providers: [], model_settings: { default_model: null, vision_model: null },
         active_sessions: application.active_sessions.map((session) => ({
           ...session,
-          model_key: "removed-model",
+          model_selection: { provider_instance_id: "provider-1", model_id: "removed-model" },
         })),
       },
     });
@@ -261,7 +262,7 @@ describe("ContextPanel", () => {
     } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
     renderPanel(store);
 
-    expect(screen.getByText("removed-model（历史配置）")).toBeVisible();
+    expect(screen.getByText("服务商已删除 / removed-model")).toBeVisible();
     expect(screen.getAllByText("未提供").length).toBeGreaterThan(0);
     expect(screen.getByText("时间未记录", { exact: false })).toBeVisible();
     expect(screen.getByRole("button", { name: /brief\.png/ })).toBeDisabled();
@@ -287,7 +288,7 @@ function contextStore(): RootStore {
       active_sessions_next_offset: null,
       archived_sessions_next_offset: null,
       configuration: { state: "ready" },
-      models: [{ model_key: "fixture", display_name: "Fixture Model" }],
+      providers: [modelProvider], model_settings: { default_model: modelSelection, vision_model: null },
       workspaces: [{
         workspace_id: "workspace-1",
         label: "当前项目",
@@ -297,7 +298,7 @@ function contextStore(): RootStore {
       active_sessions: [{
         session_id: "session-1",
         workspace_id: "workspace-1",
-        model_key: "fixture",
+        model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
@@ -311,7 +312,7 @@ function contextStore(): RootStore {
       session: {
         session_id: "session-1",
         workspace_id: "workspace-1",
-        model_key: "fixture",
+        model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
@@ -324,7 +325,7 @@ function contextStore(): RootStore {
         directories_match_current: false,
       },
       composer_capabilities: {
-        selected_model_key: "fixture",
+        selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "tool",
         goal_supported: true,

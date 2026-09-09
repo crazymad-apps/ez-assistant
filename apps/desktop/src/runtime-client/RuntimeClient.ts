@@ -1,3 +1,4 @@
+import { startupMessage } from "./startupStatus";
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
   DeviceGatewayCommand,
@@ -10,6 +11,7 @@ import type {
   RuntimeErrorInfo,
   RuntimeEventEnvelope,
   RuntimeHostCapabilities,
+  RuntimeHostHealth,
 } from "../generated/assistant-protocol";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
@@ -73,6 +75,30 @@ export class RuntimeClient {
 
   dispose(): void { this.#abort.abort(); }
 
+  /** 仅轮询受认证的 health，不启动/停止进程，也不重试初始化 SQL；连接释放会取消等待。 */
+  async waitUntilReady(receive: (health: RuntimeHostHealth) => void): Promise<void> {
+    if (this.capabilities.protocol_version !== 3 || !this.capabilities.features?.includes("startup_diagnostics")) {
+      throw new RuntimeClientError("component_mismatch", "页面与 Host 版本不一致，请使用同一版本的应用。");
+    }
+    for (;;) {
+      const health = await this.resource("/health", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(10000) }, async (response) => {
+        if (!response.ok) throw new RuntimeClientError("runtime_unavailable", "无法读取 Host 启动状态。");
+        const value = await response.json() as RuntimeHostHealth;
+        if (!value || !["starting", "ready", "unavailable"].includes(value.status)) throw new RuntimeClientError("component_mismatch", "Host 启动状态格式不匹配。");
+        return value;
+      });
+      receive(health);
+      if (health.status === "ready") return;
+      if (health.status === "unavailable") throw new RuntimeClientError("runtime_startup_failed", startupMessage(health));
+      await new Promise<void>((resolve, reject) => {
+        const stop = () => { window.clearTimeout(timer); reject(new DOMException("Connection closed", "AbortError")); };
+        const timer = window.setTimeout(() => { this.#abort.signal.removeEventListener("abort", stop); resolve(); }, 1000);
+        if (this.#abort.signal.aborted) stop();
+        else this.#abort.signal.addEventListener("abort", stop, { once: true });
+      });
+    }
+  }
+
   openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void): TerminalSocket {
     return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal);
   }
@@ -122,10 +148,12 @@ export class RuntimeClient {
 
   async command<TType extends RuntimeCommand["type"]>(
     command: Extract<RuntimeCommand, { readonly type: TType }>,
+    options?: Readonly<{ signal?: AbortSignal }>,
   ): Promise<Extract<RuntimeCommandResult, { readonly type: TType }>> {
     const request_id = createRequestId();
     const response = await this.#fetch(`${this.#base_url}/commands`, {
       method: "POST",
+      signal: options?.signal,
       headers: this.#headers(true),
       body: JSON.stringify({
         request_id,

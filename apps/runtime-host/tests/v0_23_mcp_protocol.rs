@@ -73,7 +73,7 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
     let session_id = client.runtime(
         "create_session",
         json!({
-            "title":"MCP management", "model_key":"fixture"
+            "title":"MCP management", "model_selection":null
         }),
     )["session"]["session_id"]
         .as_str()

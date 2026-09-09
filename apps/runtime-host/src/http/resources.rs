@@ -62,11 +62,15 @@ pub(super) async fn list_session_resource_files(
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<ListSessionResourceFilesRequest>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
     };
-    let root = match state
+    let root = match services
         .runtime
         .resolve_session_resource_root(&session_id, &request.locator.root)
         .await
@@ -106,11 +110,15 @@ pub(super) async fn preview_session_resource_file(
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<PreviewSessionResourceFileRequest>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
     };
-    let root = match state
+    let root = match services
         .runtime
         .resolve_session_resource_root(&session_id, &request.locator.root)
         .await
@@ -142,11 +150,15 @@ pub(super) async fn resolve_session_resource_native_path(
     RoutePath(session_id): RoutePath<String>,
     Json(locator): Json<SessionResourceLocator>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
     };
-    let root = match state
+    let root = match services
         .runtime
         .resolve_session_resource_root(&session_id, &locator.root)
         .await
@@ -292,6 +304,10 @@ pub(super) async fn preview_attachment(
     RoutePath((session_id, attachment_id)): RoutePath<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -300,7 +316,7 @@ pub(super) async fn preview_attachment(
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("attachment id is invalid")),
     };
-    let attachment = match state
+    let attachment = match services
         .runtime
         .get_attachment(GetAttachmentRequest {
             session_id,
@@ -331,6 +347,10 @@ pub(super) async fn thumbnail_attachment(
     State(state): State<HttpState>,
     RoutePath((session_id, attachment_id)): RoutePath<(String, String)>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -339,7 +359,7 @@ pub(super) async fn thumbnail_attachment(
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("attachment id is invalid")),
     };
-    let attachment = match state
+    let attachment = match services
         .runtime
         .get_attachment(GetAttachmentRequest {
             session_id,
@@ -431,7 +451,11 @@ async fn preview_tool_resource(
     resource_ref_id: ResourceRefId,
     headers: HeaderMap,
 ) -> Response {
-    let resource = match state
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
+    let resource = match services
         .runtime
         .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
         .await
@@ -490,12 +514,16 @@ pub(super) async fn resolve_tool_file_native_path(
     State(state): State<HttpState>,
     RoutePath((session_id, message_id, resource_ref_id)): RoutePath<(String, String, String)>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let Some((owner, message_id, resource_ref_id)) =
         main_tool_resource_request(&session_id, &message_id, &resource_ref_id)
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
-    let resource = match state
+    let resource = match services
         .runtime
         .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
         .await
@@ -515,12 +543,16 @@ pub(super) async fn resolve_child_tool_file_native_path(
         String,
     )>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let Some((owner, message_id, resource_ref_id)) =
         child_tool_resource_request(&session_id, &child_task_id, &message_id, &resource_ref_id)
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
-    let resource = match state
+    let resource = match services
         .runtime
         .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
         .await
@@ -716,11 +748,15 @@ pub(super) async fn export_session_markdown(
     State(state): State<HttpState>,
     RoutePath(session_id): RoutePath<String>,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
     };
-    let markdown = match state.runtime.export_session_markdown(&session_id).await {
+    let markdown = match services.runtime.export_session_markdown(&session_id).await {
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };

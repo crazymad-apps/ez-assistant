@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { modelProvider, modelSelection, modelParameters } from "../support/modelManagement";
+import { describe, expect, it, vi } from "vitest";
 import type {
   PermissionDocumentSnapshot,
   RuntimeCommand,
@@ -48,7 +49,7 @@ describe("SettingsStore connection validation", () => {
       command: async () => ({
         type: "validate_model_connection",
         payload: {
-          model_key: "qwen3.8-max",
+          selection: { provider_instance_id: "provider-1", model_id: "qwen3.8-max" },
           outcome: {
             status: "failed",
             failure: {
@@ -65,7 +66,7 @@ describe("SettingsStore connection validation", () => {
       refresh_application: async () => undefined,
     });
 
-    const result = await store.validateConfigured("qwen3.8-max");
+    const result = await store.validateModel({ provider_instance_id: "provider-1", model_id: "qwen3.8-max" });
 
     expect(result?.outcome.status).toBe("failed");
     expect(store.error_message).toBe("API Key 无效或无权访问该模型，请检查凭据。");
@@ -227,3 +228,65 @@ function permissionDocument(
     diagnostics: [],
   };
 }
+
+describe("SettingsStore model writes", () => {
+  it("reports the actual deletion response while retaining model references", async () => {
+    const command = vi.fn(async () => ({ type: "delete_provider", payload: {
+      default_model: true, vision_model: true, session_count: 28, fixed_config_count: 4, sessions: [],
+    } }));
+    const store = permissionStore({ command } as unknown as RuntimeClient);
+    store.providers = [modelProvider];
+    store.model_settings = { default_model: modelSelection, vision_model: modelSelection };
+    expect(await store.deleteProvider("provider-1")).toBe(true);
+    expect(store.providers).toEqual([]);
+    expect(store.model_settings).toEqual({ default_model: modelSelection, vision_model: modelSelection });
+    expect(store.notice_message).toContain("4 条固定配置");
+    expect(store.notice_message).toContain("28 个显式引用会话");
+    expect(store.notice_message).toContain("默认模型需重选");
+    expect(store.notice_message).toContain("辅助识图模型需重选");
+    expect(command).toHaveBeenCalledExactlyOnceWith({ type: "delete_provider", payload: { provider_instance_id: "provider-1" } });
+  });
+  it("ignores an older list response after a provider save has committed", async () => {
+    let resolve_list!: (value: unknown) => void;
+    const client = { command: async (command: RuntimeCommand) => {
+      if (command.type === "list_providers") return new Promise((resolve) => { resolve_list = resolve; });
+      if (command.type === "get_model_settings") return { type: command.type, payload: { default_model: null, vision_model: null } };
+      if (command.type === "create_provider") return { type: command.type, payload: modelProvider };
+      throw new Error("unexpected request");
+    } } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    const loading = store.loadModelSettings();
+    expect(await store.saveProvider(null, modelProvider.connection, { mode: "unchanged" })).toEqual(modelProvider);
+    resolve_list({ type: "list_providers", payload: [] });
+    expect(await loading).toBe(false);
+    expect(store.providers).toEqual([modelProvider]);
+    expect(store.loading).toBe(false);
+  });
+
+  it("keeps a committed provider save successful when application refresh fails", async () => {
+    const command = vi.fn(async () => ({ type: "create_provider", payload: modelProvider }));
+    const client = { command } as unknown as RuntimeClient;
+    const store = new SettingsStore({ get_client: () => client, get_permission_context: () => ({ session_id: null, workspace_id: null }), refresh_application: async () => { throw new Error("offline"); } });
+    expect(await store.saveProvider(null, modelProvider.connection, { mode: "unchanged" })).toEqual(modelProvider);
+    expect(store.providers).toEqual([modelProvider]);
+    expect(store.error_message).toContain("保存已完成");
+    expect(command).toHaveBeenCalledOnce();
+  });
+  it("does not publish a late save result from the previous Runtime connection", async () => {
+    let resolve!: (value: unknown) => void;
+    let client = { command: () => new Promise((done) => { resolve = done; }) } as unknown as RuntimeClient;
+    const store = new SettingsStore({ get_client: () => client, get_permission_context: () => ({ session_id: null, workspace_id: null }), refresh_application: async () => undefined });
+    const saving = store.setDefaultModel(modelSelection);
+    client = { command: vi.fn() } as unknown as RuntimeClient;
+    resolve({ type: "set_default_model", payload: { default_model: modelSelection, vision_model: null } });
+    expect(await saving).toBe(false);
+    expect(store.model_settings.default_model).toBeNull();
+    expect(store.error_message).toBeNull();
+  });
+  it("returns the authoritative timestamp and parameters for a saved fixed configuration", async () => {
+    const fixed = { selection: modelSelection, parameters: modelParameters(), updated_at_ms: 55 };
+    const client = { command: async () => ({ type: "save_model_fixed_config", payload: fixed }) } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    expect(await store.saveModelFixedConfig(modelSelection, fixed.parameters)).toEqual(fixed);
+  });
+});

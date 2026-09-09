@@ -2,7 +2,7 @@ import type { AgentVariant, ApprovalMode } from "../../../generated/assistant-pr
 import {
   SettingsCascadePopover,
   type SettingsCascadeCategory,
-} from "./SettingsCascadePopover";
+} from "../../../components/SettingsCascadePopover";
 
 type ExecutionSettingsPopoverProps = Readonly<{
   approval_mode: ApprovalMode;

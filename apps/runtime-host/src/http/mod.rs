@@ -8,16 +8,16 @@ mod events;
 mod login;
 mod materializations;
 mod resources;
+mod startup;
 pub(crate) mod terminals;
 mod web;
+pub(crate) use startup::StartupStateHandle;
 
 use std::{path::PathBuf, sync::Arc};
 
 use assistant_protocol::{
     PROTOCOL_VERSION, RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth,
-    RuntimeHostHealthStatus,
 };
-use assistant_runtime::AssistantRuntime;
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
@@ -39,7 +39,7 @@ use self::{
         resolve_tool_file_native_path, thumbnail_attachment,
     },
 };
-use crate::{access::HostAccessHandle, device::DeviceGatewayHandle, speech::SpeechServiceHandle};
+use crate::access::HostAccessHandle;
 
 pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -49,12 +49,10 @@ pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024 * 1024;
 /// Runtime 持有业务权威状态，Gateway/Speech 句柄只桥接 Host 子系统；本结构不缓存它们的第二份投影。
 #[derive(Clone)]
 pub(crate) struct HttpState {
-    runtime: Arc<AssistantRuntime>,
+    pub(crate) startup: StartupStateHandle,
     access_token: Arc<str>,
     authority: Arc<str>,
     upload_staging_directory: Arc<PathBuf>,
-    device_gateway: DeviceGatewayHandle,
-    speech: SpeechServiceHandle,
     shutdown: CancellationToken,
     pub(crate) access: HostAccessHandle,
     instance_id: Arc<str>,
@@ -100,18 +98,18 @@ impl HttpState {
     pub(crate) async fn refresh_configuration_projection(
         &self,
     ) -> Result<(), crate::access::AccessError> {
-        self.runtime
+        self.startup
+            .services()
+            .map_err(|_| crate::access::AccessError::Unavailable)?
+            .runtime
             .reload_config(assistant_protocol::ReloadConfigRequest::default())
             .await
             .map(|_| ())
             .map_err(|_| crate::access::AccessError::Unavailable)
     }
 
-    pub(crate) fn new(
-        runtime: Arc<AssistantRuntime>,
+    pub(crate) fn starting(
         endpoint: HttpEndpointState,
-        device_gateway: DeviceGatewayHandle,
-        speech: SpeechServiceHandle,
         shutdown: CancellationToken,
         access: HostAccessHandle,
         terminals: Arc<crate::user_terminal::UserTerminals>,
@@ -126,7 +124,7 @@ impl HttpState {
         Self {
             terminals,
             file_reads: Arc::new(tokio::sync::Semaphore::new(8)),
-            runtime,
+            startup: StartupStateHandle::new(),
             access_token,
             authority,
             port: base_url
@@ -135,8 +133,6 @@ impl HttpState {
                 .and_then(|url| url.port_or_known_default())
                 .expect("published endpoint has a port"),
             upload_staging_directory,
-            device_gateway,
-            speech,
             connections: shutdown.child_token(),
             shutdown,
             access,
@@ -220,10 +216,10 @@ pub(crate) fn router(state: HttpState) -> Router {
     api.merge(pages).with_state(state)
 }
 
-async fn health() -> Json<RuntimeHostHealth> {
-    Json(RuntimeHostHealth {
-        status: RuntimeHostHealthStatus::Ready,
-    })
+async fn health(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+) -> Json<RuntimeHostHealth> {
+    Json(state.startup.health())
 }
 
 async fn capabilities() -> Json<RuntimeHostCapabilities> {
@@ -235,6 +231,7 @@ async fn capabilities() -> Json<RuntimeHostCapabilities> {
         sse: true,
         streaming_upload: true,
         features: vec![
+            RuntimeHostFeature::StartupDiagnostics,
             RuntimeHostFeature::EventEnvelopes,
             RuntimeHostFeature::ApplicationSnapshot,
             RuntimeHostFeature::SessionView,

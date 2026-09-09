@@ -55,6 +55,7 @@ pub struct ResponsesProtocolAdapter {
     pub(crate) normalized_reasoning_shape: NormalizedReasoningShape,
     pub(crate) reasoning_text_projection: ReasoningTextProjection,
     pub(crate) include_encrypted_reasoning: bool,
+    pub(crate) reasoning_summary: Option<&'static str>,
     pub(crate) opaque_reasoning: OpaqueReasoningPolicy,
     pub(crate) route_fingerprint: Option<String>,
 }
@@ -78,6 +79,7 @@ impl ResponsesProtocolAdapter {
             normalized_reasoning_shape: NormalizedReasoningShape::SummaryWithItemId,
             reasoning_text_projection: ReasoningTextProjection::Content,
             include_encrypted_reasoning: false,
+            reasoning_summary: None,
             opaque_reasoning: OpaqueReasoningPolicy::None,
             route_fingerprint: None,
         }
@@ -87,6 +89,8 @@ impl ResponsesProtocolAdapter {
     pub fn openai() -> Self {
         Self {
             function_output_shape: FunctionOutputShape::ContentParts,
+            tool_image_projection: ToolImageProjection::NativeFunctionOutput,
+            reasoning_summary: Some("auto"),
             tool_choice: ToolChoiceCapabilities::all(),
             include_encrypted_reasoning: true,
             opaque_reasoning: OpaqueReasoningPolicy::PreserveEncryptedItem,

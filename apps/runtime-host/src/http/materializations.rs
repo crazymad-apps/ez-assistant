@@ -33,6 +33,10 @@ pub(super) async fn materialize_session(
     Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
+    let services = match state.startup.services() {
+        Ok(services) => services,
+        Err(error) => return materialization_error(error.to_protocol_info()),
+    };
     let manifest = match read_manifest(&mut multipart).await {
         Ok(value) => value,
         Err(error) => return materialization_error(error),
@@ -166,7 +170,7 @@ pub(super) async fn materialize_session(
         cleanup_all(&staged).await;
         return materialization_error(error.protocol_info());
     }
-    match state
+    match services
         .runtime
         .materialize_session(manifest, staged.clone())
         .await

@@ -573,6 +573,7 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -1263,6 +1264,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -1424,6 +1426,7 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
     let mut events = runtime.subscribe_events();
     let session = runtime
         .create_session(CreateSessionRequest::default())

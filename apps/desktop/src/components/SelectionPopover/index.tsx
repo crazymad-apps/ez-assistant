@@ -192,7 +192,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
             onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleEditableKeyDown}
             onKeyUp={input_method.onKeyUp}
-            placeholder={props.placeholder}
+            placeholder={props.placeholder || "请输入"}
             ref={(node) => { focus_target_ref.current = node; }}
             role="combobox"
             value={props.selected}

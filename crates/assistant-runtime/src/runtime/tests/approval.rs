@@ -236,7 +236,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
     let first_session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(workspace_id.clone()),
         })
         .await
@@ -246,7 +246,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
     let second_session = runtime
         .create_session(CreateSessionRequest {
             title: None,
-            model_key: None,
+            model_selection: None,
             workspace_id: Some(workspace_id.clone()),
         })
         .await

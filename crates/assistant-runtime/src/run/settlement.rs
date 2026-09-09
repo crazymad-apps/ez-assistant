@@ -779,6 +779,10 @@ fn failed_settlement(
     model_diagnostics: Option<&RunModelDiagnostics>,
 ) -> RunSettlement {
     let (code, message) = match error {
+        ExecutionError::DuplicateToolCallId => (
+            RuntimeErrorCode::ModelExecutionFailed,
+            "模型返回了重复的工具调用 ID，本次响应已拒绝，未执行其中的工具，请重试。".to_owned(),
+        ),
         ExecutionError::Internal => (
             RuntimeErrorCode::Internal,
             "agent execution task terminated unexpectedly".to_owned(),

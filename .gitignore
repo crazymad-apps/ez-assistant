@@ -13,3 +13,6 @@ test-results/
 docs/开发进度.md
 docs/tmp
 tmp
+
+# 项目内独立 Runtime 测试数据（包含本地凭据）
+/.runtime-test/

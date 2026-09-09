@@ -7,7 +7,7 @@ import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
 import type { ApplicationSnapshot, SessionSummary } from "../../src/generated/assistant-protocol";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 
-const transport = vi.hoisted(() => ({ command: vi.fn(), events: vi.fn(), bootstrap: vi.fn(), refresh: vi.fn() }));
+const transport = vi.hoisted(() => ({ command: vi.fn(), events: vi.fn(), ready: vi.fn(), bootstrap: vi.fn(), refresh: vi.fn() }));
 vi.mock("../../src/native-bridge/runtimeBootstrap", () => ({ bootstrapRuntime: transport.bootstrap }));
 vi.mock("../../src/native-bridge/runtimeConnection", () => ({ refreshRuntimeConnection: transport.refresh }));
 vi.mock("../../src/runtime-client/RuntimeClient", () => ({
@@ -17,16 +17,17 @@ vi.mock("../../src/runtime-client/RuntimeClient", () => ({
     constructor(bootstrap: RuntimeBootstrap) { this.instance_id = bootstrap.instance_id; this.address = bootstrap.base_url; this.capabilities = bootstrap.capabilities; }
     command(command: unknown) { return transport.command(this.address, command); }
     connectEvents(callbacks: unknown) { transport.events(this.address, callbacks); return Promise.resolve({ closed: new Promise<void>(() => undefined) }); }
+    waitUntilReady(receive: unknown) { return transport.ready(receive); }
     dispose() {}
   },
 }));
 const application: ApplicationSnapshot = {
   runtime_lifecycle: "running",
   active_sessions_next_offset: null,
-  archived_sessions_next_offset: null, configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, default_model: null, auxiliary_vision_model: null, issues: [] }, models: [], workspaces: [], active_sessions: [], archived_sessions: [], controller_availability: { status: "unavailable" }, additional_controller_count: 0,
+  archived_sessions_next_offset: null, configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, issues: [] }, providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [], active_sessions: [], archived_sessions: [], controller_availability: { status: "unavailable" }, additional_controller_count: 0,
   capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
 };
-const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, binding_id: origin, target_kind: "remote", access_token: "fixture", capabilities: { protocol_version: 2, runtime_version: "0.24.0", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login"] }, started_runtime: false });
+const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, binding_id: origin, target_kind: "remote", access_token: "fixture", capabilities: { protocol_version: 3, runtime_version: "0.24.0", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login", "startup_diagnostics"] }, started_runtime: false });
 const result = (revision: string) => ({ type: "get_application_snapshot", payload: { snapshot: { observed_sequence: 0, value: { ...structuredClone(application), configuration: { ...application.configuration, revision } } } } });
 const owners: RuntimeLifecycleCoordinator[] = [];
 function create() {
@@ -53,7 +54,7 @@ describe("selected Runtime lifecycle", () => {
     await coordinator.connect(bootstrap("http://a"));
     navigation.selectSession("older", false);
     const older: SessionSummary = {
-      session_id: "older", title: "Older", model_key: "fixture", lifecycle: "active", role: "standard",
+      session_id: "older", title: "Older", model_selection: { provider_instance_id: "provider-1", model_id: "fixture" }, lifecycle: "active", role: "standard",
       current_variant: "build", approval_mode: "ask", workspace_id: null, active_run_id: null,
       message_count: 0, queued_input_count: 0, resume_required: false, created_at_ms: 1, updated_at_ms: 1,
       archived_at_ms: null, is_pinned: false, title_origin: "user", pending_approval_count: 0,
@@ -99,4 +100,32 @@ describe("selected Runtime lifecycle", () => {
     coordinator.dispose(); resolve(result("late-initial")); await connecting;
     expect(projection.application).toBeNull();
   });
+});
+
+it("waits for readiness before opening events or loading application data", async () => {
+  const { coordinator, connection } = create();
+  let ready!: () => void;
+  transport.ready.mockImplementationOnce((receive) => {
+    receive({ status: "starting", stage: "database_migration", error: null, database_version: null, target_version: "0.25.1" });
+    return new Promise<void>((resolve) => { ready = resolve; });
+  });
+  const connecting = coordinator.connect(bootstrap("http://a"));
+  await vi.waitFor(() => expect(connection.startup?.stage).toBe("database_migration"));
+  expect(transport.events).not.toHaveBeenCalled();
+  expect(transport.command).not.toHaveBeenCalled();
+  ready(); await connecting;
+  expect(connection.state).toBe("connected");
+  expect(connection.startup).toBeNull();
+});
+
+it("ignores late readiness after the user closes a connection", async () => {
+  const { coordinator, projection } = create();
+  let ready!: () => void;
+  transport.ready.mockImplementationOnce(() => new Promise<void>((resolve) => { ready = resolve; }));
+  const connecting = coordinator.connect(bootstrap("http://a"));
+  await vi.waitFor(() => expect(transport.ready).toHaveBeenCalled());
+  coordinator.dispose(); ready(); await connecting;
+  expect(transport.events).not.toHaveBeenCalled();
+  expect(transport.command).not.toHaveBeenCalled();
+  expect(projection.application).toBeNull();
 });

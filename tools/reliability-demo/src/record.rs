@@ -494,6 +494,10 @@ impl ModelService for ObservedModelService {
         self.inner.context_window_tokens()
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let correlation = self.next_correlation.fetch_add(1, Ordering::Relaxed);
         let trace = TraceContext::new(format!("model-call-{correlation}"));

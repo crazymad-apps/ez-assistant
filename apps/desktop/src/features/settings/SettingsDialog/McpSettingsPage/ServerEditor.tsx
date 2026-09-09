@@ -68,9 +68,9 @@ export const ServerEditor = observer(function ServerEditor(props: Readonly<{
     <div className={styles.editor}>
       <fieldset disabled={busy || settings.testing}>
         <legend>基本信息</legend>
-        <label>服务标识<input autoFocus={props.server === null} disabled={props.server !== null} onChange={(event) => update({ server_key: event.target.value })} value={draft.server_key} /></label>
+        <label>服务标识<input placeholder="请输入" autoFocus={props.server === null} disabled={props.server !== null} onChange={(event) => update({ server_key: event.target.value })} value={draft.server_key} /></label>
         <p>用于工具身份和权限规则，创建后不可修改。</p>
-        <label>显示名称<input autoFocus={props.server !== null} onChange={(event) => update({ display_name: event.target.value })} placeholder={draft.server_key} value={draft.display_name} /></label>
+        <label>显示名称<input autoFocus={props.server !== null} onChange={(event) => update({ display_name: event.target.value })} placeholder={draft.server_key || "请输入"} value={draft.display_name} /></label>
         <label>业务范围说明<textarea onChange={(event) => update({ description: event.target.value })} placeholder="例如：查询 GitHub 仓库、管理 Issue" rows={2} value={draft.description} /></label>
         <label className={styles.checkbox}><input checked={draft.enabled} onChange={(event) => update({ enabled: event.target.checked })} type="checkbox" />启用此服务</label>
       </fieldset>

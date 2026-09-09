@@ -7,7 +7,7 @@ use std::{
 };
 
 use agent_model::SystemPromptSnapshot;
-use assistant_protocol::{ConversationOwner, ModelKey, SessionId, SessionTitleOrigin};
+use assistant_protocol::{ConversationOwner, SessionId, SessionTitleOrigin};
 use assistant_runtime::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationWindowRequest,
     NewStoredSession, RecoveredRuntime, StoredConversationMessageLocation,
@@ -47,7 +47,21 @@ pub(super) struct StorageEngine {
 }
 
 impl StorageEngine {
+    #[cfg(test)]
     pub(super) fn open(runtime_home: &Path) -> StorageResult<Self> {
+        Self::open_with_progress(runtime_home, None)
+    }
+
+    pub(super) fn open_with_progress(
+        runtime_home: &Path,
+        progress: Option<&tokio::sync::watch::Sender<crate::storage::DatabaseStartupProgress>>,
+    ) -> StorageResult<Self> {
+        if let Some(progress) = progress {
+            progress.send_replace(super::DatabaseStartupProgress {
+                stage: assistant_protocol::RuntimeHostStartupStage::DatabaseCheck,
+                database_version: None,
+            });
+        }
         let data_directory = runtime_home.join(DATA_DIRECTORY);
         let sessions_directory = data_directory.join(SESSIONS_DIRECTORY);
         let workspaces_directory = data_directory.join(WORKSPACES_DIRECTORY);
@@ -79,6 +93,12 @@ impl StorageEngine {
             )
         })?;
 
+        super::migrations::align(runtime_home, |stage| {
+            if let Some(progress) = progress {
+                progress.send_replace(stage);
+            }
+        })
+        .map_err(|source| internal_error("runtime database version alignment failed", source))?;
         let database_path = data_directory.join(DATABASE_FILE);
         super::filesystem::prepare_private_file(&database_path)?;
         let mut connection = Connection::open(&database_path)
@@ -101,7 +121,6 @@ impl StorageEngine {
             .map_err(|source| {
                 internal_error("runtime database foreign keys could not be enabled", source)
             })?;
-        schema::initialize(&mut connection)?;
         let recall_index_available = schema::initialize_recall_fts(&mut connection);
 
         let mut engine = Self {
@@ -117,6 +136,11 @@ impl StorageEngine {
             conversation_indexes: conversation::ConversationIndexCache::default(),
             recall_index_available,
         };
+        if let Some(progress) = progress {
+            progress.send_modify(|current| {
+                current.stage = assistant_protocol::RuntimeHostStartupStage::Recovery
+            });
+        }
         engine.recover_session_deletions()?;
         engine.repair_workspace_resources()?;
         Ok(engine)
@@ -181,15 +205,15 @@ impl StorageEngine {
             transaction
                 .execute(
                     "INSERT INTO sessions (
-                        session_id, title, model_key, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
+                        session_id, title, model_id, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin,
-                        materialization_key, automatic_title_pending
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11, ?12, ?13)",
+                        materialization_key, automatic_title_pending, model_provider_instance_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11, ?12, ?13, ?14)",
                     params![
                         session.session_id.as_str(),
                         session.title,
-                        session.model_key.as_str(),
+                        session.model_selection.as_ref().map(|selection| selection.model_id.as_str()),
                         session.reasoning_effort.map(reasoning_effort_value),
                         prompt_json,
                         skill_catalog_json,
@@ -206,6 +230,7 @@ impl StorageEngine {
                         },
                         session.materialization_key.as_ref().map(|key| key.as_str()),
                         i64::from(session.automatic_title_pending),
+                        session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
                     ],
                 )
                 .map_err(|source| {
@@ -241,7 +266,7 @@ impl StorageEngine {
         Ok(StoredSession {
             session_id: session.session_id,
             title: session.title,
-            model_key: session.model_key,
+            model_selection: session.model_selection,
             reasoning_effort: session.reasoning_effort,
             system_prompt: session.system_prompt,
 
@@ -431,7 +456,7 @@ impl StorageEngine {
         };
         let mut statement = self
             .connection
-            .prepare(&format!("SELECT session_id, title, model_key, reasoning_effort, system_prompt_json, '{{}}', current_variant,
+            .prepare(&format!("SELECT session_id, title, json_array(sessions.model_provider_instance_id, sessions.model_id), reasoning_effort, system_prompt_json, '{{}}', current_variant,
                         approval_mode, role, proxy_controller_session_id, proxy_changed_at_ms,
                         sessions.lifecycle, body_generation, message_count, created_at_ms,
                         COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
@@ -481,7 +506,7 @@ impl StorageEngine {
             let (
                 session_id,
                 title,
-                model_key,
+                model_selection,
                 reasoning_effort,
                 prompt_json,
                 _retired_skill_catalog,
@@ -511,9 +536,8 @@ impl StorageEngine {
             super::filesystem::validate_session_component(&parsed_session_id).map_err(|_| {
                 invalid_data("stored session id cannot be used as a path component")
             })?;
-            let parsed_model_key = ModelKey::new(model_key).map_err(|source| {
-                invalid_data_with_source("stored model key is invalid", source)
-            })?;
+            let parsed_model_selection =
+                super::model_management::read_selection_json(&model_selection)?;
             let system_prompt: SystemPromptSnapshot =
                 serde_json::from_str(&prompt_json).map_err(|source| {
                     invalid_data_with_source("stored system prompt is invalid", source)
@@ -527,7 +551,7 @@ impl StorageEngine {
             sessions.push(StoredSession {
                 session_id: parsed_session_id.clone(),
                 title,
-                model_key: parsed_model_key,
+                model_selection: parsed_model_selection,
                 reasoning_effort: parse_reasoning_effort(reasoning_effort)?,
                 system_prompt,
                 environment,

@@ -14,7 +14,7 @@ use agent_tools::{
     InspectImagesRequest,
 };
 use agent_types::ToolChoice;
-use assistant_protocol::{AgentVariant, ApprovalMode, ModelKey};
+use assistant_protocol::{AgentVariant, ApprovalMode};
 
 use super::AssistantRuntime;
 use super::channel::SpeakTool;
@@ -48,7 +48,6 @@ pub(super) struct CompiledModelService {
     pub(super) model: Arc<dyn ModelService>,
     pub(super) provider: agent_types::ProviderId,
     pub(super) protocol: ModelProtocol,
-    pub(super) model_id: String,
     pub(super) capabilities: ResolvedModelCapabilities,
     pub(super) max_output_tokens: u32,
     pub(super) request_timeout: Duration,
@@ -69,7 +68,7 @@ struct ImagePreparingModelService {
 }
 
 struct AuxiliaryVisionInspector {
-    model_key: String,
+    selection: assistant_protocol::ModelSelection,
     model: Arc<dyn ModelService>,
     image_preprocessor: Arc<dyn ModelImagePreprocessor>,
     reasoning: Option<ReasoningConfig>,
@@ -188,7 +187,12 @@ impl ImageInspector for AuxiliaryVisionInspector {
                             }
                             return Ok(ImageInspection {
                                 text,
-                                model_key: self.model_key.clone(),
+                                model_provider: self
+                                    .selection
+                                    .provider_instance_id
+                                    .as_str()
+                                    .to_owned(),
+                                model_id: self.selection.model_id.clone(),
                                 elapsed_ms: u64::try_from(started_at.elapsed().as_millis())
                                     .unwrap_or(u64::MAX),
                                 usage,
@@ -234,6 +238,10 @@ impl ModelService for ImagePreparingModelService {
 
     fn context_window_tokens(&self) -> u64 {
         self.inner.context_window_tokens()
+    }
+
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
     }
 
     fn stream(
@@ -322,6 +330,10 @@ impl ModelService for ObservedModelService {
         self.inner.context_window_tokens()
     }
 
+    fn max_input_tokens(&self) -> Option<u64> {
+        self.inner.max_input_tokens()
+    }
+
     fn stream(
         &self,
         request: agent_model::ModelRequest,
@@ -357,6 +369,9 @@ impl ModelService for ObservedModelService {
 
 /// 单次 Run 已同时冻结 Agent 规格和对应授权闸。
 pub(super) struct CompiledRunAgent {
+    prepared_model: crate::config::PreparedModel,
+    auxiliary_model: Option<crate::config::PreparedModel>,
+    auxiliary_selection: Option<assistant_protocol::ModelSelection>,
     agent: Agent,
     authorizer: Arc<dyn ToolAuthorizer>,
     compactor: Arc<RuntimeContextCompactor>,
@@ -368,6 +383,7 @@ pub(super) struct CompiledRunAgent {
 }
 
 pub(super) struct CompiledRunParts {
+    pub(super) model_binding: Arc<crate::config::PreparedModel>,
     pub(super) agent: Agent,
     pub(super) authorizer: Arc<dyn ToolAuthorizer>,
     pub(super) compactor: Arc<RuntimeContextCompactor>,
@@ -379,8 +395,24 @@ pub(super) struct CompiledRunParts {
 }
 
 impl CompiledRunAgent {
+    /// 调用方取得配置接纳门禁后核验，直到 Run 领取完成前不得释放该门禁。
+    pub(super) fn ensure_models_current(
+        &self,
+        registry: &crate::config::ConfigRegistry,
+    ) -> RuntimeResult<()> {
+        self.prepared_model.ensure_current(registry)?;
+        if let Some(auxiliary) = &self.auxiliary_model {
+            auxiliary.ensure_current(registry)?;
+        }
+        if registry.managed_models()?.settings.vision_model != self.auxiliary_selection {
+            return Err(RuntimeError::ConfigurationConflict);
+        }
+        Ok(())
+    }
+
     pub(super) fn into_parts(self) -> CompiledRunParts {
         CompiledRunParts {
+            model_binding: Arc::new(self.prepared_model),
             agent: self.agent,
             authorizer: self.authorizer,
             compactor: self.compactor,
@@ -422,36 +454,65 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) mcp_image_materializer: Arc<dyn McpImageMaterializer>,
 }
 
-impl AssistantRuntime {
-    /// 从同一配置快照构造 Run 和连接验证共用的冻结 ModelService。
-    pub(super) fn compile_model_service(
-        &self,
-        snapshot: &ConfigSnapshot,
-        model_key: &assistant_protocol::ModelKey,
-    ) -> RuntimeResult<CompiledModelService> {
-        compile_model_service(snapshot, model_key, self.model_factory.as_ref())
+/// 复用 Session 已接纳的模型参数；配置改变或进程重启后只读固定配置，不隐式联网。
+/// 调用方负责在既有 Session／配置门禁内接纳结果；本函数不修改 Session 或 Store。
+pub(super) async fn resolve_session_model(
+    registry: &crate::config::ConfigRegistry,
+    session: &SessionController,
+    selection: Option<&assistant_protocol::ModelSelection>,
+    store: &dyn RuntimeStore,
+) -> RuntimeResult<Arc<crate::config::PreparedModel>> {
+    let binding = session.lock_state()?.model_binding.clone();
+    let effective =
+        selection
+            .cloned()
+            .or(registry.managed_models()?.settings.default_model.clone());
+    if let Some(binding) = binding
+        && Some(&binding.selection) == effective.as_ref()
+        && binding.ensure_current(registry).is_ok()
+    {
+        return Ok(binding);
     }
+    let snapshot = registry.snapshot()?;
+    registry
+        .configured_model(&snapshot, selection, store)
+        .await
+        .map(Arc::new)
+}
 
+impl AssistantRuntime {
     /// 为独立手动压缩冻结当前 Session 的模型服务；不装配 Agent 或工具。
-    pub(super) fn compile_session_compactor(
+    pub(super) async fn compile_session_compactor(
         &self,
         session: &SessionController,
-    ) -> RuntimeResult<RuntimeContextCompactor> {
+        selection: Option<&assistant_protocol::ModelSelection>,
+    ) -> RuntimeResult<(RuntimeContextCompactor, Arc<crate::config::PreparedModel>)> {
         let snapshot = self.config_registry.snapshot()?;
-        let model_key = session.model_key()?;
-        let mut compiled =
-            compile_model_service(&snapshot, &model_key, self.model_factory.as_ref())?;
+        let prepared = resolve_session_model(
+            &self.config_registry,
+            session,
+            selection,
+            self.store.as_ref(),
+        )
+        .await?;
+        let mut compiled = compile_resolved_model_service(
+            &snapshot,
+            &prepared.model,
+            self.model_factory.as_ref(),
+            None,
+        )?;
         bind_image_preparation(&mut compiled, session.environment());
-        Ok(RuntimeContextCompactor::for_manual(
-            compiled.model,
-            session.current_system_prompt()?,
+        Ok((
+            RuntimeContextCompactor::for_manual(compiled.model, session.current_system_prompt()?),
+            prepared,
         ))
     }
 }
 
-pub(super) fn compile_run_agent(
+pub(super) async fn compile_run_agent(
     session: Arc<SessionController>,
     snapshot: &ConfigSnapshot,
+    registry: &crate::config::ConfigRegistry,
     resources: RunCompilationResources<'_>,
     authorization: RunAuthorizationInput,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
@@ -459,46 +520,86 @@ pub(super) fn compile_run_agent(
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
-    let model_key = session.model_key()?;
-    let model_config = resolve_model(snapshot, &model_key)?;
-    let mut compiled = compile_model_service_with_observer(
+    let selection = session.model_selection()?;
+    let prepared = registry
+        .prepare_model(
+            snapshot,
+            selection.as_ref(),
+            resources.store.as_ref(),
+            resources.model_factory,
+        )
+        .await?;
+    let model_config = &prepared.model;
+    let mut compiled = compile_resolved_model_service(
         snapshot,
-        &model_key,
+        model_config,
         resources.model_factory,
         model_attempt_observer,
     )?;
+    let auxiliary_selection = registry.managed_models()?.settings.vision_model.clone();
+    let mut auxiliary_prepared = None;
     let image_inspector: Option<agent_tools::SharedImageInspector> =
         if !compiled.capabilities.image_input && compiled.capabilities.tool_calls {
-            active.vision().and_then(|vision| {
-                let mut auxiliary =
-                    compile_model_service(snapshot, &vision.model_key, resources.model_factory)
-                        .ok()?;
+            if let Some(selection) = &auxiliary_selection {
+                let prepared_auxiliary = registry
+                    .prepare_model(
+                        snapshot,
+                        Some(selection),
+                        resources.store.as_ref(),
+                        resources.model_factory,
+                    )
+                    .await?;
+                let mut auxiliary = compile_resolved_model_service(
+                    snapshot,
+                    &prepared_auxiliary.model,
+                    resources.model_factory,
+                    None,
+                )?;
                 if !auxiliary.capabilities.image_input {
-                    return None;
+                    return Err(RuntimeError::InvalidRequest {
+                        reason: "辅助模型不支持图片输入，请重新选择。",
+                    });
                 }
-                let image_preprocessor = auxiliary.image_preprocessor.clone()?;
+                let image_preprocessor =
+                    auxiliary
+                        .image_preprocessor
+                        .clone()
+                        .ok_or(RuntimeError::InvalidRequest {
+                            reason: "辅助模型缺少图片预处理能力。",
+                        })?;
                 bind_image_preparation(&mut auxiliary, session.environment());
                 let (reasoning, provider_options) = protocol_request_options(
                     &auxiliary.provider,
                     auxiliary.protocol,
-                    &auxiliary.model_id,
                     &auxiliary.capabilities,
                     None,
-                )
-                .ok()?;
+                )?;
+                let timeout = active
+                    .vision()
+                    .map_or(Duration::from_secs(60), |vision| vision.timeout);
+                let output_budget = active
+                    .vision()
+                    .map_or(4096, |vision| vision.max_output_tokens);
+                auxiliary_prepared = Some(prepared_auxiliary);
                 Some(Arc::new(AuxiliaryVisionInspector {
-                    model_key: vision.model_key.as_str().to_owned(),
+                    selection: selection.clone(),
                     model: auxiliary.model,
                     image_preprocessor,
                     reasoning,
                     provider_options,
-                    timeout: vision.timeout,
-                    max_output_tokens: vision.max_output_tokens.min(auxiliary.max_output_tokens),
+                    timeout,
+                    max_output_tokens: output_budget.min(auxiliary.max_output_tokens),
                 }) as agent_tools::SharedImageInspector)
-            })
+            } else {
+                None
+            }
         } else {
             None
         };
+    prepared.ensure_current(registry)?;
+    if let Some(auxiliary) = &auxiliary_prepared {
+        auxiliary.ensure_current(registry)?;
+    }
     bind_image_preparation(&mut compiled, session.environment());
     let requested_effort = session.reasoning_effort()?;
     let frozen_reasoning_effort = requested_effort.or_else(|| {
@@ -511,7 +612,6 @@ pub(super) fn compile_run_agent(
     let (reasoning, provider_options) = protocol_request_options(
         &compiled.provider,
         compiled.protocol,
-        &compiled.model_id,
         &compiled.capabilities,
         requested_effort,
     )?;
@@ -907,7 +1007,10 @@ pub(super) fn compile_run_agent(
     let agent = builder
         .build()
         .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
-    Ok(CompiledRunAgent {
+    let result = CompiledRunAgent {
+        prepared_model: prepared,
+        auxiliary_model: auxiliary_prepared,
+        auxiliary_selection,
         agent,
         authorizer,
         compactor: parent_compactor,
@@ -916,27 +1019,20 @@ pub(super) fn compile_run_agent(
         skill_activation_latch,
         can_speak,
         disclosure_context: mcp_disclosure.context,
-    })
+    };
+    result.ensure_models_current(registry)?;
+    Ok(result)
 }
 
-pub(super) fn compile_model_service(
+pub(super) fn compile_resolved_model_service(
     snapshot: &ConfigSnapshot,
-    model_key: &assistant_protocol::ModelKey,
-    model_factory: &dyn crate::ModelServiceFactory,
-) -> RuntimeResult<CompiledModelService> {
-    compile_model_service_with_observer(snapshot, model_key, model_factory, None)
-}
-
-fn compile_model_service_with_observer(
-    snapshot: &ConfigSnapshot,
-    model_key: &assistant_protocol::ModelKey,
+    model_config: &ResolvedModelConfig,
     model_factory: &dyn crate::ModelServiceFactory,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledModelService> {
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
-    let model_config = resolve_model(snapshot, model_key)?;
     let transport = active.transport();
     let bundle = model_factory
         .create_model(ModelServiceFactoryRequest {
@@ -947,6 +1043,7 @@ fn compile_model_service_with_observer(
             model: model_config.model(),
             api_key: model_config.api_key(),
             context_window_tokens: model_config.context_window_tokens(),
+            max_input_tokens: model_config.max_input_tokens(),
             connect_timeout: transport.connect_timeout(),
             request_timeout: transport.request_timeout(),
         })
@@ -972,7 +1069,6 @@ fn compile_model_service_with_observer(
         model,
         provider: model_config.provider().clone(),
         protocol: model_config.protocol(),
-        model_id: model_config.model().to_owned(),
         capabilities: model_config.capabilities().clone(),
         max_output_tokens: model_config.max_output_tokens(),
         request_timeout: transport.request_timeout(),
@@ -1001,7 +1097,6 @@ fn bind_image_preparation(
 pub(super) fn protocol_request_options(
     provider: &agent_types::ProviderId,
     protocol: ModelProtocol,
-    model_id: &str,
     capabilities: &ResolvedModelCapabilities,
     requested_effort: Option<assistant_protocol::ReasoningEffortKey>,
 ) -> RuntimeResult<(Option<ReasoningConfig>, ProviderOptions)> {
@@ -1009,21 +1104,23 @@ pub(super) fn protocol_request_options(
     if protocol == ModelProtocol::OpenAiChatCompletions && capabilities.reasoning_enabled() {
         let options = match provider.as_str() {
             "deepseek" | "zhipu" => Some(serde_json::json!({"thinking": {"type": "enabled"}})),
-            // K3 始终思考且官方要求从 K2.x 迁移时移除 `thinking`；K2.x 才发送开关。
-            "moonshot" if !matches!(model_id, "kimi-k3" | "k3") => {
+            "moonshot"
+                if capabilities.reasoning.as_ref().is_some_and(|reasoning| {
+                    reasoning.mode == assistant_protocol::ModelReasoningMode::Optional
+                }) =>
+            {
                 Some(serde_json::json!({"thinking": {"type": "enabled"}}))
             }
-            "dashscope" if model_id == "qwen3.8-max" => {
+            "dashscope_api" | "dashscope_plan" => {
                 Some(serde_json::json!({"enable_thinking": true, "preserve_thinking": true}))
             }
-            "dashscope" => Some(serde_json::json!({"enable_thinking": true})),
             _ => None,
         };
         if let Some(options) = options {
             provider_options
                 .insert(provider.as_str(), options)
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
-                    component: "static reasoning provider options",
+                    component: "provider reasoning options",
                 })?;
         }
     }
@@ -1056,40 +1153,6 @@ fn model_effort_key(value: assistant_protocol::ReasoningEffortKey) -> agent_mode
         assistant_protocol::ReasoningEffortKey::High => agent_model::ReasoningEffort::High,
         assistant_protocol::ReasoningEffortKey::XHigh => agent_model::ReasoningEffort::XHigh,
         assistant_protocol::ReasoningEffortKey::Max => agent_model::ReasoningEffort::Max,
-    }
-}
-
-/// CreateSession 在同一配置快照中解析显式或默认 model key。
-pub(super) fn resolve_session_model_key(
-    snapshot: &ConfigSnapshot,
-    requested: Option<ModelKey>,
-) -> RuntimeResult<ModelKey> {
-    let active = snapshot
-        .active()
-        .ok_or(RuntimeError::ConfigurationUnavailable)?;
-    let key = requested
-        .or_else(|| active.default_model().cloned())
-        .ok_or(RuntimeError::ConfigurationUnavailable)?;
-    resolve_model(snapshot, &key)?;
-    Ok(key)
-}
-
-/// 在安全投影和有效 map 之间区分不存在与存在但无效。
-fn resolve_model<'a>(
-    snapshot: &'a ConfigSnapshot,
-    key: &ModelKey,
-) -> RuntimeResult<&'a ResolvedModelConfig> {
-    if let Some(model) = snapshot.model(key) {
-        return Ok(model);
-    }
-    if snapshot.contains_model_key(key) {
-        Err(RuntimeError::ModelUnavailable {
-            model_key: key.clone(),
-        })
-    } else {
-        Err(RuntimeError::ModelNotFound {
-            model_key: key.clone(),
-        })
     }
 }
 

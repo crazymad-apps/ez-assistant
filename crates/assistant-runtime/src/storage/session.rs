@@ -2,7 +2,7 @@ use agent_model::SystemPromptSnapshot;
 use agent_types::{ConversationSnapshot, ToolImageReference};
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, CompactSessionOutcome, IdempotencyKey,
-    MessageFeedback, ModelKey, ReasoningEffortKey, SessionHistoryCleanupStatus, SessionId,
+    MessageFeedback, ModelSelection, ReasoningEffortKey, SessionHistoryCleanupStatus, SessionId,
     SessionTitleGenerationTriggerSnapshot, SessionTitleOrigin,
 };
 
@@ -51,7 +51,7 @@ pub struct NewStoredSession {
     pub session_id: SessionId,
     pub title: String,
     pub title_origin: SessionTitleOrigin,
-    pub model_key: ModelKey,
+    pub model_selection: Option<ModelSelection>,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
@@ -184,7 +184,7 @@ pub struct SessionHistoryCompactionFinish {
 pub struct StoredSession {
     pub session_id: SessionId,
     pub title: String,
-    pub model_key: ModelKey,
+    pub model_selection: Option<ModelSelection>,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub system_prompt: SystemPromptSnapshot,
     pub environment: SessionExecutionEnvironment,
@@ -306,7 +306,7 @@ pub struct MessageFeedbackChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelChange {
     pub session_id: SessionId,
-    pub model_key: ModelKey,
+    pub model_selection: Option<ModelSelection>,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub changed_at_ms: i64,
 }

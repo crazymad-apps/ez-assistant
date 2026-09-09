@@ -115,7 +115,7 @@ export const WorkspaceEditorDialog = observer(function WorkspaceEditorDialog(pro
         <div className={styles.body}>
           <label className={styles.label_field}>
             <span>工作空间名称</span>
-            <input autoFocus maxLength={80} onChange={(event) => setLabel(event.currentTarget.value)} value={label} />
+            <input placeholder="请输入" autoFocus maxLength={80} onChange={(event) => setLabel(event.currentTarget.value)} value={label} />
             <small>用于会话列表和 Agent 识别，不要求唯一。</small>
           </label>
           <section className={styles.directories} aria-label="工作目录">

@@ -112,15 +112,6 @@ impl AssistantRuntime {
         let quotes = self
             .normalize_quotes(&request.session_id, &request.quotes)
             .await?;
-        let model_key = session.model_key()?;
-        let configuration = self.config_registry.snapshot()?;
-        if configuration
-            .active()
-            .and_then(|active| active.model(&model_key))
-            .is_none()
-        {
-            return Err(RuntimeError::ModelUnavailable { model_key });
-        }
         let selected_skill = request
             .skill_name
             .as_ref()
@@ -151,7 +142,7 @@ impl AssistantRuntime {
                 Ok((server_key.clone(), server.display_name))
             })
             .transpose()?;
-        let goal_submission = self.goal_submission(session.as_ref(), request.mode)?;
+        let goal_submission = self.goal_submission(session.as_ref(), request.mode).await?;
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
         let mut message = create_user_message(request.message, files, request.variant)?;
