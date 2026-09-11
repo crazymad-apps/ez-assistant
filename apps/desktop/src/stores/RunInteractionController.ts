@@ -14,7 +14,7 @@ import type {
   SessionId,
   SessionCommand,
   SubmitInputMode,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { ConnectionStore } from "./ConnectionStore";
 import type { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
 

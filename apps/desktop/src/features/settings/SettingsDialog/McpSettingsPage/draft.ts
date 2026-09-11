@@ -1,4 +1,4 @@
-import type { McpServerDraft, McpServerSnapshot, McpServerTransportDraft, McpTransportKind } from "../../../../generated/assistant-protocol";
+import type { McpServerDraft, McpServerSnapshot, McpServerTransportDraft, McpTransportKind } from "@ez-assistant/protocol";
 
 export function emptyTransport(type: McpTransportKind): McpServerTransportDraft {
   if (type === "streamable_http") return { type, payload: { url: { mode: "replace", value: "" }, headers: {} } };

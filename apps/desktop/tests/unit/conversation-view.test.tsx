@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeEvent } from "../../src/generated/assistant-protocol";
+import type { RuntimeEvent } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ConversationView } from "../../src/features/conversation/ConversationView";
@@ -36,7 +36,7 @@ describe("ConversationView scroll anchoring", () => {
       session_id: "source-1",
       title: "来源会话",
       lifecycle: "active",
-    } as import("../../src/generated/assistant-protocol").SessionSummary;
+    } as import("@ez-assistant/protocol").SessionSummary;
     const open = vi.fn();
     const { rerender } = render(
       <UserMessage

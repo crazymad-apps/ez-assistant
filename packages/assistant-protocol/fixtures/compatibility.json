@@ -1,0 +1,263 @@
+[
+  {
+    "name": "equal",
+    "client": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": null
+  },
+  {
+    "name": "newer-client-compatible",
+    "client": {
+      "version": "0.25.3",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": null
+  },
+  {
+    "name": "newer-host-compatible",
+    "client": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.3",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": null
+  },
+  {
+    "name": "client-too-old",
+    "client": {
+      "version": "0.25.1",
+      "min_compatible_version": "0.25.1"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "client_too_old"
+  },
+  {
+    "name": "host-too-old",
+    "client": {
+      "version": "0.25.3",
+      "min_compatible_version": "0.25.3"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "host_too_old"
+  },
+  {
+    "name": "missing",
+    "client": null,
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "missing_declaration"
+  },
+  {
+    "name": "numeric-components",
+    "client": {
+      "version": "0.25.10",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.9",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": null
+  },
+  {
+    "name": "u32-boundary",
+    "client": {
+      "version": "4294967295.4294967295.4294967295",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": null
+  },
+  {
+    "name": "invalid-version-'v0.25.2'",
+    "client": {
+      "version": "v0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25.02'",
+    "client": {
+      "version": "0.25.02",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25'",
+    "client": {
+      "version": "0.25",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25.2-rc.1'",
+    "client": {
+      "version": "0.25.2-rc.1",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25.2+build'",
+    "client": {
+      "version": "0.25.2+build",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'4294967296.0.0'",
+    "client": {
+      "version": "4294967296.0.0",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-' 0.25.2'",
+    "client": {
+      "version": " 0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25.2\\n'",
+    "client": {
+      "version": "0.25.2\n",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'０.25.2'",
+    "client": {
+      "version": "０.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-version-'0.25.-2'",
+    "client": {
+      "version": "0.25.-2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-client-floor",
+    "client": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.3"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-host-floor",
+    "client": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.3"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "invalid-host-version",
+    "client": {
+      "version": "0.25.2",
+      "min_compatible_version": "0.25.2"
+    },
+    "host": {
+      "version": "secret-invalid",
+      "min_compatible_version": "0.25.2"
+    },
+    "error": "invalid_declaration"
+  },
+  {
+    "name": "zero-boundary",
+    "client": {
+      "version": "0.0.0",
+      "min_compatible_version": "0.0.0"
+    },
+    "host": {
+      "version": "0.0.0",
+      "min_compatible_version": "0.0.0"
+    },
+    "error": null
+  }
+]

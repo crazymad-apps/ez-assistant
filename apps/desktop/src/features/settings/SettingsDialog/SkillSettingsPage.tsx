@@ -7,7 +7,7 @@ import type {
   SkillSourceSnapshot,
   SkillSummarySnapshot,
   WorkspaceId,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { MarkdownContent } from "../../../components/MarkdownContent";
 import { SelectionPopover, type SelectionOption } from "../../../components/SelectionPopover";

@@ -7,7 +7,7 @@ import type {
   DeviceSummarySnapshot,
   PendingDevicePairingSnapshot,
   SpeechServiceStatusSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { DeviceDetailPage } from "./DeviceDetailPage";

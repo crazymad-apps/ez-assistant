@@ -10,7 +10,7 @@ use argon2::{
     Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
     password_hash::SaltString,
 };
-use assistant_protocol::SecretValue;
+use assistant_protocol::{ClientCompatibility, SecretValue};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use tokio::{sync::Semaphore, time::Instant};
@@ -25,6 +25,7 @@ const MAX_SESSIONS: usize = 64;
 pub(crate) struct LoginSession {
     id: [u8; 32],
     pub(crate) expires_at_ms: u64,
+    compatibility: ClientCompatibility,
     deadline: Instant,
     cancelled: CancellationToken,
 }
@@ -50,6 +51,10 @@ pub(crate) struct AccessPermit {
 }
 
 impl AccessPermit {
+    pub(crate) fn compatibility(&self) -> Option<&ClientCompatibility> {
+        self.session.as_ref().map(|session| &session.compatibility)
+    }
+
     /// 登录身份仅用于同一登录的连接限额，不暴露 token。None 是本机原生凭据域。
     pub(crate) fn login_id(&self) -> Option<[u8; 32]> {
         self.session.as_ref().map(|session| session.id)
@@ -165,6 +170,7 @@ impl Credentials {
     pub(crate) async fn login(
         &self,
         password: SecretValue,
+        compatibility: ClientCompatibility,
     ) -> Result<(SecretValue, LoginSession), AccessError> {
         let expected = {
             let mut state = self.state.lock().expect("credential state poisoned");
@@ -203,16 +209,35 @@ impl Credentials {
         if !valid || state.password_hash.as_ref() != Some(&expected) {
             return Err(AccessError::Unauthorized);
         }
-        issue(&mut state)
+        issue(&mut state, compatibility)
     }
 
     pub(crate) fn issue(
         &self,
         permit: &AccessPermit,
+        compatibility: ClientCompatibility,
     ) -> Result<(SecretValue, LoginSession), AccessError> {
         let mut state = self.state.lock().expect("credential state poisoned");
         permit.check()?;
-        issue(&mut state)
+        issue(&mut state, compatibility)
+    }
+
+    /// 快捷登录交换为当前页面版本的独立会话，不改原 token 的不可变声明。
+    pub(crate) fn exchange(
+        &self,
+        token: &str,
+        compatibility: ClientCompatibility,
+    ) -> Result<(SecretValue, LoginSession), AccessError> {
+        let mut state = self.state.lock().expect("credential state poisoned");
+        if token.len() != 43
+            || !state
+                .sessions
+                .get(&digest(token))
+                .is_some_and(LoginSession::valid)
+        {
+            return Err(AccessError::Unauthorized);
+        }
+        issue(&mut state, compatibility)
     }
 
     pub(crate) fn authenticate(&self, token: &str) -> Option<LoginSession> {
@@ -228,7 +253,13 @@ impl Credentials {
     }
 }
 
-fn issue(state: &mut CredentialState) -> Result<(SecretValue, LoginSession), AccessError> {
+fn issue(
+    state: &mut CredentialState,
+    compatibility: ClientCompatibility,
+) -> Result<(SecretValue, LoginSession), AccessError> {
+    if !compatibility.is_valid() {
+        return Err(AccessError::Invalid("软件版本声明无效。"));
+    }
     state.sessions.retain(|_, session| session.valid());
     if state.sessions.len() >= MAX_SESSIONS {
         return Err(AccessError::Busy);
@@ -242,6 +273,7 @@ fn issue(state: &mut CredentialState) -> Result<(SecretValue, LoginSession), Acc
         .as_millis();
     let session = LoginSession {
         id: digest(&token),
+        compatibility,
         expires_at_ms: (now_ms + LOGIN_LIFETIME.as_millis()) as u64,
         deadline: Instant::now() + LOGIN_LIFETIME,
         cancelled: CancellationToken::new(),
@@ -300,7 +332,10 @@ mod tests {
         validate_hash(&first).unwrap();
         credentials.replace_password(Some(first));
         let (token, session) = credentials
-            .login(SecretValue::new("first password".into()))
+            .login(
+                SecretValue::new("first password".into()),
+                ClientCompatibility::current(),
+            )
             .await
             .unwrap();
         assert!(credentials.authenticate(token.expose()).is_some());
@@ -313,13 +348,19 @@ mod tests {
         assert!(credentials.authenticate(token.expose()).is_none());
         assert!(
             credentials
-                .login(SecretValue::new("first password".into()))
+                .login(
+                    SecretValue::new("first password".into()),
+                    ClientCompatibility::current()
+                )
                 .await
                 .is_err()
         );
         assert!(
             credentials
-                .login(SecretValue::new("second password".into()))
+                .login(
+                    SecretValue::new("second password".into()),
+                    ClientCompatibility::current()
+                )
                 .await
                 .is_ok()
         );
@@ -329,17 +370,26 @@ mod tests {
     fn native_and_ordinary_login_lifetimes_are_separate_and_bounded() {
         let credentials = Credentials::new();
         let native = AccessPermit::new(true, None, CancellationToken::new());
-        let (token, session) = credentials.issue(&native).unwrap();
+        let (token, session) = credentials
+            .issue(&native, ClientCompatibility::current())
+            .unwrap();
         let ordinary = AccessPermit::new(false, Some(session), CancellationToken::new());
-        let (browser_token, _) = credentials.issue(&ordinary).unwrap();
+        let (browser_token, _) = credentials
+            .issue(&ordinary, ClientCompatibility::current())
+            .unwrap();
         ordinary.logout();
         assert!(credentials.authenticate(token.expose()).is_none());
         assert!(credentials.authenticate(browser_token.expose()).is_some());
         assert!(native.check().is_ok());
         for _ in 1..MAX_SESSIONS {
-            credentials.issue(&native).unwrap();
+            credentials
+                .issue(&native, ClientCompatibility::current())
+                .unwrap();
         }
-        assert!(matches!(credentials.issue(&native), Err(AccessError::Busy)));
+        assert!(matches!(
+            credentials.issue(&native, ClientCompatibility::current()),
+            Err(AccessError::Busy)
+        ));
     }
 
     #[tokio::test]
@@ -347,16 +397,28 @@ mod tests {
         let credentials = Credentials::new();
         for _ in 0..5 {
             assert!(matches!(
-                credentials.login(SecretValue::new("test".into())).await,
+                credentials
+                    .login(
+                        SecretValue::new("test".into()),
+                        ClientCompatibility::current()
+                    )
+                    .await,
                 Err(AccessError::Unauthorized)
             ));
         }
         assert!(matches!(
-            credentials.login(SecretValue::new("test".into())).await,
+            credentials
+                .login(
+                    SecretValue::new("test".into()),
+                    ClientCompatibility::current()
+                )
+                .await,
             Err(AccessError::Busy)
         ));
         let native = AccessPermit::new(true, None, CancellationToken::new());
-        let (token, _) = credentials.issue(&native).unwrap();
+        let (token, _) = credentials
+            .issue(&native, ClientCompatibility::current())
+            .unwrap();
         credentials
             .state
             .lock()

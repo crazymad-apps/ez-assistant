@@ -2,7 +2,7 @@ import { observer } from "mobx-react-lite";
 import { useRef } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
-import type { ConversationItem } from "../../../generated/assistant-protocol";
+import type { ConversationItem } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { MarkdownContent } from "../../../components/MarkdownContent";
 import styles from "./index.module.scss";

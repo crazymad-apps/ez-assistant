@@ -11,7 +11,7 @@ import type {
   SessionId,
   SessionSummary,
   SessionViewSnapshot,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 export type ConversationHistoryProjection = Readonly<{
   owner: ConversationOwner;

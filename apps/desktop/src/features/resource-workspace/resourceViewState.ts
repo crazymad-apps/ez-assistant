@@ -1,6 +1,6 @@
 import type { SessionResourceRootItem } from "./SessionResourceTree";
 import type { editor } from "monaco-editor";
-import type { SessionResourceLocator } from "../../generated/assistant-protocol";
+import type { SessionResourceLocator } from "@ez-assistant/protocol";
 
 /** 页面淘汰后保留的查看位置；不包含文件正文、目录结果、DOM 或原生句柄。 */
 export type ResourceViewState = {

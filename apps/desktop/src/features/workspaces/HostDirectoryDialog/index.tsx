@@ -5,7 +5,7 @@ import { Dialog } from "../../../components/Dialog";
 import { InlineIconButton } from "../../../components/InlineIconButton";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
-import type { ListHostFilesResult } from "../../../generated/assistant-protocol";
+import type { ListHostFilesResult } from "@ez-assistant/protocol";
 import styles from "./index.module.scss";
 
 export const HostDirectoryDialog = observer(function HostDirectoryDialog() {

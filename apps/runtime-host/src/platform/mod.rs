@@ -4,4 +4,4 @@
 mod unix;
 
 #[cfg(unix)]
-pub(crate) use unix::launch_detached;
+pub(crate) use unix::{detach_session, launch_detached};

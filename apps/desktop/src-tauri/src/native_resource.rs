@@ -698,6 +698,7 @@ where
     let response = http
         .post(url)
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .json(request)
         .send()
         .await
@@ -1090,6 +1091,7 @@ pub(crate) async fn preview_attachment(
             attachment_id.as_str()
         ))
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1141,6 +1143,7 @@ pub(crate) async fn thumbnail_attachment(
             attachment_id.as_str()
         ))
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1190,6 +1193,7 @@ pub(crate) async fn preview_tool_file(
         .http
         .get(url)
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1712,6 +1716,7 @@ async fn get_tool_file_native_path(
         .http
         .get(url)
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1822,7 +1827,7 @@ async fn save_runtime_download(
     let mut response = tokio::select! {
         biased;
         () = coordinator.cancellation.cancelled() => return Err(error(NativeResourceErrorCode::Cancelled, "连接切换，下载已取消。")),
-        result = request.bearer_auth(&bootstrap.access_token).send() => result.map_err(|_| runtime_unavailable())?,
+        result = request.bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers()).send() => result.map_err(|_| runtime_unavailable())?,
     };
     if !response.status().is_success() {
         return Err(decode_runtime_failure(response, NativeResourceErrorCode::ExportFailed).await);
@@ -1894,6 +1899,7 @@ async fn upload_selected(
             session_id.as_str()
         ))
         .bearer_auth(access_token)
+        .headers(crate::runtime_compatibility::headers())
         .multipart(Form::new().part("file", part))
         .send();
     let response = tokio::select! {
@@ -1938,6 +1944,7 @@ async fn materialize_selected(
     let request = http
         .post(format!("{base_url}/session-materializations"))
         .bearer_auth(access_token)
+        .headers(crate::runtime_compatibility::headers())
         .multipart(form)
         .send();
     let response = tokio::select! {
@@ -2147,6 +2154,7 @@ async fn get_attachment(
         .map_err(|_| runtime_unavailable())?
         .post(format!("{}/commands", bootstrap.base_url))
         .bearer_auth(&bootstrap.access_token)
+        .headers(crate::runtime_compatibility::headers())
         .json(&CommandRequest {
             request_id: "desktop-open-attachment".to_owned(),
             command: CommandScope::Runtime(RuntimeCommand::GetAttachment(GetAttachmentRequest {

@@ -8,7 +8,7 @@ import type {
   QuotedTextSnapshot,
   ToolFileReference,
   ToolCallId,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
 import { PresenceBoundary, usePresence } from "../../../components/Presence";
@@ -730,7 +730,7 @@ export const ConversationView = observer(function ConversationView() {
 });
 
 function sourceSessionId(
-  source: import("../../../generated/assistant-protocol").ConversationInputSourceSnapshot | undefined,
+  source: import("@ez-assistant/protocol").ConversationInputSourceSnapshot | undefined,
 ): string | null {
   if (!source) return null;
   if (source.type === "controller_delivery") return source.controller_session_id;

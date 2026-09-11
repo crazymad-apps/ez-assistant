@@ -301,6 +301,7 @@ fn assert_image_preview(
             host.base_url()
         ))
         .bearer_auth(host.access_token())
+        .headers(crate::support::compatibility_headers())
         .send()
         .expect("MCP preview");
     assert!(response.status().is_success());

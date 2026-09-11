@@ -1,3 +1,4 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -27,7 +28,7 @@ async function gone(pid: number) {
 
 test("Web terminal renders Host ANSI/UTF-8; closing and refresh reap only their own PTYs", async ({ page, context }, info) => {
   const host = JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!) as { base_url: string; access_token: string };
-  const response = await fetch(`${host.base_url}/auth/login`, { method: "POST", headers: { Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method: "desktop" }) });
+  const response = await fetch(`${host.base_url}/auth/login`, { method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method: "desktop" }) });
   expect(response.ok).toBe(true);
   const { token } = await response.json() as { token: string };
   await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);

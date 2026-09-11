@@ -1,6 +1,6 @@
 import { invokeRuntime as invoke } from "./runtimeConnection";
 import { isTauri } from "@tauri-apps/api/core";
-import type { SessionId, WorkspaceId } from "../generated/assistant-protocol";
+import type { SessionId, WorkspaceId } from "@ez-assistant/protocol";
 
 type WorkspaceOpenFailure = {
   readonly code: string;

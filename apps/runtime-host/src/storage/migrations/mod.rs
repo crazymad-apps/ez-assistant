@@ -1,14 +1,20 @@
 //! 启动前的版本链、备份与逐版本事务。调用者先持有 RuntimeInstanceGuard，业务 worker 尚未开放。
 //! 初始版本与软件版本对齐；不存在旧版本账本时从 v0.25.1 开始执行。
 
+mod admission;
 mod backup;
+mod compatibility;
+#[cfg(test)]
+mod compatibility_tests;
 pub(crate) mod config_cleanup;
 #[cfg(test)]
 mod tests;
 mod v0_25_1;
+mod v0_25_2;
 
+#[cfg(test)]
+use std::fs;
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -38,6 +44,14 @@ pub(crate) enum MigrationError {
     InvalidLedger,
     #[error("database is newer than this software; upgrade the software")]
     NewerDatabase,
+    #[error("Host software is below the database minimum compatible version")]
+    HostTooOld,
+    #[error("database compatibility metadata is invalid")]
+    InvalidCompatibility,
+    #[error("database journal state cannot be inspected without possible writes")]
+    UnsafeJournal,
+    #[error("database changed during admission")]
+    DatabaseChanged,
     #[error("database backup verification failed")]
     BackupMismatch,
     #[error("database backup could not be completed and verified")]
@@ -72,6 +86,10 @@ pub(crate) enum MigrationError {
 /// validate 必须核对本版本的目标投影、保留数据与业务字段，不得在其中修补异常。
 struct Migration {
     version: &'static str,
+    /// None 仅用于引入兼容表之前的历史基线；后续版本显式声明且不得下降。
+    min_compatible_host_version: Option<&'static str>,
+    /// 无账本的既有文件必须先识别已知旧结构；新建空库不走此入口。
+    validate_source: fn(&Connection) -> Result<()>,
     apply: fn(&Connection) -> Result<()>,
     validate: fn(&Connection) -> Result<()>,
 }
@@ -92,7 +110,7 @@ pub(super) fn align(
     migrate_with_progress(
         home,
         env!("CARGO_PKG_VERSION"),
-        &[v0_25_1::entry()],
+        &[v0_25_1::entry(), v0_25_2::entry()],
         progress,
     )
     .map(|_| ())
@@ -109,6 +127,8 @@ pub(crate) fn startup_error(
         .and_then(|error| error.downcast_ref::<MigrationError>())
     {
         Some(MigrationError::NewerDatabase) => DatabaseNewer,
+        Some(MigrationError::HostTooOld) => DatabaseHostTooOld,
+        Some(MigrationError::UnsafeJournal) => DatabaseUnsafeJournal,
         Some(MigrationError::BackupMismatch | MigrationError::BackupFailed { .. }) => BackupFailed,
         Some(
             MigrationError::VersionFailed { .. }
@@ -120,7 +140,7 @@ pub(crate) fn startup_error(
 }
 
 /// 版本与 manifest 均由 Host 编译产物指定，不能接受客户端提供的目标或 SQL。
-/// 本阶段测试显式传入目标；M3 唯一正式调用点必须传入 CARGO_PKG_VERSION。
+/// 测试显式传入目标；正式调用点只使用编译软件版本。
 /// 每次打开只处理未完成前缀，失败保留前序已提交版本与独立备份，不自动还原或继续写入。
 #[cfg(test)]
 fn migrate(home: &Path, target: &str, manifest: &[Migration]) -> Result<MigrationReport> {
@@ -137,16 +157,37 @@ fn migrate_with_progress(
     let mut current = super::DatabaseStartupProgress {
         stage: DatabaseCheck,
         database_version: None,
+        min_compatible_host_version: None,
     };
     progress(current.clone());
     let versions = validate_manifest(target, manifest)?;
     let path = home.join(DATA_DIRECTORY).join(DATABASE_FILE);
-    let existed = match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => true,
-        Ok(_) => return Err(MigrationError::InvalidPath),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
+    let target_version = parse_version(target)?;
+    let existing = admission::ExistingDatabase::inspect(&path)?;
+    let existed = existing.is_some();
+    if let Some(existing) = &existing {
+        let sqlite_path = admission::sqlite_path(&path)?;
+        existing.check_unchanged(&sqlite_path)?;
+        let mut reader = Connection::open_with_flags(
+            &sqlite_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        reader.busy_timeout(BUSY_TIMEOUT)?;
+        let snapshot = reader.transaction()?;
+        let minimum = compatibility::read(&snapshot)?;
+        current.min_compatible_host_version = minimum.as_ref().map(ToString::to_string);
+        progress(current.clone());
+        compatibility::admit(minimum.as_ref(), &target_version)?;
+        let completed = inspect_state(&snapshot, &versions, manifest, minimum.as_ref(), false)?;
+        current.database_version = completed
+            .checked_sub(1)
+            .map(|index| versions[index].to_string());
+        progress(current.clone());
+        backup::check_integrity(&snapshot)?;
+        snapshot.commit()?;
+        reader.close().map_err(|(_, error)| error)?;
+        existing.check_unchanged(&path)?;
+    }
     if !existed {
         crate::config_source::prepare_private_directory(
             path.parent().ok_or(MigrationError::InvalidPath)?,
@@ -154,10 +195,23 @@ fn migrate_with_progress(
         super::create_new_private_file(&path)?;
     }
     // 既有文件不使用 CREATE；打不开绝不被解释为新库。不在备份前修改 journal 模式或 schema。
-    let mut connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let sqlite_path = admission::sqlite_path(&path)?;
+    let mut connection = Connection::open_with_flags(
+        &sqlite_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    if let Some(existing) = &existing {
+        existing.check_unchanged(&path)?;
+        existing.check_unchanged(&sqlite_path)?;
+    }
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.pragma_update(None, "foreign_keys", true)?;
-    let completed = completed_prefix(&connection, &versions)?;
+    // 在写连接事务内再验账本和下限；只读快照不能充当后续写入授权。
+    let snapshot = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let minimum = compatibility::read(&snapshot)?;
+    compatibility::admit(minimum.as_ref(), &target_version)?;
+    let completed = inspect_state(&snapshot, &versions, manifest, minimum.as_ref(), !existed)?;
+    snapshot.commit()?;
     current.database_version = completed
         .checked_sub(1)
         .map(|index| versions[index].to_string());
@@ -195,15 +249,17 @@ fn migrate_with_progress(
     for (index, migration) in manifest.iter().enumerate().skip(completed) {
         current.stage = DatabaseMigration;
         progress(current.clone());
-        apply_version(&mut connection, migration, &versions, index).map_err(|source| {
-            MigrationError::VersionFailed {
+        apply_version(&mut connection, migration, &versions, manifest, index).map_err(
+            |source| MigrationError::VersionFailed {
                 version: migration.version.into(),
                 backup: report.backup.clone(),
                 source: Box::new(source),
-            }
-        })?;
+            },
+        )?;
         report.applied.push(migration.version.into());
         current.database_version = Some(migration.version.into());
+        current.min_compatible_host_version =
+            migration.min_compatible_host_version.map(str::to_owned);
         progress(current.clone());
     }
     Ok(report)
@@ -221,16 +277,48 @@ fn validate_manifest(target: &str, manifest: &[Migration]) -> Result<Vec<Version
     {
         return Err(MigrationError::InvalidManifest);
     }
+    let mut previous = None;
+    for (index, entry) in manifest.iter().enumerate() {
+        let minimum = entry
+            .min_compatible_host_version
+            .map(parse_version)
+            .transpose()
+            .map_err(|_| MigrationError::InvalidManifest)?;
+        if (index > 0 && minimum.is_none())
+            || minimum
+                .as_ref()
+                .is_some_and(|minimum| minimum > &versions[index])
+            || minimum < previous
+        {
+            return Err(MigrationError::InvalidManifest);
+        }
+        previous = minimum;
+    }
     Ok(versions)
 }
 
 fn parse_version(raw: &str) -> Result<Version> {
-    let version = Version::parse(raw).map_err(|_| MigrationError::InvalidLedger)?;
-    // build metadata 不影响 schema 顺序，不允许它制造同一语义版本的第二份记录。
-    if version.to_string() != raw || !version.build.is_empty() {
-        return Err(MigrationError::InvalidLedger);
+    let [major, minor, patch] =
+        assistant_protocol::parse_software_version(raw).ok_or(MigrationError::InvalidLedger)?;
+    Ok(Version::new(major.into(), minor.into(), patch.into()))
+}
+
+/// 调用者持有 SQLite 快照；本函数不修补结构，也不把任意无账本库解释为历史版本。
+fn inspect_state(
+    connection: &Connection,
+    versions: &[Version],
+    manifest: &[Migration],
+    minimum: Option<&Version>,
+    new_database: bool,
+) -> Result<usize> {
+    let completed = completed_prefix(connection, versions)?;
+    compatibility::validate_committed(minimum, manifest, completed)?;
+    if completed > 0 {
+        validate_read_only(connection, manifest[completed - 1].validate)?;
+    } else if !new_database {
+        validate_read_only(connection, manifest[0].validate_source)?;
     }
-    Ok(version)
+    Ok(completed)
 }
 
 fn completed_prefix(connection: &Connection, versions: &[Version]) -> Result<usize> {
@@ -281,12 +369,19 @@ fn apply_version(
     connection: &mut Connection,
     migration: &Migration,
     versions: &[Version],
+    manifest: &[Migration],
     expected: usize,
 ) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if completed_prefix(&transaction, versions)? != expected {
         return Err(MigrationError::InvalidLedger);
     }
+    let minimum = compatibility::read(&transaction)?;
+    compatibility::admit(
+        minimum.as_ref(),
+        versions.last().ok_or(MigrationError::InvalidManifest)?,
+    )?;
+    compatibility::validate_committed(minimum.as_ref(), manifest, expected)?;
     transaction.execute_batch(LEDGER)?;
     transaction.authorizer(Some(migration_authorizer))?;
     let outcome = (migration.apply)(&transaction);
@@ -297,6 +392,7 @@ fn apply_version(
         return Err(error);
     }
     validate_read_only(&transaction, migration.validate)?;
+    compatibility::record(&transaction, migration.min_compatible_host_version)?;
     backup::check_integrity(&transaction)?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -310,6 +406,11 @@ fn apply_version(
     if completed_prefix(&transaction, versions)? != expected + 1 {
         return Err(MigrationError::InvalidLedger);
     }
+    compatibility::validate_committed(
+        compatibility::read(&transaction)?.as_ref(),
+        manifest,
+        expected + 1,
+    )?;
     transaction.commit()?;
     Ok(())
 }
@@ -342,7 +443,11 @@ fn migration_authorizer(context: AuthContext<'_>) -> Authorization {
         | DropTable { table_name }
         | AlterTable { table_name, .. }
         | CreateTrigger { table_name, .. }
-            if table_name.eq_ignore_ascii_case("schema_migrations") =>
+        | CreateTable { table_name }
+        | CreateIndex { table_name, .. }
+        | DropIndex { table_name, .. }
+            if table_name.eq_ignore_ascii_case("schema_migrations")
+                || table_name.eq_ignore_ascii_case("database_compatibility") =>
         {
             Authorization::Deny
         }

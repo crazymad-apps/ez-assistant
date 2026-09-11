@@ -21,7 +21,7 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
       `instance_id=${connection.instance_id ?? "-"}`,
       `address=${connection.address ?? "-"}`,
       `runtime_version=${capabilities?.runtime_version ?? "-"}`,
-      `protocol_version=${capabilities?.protocol_version ?? "-"}`,
+      `min_compatible_version=${capabilities?.min_compatible_version ?? "-"}`,
       `last_connected_at=${formatDateTime(connection.last_connected_at_ms)}`,
       `last_error_code=${connection.last_error_code ?? "-"}`,
       `configuration=${status?.state ?? "-"}`,
@@ -53,7 +53,7 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
             <div><dt>实例</dt><dd title={connection.instance_id ?? undefined}>{connection.instance_id ?? "—"}</dd></div>
             <div><dt>Host 地址</dt><dd>{connection.address ?? "—"}</dd></div>
             <div><dt>运行时版本</dt><dd>{capabilities?.runtime_version ?? "—"}</dd></div>
-            <div><dt>协议版本</dt><dd>{capabilities?.protocol_version ?? "—"}</dd></div>
+            <div><dt>最低兼容软件版本</dt><dd>{capabilities?.min_compatible_version ?? "—"}</dd></div>
             <div><dt>最近连接</dt><dd>{formatDateTime(connection.last_connected_at_ms)}</dd></div>
             <div><dt>错误分类</dt><dd>{connection.last_error_code ?? "—"}</dd></div>
           </dl>

@@ -7,7 +7,7 @@ import type {
   TokenUsageSnapshot,
   ToolActivityStatus,
   ToolCallId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 const MAX_TOOL_OUTPUT_CHARS = 4_000;
 

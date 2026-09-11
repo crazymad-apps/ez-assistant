@@ -1,7 +1,7 @@
 import type { ResourceHandle, ResourceTab } from "./ResourceWorkspaceStore";
 import type { ResourceViewState } from "./resourceViewState";
 import type { TerminalSource } from "../../runtime-client/TerminalSocket";
-import type { SessionResourceLocator } from "../../generated/assistant-protocol";
+import type { SessionResourceLocator } from "@ez-assistant/protocol";
 
 /** 只保存重建描述，不保存 controller、原生句柄、文件内容或终端命令/输出。 */
 export type SavedResourceTab = Readonly<{

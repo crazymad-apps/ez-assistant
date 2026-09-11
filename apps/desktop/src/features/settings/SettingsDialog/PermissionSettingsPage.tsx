@@ -9,7 +9,7 @@ import type {
   PermissionProcessModeDefinition,
   PermissionRuleDefinition,
   PermissionRuleEffect,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";

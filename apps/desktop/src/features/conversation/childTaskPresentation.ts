@@ -3,7 +3,7 @@ import type {
   ChildTaskSnapshot,
   ChildTaskStatus,
   ChildTaskTreeItemSnapshot,
-} from "../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { LiveRunProjection } from "../../stores/LiveExecutionStore";
 
 export function mergeChildTaskItems(

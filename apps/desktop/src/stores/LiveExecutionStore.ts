@@ -9,7 +9,7 @@ import type {
   RuntimeEventEnvelope,
   SessionId,
   SessionViewSnapshot,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import {
   appendTextDelta,
   appendTool,

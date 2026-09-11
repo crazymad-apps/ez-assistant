@@ -10,9 +10,23 @@
 `assistant-runtime`、具体 Agent/Provider/Tool 能力和 HTTP 应用协议，但不持有 Session、Run 或
 Conversation 的第二份权威状态。
 
-已确认的产品组成：桌面级为 Desktop + Host + Client，服务器级为 Host + Client。Host 是
-两类应用共有的运行组件，随所属应用交付，不作为独立产品分发；其独立进程和业务职责不变。
-具体 Client 装配按对应版本设计，不从组件列表推导额外进程或 Runtime 实例。
+2026-09-10 已确认产品方向：Desktop 与 TypeScript Client 是同级产品，各自分发包内置 Host，
+可独立安装或同机共存。Host 是共有运行组件，不作为独立产品分发，其独立进程和业务职责不变。
+同一用户、同一 Runtime Home 默认共享一个实例。Client、Desktop、Host 都携带当前版本及
+应用协议最低兼容版本，同一发布版本使用一致的下限定义；每次连接初始化须检查双方当前版本
+均达到对端下限。不满足时当前客户端提示启动／连接失败，保留已有 Host 及任务，不自动停止、
+替换或另开实例。v0.25.2 M2 已实现应用准入并获确认；M3 生命周期完善已通过本机隔离验收。
+
+2026-09-10 用户补充数据库准入方向：数据库独立持久保存最低兼容 Host 版本；Host 持有实例锁
+后先只读检查，在满足下限前不得执行迁移、业务写入、修复、FTS 初始化或持久日志模式变更。
+不兼容时沿用启动诊断且不开业务服务，保留原数据。存储下限与应用协议下限分开，结构、字段
+语义及持久化格式均属于存储兼容范围。下限与破坏兼容的迁移原子提升，不自动降低；元数据
+落点和现有高版本库拒绝、账本校验的衔接已在 v0.25.2 M1 编码，macOS 隔离数据库与真实旧 Host 回退验证已通过，M1 已确认。
+
+Client 架构替换不得影响 Host 独立构建和运行。Host 不依赖 Client 的源码、构建脚本、随包
+Node、配置草稿、心跳或生命周期代理；配置、discovery 与本机管理入口由 Host 拥有，契约
+不绑定 Client 的实现语言。systemd 直接执行 Host，不能通过 Client 包装脚本或私有运行时启动。
+Client 升级不能隐式迁移 Host 数据或替换在用 Host 来源；具体验收见 v0.25.2 技术方案 A23。
 
 本模块不是 `tools/*` 验证宿主，也不因独立进程形态自动成为系统 daemon、LaunchAgent 或常驻
 Worker 池。
@@ -63,7 +77,7 @@ Worker 池。
 ## 安全与日志
 
 - credential 只用于构造具体 Provider，不进入应用协议、普通日志、Demo 输出或子进程环境。
-- HTTP 请求必须通过登录凭据、Host/Origin 校验和精确 CORS 白名单。原生本机入口还接受每进程 bootstrap token，由 Tauri 注入受信任 WebView；bootstrap 不进入 URL、持久前端存储、事件或日志。普通登录 token 可用于已确认的 Web 快捷入口 fragment，页面立即移除后按登录规则兑换 Cookie。
+- HTTP 请求必须通过网络准入、登录凭据和接口权限校验；Cookie 执行同源保护，显式凭据采用无自动跨域凭据的 CORS。原生本机入口还接受每进程 bootstrap token，由 Tauri 注入受信任 WebView；bootstrap 不进入 URL、持久前端存储、事件或日志。普通登录 token 可用于已确认的 Web 快捷入口 fragment，页面立即移除后按登录规则兑换 Cookie。
 - 普通日志不得记录完整 prompt、模型响应、文件内容、Shell 输出或工具参数。
 - Host 通过 `RunToolFactory` 为每个 Run 同时冻结工具集和 Authorizer；未知或未匹配能力不得
   隐式放行，不能使用一份跨 Session 的可变 resolver 或全局可变权限状态。
@@ -81,7 +95,8 @@ Worker 池。
 - Provider Codec、工具 Dispatcher、Context 算法或 Core Guardrail 实现。
 - Runtime 业务数据库实体、跨层暴露的持久化记录类型或只为 Demo 服务的公共 Client crate。Host
   可以私有实现 RuntimeStore 的 SQLite/文件 Adapter，但不得因此持有第二份 Session/Run 状态机。
-- 系统开机启动、崩溃拉起和 daemon 管理；这些能力需由后续平台版本明确设计。
+- 系统服务注册、开机启动策略与服务管理。v0.25.2 已确认由 Client 的本机平台适配提供
+  可配置自启，默认关闭，主要面向 Linux 服务器；Host 仍是被启动的产品进程，不承担服务管理器职责。
 
 ## v0.8.0 实现边界
 
@@ -159,8 +174,8 @@ Worker 池。
   Attachment 的第二份业务状态。
 - 本地只绑定 `127.0.0.1:0`，所有路由都需进程级 Token。发现文件必须原子更新，
   退出时只清理仍属于本 `instance_id` 的文件。
-- 默认只允许无 Origin 的原生客户端和精确登记的 Tauri WebView Origin，不允许通配符 CORS。
-  纯浏览器本地直连是后续显式开启的可选能力，需独立授权和 Origin 配置。
+- v0.25.2 统一规则覆盖早期来源白名单：显式 Token 不依赖 Origin、产品名称或构建类型，
+  CORS 可使用通配符但不允许跨源自动凭据；Cookie 执行同源保护。
 - `serve` 删除 `--socket`，不提供任意 `--listen` 或公网绑定开关；本地客户端和验证客户端
   都从 Runtime Home `run/runtime.json` 发现地址与 Token。
 - v0.11.0 用默认关闭的 feature-gated 私有 Web Demo 替代继续迁移 Ratatui Demo。Web Demo
@@ -658,7 +673,7 @@ S3.2 联调的内部播放接纳与诊断约束：
 - 本机与远程共用唯一端口、Runtime 和处理函数。非本机来源永不接受进程 bootstrap；所有 Web 使用普通登录。`/auth/login`、`/auth/logout` 和 Command 的 `host_access` 分支不进入设备配对或 Runtime 会话领域。
 - `[host_access]` 与模型、语音配置共用 `LocalConfigSource`；同源写入锁覆盖阻塞 CAS 全过程，避免并发覆写。配置已保存后刷新 Runtime 配置 revision，密码哈希不进入业务投影。
 - 访问开关先 CAS 再发布策略；关闭只停止远程请求的所属连接，已接纳的 Run 继续。普通登录在改密、退出、到期、Host 重启时失效；SSE 正常结束，上传中断并清理暂存，提交前再次校验登录。
-- Cookie 为 Host-only / HttpOnly / SameSite=Strict；名称区分协议和 Host 端口，避免同一 IP 不同 Host 进程的 Cookie 相互覆盖，HTTPS 才标记 Secure。Cookie 写请求需要同源 Origin。Bootstrap 仅接受精确本机 authority 与原生来源。
+- Cookie 为 Host-only / HttpOnly / SameSite=Strict；名称区分协议和 Host 端口，避免同一 IP 不同 Host 进程的 Cookie 相互覆盖，HTTPS 才标记 Secure。Cookie 写请求需要同源 Origin。Bootstrap 要求真实 loopback、精确本机 authority 和实例私有凭据，不依赖 Origin 自报身份。
 - `serve --password-stdin` 在持有实例锁后读取至多 1027 字节，移除一组行结束符并校验 1—1024 字节密码；不提供命令行明文密码或找回密码命令。
 
 
@@ -672,7 +687,7 @@ S3.2 联调的内部播放接纳与诊断约束：
 ## v0.25.0 M2：统一端口反馈
 
 - 取消第二监听，默认 7240，配置使用 port／server_names。IP 直接访问；域名精确允许，Host 端口与
-  实际监听一致。真实 TCP peer 和本机 authority 同时成立才走本机路径；bootstrap 再校验原生 Origin／token。
+  实际监听一致。真实 TCP peer 和本机 authority 同时成立才走本机路径；bootstrap 再校验实例私有 token，页面来源不提升权限。
 - 开关及域名更新即时生效，端口／协议／证书启动时冻结；设置返回 restart_required，复用显式重启。
 - 同一 HTTPS 证书需覆盖 loopback IP 与外部访问名；不提供额外 HTTP 救援监听，不自动降级或随机换端口。
 - 端口探测及真实监听由 server 负责；macOS 对 wildcard／loopback 的重用行为需显式检查本机端口冲突。
@@ -761,3 +776,60 @@ StorageEngine 在打开日常业务连接前执行唯一 migrations manifest，�
 无账本从 0.25.1 开始，已有库先独立备份并完整回读核验。schema.rs 仅保留日常 FTS 初始化，
 旧完整 DDL 只作为 tests/legacy_v0_25_0.sql 人工升级夹具。数据库成功后再执行配置 CAS 清理；
 文件收尾失败关闭业务 Store、保留已提交数据库和诊断监听，不自动还原数据库。
+
+## v0.25.2 M1 数据库写前准入
+
+- `migrations/admission` 先核对普通文件、身份、SQLite 头和伴随日志，再建立只读连接；
+  WAL／SHM、非 DELETE 模式及非空 rollback journal 均拒绝，不执行恢复、checkpoint 或删文件。
+- 无账本的既有库必须通过已知 v0.25.0 投影检查；仅文件 NotFound 可创建新库。
+  下限表损坏或与已提交 manifest 不符时拒绝，不补表、不改值；保留高版本账本拒绝。
+- `database_compatibility` 仅由控制器在版本事务中创建／提升，v0.25.2 首值为 0.25.2；
+  业务迁移回调不得修改此表或账本。相同下限不写，异常事务不继续后继迁移。
+- StorageEngine 先完成准入和迁移，再准备业务目录、FTS；HostResources 和 Recall 密钥也在准入后准备。
+  失败继续使用现有认证诊断，Ready 保留存储线程实际核验的版本和下限。
+- M1 在 macOS arm64 完成 32 项存储／备份／进程定向验证，含真实 v0.25.1 Host 拒绝升级后库。
+  数据与文件、备份回读结果见本地进度；M1 已确认，不等同于完整产品或跨平台验收。
+
+## v0.25.2 M2 应用软件版本准入
+
+- 认证之后、业务或正文读取之前检查双向兼容；缺失／非法／双向过低统一返回 HTTP 409
+  和安全版本对。重复或不完整版本头拒绝；显式头不兼容不得回退 Cookie。
+- health、capabilities 保持认证但豁免版本门禁；静态页、合法 CORS 预检、logout 保留各自
+  来源与认证边界。SSE、命令、上传、目录、原生资源均必须声明当前请求版本。
+- 普通 LoginSession 保存本次登录的不可变版本对；快捷 token 交换创建属于当前页面的普通
+  会话，不修改原 token 的声明，仍受现有 TTL、容量与改密撤销约束，不新增连接注册库。
+- 只有兼容模块明确列举的八条 GET 媒体／下载路由可复用所属登录声明；原生凭据无该回退。
+- Desktop／Web PTY 在五秒 Open 首帧期限内完成认证和兼容检查，再解析目录、创建 PTY。
+  显式 HTTP 版本头存在时还须与首帧一致。Device Gateway 的智能终端握手保持原有规则。
+- 非数据库测试及 13 项真实 Host／浏览器／原生连接隔离实测通过，14 组源库和备份核验通过；
+  范围与原生 GUI 限制见[开发计划](../versions/v0.25.2/开发计划.md#m2-隔离实测结果2026-09-10已确认)。M2 已确认。
+
+## v0.25.2 M3 本机管理边界（实装，本机验收通过）
+
+- Home 按显式参数、环境变量、产品默认值解析并规范化路径别名；所有调用方共享原内核实例锁。
+- discovery 私有记录实际可执行路径与 SHA-256，不进入业务 DTO 或远端 capabilities。
+- launch 子进程在 Tokio 初始化前调用安全 setsid，关闭标准流；SIGINT／SIGTERM 进入既有监督关闭。
+- access read／configure／set-password 是 Host 所有的本机 JSON IPC；复用配置校验、Argon2、
+  CAS 与原子保存，不创建 Store、Runtime、Agent 或业务目录。read 不创建文件或收紧权限，
+  write 持原实例锁，竞争返回 busy；具体契约见在途技术方案第六节。
+- --build-info-json 仅输出构建版本对，不解析 Home 或创建异步 Runtime。系统服务管理仍属于 M5。
+
+M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动、原来源重启、来源缺失／变化拒绝），四库与八份备份逐表核验一致；不代表 Linux／SSH 或完整 Desktop GUI 已验收。
+
+## v0.25.2 M4 Client 接入补充
+
+- `access probe` 只读核验现有 `run/runtime.lock` 的内核锁；缺失返回 false，拒绝不安全类型、权限和归属，不创建文件、不修复权限、不打开数据库。它是 Host 所有的本机管理契约，任何客户端都可调用。
+- Node Client 经既有原生认证 HTTP、Host 短命令和 launch 接入；Host 不依赖 Node、Client 包或菜单状态。实际 macOS 双产品来源复用与受控启停已验证；系统服务仍归 M5。
+
+## v0.25.2 Docker IP 转发准入
+
+非本地访问显式开启后，普通 Web IP 目标不按地址类别过滤，适配 Docker 端口映射／隧道；域名继续显式登记。访问地址配置接受 IPv4、IPv6、大小写和国际化域名，校验及请求匹配共用规范化结果，只检查地址格式而不禁止 IP 输入。普通目标准入不授予原生权限；真实 TCP 来源、原生 authority／凭据与 Cookie 同源保护继续独立执行。Host 无需信任 X-Forwarded-For 或代理伪造的本机来源。
+
+
+## v0.25.2 统一访问规则
+
+- 普通 Cookie 和 Bearer 共享登录会话、过期和撤销；Authorization 存在时只使用该凭据，失败不回退 Cookie。
+- Cookie API 带 Origin 时必须同源；Cookie 建立、状态变更和 WS 握手必须显式同源。
+- 通用 API CORS 使用 `*`，显式列出 Authorization／内容类型／兼容头，不返回 Allow-Credentials；预检不代表已认证。
+- WS 升级无凭据只能进入既有限额和五秒首帧认证；首帧复用 HTTP 凭据验证，已认证握手不允许切换身份。认证及兼容检查完成前不创建 PTY。
+- 本机特权仍由真实 peer、authority 和私有进程凭据共同证明，不用客户端名称、Origin 或 debug 标志授权。

@@ -11,7 +11,7 @@ import type {
   PinnedMemoryCollectionSnapshot,
   PermissionDocumentSnapshot,
   SessionSummary,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
@@ -283,7 +283,7 @@ describe("SettingsDialog model management", () => {
     expect(hostAccessCommand.mock.calls.every(([command]) => command.type === "get_status")).toBe(true);
   });
 
-  it("saves a single port and requires explicit restart before remote access", async () => {
+  it("saves IP and domain entries with a single port and requires explicit restart before remote access", async () => {
     const store = new RootStore({ target_kind: "local" });
     vi.mocked(nativeCore.isTauri).mockReturnValue(true);
     store.settings.is_open = true;
@@ -301,10 +301,11 @@ describe("SettingsDialog model management", () => {
     fireEvent.change(screen.getByLabelText("端口"), { target: { value: "0" } });
     expect(screen.getByRole("button", { name: "保存访问设置" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("端口"), { target: { value: "7241" } });
+    fireEvent.change(screen.getByLabelText("允许的 IP 或域名（可选，每行一个）"), { target: { value: "127.0.0.1\n::1\nExample.COM" } });
     fireEvent.click(screen.getByRole("button", { name: "保存访问设置" }));
     expect(await screen.findByRole("button", { name: "重启本机 Runtime" })).toBeEnabled();
     expect(screen.getByRole("checkbox", { name: "允许其他设备连接" })).toBeDisabled();
-    expect(hostAccessCommand).toHaveBeenLastCalledWith({ type: "configure", payload: { expected_revision: "one-port", configuration: { ...configuration, port: 7241 } } });
+    expect(hostAccessCommand).toHaveBeenLastCalledWith({ type: "configure", payload: { expected_revision: "one-port", configuration: { ...configuration, port: 7241, server_names: ["127.0.0.1", "::1", "example.com"] } } });
     expect(restart).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "重启本机 Runtime" }));
     expect(restart).toHaveBeenCalledWith("restart_runtime");
@@ -722,13 +723,13 @@ function renderDialog(store: RootStore) {
   );
 }
 
-function onlineProvider(): import("../../src/generated/assistant-protocol").ProviderSummary {
+function onlineProvider(): import("@ez-assistant/protocol").ProviderSummary {
   return { provider_instance_id: "provider-1", has_api_key: true, connection: {
     display_name: "测试服务商", provider_type: "openai", endpoint: "https://example.test/v1",
     protocol_preference: "chat_completions", models_path: "/v1/models", discovery_format: "openai",
   } };
 }
-function onlineModel(): import("../../src/generated/assistant-protocol").DiscoveredModel {
+function onlineModel(): import("@ez-assistant/protocol").DiscoveredModel {
   return { configuration: null, model_id: "online-model", display_name: null, metadata: {
     context_window_tokens: { state: "unknown" }, max_input_tokens: { state: "unknown" }, max_output_tokens: { state: "unknown" },
     reasoning_max_input_tokens: { state: "unknown" }, reasoning_max_output_tokens: { state: "unknown" },

@@ -2,7 +2,7 @@ import { action, makeObservable, observable, observableRef, runInAction } from "
 import type {
   DeviceGatewaySnapshot,
   DeviceId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
 type DeviceGatewayDependencies = Readonly<{
@@ -204,11 +204,11 @@ export class DeviceGatewayStore {
   }
 
   async #runGatewayAction<TType extends Exclude<
-    import("../generated/assistant-protocol").DeviceGatewayCommand["type"],
+    import("@ez-assistant/protocol").DeviceGatewayCommand["type"],
     "get_snapshot"
   >>(
     action_name: string,
-    command: Extract<import("../generated/assistant-protocol").DeviceGatewayCommand, { type: TType }>,
+    command: Extract<import("@ez-assistant/protocol").DeviceGatewayCommand, { type: TType }>,
     notice: string,
   ): Promise<boolean> {
     const client = this.dependencies.get_client();

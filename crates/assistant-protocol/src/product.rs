@@ -995,7 +995,7 @@ mod tests {
     fn product_projection_schema_contains_no_credentials() {
         let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/desktop/src/generated/assistant-protocol.ts"
+            "/../../packages/assistant-protocol/src/generated/assistant-protocol.ts"
         ));
         // 精确匹配字段标识，has_api_key 是安全布尔摘要，不能被 api_key 的子串检查误报。
         let identifiers = source.to_ascii_lowercase();

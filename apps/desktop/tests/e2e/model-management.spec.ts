@@ -1,10 +1,11 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { expect, test } from "@playwright/test";
 
 // 所有服务商、固定配置和会话都来自 globalSetup 人工生成的隔离库。
 test("Web uses provider model settings, persists edits, and resets to current online metadata", async ({ page }) => {
   const fixture = JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!) as { base_url: string; access_token: string };
   const issued = await fetch(`${fixture.base_url}/auth/login`, {
-    method: "POST", headers: { Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ method: "desktop" }),
   });
   expect(issued.ok).toBe(true);

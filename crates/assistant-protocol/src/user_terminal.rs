@@ -33,6 +33,7 @@ pub struct UserTerminalSize {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserTerminalControl {
     Open {
+        client_compatibility: Option<crate::ClientCompatibility>,
         #[ts(type = "string | null")]
         bearer: Option<SecretValue>,
         source: UserTerminalSource,
@@ -50,6 +51,9 @@ pub enum UserTerminalControl {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserTerminalNotice {
+    CompatibilityError {
+        error: crate::RuntimeCompatibilityError,
+    },
     Created {
         terminal_id: String,
         directory_name: String,

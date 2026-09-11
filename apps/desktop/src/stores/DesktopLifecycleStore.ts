@@ -1,6 +1,6 @@
 import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-import type { ApplicationSnapshot } from "../generated/assistant-protocol";
+import type { ApplicationSnapshot } from "@ez-assistant/protocol";
 import {
   listenDesktopLifecycleIntents,
   listenNativeRuntimeMutations,

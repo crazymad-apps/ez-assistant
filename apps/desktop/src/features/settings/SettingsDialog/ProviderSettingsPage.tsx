@@ -3,7 +3,7 @@ import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { DiscoveredModel, ModelFixedConfig, ModelSelection, ProviderSummary, ProviderUsage } from "../../../generated/assistant-protocol";
+import type { DiscoveredModel, ModelFixedConfig, ModelSelection, ProviderSummary, ProviderUsage } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { SettingsMessages } from "./SettingsMessages";

@@ -1,4 +1,4 @@
-import type { SessionCommand } from "../../../generated/assistant-protocol";
+import type { SessionCommand } from "@ez-assistant/protocol";
 
 export type ParsedSessionCommand =
   | Readonly<{ type: "not_command" }>

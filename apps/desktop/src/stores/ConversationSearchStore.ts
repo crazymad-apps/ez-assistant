@@ -3,7 +3,7 @@ import type {
   ConversationHistoryHit,
   ConversationHistoryScope,
   GetConversationRecallWindowResult,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 export type ConversationSearchStatus = "idle" | "loading" | "ready" | "error";
 

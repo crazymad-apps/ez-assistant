@@ -1,4 +1,6 @@
-import type { HostLoginRequest, HostLoginResult, RuntimeHostCapabilities } from "../generated/assistant-protocol";
+import { compatibilityHeaders } from "@ez-assistant/protocol";
+import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } from "./compatibility";
+import type { HostLoginRequest, HostLoginResult, RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
 export class WebLoginError extends Error {
@@ -8,17 +10,19 @@ export class WebLoginError extends Error {
 export async function loginWeb(request: HostLoginRequest): Promise<void> {
   await readResponse(await fetch("/auth/login", {
     method: "POST", credentials: "same-origin", redirect: "error",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+    headers: { ...compatibilityHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(request),
   }));
 }
 
 export async function bootstrapWebRuntime(): Promise<RuntimeBootstrap> {
   const [session, capabilities] = await Promise.all([
-    fetch("/auth/session", { credentials: "same-origin", redirect: "error", cache: "no-store" }).then(readResponse) as Promise<HostLoginResult>,
-    fetch("/capabilities", { credentials: "same-origin", redirect: "error", cache: "no-store" }).then(readResponse) as Promise<RuntimeHostCapabilities>,
+    fetch("/auth/session", { credentials: "same-origin", headers: compatibilityHeaders(), redirect: "error", cache: "no-store" }).then(readResponse) as Promise<HostLoginResult>,
+    fetch("/capabilities", { credentials: "same-origin", headers: compatibilityHeaders(), redirect: "error", cache: "no-store" }).then(readResponse) as Promise<RuntimeHostCapabilities>,
   ]);
-  if (capabilities.protocol_version !== 3 || !capabilities.features?.includes("web_login")) {
-    throw new Error("页面与 Host 版本不一致，请使用同一版本的应用。");
+  const incompatible = hostCompatibilityError(capabilities);
+  if (incompatible) throw new Error(compatibilityMessage(incompatible.code));
+  if (!capabilities.features?.includes("web_login")) {
+    throw new Error("Host 缺少 Web 登录能力，请更新 Host。");
   }
   return { base_url: window.location.origin, instance_id: session.instance_id, access_token: "", capabilities, started_runtime: false, authentication: "web" };
 }
@@ -44,8 +48,9 @@ async function readResponse(response: Response): Promise<unknown> {
   if (response.ok) return response.json();
   let message = response.status === 401 ? "请输入密码登录。" : "无法连接 Host，请稍后重试。";
   try {
-    const body = await response.json() as { error?: { message?: unknown } };
-    if (typeof body.error?.message === "string") message = body.error.message;
+    const body = await response.json() as { error?: { message?: unknown; code?: unknown } };
+    if (isCompatibilityCode(body.error?.code)) message = compatibilityMessage(body.error.code);
+    else if (typeof body.error?.message === "string") message = body.error.message;
   } catch { /* 非 JSON 网络错误使用固定文案。 */ }
   if (response.status === 401) throw new WebLoginError(message);
   throw new Error(message);

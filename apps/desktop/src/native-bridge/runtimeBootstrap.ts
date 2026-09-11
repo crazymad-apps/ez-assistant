@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { RuntimeHostCapabilities } from "../generated/assistant-protocol";
+import type { RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import { bootstrapWebRuntime } from "../runtime-client/webLogin";
 
 export type RuntimeBootstrap = {

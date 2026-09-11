@@ -1,4 +1,4 @@
-import type { ChildTaskTreeItemSnapshot } from "../../../generated/assistant-protocol";
+import type { ChildTaskTreeItemSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { childTaskStatusLabel, formatCompactTokens } from "../childTaskPresentation";
 import styles from "./index.module.scss";

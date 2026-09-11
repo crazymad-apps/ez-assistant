@@ -40,28 +40,37 @@ pub(crate) async fn serve(
             _ => Err(failure("终端连接认证超时或已断开。")),
         },
     };
-    let (permit, source, size) = match open.and_then(|message| match message {
-        Control::Open {
-            bearer,
-            source,
-            size,
-        } => terminals::authenticate(&auth, bearer.as_ref().map(|token| token.expose()))
-            .map(|permit| (permit, source, size))
-            .map_err(|_| failure("登录已失效，请重新登录。")),
-        _ => Err(failure("终端连接必须先认证并选择启动目录。")),
-    }) {
-        Ok(open) => open,
-        Err(error) => {
-            let _ = notice(
-                &mut socket,
-                Notice::Error {
-                    message: error.message,
-                },
-            )
-            .await;
-            return Ok(());
-        }
-    };
+    let (permit, source, size, client_compatibility) =
+        match open.and_then(|message| match message {
+            Control::Open {
+                client_compatibility,
+                bearer,
+                source,
+                size,
+            } => terminals::authenticate(&auth, bearer.as_ref().map(|token| token.expose()))
+                .map(|permit| (permit, source, size, client_compatibility))
+                .map_err(|_| failure("登录已失效，请重新登录。")),
+            _ => Err(failure("终端连接必须先认证并选择启动目录。")),
+        }) {
+            Ok(open) => open,
+            Err(error) => {
+                let _ = notice(
+                    &mut socket,
+                    Notice::Error {
+                        message: error.message,
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+    // 普通 Cookie 的历史声明不能替代当前页面首帧；认证和兼容通过前不解析目录、不创建 PTY。
+    if let Err(error) =
+        terminals::validate_compatibility(&auth.headers, client_compatibility.as_ref())
+    {
+        let _ = notice(&mut socket, Notice::CompatibilityError { error }).await;
+        return Ok(());
+    }
     let (events, mut output) = mpsc::channel(2);
     // 不可取消 PTY spawn 的 JoinHandle；取得结果并登记后才观察关闭，避免中途丢下子进程。
     let created = async {

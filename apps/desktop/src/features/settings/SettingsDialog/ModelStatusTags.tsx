@@ -1,4 +1,4 @@
-import type { ModelConfigOrigin, ModelConfigurationSummary } from "../../../generated/assistant-protocol";
+import type { ModelConfigOrigin, ModelConfigurationSummary } from "@ez-assistant/protocol";
 import styles from "./index.module.scss";
 
 /** 创建来源与参数状态分别展示，固定记录不会因在线返回变化而改标。 */

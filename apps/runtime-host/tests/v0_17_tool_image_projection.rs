@@ -366,6 +366,7 @@ fn preview_request(
     HttpClient::new()
         .get(format!("{}/{path}", host.base_url()))
         .bearer_auth(host.access_token())
+        .headers(support::compatibility_headers())
         .send()
         .expect("preview request")
 }

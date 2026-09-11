@@ -4,7 +4,7 @@ import type {
   PersonaSnapshot,
   PinnedMemoryCollectionSnapshot,
   PinnedMemorySnapshot,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
 type MemorySettingsDependencies = Readonly<{

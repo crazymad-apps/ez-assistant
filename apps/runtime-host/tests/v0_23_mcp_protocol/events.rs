@@ -22,6 +22,7 @@ impl EventCapture {
             .expect("SSE client")
             .get(format!("{}/events", host.base_url()))
             .bearer_auth(host.access_token())
+            .headers(crate::support::compatibility_headers())
             .send()
             .expect("SSE subscription");
         assert!(response.status().is_success());

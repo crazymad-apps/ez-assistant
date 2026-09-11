@@ -17,7 +17,7 @@ pub(crate) struct ReadyServices {
 #[derive(Clone)]
 enum StartupState {
     Starting(RuntimeHostHealth),
-    Ready(Arc<ReadyServices>),
+    Ready(Arc<ReadyServices>, RuntimeHostHealth),
     Unavailable(RuntimeHostHealth),
 }
 
@@ -52,6 +52,7 @@ impl StartupStateHandle {
             if let StartupState::Starting(current) = state {
                 current.stage = Some(progress.stage);
                 current.database_version = progress.database_version.clone();
+                current.min_compatible_host_version = progress.min_compatible_host_version.clone();
                 true
             } else {
                 false
@@ -78,12 +79,19 @@ impl StartupStateHandle {
         speech: SpeechServiceHandle,
     ) {
         self.0.send_if_modified(|state| {
-            if matches!(state, StartupState::Starting(_)) {
-                *state = StartupState::Ready(Arc::new(ReadyServices {
-                    runtime: runtime.clone(),
-                    device_gateway: device_gateway.clone(),
-                    speech: speech.clone(),
-                }));
+            if let StartupState::Starting(current) = state {
+                let mut ready = current.clone();
+                ready.status = RuntimeHostHealthStatus::Ready;
+                ready.stage = None;
+                ready.error = None;
+                *state = StartupState::Ready(
+                    Arc::new(ReadyServices {
+                        runtime: runtime.clone(),
+                        device_gateway: device_gateway.clone(),
+                        speech: speech.clone(),
+                    }),
+                    ready,
+                );
                 true
             } else {
                 false
@@ -92,7 +100,7 @@ impl StartupStateHandle {
     }
     pub(super) fn services(&self) -> Result<Arc<ReadyServices>, RuntimeError> {
         match &*self.0.borrow() {
-            StartupState::Ready(services) => Ok(services.clone()),
+            StartupState::Ready(services, _) => Ok(services.clone()),
             _ => Err(RuntimeError::StorageUnavailable {
                 operation: "access Host before initialization",
                 source: None,
@@ -102,7 +110,7 @@ impl StartupStateHandle {
     pub(crate) fn health(&self) -> RuntimeHostHealth {
         match &*self.0.borrow() {
             StartupState::Starting(current) | StartupState::Unavailable(current) => current.clone(),
-            StartupState::Ready(_) => health(RuntimeHostHealthStatus::Ready, None, None),
+            StartupState::Ready(_, current) => current.clone(),
         }
     }
 }
@@ -118,6 +126,7 @@ fn health(
         database_version: (status == RuntimeHostHealthStatus::Ready)
             .then(|| env!("CARGO_PKG_VERSION").into()),
         target_version: env!("CARGO_PKG_VERSION").into(),
+        min_compatible_host_version: None,
     }
 }
 
@@ -131,6 +140,7 @@ mod tests {
         startup.database_progress(crate::storage::DatabaseStartupProgress {
             stage: RuntimeHostStartupStage::Recovery,
             database_version: Some("0.25.1".into()),
+            min_compatible_host_version: None,
         });
         startup.stage(RuntimeHostStartupStage::Configuration);
         startup.fail(RuntimeHostStartupError::ConfigurationInvalid);

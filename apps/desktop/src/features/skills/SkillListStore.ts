@@ -1,5 +1,5 @@
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
-import type { SkillManagementSnapshot } from "../../generated/assistant-protocol";
+import type { SkillManagementSnapshot } from "@ez-assistant/protocol";
 
 /** 单个可见列表的查询结果；关闭/换 owner 后丢弃，不进入会话或持久存储。 */
 export class SkillListStore {

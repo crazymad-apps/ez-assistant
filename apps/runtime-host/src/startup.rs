@@ -26,6 +26,8 @@ use tokio_util::sync::CancellationToken;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     prepare_runtime_home(&config.runtime_home)?;
     let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
     let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
@@ -33,10 +35,16 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
     if config.password_stdin {
         use tokio::io::AsyncReadExt as _;
         let mut bytes = Vec::new();
-        tokio::io::stdin()
-            .take(1027)
-            .read_to_end(&mut bytes)
-            .await?;
+        let mut input = tokio::io::stdin().take(1027);
+        tokio::select! {
+            result = input.read_to_end(&mut bytes) => { result?; }
+            _ = terminate.recv() => return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted, "Host startup interrupted before password initialization"
+            ).into()),
+            _ = interrupt.recv() => return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted, "Host startup interrupted before password initialization"
+            ).into()),
+        }
         if bytes.ends_with(b"\n") {
             bytes.pop();
             if bytes.ends_with(b"\r") {
@@ -89,7 +97,10 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
         move |shutdown| run_services(config, config_source, state.startup, shutdown),
     );
     supervisor
-        .run_until(async { tokio::signal::ctrl_c().await })
+        .run_until(async move {
+            tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
+            Ok::<(), std::io::Error>(())
+        })
         .await?;
     Ok(())
 }
@@ -154,14 +165,12 @@ async fn initialize(
     startup: &StartupStateHandle,
 ) -> Result<Initialized, RuntimeHostStartupError> {
     use RuntimeHostStartupError::*;
-    let resources = HostResources::new(&config.runtime_home).map_err(|_| InitializationFailed)?;
-    let recall_key = recall_reference_key::load_or_create(&config.runtime_home)
-        .map_err(|_| InitializationFailed)?;
     startup.stage(RuntimeHostStartupStage::DatabaseCheck);
     let (progress, mut stages) =
         tokio::sync::watch::channel(crate::storage::DatabaseStartupProgress {
             stage: RuntimeHostStartupStage::DatabaseCheck,
             database_version: None,
+            min_compatible_host_version: None,
         });
     let opening = LocalRuntimeStore::open_with_progress(&config.runtime_home, 64, Some(progress));
     tokio::pin!(opening);
@@ -177,6 +186,21 @@ async fn initialize(
             }
         }
     });
+    // 数据库准入完成后才准备业务资源与 Recall 密钥；后续失败显式关闭已拥有的存储 worker。
+    let prepared = (|| {
+        let resources =
+            HostResources::new(&config.runtime_home).map_err(|_| InitializationFailed)?;
+        let key = recall_reference_key::load_or_create(&config.runtime_home)
+            .map_err(|_| InitializationFailed)?;
+        Ok::<_, RuntimeHostStartupError>((resources, key))
+    })();
+    let (resources, recall_key) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = store.shutdown().await;
+            return Err(error);
+        }
+    };
     startup.stage(RuntimeHostStartupStage::Configuration);
     if crate::storage::migrations::config_cleanup::cleanup(source.as_ref(), &config.runtime_home)
         .await

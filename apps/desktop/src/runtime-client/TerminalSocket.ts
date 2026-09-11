@@ -1,4 +1,6 @@
-import type { UserTerminalControl, UserTerminalNotice, UserTerminalSize, UserTerminalSource } from "../generated/assistant-protocol";
+import { currentCompatibility } from "@ez-assistant/protocol";
+import { compatibilityMessage } from "./compatibility";
+import type { UserTerminalControl, UserTerminalNotice, UserTerminalSize, UserTerminalSource } from "@ez-assistant/protocol";
 
 export type TerminalSource = UserTerminalSource;
 export type TerminalSize = UserTerminalSize;
@@ -34,7 +36,7 @@ export class TerminalSocket {
     this.#timer = setTimeout(() => { this.#rejectCreated(new Error("终端连接超时。")); this.disconnect(); }, 15_000);
     this.#socket.onopen = () => {
       if (this.#closing) { this.disconnect(); return; }
-      this.#send({ type: "open", bearer: bearer || null, source, size });
+      this.#send({ type: "open", client_compatibility: currentCompatibility(), bearer: bearer || null, source, size });
     };
     this.#socket.onmessage = ({ data }: MessageEvent<unknown>) => {
       if (data instanceof ArrayBuffer) {
@@ -45,6 +47,13 @@ export class TerminalSocket {
         if (typeof data !== "string" || data.length > 8192) throw new Error();
         const notice = JSON.parse(data) as UserTerminalNotice;
         switch (notice.type) {
+          case "compatibility_error": {
+            const message = compatibilityMessage(notice.error.code);
+            this.#rejectCreated(new Error(message));
+            if (!this.#closing) receive({ type: "error", message });
+            this.disconnect();
+            break;
+          }
           case "created":
             if (this.#created) throw new Error();
             this.#created = true;

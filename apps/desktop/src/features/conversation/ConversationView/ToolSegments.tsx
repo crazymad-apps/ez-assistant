@@ -8,7 +8,7 @@ import type {
   ToolCallId,
   ToolEventSnapshot,
   ToolInputSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
 import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";

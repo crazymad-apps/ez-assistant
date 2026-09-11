@@ -8,7 +8,7 @@ import type {
   ToolFileReference,
   ToolInputSnapshot,
   TokenUsageSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { PdfViewer } from "../../../components/PdfViewer";
 import { Dialog } from "../../../components/Dialog";

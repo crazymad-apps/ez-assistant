@@ -1,7 +1,7 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../../../../components/Dialog";
-import type { PreviewMcpImportResult } from "../../../../generated/assistant-protocol";
+import type { PreviewMcpImportResult } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import shared from "../index.module.scss";

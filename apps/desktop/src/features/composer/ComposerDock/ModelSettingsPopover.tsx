@@ -3,7 +3,7 @@ import type {
   ProviderSummary,
   ReasoningEffortKey,
   ReasoningEffortOptionSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import {
   type SettingsCascadeCategory,
   type SettingsCascadeOption,

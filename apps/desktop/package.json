@@ -1,11 +1,12 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.25.1",
+  "version": "0.25.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run check:protocol && tsc && vite build",
+    "build": "npm run check:protocol && npm run check:version && tsc && vite build",
+    "check:version": "node scripts/check-version.mjs",
     "generate:icon:macos": "node scripts/generate-macos-icon.mjs",
     "check:icon:macos": "node scripts/generate-macos-icon.mjs --check",
     "generate:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs",
@@ -13,7 +14,7 @@
     "cargo": "node scripts/run-cargo.mjs",
     "generate:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript",
     "check:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript -- --check",
-    "lint": "oxlint --ignore-pattern src/generated/** src tests vite.config.ts vitest.config.ts playwright.config.ts",
+    "lint": "oxlint src tests vite.config.ts vitest.config.ts playwright.config.ts",
     "test": "npm run check:protocol && vitest run",
     "test:e2e": "npm run build:host && playwright test",
     "test:e2e:web": "npm run build:host && playwright test --config playwright.web.config.ts",
@@ -25,6 +26,7 @@
     "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {
+    "@ez-assistant/protocol": "file:../../packages/assistant-protocol",
     "@streamdown/code": "1.1.1",
     "@streamdown/math": "1.0.2",
     "@streamdown/mermaid": "1.0.2",

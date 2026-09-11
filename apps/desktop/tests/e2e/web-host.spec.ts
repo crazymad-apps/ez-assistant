@@ -1,9 +1,10 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import type { ApplicationSnapshot, RunSnapshot, SystemContextSnapshot } from "../../src/generated/assistant-protocol";
+import type { ApplicationSnapshot, RunSnapshot, SystemContextSnapshot } from "@ez-assistant/protocol";
 
 type Fixture = Readonly<{ base_url: string; access_token: string }>;
 const fixture = (): Fixture => JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP ?? "null") as Fixture;
@@ -18,7 +19,7 @@ async function expectLaunch(page: Page) {
 async function access(command: object) {
   const host = fixture();
   const response = await fetch(`${host.base_url}/commands`, {
-    method: "POST", headers: { Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ request_id: "web-access-test", command: { scope: "host_access", payload: command } }),
   });
   expect(response.status).toBe(200);
@@ -76,7 +77,7 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
 test("普通 token fragment 快速登录后立即移除，并在失效时回到密码页", async ({ page }) => {
   const host = fixture();
   const issued = await fetch(`${host.base_url}/auth/login`, {
-    method: "POST", headers: { Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ method: "desktop" }),
   });
   expect(issued.status).toBe(200);
@@ -129,7 +130,7 @@ for (const fallback of ["reduced-motion", "webgl-and-storage-unavailable"] as co
 async function runtimeCommand<T>(type: string, payload: object): Promise<T> {
   const host = fixture();
   const response = await fetch(`${host.base_url}/commands`, {
-    method: "POST", headers: { Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ request_id: crypto.randomUUID(), command: { scope: "runtime", payload: { type, payload } } }),
   });
   expect(response.status).toBe(200);
@@ -200,4 +201,32 @@ Current fixture instructions.
     const view = await runtimeCommand<{ snapshot: { value: Record<string, unknown> } }>("get_session_view", { session_id: session.session_id });
     expect(view.snapshot.value).not.toHaveProperty("skill_catalog");
   }
+});
+
+test("released old Web assets cannot log in to the new Host", async ({ page, request }, info) => {
+  const old = process.env.EZ_ASSISTANT_TEST_OLD_WEB_ORIGIN;
+  test.skip(!old, "requires an explicitly started isolated released Host");
+  expect(old).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  const host = fixture();
+  // Simulate an already cached released page; all application requests still reach the new Host.
+  await page.route(`${host.base_url}/**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/" || path.startsWith("/assets/")) {
+      const response = await request.get(`${old}${path}`);
+      expect(response.ok()).toBe(true);
+      await route.fulfill({ response });
+    } else await route.continue();
+  });
+  await page.goto(host.base_url);
+  await expect(page.getByLabel("访问密码", { exact: true })).toBeVisible();
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  const rejected = page.waitForResponse((response) => response.url() === `${host.base_url}/auth/login` && response.request().method() === "POST");
+  await page.getByRole("button", { name: "进入工作空间" }).click();
+  const response = await rejected;
+  expect(response.status()).toBe(409);
+  expect((await response.json()).error.code).toBe("missing_declaration");
+  await expect(page.locator("[data-app-title-bar]")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("released-web-rejected.png") });
+  const health = await request.get(`${host.base_url}/health`, { headers: { Authorization: `Bearer ${host.access_token}` } });
+  expect((await health.json()).status).toBe("ready");
 });

@@ -1,6 +1,6 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
-import type { SkillSummarySnapshot, WorkspaceId } from "../../../../generated/assistant-protocol";
+import type { SkillSummarySnapshot, WorkspaceId } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SkillListStore } from "../../../skills";
 import { InputContextPicker } from "../InputContextPicker";

@@ -14,6 +14,7 @@ use support::{FakeProvider, HostProcess, write_config};
 
 fn http() -> Client {
     Client::builder()
+        .default_headers(support::compatibility_headers())
         .timeout(Duration::from_secs(15))
         .no_proxy()
         .build()
@@ -30,10 +31,10 @@ fn post(client: &Client, host: &HostProcess, path: &str, body: Value) -> Respons
 
 #[test]
 fn unregistered_host_directories_and_previews_do_not_expand_session_roots() {
-    let home = tempfile::tempdir().unwrap();
-    let other_home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
+    let other_home = support::test_directory();
+    let workspace = support::test_directory();
+    let outside = support::test_directory();
     let provider = FakeProvider::start();
     write_config(home.path(), provider.endpoint(), "offline-file-test");
     fs::write(workspace.path().join("same.txt"), "HOST WORKSPACE").unwrap();
@@ -141,7 +142,7 @@ fn unregistered_host_directories_and_previews_do_not_expand_session_roots() {
 
 #[test]
 fn multipart_files_and_first_materialization_preserve_content_and_idempotency() {
-    let home = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
     let provider = FakeProvider::start();
     write_config(home.path(), provider.endpoint(), "offline-upload-test");
     let host = HostProcess::start(home.path());

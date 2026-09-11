@@ -10,7 +10,7 @@ import type {
   SessionMaterializationManifest,
   SkillSummarySnapshot,
   WorkspaceId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 export type NewSessionDraftKey = `workspace:${string}` | "unbound";
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { QuotedTextSnapshot } from "../../src/generated/assistant-protocol";
+import type { QuotedTextSnapshot } from "@ez-assistant/protocol";
 import { ComposerQuoteStore } from "../../src/stores/ComposerQuoteStore";
 import { TransientFocusStore } from "../../src/stores/TransientFocusStore";
 

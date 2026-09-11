@@ -76,7 +76,9 @@ EZ_ASSISTANT_RUNTIME_HOME="$HOME/.ez-assistant-playground" npm run tauri -- dev
 ```
 
 多 Host 同时运行还需配置不同的监听端口。自动化测试使用临时 Runtime Home，不向用户目录写入
-测试数据。开发页面与 Host 应来自匹配的开发构建；不要直接复用安装版 Host 作为 Vite 的后端。
+测试数据。开发 Desktop 可通过普通 `npm run tauri -- dev` 连接应用版本兼容的 Release Host，
+并保留前端热更新。Host 使用统一凭据校验，不按 Vite／Tauri 页面来源区分权限；
+连接地址仍为 Host 地址，例如 `http://192.168.31.21:7240`，不填写本机前端的 1420 端口。
 
 ### 构建与验证
 

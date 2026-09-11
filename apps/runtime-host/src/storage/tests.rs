@@ -3829,7 +3829,7 @@ fn work_plan_fork_is_independent_and_session_delete_cascades() {
 }
 
 #[test]
-fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
+fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
     let root = TempDir::new().expect("runtime home");
     let mut engine = open_engine(&root);
     let source_id = session_id("s-v0142-source");
@@ -3939,28 +3939,22 @@ fn v0142_storage_migrates_additively_without_losing_existing_business_data() {
         Path::new(&source.environment.session_private_directory).join("permissions.json");
     let permission_bytes = fs::read(&permission_path).expect("read legacy permission document");
 
-    // 人工构造无版本账本、无模型管理表且缺少早期记忆表的旧库；不对生产库执行降级。
+    // 构造当前迁移契约认可的无账本旧结构；缺失 persona 等业务表属于损坏库，不应自动补齐。
     engine
         .connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS conversation_recall_documents_ai;
-             DROP TRIGGER IF EXISTS conversation_recall_documents_ad;
-             DROP TRIGGER IF EXISTS conversation_recall_documents_au;
-             DROP TABLE IF EXISTS conversation_recall_fts;
-             DROP TABLE IF EXISTS conversation_recall_documents;
-             DROP TABLE IF EXISTS conversation_recall_heads;
-             DROP TABLE IF EXISTS pinned_memories;
-             DROP TABLE IF EXISTS memory_state;
-             DROP TABLE IF EXISTS persona;
+            "BEGIN IMMEDIATE;
              DROP TABLE model_fixed_configs;
              DROP TABLE model_settings;
              DROP TABLE providers;
              DROP TABLE schema_migrations;
+             DROP TABLE database_compatibility;
              ALTER TABLE sessions DROP COLUMN model_id;
              ALTER TABLE sessions DROP COLUMN model_provider_instance_id;
-             ALTER TABLE sessions ADD COLUMN model_key TEXT NOT NULL DEFAULT 'discarded-old-model';",
+             ALTER TABLE sessions ADD COLUMN model_key TEXT NOT NULL DEFAULT 'discarded-old-model';
+             COMMIT;",
         )
-        .expect("downgrade fixture to v0.14.2 shape");
+        .expect("construct known unversioned fixture");
     drop(engine);
 
     let mut reopened = open_engine(&root);

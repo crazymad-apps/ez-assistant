@@ -41,6 +41,8 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
 pub(super) fn entry() -> Migration {
     Migration {
         version: "0.25.1",
+        min_compatible_host_version: None,
+        validate_source: validate_legacy,
         apply,
         validate,
     }
@@ -379,7 +381,7 @@ fn initialize_retained_schema(connection: &Connection) -> StorageResult<()> {
     Ok(())
 }
 
-fn validate(connection: &Connection) -> Result<()> {
+pub(super) fn validate(connection: &Connection) -> Result<()> {
     for projection in REQUIRED_PROJECTIONS {
         connection.prepare(projection)?;
     }
@@ -394,6 +396,17 @@ fn validate(connection: &Connection) -> Result<()> {
     let invalid: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE NOT ((model_provider_instance_id IS NULL AND model_id IS NULL) OR (model_provider_instance_id IS NOT NULL AND length(model_provider_instance_id)>0 AND model_id IS NOT NULL AND length(model_id)>0)))", [], |r|r.get(0))?;
     if old || invalid {
         return Err(MigrationError::Integrity);
+    }
+    validate_queue_payloads(connection)?;
+    Ok(())
+}
+
+/// 无账本输入只接受已知旧 Session/Run 投影，不用 CREATE IF NOT EXISTS 修补任意文件。
+/// 这里复用保留表的实际读取列，旧模型身份单独核对；未知或残缺结构保持原状并拒绝。
+fn validate_legacy(connection: &Connection) -> Result<()> {
+    for projection in REQUIRED_PROJECTIONS {
+        let projection = projection.replace("model_provider_instance_id, model_id", "model_key");
+        connection.prepare(&projection)?;
     }
     validate_queue_payloads(connection)?;
     Ok(())

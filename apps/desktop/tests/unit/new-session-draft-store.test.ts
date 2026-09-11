@@ -25,7 +25,7 @@ describe("NewSessionDraftStore", () => {
   it("passes a stable MCP key in first materialization and preserves it on rejection", async () => {
     const store = new RootStore();
     store.connection.markConnected("instance-1", {
-      protocol_version: 1, runtime_version: "test", max_command_bytes: 65536,
+      min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 65536,
       max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["session_materialization"],
     });
     store.openNewSessionDraft(null);
@@ -95,7 +95,7 @@ describe("NewSessionDraftStore", () => {
   it("does not fall back to creating an empty Session when the Host lacks materialization", async () => {
     const store = new RootStore();
     store.connection.markConnected("instance-1", {
-      protocol_version: 1,
+      min_compatible_version: "0.25.2",
       runtime_version: "old-host",
       max_command_bytes: 64 * 1024,
       max_attachment_bytes: null,

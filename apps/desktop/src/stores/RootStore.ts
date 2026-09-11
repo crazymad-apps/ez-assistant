@@ -34,7 +34,7 @@ import type {
   SystemContextSnapshot,
   SubmitInputMode,
   WorkspaceId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { viewingSnapshot, loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import {
   copySessionResourcePath as copyNativeSessionResourcePath,
@@ -951,7 +951,7 @@ export class RootStore {
     return this.#run_interaction.clearGoal(session_id, goal_id, expected_generation);
   }
 
-  async setSessionReasoningEffort(session_id: SessionId, effort: import("../generated/assistant-protocol").ReasoningEffortKey | null): Promise<boolean> {
+  async setSessionReasoningEffort(session_id: SessionId, effort: import("@ez-assistant/protocol").ReasoningEffortKey | null): Promise<boolean> {
     return this.#run_interaction.setSessionReasoningEffort(session_id, effort);
   }
 

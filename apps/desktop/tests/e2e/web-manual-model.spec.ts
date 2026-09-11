@@ -1,3 +1,4 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { expect, test } from "@playwright/test";
 import { createServer } from "node:http";
 
@@ -28,7 +29,7 @@ test("manual model origin survives online changes and controls deletion and tags
   if (!address || typeof address === "string") throw new Error("fixture address missing");
   try {
     const fixture = JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!) as { base_url: string; access_token: string };
-    const issued = await fetch(`${fixture.base_url}/auth/login`, { method: "POST", headers: { Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method: "desktop" }) });
+    const issued = await fetch(`${fixture.base_url}/auth/login`, { method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method: "desktop" }) });
     const { token } = await issued.json() as { token: string };
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${fixture.base_url}/#token=${encodeURIComponent(token)}`);

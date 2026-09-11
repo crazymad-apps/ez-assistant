@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import { Icon } from "../../components/Icon";
-import type { QuotedTextSnapshot } from "../../generated/assistant-protocol";
+import type { QuotedTextSnapshot } from "@ez-assistant/protocol";
 import styles from "./QuoteDetailDialog.module.scss";
 
 export function QuoteDetailDialog(props: Readonly<{

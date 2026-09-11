@@ -1,6 +1,10 @@
 //! Runtime Host 的非敏感 bootstrap 参数与 Runtime Home 路径解析。
 
-use std::{ffi::OsString, num::NonZeroUsize, path::PathBuf};
+use std::{
+    ffi::OsString,
+    num::NonZeroUsize,
+    path::{Component, Path, PathBuf},
+};
 
 use clap::{Parser, Subcommand};
 use thiserror::Error;
@@ -15,7 +19,7 @@ const DEFAULT_EVENT_CAPACITY: usize = 256;
     name = "ez-assistant-runtime",
     version,
     about = "EZ Assistant Runtime Host",
-    after_help = "The Host uses one HTTP/HTTPS port (default 7240). Remote access is disabled until configured. Private local discovery is published under Runtime Home/run/runtime.json."
+    after_help = "The Host uses one HTTP/HTTPS port (default 7240). Remote access is disabled until configured. Private local discovery is published under Runtime Home/run/runtime.json. Use --build-info-json for side-effect-free software compatibility metadata."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,6 +32,10 @@ pub(crate) enum CliAction {
     Launch(LaunchArguments),
     /// Start the Runtime Host.
     Serve(ServeArguments),
+    /// Read or atomically edit access settings without starting the Runtime.
+    Access(AccessArguments),
+    #[command(hide = true)]
+    BuildInfoJson,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
@@ -48,6 +56,32 @@ pub(crate) struct ServeArguments {
     /// Initialize the owner's password from bounded stdin after acquiring the instance lock.
     #[arg(long)]
     password_stdin: bool,
+    /// Internal launch child: create a new Unix session before Host initialization.
+    #[arg(long, hide = true)]
+    pub(crate) detached: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
+pub(crate) struct AccessArguments {
+    #[arg(long, value_name = "PATH", global = true)]
+    runtime_home: Option<PathBuf>,
+    #[command(subcommand)]
+    pub(crate) operation: AccessOperation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum AccessOperation {
+    /// Query the existing instance lock without creating or modifying files.
+    Probe,
+    Read,
+    Configure,
+    SetPassword,
+}
+
+impl AccessArguments {
+    pub(crate) fn runtime_home(&self) -> Result<PathBuf, ConfigError> {
+        resolve_runtime_home(self.runtime_home.clone())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,12 +103,17 @@ pub(crate) enum ConfigError {
     HomeDirectoryUnavailable,
     #[error("Runtime Home must be absolute")]
     RelativeRuntimeHome,
+    #[error("Runtime Home cannot be resolved safely")]
+    UnavailableRuntimeHome,
 }
 
 pub(crate) fn parse_cli(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<CliAction, clap::Error> {
     let mut arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments == [OsString::from("--build-info-json")] {
+        return Ok(CliAction::BuildInfoJson);
+    }
     if arguments.is_empty() {
         arguments.push(OsString::from("--help"));
     }
@@ -105,15 +144,46 @@ impl LaunchConfig {
 }
 
 fn resolve_runtime_home(override_path: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
-    let path = match override_path {
+    let path = match override_path
+        .or_else(|| std::env::var_os("EZ_ASSISTANT_RUNTIME_HOME").map(PathBuf::from))
+    {
         Some(path) => path,
         None => default_runtime_home(dirs::home_dir())?,
     };
     if path.is_absolute() {
-        Ok(path)
+        canonical_runtime_home(&path)
     } else {
         Err(ConfigError::RelativeRuntimeHome)
     }
+}
+
+/// Resolve existing symlink aliases without creating any part of a missing Home.
+pub(crate) fn canonical_runtime_home(path: &Path) -> Result<PathBuf, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::RelativeRuntimeHome);
+    }
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            component => {
+                resolved.push(component.as_os_str());
+                match std::fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && std::fs::symlink_metadata(&resolved).is_err_and(|error| {
+                                error.kind() == std::io::ErrorKind::NotFound
+                            }) => {}
+                    Err(_) => return Err(ConfigError::UnavailableRuntimeHome),
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// 只在 bootstrap 边界把用户目录解析为绝对路径；后续始终持有完整路径。
@@ -131,14 +201,14 @@ mod tests {
     fn expect_serve(action: CliAction) -> ServeArguments {
         match action {
             CliAction::Serve(arguments) => arguments,
-            CliAction::Launch(_) => panic!("expected serve action"),
+            _ => panic!("expected serve action"),
         }
     }
 
     fn expect_launch(action: CliAction) -> LaunchArguments {
         match action {
             CliAction::Launch(arguments) => arguments,
-            CliAction::Serve(_) => panic!("expected launch action"),
+            _ => panic!("expected launch action"),
         }
     }
 
@@ -196,8 +266,11 @@ mod tests {
             .expect("parse"),
         );
         let config = ServeConfig::resolve(arguments).expect("config");
-        assert_eq!(config.runtime_home, home);
-        assert_eq!(config.config_path, home.join(CONFIG_FILE));
+        assert_eq!(config.runtime_home, canonical_runtime_home(&home).unwrap());
+        assert_eq!(
+            config.config_path,
+            canonical_runtime_home(&home).unwrap().join(CONFIG_FILE)
+        );
     }
 
     #[test]
@@ -213,7 +286,9 @@ mod tests {
         );
         assert_eq!(
             LaunchConfig::resolve(arguments),
-            Ok(LaunchConfig { runtime_home: home })
+            Ok(LaunchConfig {
+                runtime_home: canonical_runtime_home(&home).unwrap()
+            })
         );
     }
 

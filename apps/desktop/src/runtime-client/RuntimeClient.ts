@@ -1,3 +1,5 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
+import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } from "./compatibility";
 import { startupMessage } from "./startupStatus";
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
@@ -12,7 +14,7 @@ import type {
   RuntimeEventEnvelope,
   RuntimeHostCapabilities,
   RuntimeHostHealth,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
 type RuntimeCommandResponse = {
@@ -77,8 +79,10 @@ export class RuntimeClient {
 
   /** 仅轮询受认证的 health，不启动/停止进程，也不重试初始化 SQL；连接释放会取消等待。 */
   async waitUntilReady(receive: (health: RuntimeHostHealth) => void): Promise<void> {
-    if (this.capabilities.protocol_version !== 3 || !this.capabilities.features?.includes("startup_diagnostics")) {
-      throw new RuntimeClientError("component_mismatch", "页面与 Host 版本不一致，请使用同一版本的应用。");
+    const incompatible = hostCompatibilityError(this.capabilities);
+    if (incompatible) throw new RuntimeClientError("component_mismatch", compatibilityMessage(incompatible.code));
+    if (!this.capabilities.features?.includes("startup_diagnostics")) {
+      throw new RuntimeClientError("component_mismatch", "Host 缺少启动诊断能力，请更新 Host。");
     }
     for (;;) {
       const health = await this.resource("/health", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(10000) }, async (response) => {
@@ -138,7 +142,9 @@ export class RuntimeClient {
   }
 
   async #fetch(input: string, init: RequestInit): Promise<Response> {
-    const response = await fetch(input, { ...init, credentials: "same-origin", redirect: "error", signal: init.signal ?? this.#abort.signal });
+    const headers = new Headers(init.headers);
+    Object.entries(compatibilityHeaders()).forEach(([key, value]) => headers.set(key, value));
+    const response = await fetch(input, { ...init, headers, credentials: this.#access_token ? "omit" : "same-origin", redirect: "error", signal: init.signal ?? this.#abort.signal });
     if (response.status === 401) {
       this.on_unauthorized?.();
       throw new RuntimeClientError("authentication_required", "登录已失效，请重新登录。");
@@ -202,11 +208,15 @@ export class RuntimeClient {
     listener: RuntimeEventListener,
     signal: AbortSignal,
   ): Promise<RuntimeEventConnection> {
+    const capabilities = await this.resource("/capabilities", { method: "GET", cache: "no-store", signal }, async (response) => await response.json() as RuntimeHostCapabilities);
+    const incompatible = hostCompatibilityError(capabilities);
+    if (incompatible) throw new RuntimeClientError(incompatible.code, compatibilityMessage(incompatible.code));
     const response = await this.#fetch(`${this.#base_url}/events`, {
       headers: this.#headers(false),
       signal,
     });
-    if (!response.ok || !response.body) {
+    if (!response.ok) throw await decodeCommandFailure(response);
+    if (!response.body) {
       throw new RuntimeClientError("event_stream_unavailable", "无法建立 Runtime 事件流。");
     }
     return {
@@ -228,7 +238,7 @@ async function decodeCommandFailure(response: Response): Promise<RuntimeClientEr
   try {
     const body = (await response.json()) as CommandFailure;
     if (body.error && typeof body.error.code === "string") {
-      return new RuntimeClientError(body.error.code, body.error.message);
+      return new RuntimeClientError(body.error.code, isCompatibilityCode(body.error.code) ? compatibilityMessage(body.error.code) : body.error.message);
     }
   } catch {
     // Transport fallback below intentionally avoids exposing a response body.

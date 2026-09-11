@@ -1,3 +1,4 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { basename } from "node:path";
@@ -19,7 +20,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
     readonly base_url: string;
   };
   const retired_demo = await fetch(`${runtime_bootstrap.base_url}/demo`, {
-    headers: { Authorization: `Bearer ${runtime_bootstrap.access_token}` },
+    headers: { ...compatibilityHeaders(), Authorization: `Bearer ${runtime_bootstrap.access_token}` },
   });
   expect(retired_demo.status).toBe(404);
   await page.addInitScript(({ serialized_bootstrap, workspace_directory }) => {
@@ -85,7 +86,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
             body.append("manifest", JSON.stringify(request.manifest));
             const response = await fetch(`${runtime.base_url}/session-materializations`, {
               method: "POST",
-              headers: { Authorization: `Bearer ${runtime.access_token}` },
+              headers: { ...compatibilityHeaders(), Authorization: `Bearer ${runtime.access_token}` },
               body,
             });
             const payload = await response.json() as { readonly error?: { readonly message?: string } };

@@ -12,7 +12,7 @@ import type {
   SkillManagementSnapshot,
   ChildTaskTreeItemSnapshot,
   WorkPlanSnapshot,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import {
   chooseAttachmentFiles,
   previewAttachmentSelection,
@@ -243,8 +243,8 @@ describe("ComposerDock", () => {
     const store = new RootStore();
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
-      protocol_version: 1,
-      runtime_version: "test",
+      min_compatible_version: "0.25.2",
+      runtime_version: "0.25.2",
       max_command_bytes: 64 * 1024,
       max_attachment_bytes: null,
       sse: true,
@@ -284,8 +284,8 @@ describe("ComposerDock", () => {
     const store = new RootStore();
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
-      protocol_version: 1,
-      runtime_version: "test",
+      min_compatible_version: "0.25.2",
+      runtime_version: "0.25.2",
       max_command_bytes: 64 * 1024,
       max_attachment_bytes: null,
       sse: true,
@@ -1187,8 +1187,8 @@ function renderComposer(overrides: Readonly<{
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
   vi.spyOn(store, "listSkills").mockResolvedValue(overrides.skill_catalog ?? { available: true, skills: [], diagnostics: [] });
   store.connection.markConnected("instance-1", {
-    protocol_version: 1,
-    runtime_version: "test",
+    min_compatible_version: "0.25.2",
+    runtime_version: "0.25.2",
     max_command_bytes: 64 * 1024,
     max_attachment_bytes: null,
     sse: true,

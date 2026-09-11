@@ -5,7 +5,7 @@ import type {
   ConversationPage,
   RuntimeEventEnvelope,
   SessionViewSnapshot,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { conversationItemId, RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
 
 const application: ApplicationSnapshot = {

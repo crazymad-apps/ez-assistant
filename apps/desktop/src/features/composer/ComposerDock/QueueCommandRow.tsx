@@ -1,4 +1,4 @@
-import type { QueuedSessionCommandSnapshot } from "../../../generated/assistant-protocol";
+import type { QueuedSessionCommandSnapshot } from "@ez-assistant/protocol";
 import styles from "./index.module.scss";
 
 /** Command 只显示队列状态，不暴露取消或伪 Run 操作。 */

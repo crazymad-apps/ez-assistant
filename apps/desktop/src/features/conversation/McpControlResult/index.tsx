@@ -1,4 +1,4 @@
-import type { ConversationItem, McpServerRefreshOutcome } from "../../../generated/assistant-protocol";
+import type { ConversationItem, McpServerRefreshOutcome } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import styles from "./index.module.scss";
 

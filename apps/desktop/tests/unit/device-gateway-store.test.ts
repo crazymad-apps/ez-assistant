@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DeviceGatewaySnapshot } from "../../src/generated/assistant-protocol";
+import type { DeviceGatewaySnapshot } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { DeviceGatewayStore } from "../../src/stores/DeviceGatewayStore";
 

@@ -1,4 +1,4 @@
-//! 为 Desktop 生成单一、只读的 TypeScript 协议绑定。
+//! 为多个产品生成独立、只读的 TypeScript 协议绑定。
 
 use std::{env, error::Error, fs, path::PathBuf, process};
 
@@ -38,6 +38,7 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     }
 
     export_roots!(
+        assistant_protocol::RuntimeCompatibilityError,
         UserTerminalControl,
         UserTerminalNotice,
         HostAccessCommand,
@@ -104,14 +105,19 @@ fn normalize_generated_file(output_file: &PathBuf) -> Result<(), Box<dyn Error>>
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    fs::write(output_file, normalized)?;
+    let release = format!(
+        "export const SOFTWARE_VERSION = {:?} as const;\nexport const MIN_COMPATIBLE_VERSION = {:?} as const;\n\n",
+        assistant_protocol::SOFTWARE_VERSION,
+        assistant_protocol::MIN_COMPATIBLE_VERSION,
+    );
+    fs::write(output_file, release + &normalized)?;
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let committed_file = manifest_directory
-        .join("../../apps/desktop/src/generated")
+        .join("../../packages/assistant-protocol/src/generated")
         .join(OUTPUT_FILE);
 
     if env::args().any(|argument| argument == "--check") {

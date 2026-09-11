@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { SystemContextSnapshot } from "../../../generated/assistant-protocol";
+import type { SystemContextSnapshot } from "@ez-assistant/protocol";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
 import { MarkdownContent } from "../../../components/MarkdownContent";

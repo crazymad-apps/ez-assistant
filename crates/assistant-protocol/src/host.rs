@@ -10,6 +10,10 @@ pub struct RuntimeHostHealth {
     pub status: RuntimeHostHealthStatus,
     pub stage: Option<RuntimeHostStartupStage>,
     pub database_version: Option<String>,
+    /// 只投影经过规范校验的数据库要求；读取失败或旧端未提供时未知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_compatible_host_version: Option<String>,
     pub target_version: String,
     pub error: Option<RuntimeHostStartupError>,
 }
@@ -43,6 +47,8 @@ pub enum RuntimeHostStartupStage {
 pub enum RuntimeHostStartupError {
     DatabaseUnavailable,
     DatabaseNewer,
+    DatabaseHostTooOld,
+    DatabaseUnsafeJournal,
     MigrationFailed,
     BackupFailed,
     ConfigurationInvalid,
@@ -75,7 +81,7 @@ pub enum RuntimeHostFeature {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RuntimeHostCapabilities {
-    pub protocol_version: u32,
+    pub min_compatible_version: String,
     pub runtime_version: String,
     pub max_command_bytes: u64,
     pub max_attachment_bytes: Option<u64>,
@@ -96,6 +102,7 @@ mod tests {
             status: RuntimeHostHealthStatus::Ready,
             stage: None,
             database_version: None,
+            min_compatible_host_version: None,
             target_version: "0.25.0".into(),
             error: None,
         };
@@ -105,7 +112,7 @@ mod tests {
         );
 
         let capabilities = RuntimeHostCapabilities {
-            protocol_version: 1,
+            min_compatible_version: "0.25.2".into(),
             runtime_version: "0.1.0".to_owned(),
             max_command_bytes: 1024 * 1024,
             max_attachment_bytes: Some(1024 * 1024 * 1024),

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   PermissionDocumentSnapshot,
   RuntimeCommand,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { SettingsStore } from "../../src/stores/SettingsStore";
 import { serverDraft } from "../../src/features/settings/SettingsDialog/McpSettingsPage/draft";

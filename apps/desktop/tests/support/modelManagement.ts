@@ -1,4 +1,4 @@
-import type { DiscoveredModel, ModelParameters, ModelSelection, ProviderSummary } from "../../src/generated/assistant-protocol";
+import type { DiscoveredModel, ModelParameters, ModelSelection, ProviderSummary } from "@ez-assistant/protocol";
 
 export const modelSelection: ModelSelection = { provider_instance_id: "provider-1", model_id: "fixture" };
 export const modelProvider: ProviderSummary = {

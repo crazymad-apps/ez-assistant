@@ -1,5 +1,5 @@
 import { action, makeObservable, observable } from "mobx";
-import type { ConversationOwner, MessageId, QuotedTextSnapshot } from "../generated/assistant-protocol";
+import type { ConversationOwner, MessageId, QuotedTextSnapshot } from "@ez-assistant/protocol";
 
 export type TransientFocusTarget = Readonly<{
   owner: ConversationOwner;

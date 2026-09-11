@@ -3,7 +3,7 @@ import type {
   MessageId,
   QuotedTextSnapshot,
   QuotedTextSourceRoleSnapshot,
-} from "../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 const MAX_EXACT_BYTES = 8 * 1024;
 const MAX_CONTEXT_CODE_POINTS = 128;

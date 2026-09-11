@@ -5,7 +5,7 @@ import type {
   SessionResourceEntry,
   SessionResourceLocator,
   SessionResourceRoot,
-} from "../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../components/Icon";
 import { InlineIconButton } from "../../components/InlineIconButton";
 import { resolveMaterialFileIcon, resolveMaterialFolderIcon } from "./materialResourceIcon";

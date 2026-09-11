@@ -58,7 +58,7 @@ pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeEr
             });
         }
     };
-    if !initial.file_type().is_dir() {
+    if !initial.file_type().is_dir() || initial.uid() != nix::unistd::geteuid().as_raw() {
         return Err(RuntimeHomeError::Unsafe {
             path: path.to_owned(),
         });
@@ -110,6 +110,7 @@ pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeEr
 /// 生产 Host 使用的单一配置文件来源。
 pub(crate) struct LocalConfigSource {
     path: PathBuf,
+    repair_permissions: bool,
     /// 同一来源的 Runtime／Speech／Host 设置串行提交，避免两个 CAS 同时通过后互相覆盖。
     write_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
@@ -118,7 +119,17 @@ impl LocalConfigSource {
     pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
+            repair_permissions: true,
             write_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
+impl LocalConfigSource {
+    pub(crate) fn read_only(path: PathBuf) -> Self {
+        Self {
+            repair_permissions: false,
+            ..Self::new(path)
         }
     }
 }
@@ -130,8 +141,9 @@ impl RuntimeConfigSource for LocalConfigSource {
 
     fn load(&self) -> ConfigSourceFuture<'_> {
         let path = self.path.clone();
+        let repair = self.repair_permissions;
         Box::pin(async move {
-            match tokio::task::spawn_blocking(move || read_private_config(&path)).await {
+            match tokio::task::spawn_blocking(move || read_config(&path, repair)).await {
                 Ok(result) => result,
                 Err(_) => unavailable(
                     ConfigSourceFailureKind::Read,
@@ -148,6 +160,12 @@ impl RuntimeConfigSource for LocalConfigSource {
     ) -> ConfigSourceReplaceFuture<'_> {
         let path = self.path.clone();
         Box::pin(async move {
+            if !self.repair_permissions {
+                return ConfigSourceReplace::Unavailable(ConfigSourceFailure::new(
+                    ConfigSourceFailureKind::Unsafe,
+                    "read-only configuration source",
+                ));
+            }
             let write_guard = self.write_gate.clone().lock_owned().await;
             match tokio::task::spawn_blocking(move || {
                 let _write_guard = write_guard;
@@ -166,6 +184,10 @@ impl RuntimeConfigSource for LocalConfigSource {
 }
 
 fn read_private_config(path: &Path) -> ConfigSourceLoad {
+    read_config(path, true)
+}
+
+fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
     let initial = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -178,7 +200,7 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
             );
         }
     };
-    if !initial.file_type().is_file() {
+    if !initial.file_type().is_file() || initial.uid() != nix::unistd::geteuid().as_raw() {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file must be a regular file",
@@ -229,7 +251,14 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
             "configuration file exceeds the size limit",
         );
     }
-    if opened.permissions().mode() & 0o777 != PRIVATE_CONFIG_MODE
+    if !repair && opened.permissions().mode() & 0o077 != 0 {
+        return unavailable(
+            ConfigSourceFailureKind::Unsafe,
+            "configuration file permissions are not private",
+        );
+    }
+    if repair
+        && opened.permissions().mode() & 0o777 != PRIVATE_CONFIG_MODE
         && file
             .set_permissions(fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
             .is_err()
@@ -248,8 +277,7 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
             );
         }
     };
-    if !secured.file_type().is_file() || secured.permissions().mode() & 0o777 != PRIVATE_CONFIG_MODE
-    {
+    if !secured.file_type().is_file() || secured.permissions().mode() & 0o077 != 0 {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file permissions are not private",

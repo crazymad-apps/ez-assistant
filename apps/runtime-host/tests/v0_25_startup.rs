@@ -18,6 +18,9 @@ impl Drop for Host {
     }
 }
 fn start(home: &Path) -> Host {
+    start_binary(home, Path::new(env!("CARGO_BIN_EXE_ez-assistant-runtime")))
+}
+fn start_binary(home: &Path, binary: &Path) -> Host {
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -29,7 +32,7 @@ fn start(home: &Path) -> Host {
     )
     .unwrap();
     Host(
-        Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"))
+        Command::new(binary)
             .args(["serve", "--runtime-home"])
             .arg(home)
             .stdout(Stdio::null())
@@ -40,6 +43,20 @@ fn start(home: &Path) -> Host {
 }
 fn http() -> Client {
     Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                assistant_protocol::CLIENT_VERSION_HEADER,
+                reqwest::header::HeaderValue::from_static(assistant_protocol::SOFTWARE_VERSION),
+            );
+            headers.insert(
+                assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
+                reqwest::header::HeaderValue::from_static(
+                    assistant_protocol::MIN_COMPATIBLE_VERSION,
+                ),
+            );
+            headers
+        })
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()
@@ -103,7 +120,15 @@ fn gated(discovery: &Value) {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(capabilities["protocol_version"], 3);
+    if capabilities["runtime_version"] == "0.25.1" {
+        assert_eq!(capabilities["protocol_version"], 3); // 真实已发布旧程序的行为。
+    } else {
+        assert!(capabilities.get("protocol_version").is_none());
+        assert_eq!(
+            capabilities["min_compatible_version"],
+            assistant_protocol::MIN_COMPATIBLE_VERSION
+        );
+    }
     assert!(
         capabilities["features"]
             .as_array()
@@ -165,6 +190,115 @@ fn stop(discovery: &Value, host: &mut Host) {
         thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// 必须提供已核验来源的真实旧程序；默认测试不使用模拟程序冒充回退验收。
+#[test]
+#[ignore = "requires verified EZ_ASSISTANT_V0251_HOST and approval for isolated database operations"]
+fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
+    let binary = std::env::var_os("EZ_ASSISTANT_V0251_HOST")
+        .expect("set the verified released v0.25.1 Host path");
+    let binary = Path::new(&binary);
+    assert!(binary.is_absolute() && binary.is_file());
+    let home = tempfile::tempdir().unwrap();
+    let mut old = start_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "ready");
+    let response: Value = http()
+        .get(format!("{}/health", discovery["address"].as_str().unwrap()))
+        .bearer_auth(discovery["access_token"].as_str().unwrap())
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(response["target_version"], "0.25.1");
+    stop(&discovery, &mut old);
+    let database = home.path().join("data/runtime.sqlite3");
+    let readonly = |path: &Path| {
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    let count = |connection: &rusqlite::Connection, table: &str| -> i64 {
+        connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{}\"", table.replace('"', "\"\"")),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let before = readonly(&database);
+    assert_eq!(count(&before, "schema_migrations"), 1);
+    assert_eq!(count(&before, "sessions"), 1);
+    drop(before);
+
+    let mut current = start(home.path());
+    let discovery = wait_health(home.path(), &mut current, "ready");
+    stop(&discovery, &mut current);
+    let upgraded = readonly(&database);
+    assert_eq!(count(&upgraded, "schema_migrations"), 2);
+    assert_eq!(count(&upgraded, "sessions"), 1);
+    assert_eq!(
+        upgraded
+            .query_row(
+                "SELECT min_compatible_host_version FROM database_compatibility WHERE id=1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "0.25.2"
+    );
+    let backup_dir = fs::read_dir(home.path().join("backups/database"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let backup = readonly(&backup_dir.join("runtime.sqlite3"));
+    assert_eq!(
+        backup
+            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(backup_dir.join("manifest.json")).unwrap()).unwrap();
+    for (table, expected) in evidence["database"]["tables"].as_object().unwrap() {
+        assert_eq!(
+            count(&backup, table),
+            expected["rows"].as_i64().unwrap(),
+            "backup {table}"
+        );
+    }
+    assert_eq!(count(&backup, "schema_migrations"), 1);
+    assert_eq!(count(&backup, "sessions"), 1);
+    drop(backup);
+    drop(upgraded);
+    fn files(directory: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(files(&path));
+            } else {
+                result.insert(path.clone(), fs::read(path).unwrap());
+            }
+        }
+        result
+    }
+    let preserved = files(&home.path().join("data"));
+    let mut old = start_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "unavailable");
+    let failure: Value = http()
+        .get(format!("{}/health", discovery["address"].as_str().unwrap()))
+        .bearer_auth(discovery["access_token"].as_str().unwrap())
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(failure["error"], "database_newer");
+    gated(&discovery);
+    stop(&discovery, &mut old);
+    assert_eq!(files(&home.path().join("data")), preserved);
+}
 #[test]
 fn invalid_database_keeps_authenticated_diagnostics_without_retry_or_recreation() {
     let home = tempfile::tempdir().unwrap();
@@ -191,7 +325,9 @@ fn invalid_database_keeps_authenticated_diagnostics_without_retry_or_recreation(
 #[test]
 fn locked_simulated_database_publishes_starting_then_ready_on_the_same_instance() {
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir(home.path().join("data")).unwrap();
+    let mut initial = start(home.path());
+    let discovery = wait_health(home.path(), &mut initial, "ready");
+    stop(&discovery, &mut initial);
     let database = rusqlite::Connection::open(home.path().join("data/runtime.sqlite3")).unwrap();
     database.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserve'); BEGIN EXCLUSIVE").unwrap();
     let mut host = start(home.path());
@@ -226,6 +362,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(health["min_compatible_host_version"], "0.25.2");
     let configuration = fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
     assert!(configuration.contains("[host_access]"));
@@ -253,12 +390,12 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     .unwrap();
     let ledger: (String, i64) = database
         .query_row(
-            "SELECT version, applied_at_ms FROM schema_migrations",
+            "SELECT version, applied_at_ms FROM schema_migrations ORDER BY version DESC LIMIT 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(ledger.0, "0.25.1");
+    assert_eq!(ledger.0, "0.25.2");
     let count = |table: &str| {
         database
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -266,7 +403,8 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 1);
+    assert_eq!(count("schema_migrations"), 2);
+    assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
     assert_eq!(count("model_settings"), 1);
@@ -310,7 +448,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     assert_eq!(
         database
             .query_row(
-                "SELECT version, applied_at_ms FROM schema_migrations",
+                "SELECT version, applied_at_ms FROM schema_migrations ORDER BY version DESC LIMIT 1",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             )
@@ -322,7 +460,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         database

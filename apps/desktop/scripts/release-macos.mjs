@@ -1,3 +1,4 @@
+import "./check-version.mjs";
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createReadStream } from "node:fs";

@@ -1,6 +1,6 @@
 import { invokeRuntime as invoke } from "./runtimeConnection";
 import { isTauri } from "@tauri-apps/api/core";
-import type { SkillSourceSnapshot, WorkspaceId } from "../generated/assistant-protocol";
+import type { SkillSourceSnapshot, WorkspaceId } from "@ez-assistant/protocol";
 
 type NativeFailure = Readonly<{ code: string; message: string }>;
 

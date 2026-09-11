@@ -1,3 +1,4 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -7,8 +8,7 @@ async function login(page: Page) {
   const host = JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!) as Fixture;
   const response = await fetch(`${host.base_url}/auth/login`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${host.access_token}`,
+    headers: { ...compatibilityHeaders(), Authorization: `Bearer ${host.access_token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ method: "desktop" }),

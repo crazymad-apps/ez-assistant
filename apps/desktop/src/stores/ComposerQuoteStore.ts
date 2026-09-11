@@ -1,5 +1,5 @@
 import { action, makeObservable, observable } from "mobx";
-import type { QuotedTextSnapshot, SessionId } from "../generated/assistant-protocol";
+import type { QuotedTextSnapshot, SessionId } from "@ez-assistant/protocol";
 
 /** WebView 生命周期内的 Session Composer 引用草稿；发送成功前不进入 Runtime 权威状态。 */
 export class ComposerQuoteStore {

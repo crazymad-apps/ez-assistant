@@ -1,6 +1,6 @@
 import { Button } from "../../../components/Button";
 import { useEffect, useRef, useState } from "react";
-import type { DiscoveredModel, ModelFixedConfig, ModelSelection, ProviderInstanceId, ProviderSummary } from "../../../generated/assistant-protocol";
+import type { DiscoveredModel, ModelFixedConfig, ModelSelection, ProviderInstanceId, ProviderSummary } from "@ez-assistant/protocol";
 import { SettingsCascadePopover, type SettingsCascadeCategory } from "../../../components/SettingsCascadePopover";
 import { useRootStore } from "../../../stores/RootStoreContext";
 

@@ -13,7 +13,7 @@ import type {
   SessionResourceEntry,
   SessionResourceLocator,
   ToolFileReference,
-} from "../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../../components/DropdownMenu";
 import { Icon, type IconName } from "../../components/Icon";
 import { MarkdownContent } from "../../components/MarkdownContent";

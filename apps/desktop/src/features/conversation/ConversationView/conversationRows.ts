@@ -8,7 +8,7 @@ import type {
   ToolActivityStatus,
   ToolInputSnapshot,
   UserMessageSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type {
   LiveExecutionSegment,
   LiveRunProjection,

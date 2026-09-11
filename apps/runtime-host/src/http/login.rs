@@ -1,6 +1,6 @@
 //! 普通登录与快捷登录复用一个入口；浏览器只获得 HttpOnly Cookie。
 
-use assistant_protocol::{HostLoginRequest, HostLoginResult};
+use assistant_protocol::{ClientCompatibility, HostLoginRequest, HostLoginResult};
 use axum::{
     Extension, Json,
     extract::State,
@@ -13,8 +13,7 @@ use axum::{
 
 use super::{
     HttpState,
-    auth::{cookie_name, native_origin},
-    error::HttpError,
+    auth::{cookie_name, require_same_origin},
 };
 use crate::access::{AccessError, AccessPermit};
 
@@ -22,33 +21,34 @@ pub(super) async fn login(
     State(state): State<HttpState>,
     Extension(permit): Extension<Option<AccessPermit>>,
     headers: HeaderMap,
+    Extension(compatibility): Extension<ClientCompatibility>,
     Json(request): Json<HostLoginRequest>,
 ) -> Response {
     let credentials = &state.access.credentials;
     let result = match request {
         HostLoginRequest::Password { password, native } => {
-            if native && !native_origin(&headers) {
-                return HttpError::forbidden("原生登录响应只供原生客户端使用。").into_response();
+            // native 仅选择 Token 响应，不代表本机管理身份。
+            if !native && let Err(error) = require_same_origin(&state, &headers) {
+                return error.into_response();
             }
             credentials
-                .login(password)
+                .login(password, compatibility.clone())
                 .await
                 .map(|(token, session)| (token, session, native))
         }
-        HostLoginRequest::Token { token } => credentials
-            .authenticate(token.expose())
-            .map(|session| (token, session, false))
-            .ok_or(AccessError::Unauthorized),
-        HostLoginRequest::Desktop => {
-            if !native_origin(&headers) {
-                return HttpError::forbidden("快捷入口只供原生客户端使用。").into_response();
+        HostLoginRequest::Token { token } => {
+            if let Err(error) = require_same_origin(&state, &headers) {
+                return error.into_response();
             }
-            permit
-                .as_ref()
-                .ok_or(AccessError::Unauthorized)
-                .and_then(|permit| credentials.issue(permit))
-                .map(|(token, session)| (token, session, true))
+            credentials
+                .exchange(token.expose(), compatibility.clone())
+                .map(|(token, session)| (token, session, false))
         }
+        HostLoginRequest::Desktop => permit
+            .as_ref()
+            .ok_or(AccessError::Unauthorized)
+            .and_then(|permit| credentials.issue(permit, compatibility.clone()))
+            .map(|(token, session)| (token, session, true)),
     };
     let (token, session, native) = match result {
         Ok(result) => result,

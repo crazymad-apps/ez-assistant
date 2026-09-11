@@ -1,4 +1,4 @@
-import type { DeviceCapabilitiesSnapshot, DeviceSummarySnapshot } from "../../../generated/assistant-protocol";
+import type { DeviceCapabilitiesSnapshot, DeviceSummarySnapshot } from "@ez-assistant/protocol";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 

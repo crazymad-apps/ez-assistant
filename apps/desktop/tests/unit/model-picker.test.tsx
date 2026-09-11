@@ -5,7 +5,7 @@ import { ModelPicker } from "../../src/features/settings/ModelPicker";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { discoveredModel, modelProvider, modelSelection } from "../support/modelManagement";
-import type { ModelSelection } from "../../src/generated/assistant-protocol";
+import type { ModelSelection } from "@ez-assistant/protocol";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 

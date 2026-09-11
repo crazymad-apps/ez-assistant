@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApplicationSnapshot,
   SessionSummary,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { SessionSidebar } from "../../src/features/sessions/SessionSidebar";
@@ -298,8 +298,8 @@ describe("SessionSidebar grouping", () => {
 function connectedStore(): RootStore {
   const store = new RootStore();
   store.connection.markConnected("instance-1", {
-    protocol_version: 1,
-    runtime_version: "test",
+    min_compatible_version: "0.25.2",
+    runtime_version: "0.25.2",
     max_command_bytes: 64 * 1024,
     max_attachment_bytes: null,
     sse: true,

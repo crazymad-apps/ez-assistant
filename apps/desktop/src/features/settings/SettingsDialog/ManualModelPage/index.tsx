@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "../../../../components/Button";
-import type { ModelSelection, ProviderSummary } from "../../../../generated/assistant-protocol";
+import type { ModelSelection, ProviderSummary } from "@ez-assistant/protocol";
 import { ModelFixedConfigPage } from "../ModelFixedConfigPage";
 import { SettingsPageContainer } from "../SettingsPageContainer";
 import shared from "../index.module.scss";

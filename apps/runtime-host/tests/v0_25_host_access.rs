@@ -13,6 +13,7 @@ use support::HostProcess;
 
 fn client() -> Client {
     Client::builder()
+        .default_headers(support::compatibility_headers())
         .timeout(Duration::from_secs(12))
         .no_proxy()
         .resolve("runtime.test", "127.0.0.1:0".parse().unwrap())
@@ -90,8 +91,8 @@ fn login(http: &Client, base: &str, password: &str) -> String {
 
 #[test]
 fn two_hosts_isolate_tokens_and_passwords_and_restrict_native_bootstrap() {
-    let directory_a = tempfile::tempdir().unwrap();
-    let directory_b = tempfile::tempdir().unwrap();
+    let directory_a = support::test_directory();
+    let directory_b = support::test_directory();
     let a = HostProcess::start(directory_a.path());
     let b = HostProcess::start(directory_b.path());
     let http = client();
@@ -138,7 +139,7 @@ fn two_hosts_isolate_tokens_and_passwords_and_restrict_native_bootstrap() {
             .send()
             .unwrap()
             .status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     assert_eq!(
         http.get(format!("{}/health", b.base_url()))
@@ -164,7 +165,7 @@ fn two_hosts_isolate_tokens_and_passwords_and_restrict_native_bootstrap() {
             .send()
             .unwrap()
             .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
     let shutdown = http.post(format!("{external}/commands")).bearer_auth(&token).json(&json!({"request_id":"forbidden-shutdown", "command":{"scope":"runtime", "payload":{"type":"shutdown_runtime", "payload":{}}}})).send().unwrap();
     assert_eq!(shutdown.status(), StatusCode::FORBIDDEN);
@@ -199,7 +200,7 @@ fn two_hosts_isolate_tokens_and_passwords_and_restrict_native_bootstrap() {
 #[test]
 fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles() {
     use std::io::Read as _;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let host = HostProcess::start(directory.path());
     let http = client();
     password(&http, &host, "cookie password");
@@ -256,7 +257,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
             .send()
             .unwrap()
             .status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     assert_eq!(
         http.post(format!("{external}/auth/logout"))
@@ -316,7 +317,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
 
 #[test]
 fn https_uses_the_same_port_after_restart_and_requires_certificate_trust() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let host = HostProcess::start(directory.path());
     let http = client();
     password(&http, &host, "https password");
@@ -353,6 +354,7 @@ fn https_uses_the_same_port_after_restart_and_requires_certificate_trust() {
     );
     drop(host);
     let trusted = Client::builder()
+        .default_headers(support::compatibility_headers())
         .timeout(Duration::from_secs(5))
         .no_proxy()
         .add_root_certificate(reqwest::Certificate::from_pem(certificate.as_bytes()).unwrap())
@@ -380,7 +382,7 @@ fn https_uses_the_same_port_after_restart_and_requires_certificate_trust() {
 
 #[test]
 fn port_change_is_explicit_survives_restart_and_does_not_fall_back_on_conflict() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let host = HostProcess::start(directory.path());
     let http = client();
     password(&http, &host, "port password");
@@ -411,7 +413,7 @@ fn port_change_is_explicit_survives_restart_and_does_not_fall_back_on_conflict()
 
 #[test]
 fn closing_external_access_does_not_cancel_an_accepted_runtime_run() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let provider = support::FakeProvider::start();
     support::write_config(
         directory.path(),
@@ -473,7 +475,7 @@ fn closing_external_access_does_not_cancel_an_accepted_runtime_run() {
 #[test]
 fn stdin_initialization_holds_instance_lock_and_password_changes_invalidate_old_sessions() {
     use std::process::Command;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let host = HostProcess::start_with_password(directory.path(), " stdin password \r\n");
     let http = client();
     assert!(
@@ -508,8 +510,8 @@ fn stdin_initialization_holds_instance_lock_and_password_changes_invalidate_old_
 
 #[test]
 fn browser_logins_on_two_host_ports_do_not_replace_or_logout_each_other() {
-    let directory_a = tempfile::tempdir().unwrap();
-    let directory_b = tempfile::tempdir().unwrap();
+    let directory_a = support::test_directory();
+    let directory_b = support::test_directory();
     let a = HostProcess::start(directory_a.path());
     let b = HostProcess::start(directory_b.path());
     let http = client();
@@ -568,7 +570,7 @@ fn browser_logins_on_two_host_ports_do_not_replace_or_logout_each_other() {
 
 #[test]
 fn occupied_configured_port_prevents_startup_without_publishing_another_port() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::test_directory();
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let configuration = assistant_protocol::HostAccessConfiguration {
         port: occupied.local_addr().unwrap().port(),
@@ -594,4 +596,148 @@ fn occupied_configured_port_prevents_startup_without_publishing_another_port() {
         assistant_protocol::HostAccessConfiguration::default().port,
         7240
     );
+}
+
+#[test]
+fn bearer_access_is_origin_independent_while_cookie_access_stays_same_origin() {
+    let directory = support::test_directory();
+    let host = HostProcess::start(directory.path());
+    let http = client();
+    password(&http, &host, "unified access password");
+    let base = host.base_url();
+    let response = http
+        .post(format!("{base}/auth/login"))
+        .header("Origin", "http://localhost:1420")
+        .json(&json!({"method":"password", "password":"unified access password", "native":true}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert!(
+        !response
+            .headers()
+            .contains_key("access-control-allow-credentials")
+    );
+    let token = response.json::<Value>().unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for origin in [
+        "http://localhost:1420",
+        "tauri://localhost",
+        "https://other.test",
+        "null",
+    ] {
+        let preflight = http
+            .request(reqwest::Method::OPTIONS, format!("{base}/health"))
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "GET")
+            .header(
+                "Access-Control-Request-Headers",
+                "authorization,x-ez-client-version",
+            )
+            .send()
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+        assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+        assert_eq!(
+            http.get(format!("{base}/health"))
+                .header("Origin", origin)
+                .bearer_auth(&token)
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let denied = http
+            .get(format!("{base}/health"))
+            .header("Origin", origin)
+            .send()
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(denied.headers()["access-control-allow-origin"], "*");
+        let invalid = http
+            .get(format!("{base}/health"))
+            .header("Origin", origin)
+            .bearer_auth("invalid")
+            .send()
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(invalid.headers()["access-control-allow-origin"], "*");
+    }
+    for origin in [None, Some("http://localhost:1420"), Some("null")] {
+        let request = http.post(format!("{base}/auth/login")).json(
+            &json!({"method":"password", "password":"unified access password", "native":false}),
+        );
+        let request = if let Some(origin) = origin {
+            request.header("Origin", origin)
+        } else {
+            request
+        };
+        let response = request.send().unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!response.headers().contains_key("set-cookie"));
+    }
+    let browser = http
+        .post(format!("{base}/auth/login"))
+        .header("Origin", base)
+        .json(&json!({"method":"password", "password":"unified access password", "native":false}))
+        .send()
+        .unwrap();
+    assert_eq!(browser.status(), StatusCode::OK);
+    let cookie = browser.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for (method, path) in [
+        (reqwest::Method::GET, "health"),
+        (reqwest::Method::POST, "auth/logout"),
+        (reqwest::Method::GET, "user-terminals/socket"),
+    ] {
+        assert_eq!(
+            http.request(method, format!("{base}/{path}"))
+                .header("Cookie", &cookie)
+                .header("Origin", "http://localhost:1420")
+                .send()
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        http.get(format!("{base}/health"))
+            .header("Cookie", &cookie)
+            .header("Origin", base)
+            .send()
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        http.get(format!("{base}/health"))
+            .header("Cookie", &cookie)
+            .bearer_auth("invalid")
+            .send()
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        http.get(format!("{base}/health"))
+            .header("Cookie", &cookie)
+            .header("Origin", "http://localhost:1420")
+            .bearer_auth(&token)
+            .send()
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let shutdown = http.post(format!("{base}/commands")).bearer_auth(&token)
+        .header("Origin", "tauri://localhost")
+        .json(&json!({"request_id":"no-origin-privilege", "command":{"scope":"runtime", "payload":{"type":"shutdown_runtime", "payload":{}}}}))
+        .send().unwrap();
+    assert_eq!(shutdown.status(), StatusCode::FORBIDDEN);
 }

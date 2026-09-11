@@ -9,7 +9,7 @@ import type {
   SessionViewSnapshot,
   SkillSummarySnapshot,
   SubmitInputMode,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
@@ -1060,7 +1060,7 @@ function resizeTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.height = `${Math.min(line_height * 8, Math.max(line_height * 2, textarea.scrollHeight))}px`;
 }
 
-function modelDisplayName(application: ReturnType<typeof useRootStore>["projection"]["application"], selection: import("../../../generated/assistant-protocol").ModelSelection): string {
+function modelDisplayName(application: ReturnType<typeof useRootStore>["projection"]["application"], selection: import("@ez-assistant/protocol").ModelSelection): string {
   const provider = application?.providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
   return `${provider?.connection.display_name ?? "服务商已删除"} / ${selection.model_id}`;
 }

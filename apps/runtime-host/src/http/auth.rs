@@ -1,4 +1,4 @@
-//! 精确来源校验、普通 Cookie／Bearer 与仅限本机原生入口的 bootstrap。
+//! 网络准入、统一凭据认证和 Cookie 同源保护；页面来源不代表客户端身份。
 
 use axum::{
     body::Body,
@@ -19,19 +19,15 @@ use futures_util::StreamExt as _;
 use super::{HttpState, error::HttpError};
 use crate::access::AccessPermit;
 
-const WEBVIEW_ORIGINS: &[&str] = &[
-    "tauri://localhost",
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-];
-
-pub(super) fn native_origin(headers: &HeaderMap) -> bool {
-    match headers.get(ORIGIN).and_then(|value| value.to_str().ok()) {
-        None => !headers.contains_key(ORIGIN),
-        Some(origin) => {
-            WEBVIEW_ORIGINS.contains(&origin)
-                || (cfg!(debug_assertions) && origin == "http://localhost:1420")
-        }
+/// Cookie 的建立与状态变更必须同源；不用于显式凭据的身份判定。
+pub(super) fn require_same_origin(state: &HttpState, headers: &HeaderMap) -> Result<(), HttpError> {
+    let scheme = if state.secure { "https" } else { "http" };
+    let host = headers.get(HOST).and_then(|value| value.to_str().ok());
+    let origin = headers.get(ORIGIN).and_then(|value| value.to_str().ok());
+    if host.is_some_and(|host| origin == Some(format!("{scheme}://{host}").as_str())) {
+        Ok(())
+    } else {
+        Err(HttpError::forbidden("Cookie 请求需要同源 Origin。"))
     }
 }
 
@@ -73,14 +69,23 @@ pub(super) async fn authorize(
     let result = authorize_request(&state, &request);
     let (origin, permit) = match result {
         Ok(result) => result,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            return with_cors(
+                error.into_response(),
+                request
+                    .headers()
+                    .get(ORIGIN)
+                    .and_then(|value| value.to_str().ok()),
+            );
+        }
     };
     if request.method() == Method::OPTIONS {
         return preflight_response(request.headers(), origin.as_deref());
     }
     let login = request.uri().path() == "/auth/login";
     let terminal = request.uri().path() == "/user-terminals/socket";
-    if !login && permit.is_none() && !(terminal && native_origin(request.headers())) {
+    // WS 只允许进入有界首帧认证等待，认证通过前不能创建 PTY。
+    if !login && permit.is_none() && !terminal {
         return with_cors(HttpError::unauthorized().into_response(), origin.as_deref());
     }
     if request.uri().path().ends_with("/native-path")
@@ -90,6 +95,30 @@ pub(super) async fn authorize(
             HttpError::forbidden("该路径仅允许本机原生客户端访问。").into_response(),
             origin.as_deref(),
         );
+    }
+    if !terminal
+        && !matches!(
+            request.uri().path(),
+            "/health" | "/capabilities" | "/auth/logout"
+        )
+    {
+        let route = request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .map_or("", |path| path.as_str());
+        match super::compatibility::admit(
+            request.headers(),
+            request.method(),
+            route,
+            permit.as_ref(),
+        ) {
+            Ok(client) => {
+                request.extensions_mut().insert(client);
+            }
+            Err(error) => {
+                return with_cors(super::compatibility::response(error), origin.as_deref());
+            }
+        }
     }
     if !matches!(
         request.uri().path(),
@@ -190,14 +219,11 @@ pub(super) fn authorize_request(
                 .map_err(|_| HttpError::forbidden("Origin header is not allowed"))
         })
         .transpose()?;
-    if origin
-        .as_ref()
-        .is_some_and(|origin| origin != &expected_origin && !native_origin(headers))
-    {
-        return Err(HttpError::forbidden("Origin header is not allowed"));
-    }
     if request.method() == Method::OPTIONS {
         return Ok((origin, None));
+    }
+    if headers.get_all(AUTHORIZATION).iter().count() > 1 {
+        return Err(HttpError::unauthorized());
     }
     let bearer = headers
         .get(AUTHORIZATION)
@@ -209,17 +235,18 @@ pub(super) fn authorize_request(
                 .ok_or_else(HttpError::unauthorized)
         })
         .transpose()?;
-    let cookie = session_cookie(headers, &cookie_name(state.secure, headers))?;
-    if let (Some(bearer), Some(cookie)) = (bearer, cookie)
-        && bearer != cookie
-    {
-        return Err(HttpError::unauthorized());
-    }
+    // 显式凭据优先；失败绝不回退 Cookie，也不合并两种凭据的权限。
+    let cookie = if bearer.is_none() {
+        session_cookie(headers, &cookie_name(state.secure, headers))?
+    } else {
+        None
+    };
     if cookie.is_some()
-        && request.method() != Method::GET
-        && origin.as_deref() != Some(expected_origin.as_str())
+        && (origin.is_some()
+            || !matches!(*request.method(), Method::GET | Method::HEAD)
+            || request.uri().path() == "/user-terminals/socket")
     {
-        return Err(HttpError::forbidden("Cookie 写请求需要同源 Origin。"));
+        require_same_origin(state, headers)?;
     }
     let token = bearer.or(cookie);
     let permit = token.and_then(|token| {
@@ -227,7 +254,6 @@ pub(super) fn authorize_request(
             && cookie.is_none()
             && local
             && host == state.authority.as_ref()
-            && native_origin(headers)
             && token == state.access_token.as_ref()
         {
             return Some(AccessPermit::new(true, None, connections.clone()));
@@ -301,9 +327,14 @@ fn preflight_response(headers: &HeaderMap, origin: Option<&str>) -> Response {
         .and_then(|value| value.to_str().ok())
         .is_some_and(|requested| {
             requested.split(',').map(str::trim).any(|header| {
-                !["authorization", "content-type"]
-                    .iter()
-                    .any(|allowed| header.eq_ignore_ascii_case(allowed))
+                ![
+                    "authorization",
+                    "content-type",
+                    assistant_protocol::CLIENT_VERSION_HEADER,
+                    assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
+                ]
+                .iter()
+                .any(|allowed| header.eq_ignore_ascii_case(allowed))
             })
         })
     {
@@ -317,11 +348,10 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
     );
-    if let Some(origin) = origin
-        && let Ok(value) = HeaderValue::from_str(origin)
-    {
+    if origin.is_some() {
         let headers = response.headers_mut();
-        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        // 只开放显式凭据的跨源读取，不允许浏览器跨源携带 Cookie。
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
         headers.insert(VARY, HeaderValue::from_static("Origin"));
         headers.insert(
             ACCESS_CONTROL_ALLOW_METHODS,
@@ -329,7 +359,9 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         );
         headers.insert(
             ACCESS_CONTROL_ALLOW_HEADERS,
-            HeaderValue::from_static("authorization,content-type"),
+            HeaderValue::from_static(
+                "authorization,content-type,x-ez-client-version,x-ez-min-compatible-version",
+            ),
         );
     }
     response
@@ -376,7 +408,13 @@ mod tests {
             "127.0.0.1:1234".parse().unwrap(),
             "localhost"
         ));
-        for host in ["localhost", "127.0.0.1", "runtime.test"] {
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "127.0.0.2",
+            "[::1]",
+            "runtime.test",
+        ] {
             assert!(!is_local_request("192.0.2.10:1234".parse().unwrap(), host));
         }
         assert!(!is_local_request(

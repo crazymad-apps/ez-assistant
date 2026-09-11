@@ -3,6 +3,7 @@
 //! 该 crate 应保持轻量，避免依赖具体 UI、存储或模型实现。
 
 mod command;
+mod compatibility;
 mod config;
 mod device_gateway;
 mod error;
@@ -19,6 +20,19 @@ mod product;
 mod resource;
 mod skill;
 mod snapshot;
+mod software_version;
+
+pub use compatibility::{
+    CLIENT_VERSION_HEADER, ClientCompatibility, MIN_COMPATIBLE_VERSION_HEADER,
+    RuntimeCompatibilityError, RuntimeCompatibilityErrorCode, check_compatibility,
+};
+
+pub use software_version::parse_software_version;
+
+/// 当前软件发布版本；与 Host、Desktop 和随包 Web 同源。
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 当前发布要求的应用协议最低兼容软件版本，不表达数据库格式。
+pub const MIN_COMPATIBLE_VERSION: &str = env!("EZ_ASSISTANT_MIN_COMPATIBLE_VERSION");
 
 pub use host_access::{
     HostAccessCommand, HostAccessConfiguration, HostAccessScheme, HostAccessStatus,
@@ -170,11 +184,6 @@ pub use snapshot::{
     TokenUsageSnapshot, ToolActivitySnapshot, ToolActivityStatus, ToolApprovalSubject,
     ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
 };
-
-/// 客户端与 Runtime Host 当前共同理解的应用协议版本。
-///
-/// 该常量通过 Host capabilities 投影，不定义 HTTP 或 SSE 的传输版本。
-pub const PROTOCOL_VERSION: u32 = 3;
 
 mod user_terminal;
 pub use user_terminal::{

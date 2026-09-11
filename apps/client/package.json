@@ -1,0 +1,37 @@
+{
+  "name": "@ez-assistant/client",
+  "version": "0.25.2",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0"
+  },
+  "scripts": {
+    "dev": "node --import tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "build": "npm run check:version && npm --prefix ../../packages/assistant-protocol run build && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:terminal": "npm run build && python3 tests/terminal-smoke.py",
+    "test:host": "npm run build && python3 tests/host-smoke.py",
+    "check:version": "node scripts/check-version.mjs",
+    "test:web": "npm run build && python3 tests/web-smoke.py",
+    "test:port": "npm run build && python3 tests/port-smoke.py",
+    "test:native": "npm run build && python3 tests/native-smoke.py"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.8.0",
+    "commander": "15.0.0",
+    "ora": "9.4.1",
+    "picocolors": "1.1.1",
+    "@ez-assistant/protocol": "file:../../packages/assistant-protocol"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  },
+  "bin": {
+    "ez-assistant": "dist/cli.js"
+  }
+}

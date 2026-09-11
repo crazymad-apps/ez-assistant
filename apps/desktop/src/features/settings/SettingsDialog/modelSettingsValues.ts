@@ -1,4 +1,4 @@
-import type { ModelFeatureSupport, ModelParameters, ModelTokenLimit, ProviderConnection, ProviderType } from "../../../generated/assistant-protocol";
+import type { ModelFeatureSupport, ModelParameters, ModelTokenLimit, ProviderConnection, ProviderType } from "@ez-assistant/protocol";
 
 export const provider_labels: Record<ProviderType, string> = {
   openai: "OpenAI", deepseek: "DeepSeek", dashscope_api: "百炼 API", dashscope_plan: "百炼套餐", moonshot: "Kimi / Moonshot", zhipu: "智谱", vllm: "vLLM", local: "本地兼容服务",

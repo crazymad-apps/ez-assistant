@@ -75,6 +75,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct DatabaseStartupProgress {
     pub(crate) stage: assistant_protocol::RuntimeHostStartupStage,
     pub(crate) database_version: Option<String>,
+    pub(crate) min_compatible_host_version: Option<String>,
 }
 
 type StorageResult<T> = Result<T, StoreError>;

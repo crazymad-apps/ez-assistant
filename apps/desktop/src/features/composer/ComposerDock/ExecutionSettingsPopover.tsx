@@ -1,4 +1,4 @@
-import type { AgentVariant, ApprovalMode } from "../../../generated/assistant-protocol";
+import type { AgentVariant, ApprovalMode } from "@ez-assistant/protocol";
 import {
   SettingsCascadePopover,
   type SettingsCascadeCategory,

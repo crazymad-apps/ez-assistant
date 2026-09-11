@@ -17,6 +17,7 @@ unsafe_code = "deny"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+sha2.workspace = true
 assistant-protocol = { path = "../../../crates/assistant-protocol" }
 dirs.workspace = true
 getrandom.workspace = true
@@ -33,7 +34,7 @@ tauri-plugin-opener = "2.5.4"
 tauri-plugin-window-state = "2"
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["io"] }
 url.workspace = true
 
@@ -50,3 +51,6 @@ block2 = "=0.6.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSValue", "NSURL", "NSString"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSView", "NSWindow"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "WKWebView", "WKSnapshotConfiguration", "WKUserContentController", "block2"] }
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

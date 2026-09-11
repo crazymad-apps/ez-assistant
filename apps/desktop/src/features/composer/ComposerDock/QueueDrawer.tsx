@@ -1,5 +1,5 @@
 import { observer } from "mobx-react-lite";
-import type { GoalSnapshot, QueueSnapshot } from "../../../generated/assistant-protocol";
+import type { GoalSnapshot, QueueSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ComposerSecondaryDrawer } from "./ComposerSecondaryDrawer";
@@ -108,8 +108,8 @@ function formatTime(value: number): string {
 }
 
 function queueSourceLabel(
-  source: import("../../../generated/assistant-protocol").ConversationInputSourceSnapshot,
-  application: import("../../../generated/assistant-protocol").ApplicationSnapshot | null,
+  source: import("@ez-assistant/protocol").ConversationInputSourceSnapshot,
+  application: import("@ez-assistant/protocol").ApplicationSnapshot | null,
 ): string | null {
   if (source.type === "controller_delivery") {
     return "主控转达";

@@ -4,7 +4,7 @@ import { ConnectionStore } from "../../src/stores/ConnectionStore";
 import { NavigationStore } from "../../src/stores/NavigationStore";
 import { RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
 import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
-import type { ApplicationSnapshot, SessionSummary } from "../../src/generated/assistant-protocol";
+import type { ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 
 const transport = vi.hoisted(() => ({ command: vi.fn(), events: vi.fn(), ready: vi.fn(), bootstrap: vi.fn(), refresh: vi.fn() }));
@@ -27,7 +27,7 @@ const application: ApplicationSnapshot = {
   archived_sessions_next_offset: null, configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, issues: [] }, providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [], active_sessions: [], archived_sessions: [], controller_availability: { status: "unavailable" }, additional_controller_count: 0,
   capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
 };
-const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, binding_id: origin, target_kind: "remote", access_token: "fixture", capabilities: { protocol_version: 3, runtime_version: "0.24.0", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login", "startup_diagnostics"] }, started_runtime: false });
+const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, binding_id: origin, target_kind: "remote", access_token: "fixture", capabilities: { min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login", "startup_diagnostics"] }, started_runtime: false });
 const result = (revision: string) => ({ type: "get_application_snapshot", payload: { snapshot: { observed_sequence: 0, value: { ...structuredClone(application), configuration: { ...application.configuration, revision } } } } });
 const owners: RuntimeLifecycleCoordinator[] = [];
 function create() {

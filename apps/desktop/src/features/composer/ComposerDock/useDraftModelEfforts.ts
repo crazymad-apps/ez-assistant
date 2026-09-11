@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ModelSelection, ReasoningEffortKey, ReasoningEffortOptionSnapshot } from "../../../generated/assistant-protocol";
+import type { ModelSelection, ReasoningEffortKey, ReasoningEffortOptionSnapshot } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 
 const effort_keys: readonly ReasoningEffortKey[] = ["low", "medium", "high", "x_high", "max"];

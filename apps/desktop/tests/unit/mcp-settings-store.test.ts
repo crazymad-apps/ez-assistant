@@ -4,7 +4,7 @@ import { SettingsStore } from "../../src/stores/SettingsStore";
 import { McpSettingsStore } from "../../src/features/settings/SettingsDialog/McpSettingsPage/store";
 import { serverDraft, validateMcpDraft } from "../../src/features/settings/SettingsDialog/McpSettingsPage/draft";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
-import type { McpServerDraft, RuntimeCommand } from "../../src/generated/assistant-protocol";
+import type { McpServerDraft, RuntimeCommand } from "@ez-assistant/protocol";
 
 function deferred() {
   let resolve!: (value: unknown) => void;

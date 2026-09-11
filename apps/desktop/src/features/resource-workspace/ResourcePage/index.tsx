@@ -1,7 +1,7 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useState, type RefObject } from "react";
-import type { SessionResourceEntry } from "../../../generated/assistant-protocol";
-import type { SessionResourceLocator } from "../../../generated/assistant-protocol";
+import type { SessionResourceEntry } from "@ez-assistant/protocol";
+import type { SessionResourceLocator } from "@ez-assistant/protocol";
 import type { NewSessionDraftKey } from "../../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { openSessionResourceInSystem, revealSessionResourceInDirectory } from "../../../native-bridge/nativeResource";

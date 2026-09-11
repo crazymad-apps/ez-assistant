@@ -14,7 +14,7 @@ import type {
   SessionMaterializationResult,
   SessionResourceLocator,
   UploadAttachmentResult,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 export type AttachmentSelection = Readonly<{
   selection_id: string;

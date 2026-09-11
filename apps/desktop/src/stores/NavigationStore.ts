@@ -1,5 +1,5 @@
 import { action, computed, makeObservable, observable } from "mobx";
-import type { ChildTaskId, MessageId, SessionId, WorkspaceId } from "../generated/assistant-protocol";
+import type { ChildTaskId, MessageId, SessionId, WorkspaceId } from "@ez-assistant/protocol";
 import type { NewSessionDraftKey } from "./NewSessionDraftStore";
 
 export type ConversationLocation = Readonly<{

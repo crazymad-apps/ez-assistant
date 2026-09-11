@@ -9,7 +9,7 @@ import {
 import { Icon } from "../../components/Icon";
 import { PresenceBoundary } from "../../components/Presence";
 import { useInputMethodGuard } from "../../components/InputMethodGuard";
-import type { PrepareDeleteSessionResult, SessionSummary } from "../../generated/assistant-protocol";
+import type { PrepareDeleteSessionResult, SessionSummary } from "@ez-assistant/protocol";
 import { SessionActionDialog } from "../../features/sessions/SessionActionDialog";
 import { isDraftCustomized } from "../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../stores/RootStoreContext";

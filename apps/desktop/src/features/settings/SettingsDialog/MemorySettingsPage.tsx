@@ -1,6 +1,6 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useState } from "react";
-import type { PinnedMemorySnapshot } from "../../../generated/assistant-protocol";
+import type { PinnedMemorySnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
 import { useRootStore } from "../../../stores/RootStoreContext";

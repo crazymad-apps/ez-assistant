@@ -1,0 +1,20 @@
+{
+  "name": "@ez-assistant/protocol",
+  "version": "0.25.2",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./fixtures/compatibility.json": "./fixtures/compatibility.json",
+    "./node": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

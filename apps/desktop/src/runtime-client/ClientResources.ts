@@ -10,7 +10,7 @@ import type {
   SessionMaterializationResult,
   UploadAttachmentResult,
   ConversationOwner,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 /** 每个 RootStore 自己拥有浏览器 File 与上传操作。切换/退出释放引用，迟到结果不能进入新目标。 */
 export class ClientResources {

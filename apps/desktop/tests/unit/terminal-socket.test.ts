@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TerminalSocket } from "../../src/runtime-client/TerminalSocket";
+import { currentCompatibility } from "@ez-assistant/protocol";
 
 class SocketFixture {
   static OPEN = 1;
@@ -27,7 +28,7 @@ it("uses matching WSS with the credential only in the first frame; input awaits 
   const socket = SocketFixture.connections[0]!;
   expect(socket.url.toString()).toBe("wss://runtime.test:7240/user-terminals/socket");
   socket.open();
-  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: "private-token", source });
+  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: "private-token", source, client_compatibility: currentCompatibility() });
   socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace" });
   await terminal.created;
   let written = false;
@@ -78,4 +79,14 @@ it("does not report successful cleanup when Host reports failure without Closed"
   socket.message({ type: "error", message: "终端清理失败" });
   socket.close();
   await closed;
+});
+
+ it("reports incompatible Host before terminal creation", async () => {
+  const terminal = new TerminalSocket("http://runtime.test", "token", source, { cols: 80, rows: 24 }, vi.fn(), new AbortController().signal);
+  const socket = SocketFixture.connections[0]!;
+  const failed = expect(terminal.created).rejects.toThrow("请更新 Host");
+  socket.open();
+  socket.message({ type: "compatibility_error", error: { code: "host_too_old", client: currentCompatibility(), host: { version: "0.25.1", min_compatible_version: "0.25.1" } } });
+  await failed;
+  expect(socket.readyState).toBe(3);
 });

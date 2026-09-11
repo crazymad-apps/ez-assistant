@@ -81,25 +81,10 @@ pub(super) fn validate(configuration: &HostAccessConfiguration) -> Result<(), Ac
         return Err(AccessError::Invalid("端口必须为 1—65535。"));
     }
     if configuration.server_names.len() > 16 {
-        return Err(AccessError::Invalid("最多可设置 16 个访问域名。"));
+        return Err(AccessError::Invalid("最多可设置 16 个 IP 或域名。"));
     }
     for name in &configuration.server_names {
-        let parsed = reqwest::Url::parse(&format!("http://{name}"))
-            .map_err(|_| AccessError::Invalid("访问域名无效。"))?;
-        if parsed.host_str() != Some(name.as_str())
-            || name.parse::<std::net::IpAddr>().is_ok()
-            || name.starts_with('[')
-            || parsed.port().is_some()
-            || parsed.path() != "/"
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-        {
-            return Err(AccessError::Invalid(
-                "请填写小写域名，不包含协议、端口或路径；IP 无需填写。",
-            ));
-        }
+        normalized_server_name(name)?;
     }
     if configuration.scheme == HostAccessScheme::Https {
         for path in [
@@ -117,6 +102,32 @@ pub(super) fn validate(configuration: &HostAccessConfiguration) -> Result<(), Ac
         }
     }
     Ok(())
+}
+
+/// 配置输入与请求匹配共用规范化：接受 IPv4、IPv6、大小写及国际化域名，不修改保存的原文。
+pub(super) fn normalized_server_name(name: &str) -> Result<String, AccessError> {
+    let invalid = || AccessError::Invalid("请填写合法 IP 或域名，不包含协议、端口、路径或空白。");
+    if let Some(address) = name
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        return address
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.to_string())
+            .map_err(|_| invalid());
+    }
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        return Ok(ip.to_string());
+    }
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '/' | '\\' | ':' | '?' | '#' | '@'))
+    {
+        return Err(invalid());
+    }
+    let parsed = reqwest::Url::parse(&format!("http://{name}")).map_err(|_| invalid())?;
+    parsed.host_str().map(str::to_owned).ok_or_else(invalid)
 }
 
 pub(super) fn same_endpoint(
@@ -180,21 +191,49 @@ mod tests {
     }
 
     #[test]
-    fn server_names_are_domains_and_http_does_not_require_certificates() {
+    fn server_names_accept_ip_and_domains_and_http_does_not_require_certificates() {
         let mut configuration = HostAccessConfiguration {
             remote_enabled: true,
             server_names: vec!["runtime.example".into()],
             ..Default::default()
         };
         assert!(validate(&configuration).is_ok());
+        for valid in [
+            "127.0.0.1",
+            "172.16.20.4",
+            "0.0.0.0",
+            "::",
+            "::1",
+            "[::1]",
+            "2001:db8::1",
+            "localhost",
+            "RUNTIME.EXAMPLE",
+            "例子.测试",
+        ] {
+            configuration.server_names = vec![valid.into()];
+            assert!(validate(&configuration).is_ok(), "{valid}");
+        }
+        assert_eq!(
+            normalized_server_name("RUNTIME.EXAMPLE").unwrap(),
+            "runtime.example"
+        );
+        assert_eq!(normalized_server_name("[0:0:0:0:0:0:0:1]").unwrap(), "::1");
+        assert_eq!(
+            normalized_server_name("例子.测试").unwrap(),
+            "xn--fsqu00a.xn--0zwm56d"
+        );
         for invalid in [
             "http://runtime.example",
             "runtime.example:7240",
             "runtime.example/path",
             "runtime.example?x=1",
             "user@runtime.example",
-            "127.0.0.1",
-            "RUNTIME.EXAMPLE",
+            "",
+            "127.0.0.1:7240",
+            "[::1]:7240",
+            "[127.0.0.1]",
+            "999.999.999.999",
+            "runtime example",
         ] {
             configuration.server_names = vec![invalid.into()];
             assert!(validate(&configuration).is_err(), "{invalid}");

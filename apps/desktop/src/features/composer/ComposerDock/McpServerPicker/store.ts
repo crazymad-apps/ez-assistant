@@ -1,5 +1,5 @@
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
-import type { McpServerOptionSnapshot } from "../../../../generated/assistant-protocol";
+import type { McpServerOptionSnapshot } from "@ez-assistant/protocol";
 
 /** 只保存本次打开的服务摘要；关闭后失效，绝不缓存工具目录或授权结论。 */
 export class McpServerPickerStore {

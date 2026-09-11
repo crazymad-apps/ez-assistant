@@ -9,7 +9,9 @@ mod desktop_preferences;
 mod external_link;
 mod native_resource;
 mod runtime_bootstrap;
+mod runtime_compatibility;
 mod runtime_connection;
+mod runtime_source;
 mod workspace_directory;
 
 use tauri::Manager as _;

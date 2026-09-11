@@ -25,7 +25,7 @@ vi.mock("../../src/stores/RootStore", () => ({ RootStore: class {
 import { RootStore } from "../../src/stores/RootStore";
 import { ApplicationConnectionStore } from "../../src/features/runtime-access/ApplicationConnectionStore";
 
-const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, access_token: "fixture", capabilities: { protocol_version: 2, runtime_version: "0.24.0", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login"] }, started_runtime: false });
+const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, access_token: "fixture", capabilities: { min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login"] }, started_runtime: false });
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
 beforeEach(() => { vi.clearAllMocks(); native.desktop = true; native.local.mockResolvedValue(bootstrap("http://local")); native.begin.mockResolvedValue("binding"); native.connect.mockImplementation(async (_binding, origin) => ({ bootstrap: bootstrap(origin ?? "http://local"), warning: null })); web.login.mockResolvedValue(undefined); web.logout.mockResolvedValue(undefined); web.token.mockReturnValue(null); web.bootstrap.mockResolvedValue(bootstrap("http://web")); });
 

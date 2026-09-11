@@ -1,7 +1,7 @@
 import { useRef } from "react";
 import { Dialog } from "../../../../components/Dialog";
 import { Icon } from "../../../../components/Icon";
-import type { ConversationInputSourceSnapshot } from "../../../../generated/assistant-protocol";
+import type { ConversationInputSourceSnapshot } from "@ez-assistant/protocol";
 import styles from "./index.module.scss";
 
 type DeviceSource = Extract<ConversationInputSourceSnapshot, { type: "device" }>;

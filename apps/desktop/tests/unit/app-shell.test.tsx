@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApplicationSnapshot, SessionSummary } from "../../src/generated/assistant-protocol";
+import type { ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { AppShell } from "../../src/app/AppShell";

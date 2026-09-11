@@ -17,7 +17,7 @@ import type {
   QuotedTextSnapshot,
   ToolCallId,
   UserMessageSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
 import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";

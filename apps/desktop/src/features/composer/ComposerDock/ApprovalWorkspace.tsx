@@ -3,7 +3,7 @@ import type {
   ApprovalDecision,
   ApprovalSnapshot,
   ToolApprovalSubject,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import styles from "./index.module.scss";

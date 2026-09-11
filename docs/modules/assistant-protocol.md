@@ -1,7 +1,7 @@
 # assistant-protocol 模块约束
 
 > 在途演进：[v0.25.0 技术方案](../versions/v0.25.0/技术方案.md)已确认并定稿。本版 Host/Desktop 同版本
-> 调整，不要求兼容旧 Desktop；M0 已新增 Host 访问设置／登录 DTO 并将 PROTOCOL_VERSION 调整为 2，轻量依赖与业务归属约束保持。
+> 调整，不要求兼容旧 Desktop。v0.25.2 M2 已移除应用协议整数，改用双方软件版本和兼容下限；轻量依赖与业务归属约束保持。
 
 ## 模块定位
 
@@ -31,6 +31,9 @@
 
 ## 协议演进
 
+- 协议定义、生成器和跨客户端投影独立于 Client 工程，不依赖其框架、构建脚本或私有类型。
+  TS 绑定是对语言无关契约的投影；Client 更换技术架构时可直接实现同一契约，不要求 Host／Desktop
+  跟随变更。应用协议最低兼容软件版本不因 Client 内部实现变化而提高。
 - enum 序列化使用显式 tag，variant 名称视为兼容契约。
 - 字段含义不能静默改变；需要改变时新增字段/variant并给出迁移路径。
 - 新事件必须检查 Runtime 生产、Tauri 转发、前端消费、持久化和恢复。
@@ -330,3 +333,25 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
 - ModelConfigOrigin（online/manual）随 ModelFixedConfig、ModelConfigurationDetail、保存请求传递，表示创建来源；不得从 ModelConfigurationSource（参数来源）推断。
 - GetModelConfigurationRequest 增量包含 origin，缺省 online；selection 字段在序列化中展开。manual 未保存草稿由 Runtime 返回模板参数；已有记录以存储来源为准。
 - DiscoveredModel.configuration 为 Runtime 计算的可选摘要（uses_template / requires_configuration），供列表标签展示，不改变服务商原始 metadata，不持久化目录。
+
+### v0.25.2 M1 发布事实与存储诊断
+
+- 当前软件版本来自根 Cargo workspace.package，应用最低兼容版本来自 workspace.metadata.ez-assistant；
+  构建脚本检查规范 u32 三段版本及下限关系，TS 导出器同步两个发布常量，不依赖 Client 工程。
+- `RuntimeHostHealth.min_compatible_host_version` 是可选的数据库要求，只在存储线程读到有效值后投影；
+  不替代迁移版本或应用协议下限。新增 `database_host_too_old`、`database_unsafe_journal` 脱敏错误。
+- M1 当时未切换应用请求准入；M2 已同步移除协议整数及其消费者，见下一节。
+
+### v0.25.2 M2 软件版本准入与独立 TS 投影
+
+- 当前应用契约以本节为准；上文各版本 PROTOCOL_VERSION 仅为历史记录。capabilities 保留
+  runtime_version，增加 min_compatible_version；不再输出或比较独立协议整数。
+- ClientCompatibility、RuntimeCompatibilityError 及四类错误由 Rust 定义；双向比较使用规范三段
+  u32 软件版本，边界包含相等值，允许不同但兼容的软件版本。错误只携带校验后的版本对。
+- [独立 TS 包](../../packages/assistant-protocol/package.json)为 @ez-assistant/protocol，Rust 导出器将
+  DTO 与发布常量生成到该包，纯判定与 Rust 使用同一份 22 项 JSON 向量。包无运行依赖，
+  不导入 DOM、Desktop 或 Client；明确 .ts 后缀可供 Node TS 加载器和前端构建消费。
+- Desktop npm 本地依赖该包，构建核对生成内容及 Cargo／Tauri／Desktop／协议包的发布版本。
+  M4 正式 Client 消费独立 `/node` 导出（共享包自身 tsc 生成的 ESM 与声明）；根 TS 导出仍供 Desktop 使用。包构建不得引用 Client 私有文件。随包分发仍归 M6。
+- HTTP 每次发送 x-ez-client-version 与 x-ez-min-compatible-version；Desktop／Web PTY Open
+  新增可选 client_compatibility，缺失按兼容错误拒绝。智能终端 Device Gateway 不增加字段。

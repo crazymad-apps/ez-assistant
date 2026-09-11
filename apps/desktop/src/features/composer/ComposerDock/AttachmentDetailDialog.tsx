@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon } from "../../../components/Icon";
 import { PdfViewer } from "../../../components/PdfViewer";
-import type { SessionId } from "../../../generated/assistant-protocol";
+import type { SessionId } from "@ez-assistant/protocol";
 import {
   NativeResourceFailure,
   type AttachmentPreview,

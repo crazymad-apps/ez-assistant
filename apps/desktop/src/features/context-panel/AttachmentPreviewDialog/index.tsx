@@ -1,6 +1,6 @@
 import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import { useEffect, useState } from "react";
-import type { AttachmentSummary } from "../../../generated/assistant-protocol";
+import type { AttachmentSummary } from "@ez-assistant/protocol";
 import {
   NativeResourceFailure,
   openAttachmentInSystem,

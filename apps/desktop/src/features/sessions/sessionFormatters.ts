@@ -1,4 +1,4 @@
-import type { SessionSummary } from "../../generated/assistant-protocol";
+import type { SessionSummary } from "@ez-assistant/protocol";
 
 export function workspaceDisplayName(path: string): string {
   const normalized = path.replaceAll("\\", "/").replace(/\/$/, "");

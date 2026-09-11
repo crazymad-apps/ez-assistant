@@ -4,7 +4,7 @@ import type {
   PinnedMemoryCollectionSnapshot,
   PersonaSnapshot,
   RuntimeCommand,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { MemorySettingsStore } from "../../src/stores/MemorySettingsStore";
 

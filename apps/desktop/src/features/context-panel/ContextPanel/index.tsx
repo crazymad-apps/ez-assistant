@@ -6,7 +6,7 @@ import type {
   SessionResourceLocator,
   SessionViewSnapshot,
   SystemContextSnapshot,
-} from "../../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
 import { InlineIconButton } from "../../../components/InlineIconButton";

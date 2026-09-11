@@ -1,4 +1,4 @@
-import type { SessionSummary } from "../../../generated/assistant-protocol";
+import type { SessionSummary } from "@ez-assistant/protocol";
 import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";

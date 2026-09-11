@@ -2,6 +2,9 @@
 
 mod config;
 mod credentials;
+pub(crate) mod offline;
+#[cfg(test)]
+mod tests;
 
 use std::sync::{Arc, RwLock};
 
@@ -304,12 +307,13 @@ impl HostAccessHandle {
         server_name: &str,
     ) -> Result<CancellationToken, AccessError> {
         let remote = self.remote.read().map_err(|_| AccessError::Unavailable)?;
-        let ip = server_name
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>();
-        let allowed = ip.is_ok_and(|ip| !ip.is_unspecified() && !ip.is_loopback())
-            || remote.server_names.iter().any(|name| name == server_name);
+        let requested = config::normalized_server_name(server_name)?;
+        // 回环地址也可能经 Docker／隧道转发到达：允许普通远程访问，不据此授予本机权限。
+        // 原生凭据仍由 HTTP 层结合真实 TCP 来源校验，不按 IP 地址类别限制普通访问。
+        let allowed = requested.parse::<std::net::IpAddr>().is_ok()
+            || remote.server_names.iter().any(|name| {
+                config::normalized_server_name(name).is_ok_and(|name| name == requested)
+            });
         if !remote.enabled || !allowed {
             return Err(AccessError::Unauthorized);
         }

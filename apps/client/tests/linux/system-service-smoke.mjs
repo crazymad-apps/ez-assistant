@@ -1,0 +1,38 @@
+// 仅用于独立 Docker systemd 容器；已安装成品包位于 /opt/client，不用于服务器生产验收。
+import assert from 'node:assert/strict';
+import { access, readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+assert.equal(process.platform, 'linux');
+assert.equal(process.getuid(), 0);
+await access('/.dockerenv');
+const base='/opt/client/node_modules/@ez-assistant/client/dist';
+const {prepareService,saveService}=await import(base+'/platform/systemd/commit.js');
+const {querySystemd}=await import(base+'/platform/systemd/query.js');
+const {HostControl}=await import(base+'/host/control.js');
+const home='/var/lib/ez-system-service-check', signal=new AbortController().signal;
+assert.equal((await querySystemd(home)).scope,'system');
+await assert.rejects(access(home));
+const draft=await prepareService(home,true);
+await assert.rejects(access(home));
+assert.equal(draft.expected.linger,null);
+const registered=await saveService(draft,signal);
+assert.equal(registered.autostart,'enabled');
+assert.equal(registered.state.mainPid,0);
+const unit=registered.unit;
+assert.match(await readFile('/etc/systemd/system/'+unit,'utf8'),/User=0/);
+execFileSync('systemd-analyze',['verify','/etc/systemd/system/'+unit]);
+const control=new HostControl(home,signal,console.log);
+await control.start();
+assert.equal((await querySystemd(home)).state.activeState,'active');
+await control.restart();
+await control.stop();
+assert.equal((await querySystemd(home)).state.mainPid,0);
+// 另一范围的固定名称即使只是残留，也不允许隐式覆盖。
+await mkdir('/root/.config/systemd/user',{recursive:true});
+const other='/root/.config/systemd/user/'+unit;
+await writeFile(other,'conflict fixture');
+assert.equal((await querySystemd(home)).kind,'conflict');
+await unlink(other);
+await saveService(await prepareService(home,false),signal);
+assert.equal((await querySystemd(home)).autostart,'disabled');
+console.log(JSON.stringify({passed:true,home,unit,state:await querySystemd(home)}));

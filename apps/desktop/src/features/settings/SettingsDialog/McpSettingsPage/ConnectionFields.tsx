@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SelectionPopover, type SelectionOption } from "../../../../components/SelectionPopover";
-import type { McpFieldChange, McpSecretChange } from "../../../../generated/assistant-protocol";
+import type { McpFieldChange, McpSecretChange } from "@ez-assistant/protocol";
 import styles from "./index.module.scss";
 
 export function ConnectionField(props: Readonly<{ label: string; change: McpFieldChange<string>; onChange: (change: McpFieldChange<string>) => void; removable?: boolean }>) {

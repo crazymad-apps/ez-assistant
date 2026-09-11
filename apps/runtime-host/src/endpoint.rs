@@ -2,9 +2,9 @@
 
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
-    io::Write,
+    io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -68,6 +68,8 @@ pub(crate) struct RuntimeDiscovery {
     pub(crate) instance_id: String,
     pub(crate) access_token: String,
     pub(crate) pid: u32,
+    pub(crate) executable_path: PathBuf,
+    pub(crate) executable_sha256: String,
 }
 
 impl RuntimeInstanceGuard {
@@ -88,17 +90,36 @@ impl RuntimeInstanceGuard {
                 path: lock_path.clone(),
                 source,
             })?;
-        instance_lock
-            .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        let opened = instance_lock
+            .metadata()
             .map_err(|source| EndpointError::Io {
                 path: lock_path.clone(),
                 source,
             })?;
+        let current = fs::symlink_metadata(&lock_path).map_err(|source| EndpointError::Io {
+            path: lock_path.clone(),
+            source,
+        })?;
+        if !opened.is_file()
+            || opened.uid() != nix::unistd::geteuid().as_raw()
+            || opened.dev() != current.dev()
+            || opened.ino() != current.ino()
+        {
+            return Err(EndpointError::UnsafeLockFile { path: lock_path });
+        }
         match instance_lock.try_lock() {
-            Ok(()) => Ok(Self {
-                run_directory,
-                instance_lock,
-            }),
+            Ok(()) => {
+                instance_lock
+                    .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+                    .map_err(|source| EndpointError::Io {
+                        path: lock_path.clone(),
+                        source,
+                    })?;
+                Ok(Self {
+                    run_directory,
+                    instance_lock,
+                })
+            }
             Err(TryLockError::WouldBlock) => Err(EndpointError::AlreadyRunning { path: lock_path }),
             Err(TryLockError::Error(source)) => Err(EndpointError::Io {
                 path: lock_path,
@@ -120,11 +141,18 @@ impl RuntimeInstanceGuard {
         let access_token = random_secret(TOKEN_BYTES)?;
         let discovery_path = self.run_directory.join(DISCOVERY_FILE);
         validate_regular_file_or_missing(&discovery_path, false)?;
+        let (executable_path, executable_sha256) =
+            executable_identity().map_err(|source| EndpointError::Io {
+                path: self.run_directory.clone(),
+                source,
+            })?;
         let discovery = RuntimeDiscovery {
             address: endpoint_url(address, configuration.scheme),
             instance_id: instance_id.clone(),
             access_token: access_token.clone(),
             pid: std::process::id(),
+            executable_path,
+            executable_sha256,
         };
         write_discovery_atomic(&self.run_directory, &discovery_path, &discovery)?;
         Ok(OwnedEndpoint {
@@ -179,6 +207,33 @@ impl OwnedEndpoint {
     pub(crate) fn discovery_path(&self) -> &Path {
         &self.discovery_path
     }
+}
+
+fn executable_identity() -> std::io::Result<(PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    let path = std::env::current_exe()?.canonicalize()?;
+    let mut file = File::open(&path)?;
+    let before = file.metadata()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        digest.update(&buffer[..length]);
+    }
+    let after = fs::metadata(&path)?;
+    if before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.modified()? != after.modified()?
+    {
+        return Err(std::io::Error::other(
+            "Host executable changed during discovery publication",
+        ));
+    }
+    Ok((path, format!("{:x}", digest.finalize())))
 }
 
 fn endpoint_url(address: SocketAddr, scheme: HostAccessScheme) -> String {
@@ -401,6 +456,8 @@ mod tests {
             instance_id: "replacement-instance".to_owned(),
             access_token: "replacement-token".to_owned(),
             pid: 99,
+            executable_path: std::env::current_exe().unwrap(),
+            executable_sha256: "0".repeat(64),
         };
         fs::write(
             endpoint.discovery_path(),

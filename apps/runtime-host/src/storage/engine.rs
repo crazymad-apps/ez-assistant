@@ -60,6 +60,7 @@ impl StorageEngine {
             progress.send_replace(super::DatabaseStartupProgress {
                 stage: assistant_protocol::RuntimeHostStartupStage::DatabaseCheck,
                 database_version: None,
+                min_compatible_host_version: None,
             });
         }
         let data_directory = runtime_home.join(DATA_DIRECTORY);
@@ -68,6 +69,13 @@ impl StorageEngine {
         let blobs_directory = data_directory.join(BLOBS_DIRECTORY);
         let upload_staging_directory = data_directory.join(STAGING_DIRECTORY);
         let deletion_staging_directory = data_directory.join(DELETION_STAGING_DIRECTORY);
+        // 准入必须先于业务目录创建、权限修改和任何写连接；失败时只保留外层诊断。
+        super::migrations::align(runtime_home, |stage| {
+            if let Some(progress) = progress {
+                progress.send_replace(stage);
+            }
+        })
+        .map_err(|source| internal_error("runtime database version alignment failed", source))?;
         prepare_private_directory(&data_directory).map_err(|source| {
             internal_error("runtime data directory could not be prepared", source)
         })?;
@@ -93,12 +101,6 @@ impl StorageEngine {
             )
         })?;
 
-        super::migrations::align(runtime_home, |stage| {
-            if let Some(progress) = progress {
-                progress.send_replace(stage);
-            }
-        })
-        .map_err(|source| internal_error("runtime database version alignment failed", source))?;
         let database_path = data_directory.join(DATABASE_FILE);
         super::filesystem::prepare_private_file(&database_path)?;
         let mut connection = Connection::open(&database_path)

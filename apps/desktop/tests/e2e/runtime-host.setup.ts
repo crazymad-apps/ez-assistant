@@ -1,3 +1,4 @@
+import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -206,7 +207,7 @@ async function uploadAttachment(discovery: Discovery, session_id: string): Promi
   body.append("file", new Blob(["formal host attachment projection"], { type: "text/plain" }), "e2e-attachment.txt");
   const response = await fetch(`${discovery.address}/sessions/${session_id}/attachments`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${discovery.access_token}` },
+    headers: { ...compatibilityHeaders(), Authorization: `Bearer ${discovery.access_token}` },
     body,
   });
   if (!response.ok) {
@@ -325,7 +326,7 @@ async function waitForDiscovery(
     try {
       const discovery = JSON.parse(await readFile(discovery_path, "utf8")) as Discovery;
       const response = await fetch(`${discovery.address}/health`, {
-        headers: { Authorization: `Bearer ${discovery.access_token}` },
+        headers: { ...compatibilityHeaders(), Authorization: `Bearer ${discovery.access_token}` },
       });
       if (response.ok && (await response.json() as { status: string }).status === "ready") {
         return discovery;
@@ -346,8 +347,7 @@ async function runtimeCommand(
   const request_id = crypto.randomUUID();
   const response = await fetch(`${discovery.address}/commands`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${discovery.access_token}`,
+    headers: { ...compatibilityHeaders(), Authorization: `Bearer ${discovery.access_token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -367,7 +367,7 @@ async function runtimeCommand(
 
 async function getJson(url: string, access_token: string): Promise<unknown> {
   const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${access_token}` },
+    headers: { ...compatibilityHeaders(), Authorization: `Bearer ${access_token}` },
   });
   if (!response.ok) {
     throw new Error(`Runtime request failed: ${response.status}`);
@@ -388,6 +388,10 @@ async function waitForExit(child: ChildProcess): Promise<void> {
 }
 
 async function removeTemporaryDirectories(...directories: readonly string[]): Promise<void> {
+  if (process.env.EZ_ASSISTANT_KEEP_TEST_FIXTURES) {
+    console.log(`retained fixtures: ${directories.join(", ")}`);
+    return;
+  }
   const [runtime_home] = directories;
   await chmod(runtime_home, 0o700).catch(() => undefined);
   await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })));

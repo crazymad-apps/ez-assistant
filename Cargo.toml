@@ -26,9 +26,14 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.25.1"
+version = "0.25.2"
+
+[workspace.metadata.ez-assistant]
+min_compatible_version = "0.25.2"
 
 [workspace.dependencies]
+sha2 = "0.10.9"
+nix = { version = "=0.28.0", features = ["process", "user"] }
 async-stream = "0.3.6"
 axum = "0.8.4"
 axum-server = "0.8.0"

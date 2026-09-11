@@ -48,13 +48,30 @@ use std::error::Error;
 use thiserror::Error;
 
 #[cfg(unix)]
-#[tokio::main]
-async fn main() {
+fn main() {
     let action = match parse_cli(std::env::args_os().skip(1)) {
         Ok(action) => action,
         Err(error) => error.exit(),
     };
-    if let Err(error) = run(action).await {
+    if matches!(&action, CliAction::Serve(arguments) if arguments.detached)
+        && let Err(error) = platform::detach_session()
+    {
+        eprintln!("runtime-host: cannot detach session: {error}");
+        std::process::exit(2);
+    }
+    if matches!(action, CliAction::BuildInfoJson) {
+        println!(
+            "{}",
+            serde_json::to_string(&assistant_protocol::ClientCompatibility::current())
+                .expect("build info")
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Host async runtime");
+    if let Err(error) = runtime.block_on(run(action)) {
         eprintln!("runtime-host: {error}");
         std::process::exit(2);
     }
@@ -62,6 +79,24 @@ async fn main() {
 
 async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
     match action {
+        CliAction::BuildInfoJson => {
+            println!(
+                "{}",
+                serde_json::to_string(&assistant_protocol::ClientCompatibility::current())?
+            );
+            Ok(())
+        }
+        CliAction::Access(arguments) => {
+            #[cfg(unix)]
+            {
+                access::offline::run(arguments).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = arguments;
+                Err(Box::new(UnsupportedPlatform))
+            }
+        }
         CliAction::Launch(arguments) => {
             #[cfg(unix)]
             {

@@ -1,6 +1,6 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
-import type { ListMcpServerOptionsRequest, McpSelectionTagSnapshot } from "../../../../generated/assistant-protocol";
+import type { ListMcpServerOptionsRequest, McpSelectionTagSnapshot } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { InputContextPicker } from "../InputContextPicker";
 import { McpServerPickerStore } from "./store";

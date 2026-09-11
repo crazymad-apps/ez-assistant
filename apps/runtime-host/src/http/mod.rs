@@ -3,6 +3,7 @@
 mod attachments;
 mod auth;
 mod commands;
+mod compatibility;
 mod error;
 mod events;
 mod login;
@@ -16,7 +17,7 @@ pub(crate) use startup::StartupStateHandle;
 use std::{path::PathBuf, sync::Arc};
 
 use assistant_protocol::{
-    PROTOCOL_VERSION, RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth,
+    MIN_COMPATIBLE_VERSION, RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth,
 };
 use axum::{
     Json, Router,
@@ -224,7 +225,7 @@ async fn health(
 
 async fn capabilities() -> Json<RuntimeHostCapabilities> {
     Json(RuntimeHostCapabilities {
-        protocol_version: PROTOCOL_VERSION,
+        min_compatible_version: MIN_COMPATIBLE_VERSION.to_owned(),
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
         max_command_bytes: MAX_COMMAND_BYTES as u64,
         max_attachment_bytes: Some(MAX_ATTACHMENT_BYTES),

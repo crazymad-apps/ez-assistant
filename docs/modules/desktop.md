@@ -31,6 +31,10 @@
 
 ## 核心约束
 
+- Desktop 独立构建与运行不得依赖 Client 工程、交互库、构建脚本、可执行入口或随包 Node。
+  共用的协议类型和生成器必须独立于 Client；Desktop 自行发现、认证和管理 Host，通过
+  discovery／systemd 读取真实来源，不解析 Client 私有安装布局或调用其生命周期代理。
+  Client 未来替换架构不要求 Desktop 同步改造；该边界见 [v0.25.2 技术方案](../versions/v0.25.2/技术方案.md)。
 - `src-tauri` 依赖 `assistant-protocol` 和 Runtime Client，不直接依赖或装配
   `assistant-runtime`；Tauri command 必须薄，不实现会话或 Agent Loop。
 - Tauri Rust 启动层从 Runtime Home 私有发现文件取得 loopback 地址和进程级
@@ -38,17 +42,20 @@
   直接调用 Runtime Command、Upload 和事件流，不要求每个请求都经 Tauri command 代理。
 - 远程连接是默认关闭的可选能力；v0.25.0 已确认支持 HTTP／HTTPS 地址和远程身份，
   HTTPS 可选。M2 已实现同一 WebView Runtime Client 复用命令、事件和上传契约的目标连接。
+- 开发 Desktop 使用普通 `npm run tauri -- dev` 连接兼容的 Release Host。显式 Token 请求
+  使用 `credentials: omit`，Host 不根据 Vite／Tauri 来源或构建模式改变认证与权限；
+  Cookie 登录及 API 保留同源保护，普通凭据不能提升为本机管理权限。
 - WebView 中的连接 Token 只存内存，不进入 `localStorage`、日志或普通前端事件；进程 bootstrap 不进入 URL。
   打开 Web 快捷入口仅使用独立普通登录 token fragment，页面立即移除后建立 Cookie 登录态；
-  配套 CSP、受控导航和精确 WebView Origin 白名单。
+  配套 CSP、受控导航和 Cookie 同源保护；显式 Token 采用统一 CORS。
 - xterm DOM renderer 会动态生成字体、ANSI 色、光标样式表及 truecolor/对比度内联样式，因此主窗口
   CSP 的 `style-src` 允许 `'unsafe-inline'`，并仅对 `style-src` 关闭 Tauri 的自动 hash/nonce 注入，
   避免注入的 hash 使该许可失效；脚本 CSP 与其他指令继续保持限制。终端内容仍通过 xterm 写入，
   不转换为 HTML。终端渲染验收必须使用正式 CSP 的 Release WebView，检查等宽字、ANSI/truecolor、
   光标和尺寸变化，不能以放宽策略的独立验证页替代安装包配置。
 - 事件订阅使用能携带 Authorization header 的 `fetch` streaming SSE，不在 URL 中传 Token。
-- 纯浏览器直连本地 Runtime 保留为未来显式开放的可选模式，默认关闭；它可通过
-  独立的 Origin 白名单和授权边界直连，不强制引入 companion bridge。
+- 浏览器可使用随包 Web 的同源 Cookie，或显式提供普通 Token 调用 API；凭据与权限统一，
+  不增加独立的 Origin 配置或 companion bridge。
 - WebView 不直接访问文件系统、模型 API、数据库或 Shell；Host 文件与终端通过受认证 HTTP／WebSocket，客户端 OS 能力通过受控 Tauri command。
 - 关闭主窗口或退出桌面客户端不得默认终止 Runtime；只有明确执行“停止 Runtime”，或在当次退出
   确认中选择“同时停止 Runtime”，才触发受控关闭流程。“退出 Assistant”不作为独立动作。
@@ -287,15 +294,17 @@ npm run tauri -- build --no-bundle
 
 
 开发构建复用本机 Host 时，在 bootstrap 返回就绪前使用 Vite 的精确 Origin 执行预检；原生
-健康检查成功不等于 WebView 具备 CORS 访问能力。安装版 Host 拒绝开发来源时明确提示版本／
-来源不匹配，不自动停止既有进程或放宽 Release 来源策略；原生停止／重启通道不受此预检限制。
+健康检查成功不等于 WebView 具备 CORS 访问能力。显式 Token 的预检接受精确来源或通配符；
+旧 Host 拒绝时提示更新，不自动停止既有进程；原生停止／重启通道不受此预检限制。
 
 ## v0.25.1 M2 启动等待
 
 原生 bootstrap 以认证 capabilities 确认已存在 Host，可达不等于业务就绪；初始化中不得反复
 launch 或因 readiness 超时杀死 Host。页面在创建 SSE、快照及资源恢复前等待 health Ready；
 失败停止自动重连并显示修复指引，连接释放只取消客户端等待，不取消 Host 的迁移或恢复。
-Desktop 与 Web 使用同一启动状态解释；协议不匹配先提示同版本升级，不提供旧业务形状回退。
+Desktop 与 Web 使用同一启动状态解释；不提供旧业务形状回退。2026-09-10 用户明确 v0.25.2
+接入按应用协议最低兼容版本双向检查，不兼容时提示启动／连接失败；该方向替代“必须同版本”
+的判断，具体接入方式与现有协议检查的职责统一由技术方案明确，尚未实现。
 
 ## v0.25.1 M3 模型管理客户端
 
@@ -354,3 +363,29 @@ MarkdownContent 的有序列表保留原生编号，依据起始值与直接列�
 模型行用紧凑 Tag 展示创建来源和参数状态，来源取固定记录 origin，模板／待补全状态取 Runtime 的目录摘要。手动新增复用第三级参数编辑页；manual 删除模型、online 重置配置。选择器分别加载本次在线列表与固定记录，目录慢或失败时已保存模型仍可选择，关闭后丢弃本次视图结果。
 
 开发便捷脚本 `apps/desktop/start.sh` 与 `host-restart.sh` 接受一个位置参数指定 Runtime Home；优先级为入参 > `EZ_ASSISTANT_RUNTIME_HOME` > `~/.ez-assistant`。相对路径按调用位置解析，运行命令前切换到 desktop 目录。重启脚本先执行 `npm run build:host`，构建失败保留现有进程；后续 Cargo 启动也继承 `EZ_ASSISTANT_WEB_DIST`，避免重新生成不含 Web 的开发 Host。构建成功后只读取目标目录发现文件，核对进程命令和目录后发送 SIGINT，最多等待 30 秒；核对失败或超时不启动新 Host，不全局 pkill。
+
+## v0.25.2 M2 软件版本与共享协议消费
+
+- DTO、发布常量、纯判定统一导入 @ez-assistant/protocol；不再引用应用私有 generated 目录。
+- 原生发现与远端连接使用软件版本双向下限，缺少声明的旧 Host 明确拒绝，不替换现有实例。
+  原生请求、前端 fetch、上传／下载均携带自身构建版本，不取 Host 版本冒充页面版本。
+- Web 登录前声明页面版本；快捷登录交换后的普通会话使用当前页面声明。SSE 每次重建重新
+  读取并校验 capabilities，再建立事件流；HTTP 409 和 PTY 兼容错误给出更新／刷新提示。
+- 诊断显示 Host 软件版本及最低兼容软件版本。共享协议包、Desktop 构建和 Host 均不依赖
+  Client 代码、CLI 框架或随包 Node；Client 尚未进入正式实现。
+
+## v0.25.2 M3 本机生命周期（实装，本机验收通过）
+
+- 受控停止固定已认证的地址、实例、token 和 PID；不重发现后向后继实例补发 shutdown。
+  只有原进程退出且原实例锁可取得才完成，discovery 消失本身不证明已停止。
+- 普通重启在停止前核对 Host 私有来源的可执行性、摘要及 build-info 版本对，停止后再核对，
+  始终沿原来源启动；不可用时失败，不回退到 Desktop 随包版本或调用 Client 代理。
+- 原生发现／请求遵循三秒请求、六十秒启动和三十秒停止上限，轮询 250 毫秒递增至一秒。
+  原生 bootstrap 只证明安全连接；Starting／Unavailable／Ready 仍由既有 UI 生命周期消费 health。
+- 来源验证属于 Desktop 的原生适配，不依赖 Client 安装、Node 或任何 Client 私有清单。
+
+M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动、原来源重启、来源缺失／变化拒绝），四库与八份备份逐表核验一致；不代表 Linux／SSH 或完整 Desktop GUI 已验收。
+
+## v0.25.2 桌面启动与服务器自启边界
+
+2026-09-10 用户明确：Desktop 与 Client 的自启逻辑不同，Client 主要面向服务器。Desktop 保留自己的桌面启动逻辑，本版不新增开机／登录自启功能，也不接入 Client 的 systemd 用户服务、linger 或服务器 unit 管理。两产品共存仍遵守共享 Host 的发现、实例锁、软件兼容和来源保护；不把共用 Host 推导为共用自启策略。

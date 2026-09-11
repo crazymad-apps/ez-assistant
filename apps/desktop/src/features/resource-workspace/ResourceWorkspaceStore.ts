@@ -11,7 +11,7 @@ import type {
   SessionId,
   SessionResourceLocator,
   ToolFileReference,
-} from "../../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { registerLocalFileUri, type RegisteredLocalResource } from "../../native-bridge/nativeResource";
 import { localFileUri, resourceIdentity, savedResourcePage, type ResourceWorkspaceSnapshot, type SavedResourceTab } from "./resourceWorkspaceSnapshot";
 

@@ -1,5 +1,5 @@
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
-import type { McpConfigurationMutation, McpConfigurationSnapshot, McpServerDraft, PreviewMcpImportResult, TestMcpServerResult } from "../../../../generated/assistant-protocol";
+import type { McpConfigurationMutation, McpConfigurationSnapshot, McpServerDraft, PreviewMcpImportResult, TestMcpServerResult } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../../../runtime-client/RuntimeClient";
 
 /** MCP 设置的请求与反馈归属；不保存工具目录、连接或权限的权威状态。 */

@@ -1,7 +1,7 @@
 import { ClientResources } from "../../src/runtime-client/ClientResources";
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSummary } from "../../src/generated/assistant-protocol";
+import type { WorkspaceSummary } from "@ez-assistant/protocol";
 import { ConnectionStore } from "../../src/stores/ConnectionStore";
 import { NavigationStore } from "../../src/stores/NavigationStore";
 import type { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
@@ -114,8 +114,8 @@ function controllerFixture(restored: boolean) {
   const navigation = new NavigationStore();
   const connection = new ConnectionStore();
   connection.markConnected("instance-1", {
-    protocol_version: 1,
-    runtime_version: "test",
+    min_compatible_version: "0.25.2",
+    runtime_version: "0.25.2",
     max_command_bytes: 64 * 1024,
     max_attachment_bytes: null,
     sse: true,

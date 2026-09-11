@@ -3,13 +3,13 @@ import { describe, expect, it } from "vitest";
 import type {
   AssistantMessageSnapshot,
   RuntimeHostCapabilities,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 
 describe("generated assistant protocol", () => {
   it("represents additive host capabilities", () => {
     const capabilities = {
-      protocol_version: 1,
-      runtime_version: "0.1.0",
+      min_compatible_version: "0.25.2",
+      runtime_version: "0.25.2",
       max_command_bytes: 1024,
       max_attachment_bytes: null,
       sse: true,

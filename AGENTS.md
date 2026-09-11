@@ -8,6 +8,7 @@
 ```text
 .
 ├── apps/
+│   ├── client/                  # Node.js／TypeScript 本机 Host 管理客户端
 │   ├── desktop/                 # Tauri 桌面应用（Vanilla TypeScript + Vite + Rust）
 │   └── runtime-host/            # 正式 Assistant Runtime 产品进程入口
 ├── crates/
@@ -23,6 +24,8 @@
 │   ├── agent-types/             # Provider-neutral 规范类型
 │   ├── assistant-protocol/      # 跨层共享 DTO、事件与标识类型
 │   └── assistant-runtime/       # 会话、Run、调度、配置与持久化编排
+├── packages/
+│   └── assistant-protocol/      # 多产品共享 TS 协议投影与纯兼容判定
 ├── tools/
 │   ├── core-demo/               # SDK 与完整 Core 能力的独立 B/S 验证宿主
 │   ├── debug-viewer/            # 调试查看器（独立开发工具：POST 接收 + SSE 广播 + 静态页）
@@ -58,6 +61,7 @@
 
 | 改动范围 | 语言规范 | 模块约束 |
 | --- | --- | --- |
+| `apps/client/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`client.md`](docs/modules/client.md) |
 | `apps/desktop/src/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/desktop/src-tauri/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/runtime-host/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-host.md`](docs/modules/runtime-host.md) |
@@ -73,6 +77,7 @@
 | `crates/agent-tools-local/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`agent-tools-local.md`](docs/modules/agent-tools-local.md) |
 | `crates/assistant-runtime/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-runtime.md`](docs/modules/assistant-runtime.md) |
 | `crates/assistant-protocol/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
+| `packages/assistant-protocol/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`assistant-protocol.md`](docs/modules/assistant-protocol.md) |
 | `tools/core-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`core-demo.md`](docs/modules/core-demo.md) |
 | `tools/debug-viewer/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`debug-viewer.md`](docs/modules/debug-viewer.md) |
 | `tools/memory-demo/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`memory-demo.md`](docs/modules/memory-demo.md) |
@@ -153,7 +158,7 @@
   手动启动开发 GUI／Host 时分别显式设置 `EZ_ASSISTANT_RUNTIME_HOME`／`--runtime-home`。
   自动化与隔离验收仍使用临时 Runtime Home，不得把测试数据或批量清理操作指向用户目录。
   未经启动脚本或环境覆盖的 debug／Dev 二进制仍回退 `.ez-assistant-dev`；开发 GUI（含 Release 验证）
-  继续使用 `tauri.dev.conf.json` 隔离应用偏好和 WebView 存储。原有数据库操作确认规则继续适用。
+  继续使用 `tauri.dev.conf.json` 隔离应用偏好和 WebView 存储。数据库操作按第七节区分生产与非生产环境。
 
 常用验证命令：
 
@@ -179,9 +184,10 @@ npm run tauri -- build --no-bundle
 
 ## 七、数据库操作安全
 
-- 任何数据库操作必须分步骤执行并反复核验，不能把目标结果授权理解为允许跳过操作前确认。
+- 2026-09-10 用户明确授权：本项目中已核实的非生产数据库（开发、测试、隔离验收库）操作无需逐次向用户确认；该授权持续有效。生产数据库仍须按下述规则明确确认，不能仅凭目录名判断环境。
+- 任何数据库操作必须分步骤执行并反复核验；非生产免确认不免除目标核对、独立备份、事务保护、异常停止与结果验证。
 - 操作前明确核对源库与目标库的主机、端口、数据库名、表和预期影响范围，并确认应用实际读取的表。
-- 删除、清空、覆盖、恢复、迁移或批量更新前必须再次取得明确确认；确认前只允许只读检查和制定方案。
+- 生产数据库的删除、清空、覆盖、恢复、迁移或批量更新前必须再次取得明确确认；确认前只允许只读检查和制定方案。已核实的本项目非生产库按上述持续授权执行。
 - 破坏性操作前创建独立备份，并实际验证备份存在、可读及关键表精确数量有效。
 - 优先使用事务；无法完整回滚时，操作前说明不可回滚步骤和恢复方案。
 - 任一步骤报错、影响行数异常或验证不符时立即停止，不自行扩大操作范围或连续补救。

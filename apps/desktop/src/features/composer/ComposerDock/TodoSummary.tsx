@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { WorkPlanSnapshot } from "../../../generated/assistant-protocol";
+import type { WorkPlanSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { AnchoredOverlay } from "../../../components/AnchoredOverlay";
 import styles from "./index.module.scss";

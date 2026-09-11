@@ -9,7 +9,7 @@ import {
 import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
 import { PresenceBoundary } from "../../../components/Presence";
-import type { SessionSummary, WorkspaceSummary } from "../../../generated/assistant-protocol";
+import type { SessionSummary, WorkspaceSummary } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { draftKeyForWorkspace } from "../../../stores/NewSessionDraftStore";
 import { sessionTime } from "../sessionFormatters";

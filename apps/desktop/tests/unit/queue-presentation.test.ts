@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { QueueSnapshot } from "../../src/generated/assistant-protocol";
+import type { QueueSnapshot } from "@ez-assistant/protocol";
 import { queuePresentation } from "../../src/features/composer/ComposerDock/queuePresentation";
 
 const queue: QueueSnapshot = {

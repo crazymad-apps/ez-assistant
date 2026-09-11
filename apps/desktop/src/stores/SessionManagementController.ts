@@ -14,7 +14,7 @@ import type {
   UpdateWorkspaceRequest,
   WorkspaceId,
   WorkspaceSummary,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { ClientResources } from "../runtime-client/ClientResources";
 import {
   openSessionWorkspaceDirectory,

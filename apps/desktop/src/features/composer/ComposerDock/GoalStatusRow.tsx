@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GoalPauseReasonSnapshot, GoalSnapshot } from "../../../generated/assistant-protocol";
+import type { GoalPauseReasonSnapshot, GoalSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";

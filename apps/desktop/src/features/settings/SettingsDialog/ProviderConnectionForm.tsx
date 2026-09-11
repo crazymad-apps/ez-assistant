@@ -3,7 +3,7 @@ import { CollapsibleSection } from "../../../components/CollapsibleSection";
 import { InlineIconButton } from "../../../components/InlineIconButton";
 import { observer } from "mobx-react-lite";
 import { useEffect, useId, useRef, useState } from "react";
-import type { ProviderConnection, ProviderCredentialChange, ProviderSummary, ProviderType } from "../../../generated/assistant-protocol";
+import type { ProviderConnection, ProviderCredentialChange, ProviderSummary, ProviderType } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { ModelFieldSelector } from "./ModelFieldSelector";
 import { SettingsMessages } from "./SettingsMessages";

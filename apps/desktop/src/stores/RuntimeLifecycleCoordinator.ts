@@ -8,7 +8,7 @@ import type {
   RuntimeEvent,
   RuntimeEventEnvelope,
   SessionId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import {
   bootstrapRuntime,
   type RuntimeBootstrap,

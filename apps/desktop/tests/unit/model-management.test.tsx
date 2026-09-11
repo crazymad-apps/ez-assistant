@@ -5,7 +5,7 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { discoveredModel, modelParameters, modelProvider, modelSelection } from "../support/modelManagement";
 import { compileTokenDraft, sameParameters, tokenDraft } from "../../src/features/settings/SettingsDialog/modelSettingsValues";
-import type { ModelConfigurationDetail, ProviderUsage } from "../../src/generated/assistant-protocol";
+import type { ModelConfigurationDetail, ProviderUsage } from "@ez-assistant/protocol";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 function modelStore() {

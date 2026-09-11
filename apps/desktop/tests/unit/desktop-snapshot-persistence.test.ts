@@ -11,7 +11,7 @@ afterEach(async () => { for (const store of stores.splice(0)) { await store.flus
 function create() {
   const store = new RootStore();
   vi.mocked(RuntimeLifecycleCoordinator.prototype.connect).mockImplementationOnce(async () => {
-    store.connection.markConnected("fixture", { protocol_version: 3, runtime_version: "test", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] });
+    store.connection.markConnected("fixture", { min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] });
   });
   stores.push(store); return store;
 }

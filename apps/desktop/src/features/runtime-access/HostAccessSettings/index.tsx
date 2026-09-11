@@ -3,7 +3,7 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { SelectionPopover } from "../../../components/SelectionPopover";
-import type { HostAccessConfiguration, HostAccessStatus } from "../../../generated/assistant-protocol";
+import type { HostAccessConfiguration, HostAccessStatus } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SettingsPageContainer } from "../../settings/SettingsDialog/SettingsPageContainer";
 import styles from "./index.module.scss";
@@ -77,9 +77,9 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
         <div className={styles.heading}><h4>非本地访问</h4><span>{locked ? "已开启" : "已关闭"}</span></div>
         <label className={styles.toggle}><input checked={draft.remote_enabled} disabled={pending || !status.password_configured || status.restart_required} onChange={(event) => update({ remote_enabled: event.target.checked })} type="checkbox" />允许其他设备连接</label>
         <p>本机与其他设备共用同一个端口，使用这台电脑的 IP 直接访问。</p>
-        <label htmlFor="host-server-names">允许的域名（可选，每行一个）</label>
-        <textarea disabled={pending} id="host-server-names" onChange={(event) => update({ server_names: event.target.value.split("\n") })} placeholder="assistant.example.com" rows={2} value={draft.server_names.join("\n")} />
-        <p>仅使用 IP 时留空；域名无需填写协议和端口。</p>
+        <label htmlFor="host-server-names">允许的 IP 或域名（可选，每行一个）</label>
+        <textarea disabled={pending} id="host-server-names" onChange={(event) => update({ server_names: event.target.value.split("\n") })} placeholder={"127.0.0.1\n::1\nassistant.example.com"} rows={3} value={draft.server_names.join("\n")} />
+        <p>支持 IPv4、IPv6 和域名，不包含协议、端口或路径；仅使用 IP 时也可留空。</p>
         {closing_current && <p className={styles.warning}>关闭后，当前连接将中断。Host 上的任务继续运行，可通过本机设置重新开启。</p>}
       </section>
       <section className={styles.card}>
@@ -96,7 +96,7 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
             <label htmlFor="host-private-key">私钥路径（Host）</label><input id="host-private-key" onChange={(event) => update({ tls_private_key: event.target.value || null })} placeholder="/absolute/path/host.key" value={draft.tls_private_key ?? ""} />
           </>}
         </fieldset>
-        {locked ? <p>关闭非本地访问后，可修改端口、协议和证书。</p> : <p>修改端口、协议或证书后需重启 Host；访问开关和域名立即生效。</p>}
+        {locked ? <p>关闭非本地访问后，可修改端口、协议和证书。</p> : <p>修改端口、协议或证书后需重启 Host；访问开关和允许地址立即生效。</p>}
         {status.restart_required && <p role="status" className={styles.warning}>端口、协议或证书已修改，请重启 Host 后再开启非本地访问。</p>}
 
         {status.restart_required && isTauri() && root.desktop_lifecycle.local_impact_known && <Button disabled={pending || root.desktop_lifecycle.pending} onClick={() => root.desktop_lifecycle.request("restart_runtime")}>重启本机 Runtime</Button>}

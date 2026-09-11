@@ -32,7 +32,7 @@ fn socket(host: &HostProcess, cookie: Option<&str>) -> Socket {
     } else {
         request
             .headers_mut()
-            .insert("Origin", "tauri://localhost".parse().unwrap());
+            .insert("Origin", "http://localhost:1420".parse().unwrap());
     }
     let (socket, _) = tungstenite::connect(request).unwrap();
     if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
@@ -50,7 +50,7 @@ fn control(socket: &mut Socket, value: Value) {
 fn open(socket: &mut Socket, token: Option<&str>, source: &Value) -> Value {
     control(
         socket,
-        json!({"type":"open", "bearer":token, "source":source, "size":{"cols":80,"rows":24}}),
+        json!({"type":"open", "client_compatibility":assistant_protocol::ClientCompatibility::current(), "bearer":token, "source":source, "size":{"cols":80,"rows":24}}),
     );
     let result = notice(socket);
     if result["type"] == "created" {
@@ -142,8 +142,8 @@ fn gone(pid: i32) -> bool {
 
 #[test]
 fn terminal_bytes_resize_disconnect_and_source_removal_are_connection_owned() {
-    let home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
+    let workspace = support::test_directory();
     let host = HostProcess::start(home.path());
     let mut api = host.connect();
     let registered = api.runtime("register_workspace",json!({"label":"M4 terminal", "primary_directory":workspace.path(), "additional_directories":[]}));
@@ -190,8 +190,8 @@ fn terminal_bytes_resize_disconnect_and_source_removal_are_connection_owned() {
 
 #[test]
 fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
-    let home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
+    let workspace = support::test_directory();
     let host = HostProcess::start(home.path());
     let mut api = host.connect();
     let registered = api.runtime("register_workspace",json!({"label":"M4 auth", "primary_directory":workspace.path(), "additional_directories":[]}));
@@ -206,6 +206,7 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
     let login: Value = client
         .post(format!("{}/auth/login", host.base_url()))
         .bearer_auth(host.access_token())
+        .headers(support::compatibility_headers())
         .json(&json!({"method":"desktop"}))
         .send()
         .unwrap()
@@ -219,6 +220,11 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
         .port()
         .unwrap();
     let cookie = format!("ez_host_session_http_{port}={token}");
+    let mut switched = socket(&host, Some(&cookie));
+    let rejected = open(&mut switched, Some(host.access_token()), &source);
+    assert_eq!(rejected["type"], "error");
+    assert!(rejected["message"].as_str().unwrap().contains("登录"));
+    drop(switched);
     let mut web = socket(&host, Some(&cookie));
     assert_eq!(open(&mut web, None, &source)["type"], "created");
     input(&mut web, "echo $$ > web.pid; sleep 60\n");
@@ -226,6 +232,7 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
     client
         .post(format!("{}/auth/logout", host.base_url()))
         .bearer_auth(token)
+        .headers(support::compatibility_headers())
         .send()
         .unwrap()
         .error_for_status()
@@ -249,6 +256,7 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
         let login: Value = client
             .post(format!("{}/auth/login", host.base_url()))
             .bearer_auth(host.access_token())
+            .headers(support::compatibility_headers())
             .json(&json!({"method":"desktop"}))
             .send()
             .unwrap()
@@ -277,8 +285,8 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
 
 #[test]
 fn missing_authentication_and_silent_peer_are_bounded() {
-    let home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
+    let workspace = support::test_directory();
     let host = HostProcess::start(home.path());
     let mut api = host.connect();
     let registered = api.runtime("register_workspace",json!({"label":"M4 timeout", "primary_directory":workspace.path(), "additional_directories":[]}));
@@ -324,10 +332,10 @@ fn missing_authentication_and_silent_peer_are_bounded() {
 
 #[test]
 fn session_deletion_reclaims_its_terminal_and_tcp_loss_does_not_cancel_a_run() {
-    let home = tempfile::tempdir().unwrap();
+    let home = support::test_directory();
     let provider = support::FakeProvider::start();
     support::write_config(home.path(), provider.endpoint(), "isolated-terminal-model");
-    let markers = tempfile::tempdir().unwrap();
+    let markers = support::test_directory();
     let host = HostProcess::start(home.path());
     let mut api = host.connect();
     let created = api.runtime(
@@ -382,4 +390,45 @@ fn session_deletion_reclaims_its_terminal_and_tcp_loss_does_not_cancel_a_run() {
     );
     api.runtime("shutdown_runtime", json!({}));
     assert!(host.wait().status.success());
+}
+
+#[test]
+fn incompatible_first_frames_are_rejected_before_resolving_a_directory() {
+    let directory = support::test_directory();
+    let host = HostProcess::start(directory.path());
+    for (declaration, expected) in [
+        (Value::Null, "missing_declaration"),
+        (
+            json!({"version":"0.25.1","min_compatible_version":"0.25.1"}),
+            "client_too_old",
+        ),
+        (
+            json!({"version":"0.25.3","min_compatible_version":"0.25.3"}),
+            "host_too_old",
+        ),
+        (
+            json!({"version":"not-a-version","min_compatible_version":"0.25.2"}),
+            "invalid_declaration",
+        ),
+    ] {
+        let mut peer = socket(&host, None);
+        control(
+            &mut peer,
+            json!({"type":"open", "bearer":host.access_token(), "client_compatibility":declaration,
+            "source":{"type":"workspace","workspace_id":"does-not-exist"},"size":{"cols":80,"rows":24}}),
+        );
+        let rejected = notice(&mut peer);
+        assert_eq!(rejected["type"], "compatibility_error");
+        assert_eq!(rejected["error"]["code"], expected);
+    }
+    let client = reqwest::blocking::Client::new();
+    assert!(
+        client
+            .get(format!("{}/health", host.base_url()))
+            .bearer_auth(host.access_token())
+            .send()
+            .unwrap()
+            .status()
+            .is_success()
+    );
 }

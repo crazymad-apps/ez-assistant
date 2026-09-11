@@ -6,7 +6,7 @@ import {
   DropdownMenuTrigger,
 } from "../../../components/DropdownMenu";
 import { Icon } from "../../../components/Icon";
-import type { SessionSummary } from "../../../generated/assistant-protocol";
+import type { SessionSummary } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import styles from "./index.module.scss";
 

@@ -1,4 +1,4 @@
-import type { QueueSnapshot, QueuedSessionItemSnapshot, RunId } from "../../../generated/assistant-protocol";
+import type { QueueSnapshot, QueuedSessionItemSnapshot, RunId } from "@ez-assistant/protocol";
 
 export type QueuePresentation = Readonly<{
   items: readonly QueuedSessionItemSnapshot[];

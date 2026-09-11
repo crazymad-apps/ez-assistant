@@ -11,6 +11,13 @@ fn db(home: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
 
+fn validate_old_source(connection: &Connection) -> Result<()> {
+    connection.prepare(
+        "SELECT session_id, model_key, title, body_generation, message_count FROM sessions LIMIT 0",
+    )?;
+    Ok(())
+}
+
 fn baseline(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -41,6 +48,8 @@ fn validate_baseline(connection: &Connection) -> Result<()> {
 fn first() -> Migration {
     Migration {
         version: BASELINE,
+        min_compatible_host_version: None,
+        validate_source: validate_old_source,
         apply: baseline,
         validate: validate_baseline,
     }
@@ -196,11 +205,15 @@ fn skips_committed_prefix_and_records_explicit_empty_versions_in_semver_order() 
         first(),
         Migration {
             version: "0.25.2",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: next,
             validate: empty,
         },
         Migration {
             version: "0.25.10",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: empty,
             validate: empty,
         },
@@ -221,11 +234,15 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
         first(),
         Migration {
             version: "0.25.2",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: fail,
             validate: empty,
         },
         Migration {
             version: "0.25.3",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: next,
             validate: empty,
         },
@@ -261,6 +278,8 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
             first(),
             Migration {
                 version: "0.25.2",
+                min_compatible_host_version: Some("0.25.2"),
+                validate_source: validate_old_source,
                 apply: next,
                 validate: empty,
             },
@@ -309,6 +328,8 @@ fn validation_failure_and_illegal_transaction_controls_roll_back_initial_ledger(
                 BASELINE,
                 &[Migration {
                     version: BASELINE,
+                    min_compatible_host_version: None,
+                    validate_source: validate_old_source,
                     apply,
                     validate
                 }]
@@ -351,6 +372,8 @@ fn rejects_ledger_gaps_unknown_versions_invalid_values_and_newer_database_before
                 first(),
                 Migration {
                     version: "0.25.2",
+                    min_compatible_host_version: Some("0.25.2"),
+                    validate_source: validate_old_source,
                     apply: empty,
                     validate: empty,
                 },
@@ -371,6 +394,8 @@ fn invalid_manifest_is_rejected_without_creating_database() {
         vec![first(), first()],
         vec![Migration {
             version: "0.25.2",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: empty,
             validate: empty,
         }],
@@ -426,23 +451,30 @@ fn referenced_old_column_fails_without_partial_schema_changes() {
 }
 
 #[test]
-fn backup_contains_wal_rows_and_fixed_constraints_are_enforced() {
+fn wal_is_rejected_without_checkpoint_or_backup() {
     let home = tempfile::tempdir().unwrap();
     let c = db(home.path());
     c.pragma_update(None, "journal_mode", "WAL").unwrap();
     c.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     legacy(&c);
-    let report = migrate(home.path(), BASELINE, &[first()]).unwrap();
-    let b = Connection::open_with_flags(
-        report.backup.unwrap().join("runtime.sqlite3"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    assert_eq!(
-        b.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
+    let path = home.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
+    let before = fs::read(&path).unwrap();
+    let wal = path.with_file_name(format!("{DATABASE_FILE}-wal"));
+    let wal_before = fs::read(&wal).unwrap();
+    assert!(matches!(
+        migrate(home.path(), BASELINE, &[first()]),
+        Err(MigrationError::UnsafeJournal)
+    ));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert!(!home.path().join("backups").exists());
+}
+
+#[test]
+fn fixed_constraints_remain_enforced_after_upgrade() {
+    let home = tempfile::tempdir().unwrap();
+    migrate(home.path(), BASELINE, &[first()]).unwrap();
+    let c = db(home.path());
     c.pragma_update(None, "foreign_keys", true).unwrap();
     c.execute("INSERT INTO providers VALUES('p')", []).unwrap();
     c.execute(
@@ -498,6 +530,8 @@ fn validation_cannot_mutate_business_rows_or_ledger() {
                 BASELINE,
                 &[Migration {
                     version: BASELINE,
+                    min_compatible_host_version: None,
+                    validate_source: validate_old_source,
                     apply: baseline,
                     validate
                 }]
@@ -526,11 +560,15 @@ fn ledger_with_missing_middle_release_or_wrong_shape_is_rejected() {
         first(),
         Migration {
             version: "0.25.2",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: empty,
             validate: empty,
         },
         Migration {
             version: "0.25.3",
+            min_compatible_host_version: Some("0.25.2"),
+            validate_source: validate_old_source,
             apply: empty,
             validate: empty,
         },
@@ -558,6 +596,8 @@ fn controlled_upgrade_reports_backup_and_failed_sql_without_enabling_runtime() {
     let mut stages = Vec::new();
     let failing = Migration {
         version: BASELINE,
+        min_compatible_host_version: None,
+        validate_source: validate_old_source,
         apply: |connection| {
             connection
                 .execute_batch("DELETE FROM sessions; SELECT * FROM intentional_missing_table")?;
@@ -567,7 +607,9 @@ fn controlled_upgrade_reports_backup_and_failed_sql_without_enabling_runtime() {
     };
     let error = migrate_with_progress(home.path(), BASELINE, &[failing], |progress| {
         let stage = progress.stage;
-        stages.push(stage);
+        if stages.last() != Some(&stage) {
+            stages.push(stage);
+        }
         startup.database_progress(progress);
         assert_eq!(startup.health().status, RuntimeHostHealthStatus::Starting);
         assert_eq!(startup.health().stage, Some(stage));

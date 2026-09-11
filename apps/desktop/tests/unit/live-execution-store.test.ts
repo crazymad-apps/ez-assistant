@@ -3,7 +3,7 @@ import type {
   RuntimeEvent,
   RuntimeEventEnvelope,
   SessionViewSnapshot,
-} from "../../src/generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
 
 describe("LiveExecutionStore", () => {

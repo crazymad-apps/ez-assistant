@@ -1,7 +1,7 @@
 import { copyText } from "../../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
-import type { McpServerDraft, McpServerSnapshot, McpTransportKind } from "../../../../generated/assistant-protocol";
+import type { McpServerDraft, McpServerSnapshot, McpTransportKind } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "../SettingsPageContainer";

@@ -1,5 +1,5 @@
 import { observer } from "mobx-react-lite";
-import type { ApplicationSnapshot } from "../../../generated/assistant-protocol";
+import type { ApplicationSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import styles from "./index.module.scss";

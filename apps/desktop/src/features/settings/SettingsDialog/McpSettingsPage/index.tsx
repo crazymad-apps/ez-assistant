@@ -1,7 +1,7 @@
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../../../components/Icon";
-import type { McpServerSnapshot } from "../../../../generated/assistant-protocol";
+import type { McpServerSnapshot } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "../SettingsPageContainer";

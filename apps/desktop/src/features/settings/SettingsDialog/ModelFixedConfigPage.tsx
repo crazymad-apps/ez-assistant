@@ -4,7 +4,7 @@ import { openExternalHttpUrl } from "../../../native-bridge/openExternalUrl";
 import { CollapsibleSection } from "../../../components/CollapsibleSection";
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import type { ModelConfigurationDetail, ModelParameters, ModelSelection, ProviderSummary, ReasoningEffortKey } from "../../../generated/assistant-protocol";
+import type { ModelConfigurationDetail, ModelParameters, ModelSelection, ProviderSummary, ReasoningEffortKey } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { ModelFieldSelector } from "./ModelFieldSelector";

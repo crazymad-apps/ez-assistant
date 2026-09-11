@@ -1,7 +1,7 @@
 import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ModelSelection, ProviderInstanceId } from "../../../generated/assistant-protocol";
+import type { ModelSelection, ProviderInstanceId } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { ModelFixedConfigPage } from "./ModelFixedConfigPage";

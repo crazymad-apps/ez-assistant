@@ -24,7 +24,7 @@ import type {
   SkillManagementSnapshot,
   ValidateModelConnectionResult,
   WorkspaceId,
-} from "../generated/assistant-protocol";
+} from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
 
 export type RuntimeSettingsPageId = "runtime" | "runtime_connection" | "host_access" | "runtime_diagnostics" | "runtime_local";

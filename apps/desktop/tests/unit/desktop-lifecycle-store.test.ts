@@ -1,6 +1,6 @@
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApplicationSnapshot } from "../../src/generated/assistant-protocol";
+import type { ApplicationSnapshot } from "@ez-assistant/protocol";
 import type {
   DesktopLifecycleIntent,
   NativeRuntimeMutationEvent,

@@ -19,6 +19,29 @@ use reqwest::blocking::Client as HttpClient;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
+/// 显式隔离验收时保留夹具供逐表审计，日常测试仍自动清理。
+pub fn test_directory() -> tempfile::TempDir {
+    let mut directory = tempfile::tempdir().expect("create isolated fixture");
+    if std::env::var_os("EZ_ASSISTANT_KEEP_TEST_FIXTURES").is_some() {
+        directory.disable_cleanup(true);
+        eprintln!("retained fixture: {}", directory.path().display());
+    }
+    directory
+}
+
+pub fn compatibility_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        assistant_protocol::CLIENT_VERSION_HEADER,
+        reqwest::header::HeaderValue::from_static(assistant_protocol::SOFTWARE_VERSION),
+    );
+    headers.insert(
+        assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
+        reqwest::header::HeaderValue::from_static(assistant_protocol::MIN_COMPATIBLE_VERSION),
+    );
+    headers
+}
+
 pub struct FakeProvider {
     endpoint: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -1283,6 +1306,7 @@ impl Client {
     fn connect(base_url: String, access_token: String) -> Self {
         Self {
             http: HttpClient::builder()
+                .default_headers(compatibility_headers())
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(12))
                 .build()

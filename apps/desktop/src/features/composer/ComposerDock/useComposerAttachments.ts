@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AttachmentId } from "../../../generated/assistant-protocol";
+import type { AttachmentId } from "@ez-assistant/protocol";
 import type { ComposerAttachment } from "../../../stores/NewSessionDraftStore";
 import type { AttachmentSelection } from "../../../native-bridge/nativeResource";
 import { useRootStore } from "../../../stores/RootStoreContext";

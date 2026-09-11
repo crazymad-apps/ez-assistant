@@ -1,6 +1,6 @@
 import { action, makeObservable, observable, observableRef } from "mobx";
 import { startupMessage } from "../runtime-client/startupStatus";
-import type { RuntimeHostCapabilities, RuntimeHostHealth } from "../generated/assistant-protocol";
+import type { RuntimeHostCapabilities, RuntimeHostHealth } from "@ez-assistant/protocol";
 
 export type RuntimeConnectionState =
   | "booting"

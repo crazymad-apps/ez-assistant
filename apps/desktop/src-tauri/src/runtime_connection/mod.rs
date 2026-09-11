@@ -18,10 +18,21 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Serialize)]
 pub(crate) struct ConnectionError {
     code: &'static str,
-    message: &'static str,
+    message: String,
 }
 fn failure(code: &'static str, message: &'static str) -> ConnectionError {
-    ConnectionError { code, message }
+    ConnectionError {
+        code,
+        message: message.to_owned(),
+    }
+}
+
+impl ConnectionError {
+    // 只附加固定阶段，不回显响应正文、密码、Token 或请求 URL。
+    fn at_step(mut self, step: &'static str) -> Self {
+        self.message = format!("{step}：{}", self.message);
+        self
+    }
 }
 fn stale() -> ConnectionError {
     failure("connection_changed", "连接目标已切换，请重新操作。")
@@ -31,6 +42,31 @@ fn unavailable() -> ConnectionError {
         "runtime_unavailable",
         "无法连接 Runtime，请检查地址、网络及证书信任。",
     )
+}
+
+fn transport_error(error: &reqwest::Error) -> ConnectionError {
+    let mut failure = if error.is_timeout() {
+        failure("runtime_unavailable", "连接 Runtime 超时。")
+    } else if error.is_connect() {
+        failure(
+            "runtime_unavailable",
+            "无法建立到 Runtime 的连接，请检查网络及证书信任。",
+        )
+    } else {
+        unavailable()
+    };
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(code) = cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+        {
+            failure.message.push_str(&format!("（系统错误码 {code}）"));
+            break;
+        }
+        source = cause.source();
+    }
+    failure
 }
 
 #[derive(Default)]
@@ -233,7 +269,7 @@ pub(crate) async fn open_runtime_web(
     let result = tokio::select! {
         biased;
         () = target.cancellation.cancelled() => return Err(stale()),
-        result = http()?.post(format!("{}/auth/login", bootstrap.base_url)).bearer_auth(&bootstrap.access_token).json(&HostLoginRequest::Desktop).send() => result.map_err(|_| unavailable())?,
+        result = http()?.post(format!("{}/auth/login", bootstrap.base_url)).bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers()).json(&HostLoginRequest::Desktop).send() => result.map_err(|_| unavailable())?,
     };
     let login = decode_login(result).await?;
     target.ensure_active()?;
@@ -277,8 +313,20 @@ async fn decode_login(response: reqwest::Response) -> Result<HostLoginResult, Co
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(failure("authentication_required", "密码错误或登录已失效。"));
     }
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        return Err(failure(
+            "component_mismatch",
+            "Host 与 Desktop 软件版本不兼容，请更新对应应用。",
+        ));
+    }
     if !response.status().is_success() {
-        return Err(unavailable());
+        return Err(ConnectionError {
+            code: "runtime_unavailable",
+            message: format!(
+                "Host 返回 HTTP {}，请检查访问设置。",
+                response.status().as_u16()
+            ),
+        });
     }
     decode_json(response).await
 }
@@ -293,23 +341,32 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    serde_json::from_slice(&bytes).map_err(|_| {
+        failure(
+            "component_mismatch",
+            "Host 响应格式不匹配，请核对 Host 与 Desktop 版本。",
+        )
+    })
 }
 
 async fn remote_login(origin: &str, password: &str) -> Result<RuntimeBootstrap, ConnectionError> {
     let login = decode_login(
         http()?
             .post(format!("{origin}/auth/login"))
+            .headers(crate::runtime_compatibility::headers())
             .json(&HostLoginRequest::Password {
                 password: SecretValue::new(password.to_owned()),
                 native: true,
             })
             .send()
             .await
-            .map_err(|_| unavailable())?,
+            .map_err(|error| transport_error(&error).at_step("发送登录请求"))?,
     )
-    .await?;
-    let token = login.token.ok_or_else(unavailable)?;
+    .await
+    .map_err(|error| error.at_step("读取登录响应"))?;
+    let token = login
+        .token
+        .ok_or_else(|| failure("component_mismatch", "Host 未返回原生登录凭据。"))?;
     verify_remote(origin, token.expose()).await
 }
 async fn verify_remote(origin: &str, token: &str) -> Result<RuntimeBootstrap, ConnectionError> {
@@ -324,23 +381,40 @@ async fn verify_remote_with_client(
     let session = decode_login(
         http.get(format!("{origin}/auth/session"))
             .bearer_auth(token)
+            .headers(crate::runtime_compatibility::headers())
             .send()
             .await
-            .map_err(|_| unavailable())?,
+            .map_err(|error| transport_error(&error).at_step("查询登录状态"))?,
     )
-    .await?;
+    .await
+    .map_err(|error| error.at_step("验证登录状态"))?;
     let response = http
         .get(format!("{origin}/capabilities"))
         .bearer_auth(token)
+        .headers(crate::runtime_compatibility::headers())
         .send()
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|error| transport_error(&error).at_step("查询 Host 能力"))?;
     if !response.status().is_success() {
-        return Err(unavailable());
+        return Err(ConnectionError {
+            code: "runtime_unavailable",
+            message: format!("查询 Host 能力返回 HTTP {}。", response.status().as_u16()),
+        });
     }
-    let capabilities: RuntimeHostCapabilities = decode_json(response).await?;
-    if capabilities.protocol_version != assistant_protocol::PROTOCOL_VERSION
-        || capabilities.runtime_version != env!("CARGO_PKG_VERSION")
+    let capabilities: RuntimeHostCapabilities = decode_json(response).await.map_err(|_| {
+        failure(
+            "component_mismatch",
+            "Host 缺少有效的软件版本声明，请更新 Host。",
+        )
+    })?;
+    if assistant_protocol::check_compatibility(
+        Some(&assistant_protocol::ClientCompatibility::current()),
+        &assistant_protocol::ClientCompatibility {
+            version: capabilities.runtime_version.clone(),
+            min_compatible_version: capabilities.min_compatible_version.clone(),
+        },
+    )
+    .is_err()
         || !capabilities.sse
         || !capabilities
             .features
@@ -348,7 +422,7 @@ async fn verify_remote_with_client(
     {
         return Err(failure(
             "component_mismatch",
-            "Host 与 Desktop 版本或能力不匹配，请使用同版本应用。",
+            "Host 与 Desktop 软件版本不兼容或缺少所需能力，请更新对应应用。",
         ));
     }
     Ok(RuntimeBootstrap {
@@ -371,7 +445,7 @@ mod tests {
             access_token: secret.into(),
             started_runtime: false,
             capabilities: RuntimeHostCapabilities {
-                protocol_version: assistant_protocol::PROTOCOL_VERSION,
+                min_compatible_version: assistant_protocol::MIN_COMPATIBLE_VERSION.into(),
                 runtime_version: env!("CARGO_PKG_VERSION").into(),
                 max_command_bytes: 1048576,
                 max_attachment_bytes: None,
@@ -450,16 +524,52 @@ mod tests {
             assert!(socket.read(&mut request).await.unwrap() > 0);
             socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{location}/auth/login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         });
-        assert!(
-            remote_login(&format!("http://{address}"), "test-password")
-                .await
-                .is_err()
-        );
+        let error = remote_login(&format!("http://{address}"), "test-password")
+            .await
+            .map(|_| ())
+            .expect_err("redirect must be rejected");
+        assert_eq!(error.code, "runtime_unavailable");
+        assert!(error.message.contains("读取登录响应"));
+        assert!(error.message.contains("307"));
+        assert!(!error.message.contains("test-password"));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), destination.accept())
                 .await
                 .is_err()
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_login_response_is_distinct_from_network_failure_and_redacted() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = source.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = source.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = r#"{"token":"sensitive-response-token"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let error = remote_login(&format!("http://{address}"), "test-password")
+            .await
+            .map(|_| ())
+            .expect_err("incomplete login response must fail");
+        assert_eq!(error.code, "component_mismatch");
+        assert!(error.message.contains("读取登录响应"));
+        assert!(error.message.contains("响应格式不匹配"));
+        assert!(!error.message.contains("sensitive-response-token"));
+        assert!(!error.message.contains("test-password"));
         server.await.unwrap();
     }
     #[tokio::test]
@@ -480,6 +590,7 @@ mod tests {
             .unwrap();
         let response = trusted
             .post(format!("{origin}/auth/login"))
+            .headers(crate::runtime_compatibility::headers())
             .json(&HostLoginRequest::Password {
                 password: SecretValue::new("Dev-remote-025".into()),
                 native: true,
@@ -494,8 +605,8 @@ mod tests {
         assert_eq!(prepared.base_url, origin);
         assert_eq!(prepared.instance_id, login.instance_id);
         assert_eq!(
-            prepared.capabilities.protocol_version,
-            assistant_protocol::PROTOCOL_VERSION
+            prepared.capabilities.min_compatible_version,
+            assistant_protocol::MIN_COMPATIBLE_VERSION
         );
     }
 }

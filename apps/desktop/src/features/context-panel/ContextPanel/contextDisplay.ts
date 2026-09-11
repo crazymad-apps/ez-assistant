@@ -1,4 +1,4 @@
-import type { RunStatus, SessionViewSnapshot, SkillManagementSnapshot } from "../../../generated/assistant-protocol";
+import type { RunStatus, SessionViewSnapshot, SkillManagementSnapshot } from "@ez-assistant/protocol";
 
 /** 当前目录决定列表；激活标签只说明已进入历史的正文，不补回已删除技能。 */
 export function sessionSkillRows(view: SessionViewSnapshot | undefined, catalog: SkillManagementSnapshot | null) {
@@ -44,7 +44,7 @@ export function formatApprovalMode(mode: string | null | undefined): string {
   return mode === "ask" ? "询问" : mode === "auto" ? "自动" : "未记录";
 }
 
-export function formatModelIdentity(selection: import("../../../generated/assistant-protocol").ModelSelection | null, providers: readonly import("../../../generated/assistant-protocol").ProviderSummary[]): string {
+export function formatModelIdentity(selection: import("@ez-assistant/protocol").ModelSelection | null, providers: readonly import("@ez-assistant/protocol").ProviderSummary[]): string {
   if (!selection) return "未配置默认模型";
   const provider = providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
   return `${provider?.connection.display_name ?? "服务商已删除"} / ${selection.model_id}`;

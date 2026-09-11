@@ -9,7 +9,7 @@ import {
   viewingSnapshot,
 } from "../../src/native-bridge/desktopPreferences";
 import { copyText } from "../../src/platform/clipboard";
-import type { SessionMaterializationManifest } from "../../src/generated/assistant-protocol";
+import type { SessionMaterializationManifest } from "@ez-assistant/protocol";
 
 vi.mock("@tauri-apps/api/core", async (original) => ({
   ...(await original<typeof import("@tauri-apps/api/core")>()),
@@ -28,8 +28,8 @@ function runtime(origin = "http://host.test:7240") {
     instance_id: "host-a",
     started_runtime: false,
     capabilities: {
-      protocol_version: 1,
-      runtime_version: "test",
+      min_compatible_version: "0.25.2",
+      runtime_version: "0.25.2",
       max_command_bytes: 65536,
       max_attachment_bytes: null,
       sse: true,
