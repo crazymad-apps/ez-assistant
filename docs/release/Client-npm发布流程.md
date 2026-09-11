@@ -2,7 +2,26 @@
 
 本文用于 ez-assistant Client 的 npm 发包。流程为：**确定版本和平台 → 独立构建 Host/Web → 装配 npm 包 → 隔离验收 → 平台附件发布到 next → 主包发布到 next → registry 安装验证 → 切换 latest**。
 
-当前为 v0.25.2 M6 的发布操作手册。整理本流程不代表版本验收通过或授权实际发布；当前包仍是本地候选产物。Desktop 的 App/DMG 继续使用[macOS 发布流程](macOS发布流程.md)，不与 npm 发布绑定。
+本文从 v0.25.2 M6 发布流程整理，v0.25.2 已于 2026-09-11 经用户授权发布到官方 npm 源，发布记录见下节。Desktop 的 App/DMG 继续使用[macOS 发布流程](macOS发布流程.md)，不与 npm 发布绑定。
+
+## 2026-09-11 官方发布记录
+
+- Registry：`https://registry.npmjs.org/`；发布账号 `crazy_mad`（组织 owner）。
+- Client 与 macOS arm64、Linux arm64、Linux x64 三个平台附件均为 `0.25.2`；主包精确依赖同版本附件。四包的 `next`、`latest` 回读均为 `0.25.2`。
+- 源码修订 `31546f304c38890d279f78f26d50b97cec052afc`，对应已推送标签 `v0.25.2`。Client 重新编译；Host 从已验收私有附件提取，并逐字节核对二进制及 manifest，未使用来源不确定的 target 产物。
+- 发布前四包 dry-run、SHA512 和 macOS 代码签名检查通过。发布后四包 registry SHA1／SHA512 与本地产物一致。
+- 使用独立 prefix 与空缓存从官方源安装主包，确认仅安装本机 macOS arm64 附件，安装后二进制与验收产物一致；Node 22.12.0 执行 CLI 返回 `0.25.2`，Host build-info 返回软件／最低兼容版本均为 `0.25.2`。本次未重新运行 Linux 全量验收、Desktop 构建或业务 Host，也未修改生产环境。
+- 本地证据：`/tmp/ez-client-npm-official-v0252-verified/official-preflight.json`、同目录 `official-verification.json`；隔离安装目录 `/tmp/ez-client-official-registry-install-0252`。这些临时路径不作为长期归档保证。
+
+安装命令：
+
+```sh
+npm install -g @ez-assistant/client@0.25.2 --registry=https://registry.npmjs.org/
+ez-assistant config
+ez-assistant start
+```
+
+GitHub 同版本发行页：[EZ Assistant v0.25.2](https://github.com/crazymad-apps/ez-assistant/releases/tag/v0.25.2)，已附 macOS arm64 Desktop DMG 和上述 npm 安装信息。Desktop DMG SHA-256 为 `96af0485b444c31562384abcc488d517c18c0c324441573088ea11a6c44f8ae7`；上传后 GitHub 资产摘要核对一致。
 
 ## 1. 发哪些包
 
