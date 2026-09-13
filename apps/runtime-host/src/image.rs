@@ -568,6 +568,8 @@ fn encode_jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, ImageResour
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
     use std::sync::Arc;
 
     use image::{

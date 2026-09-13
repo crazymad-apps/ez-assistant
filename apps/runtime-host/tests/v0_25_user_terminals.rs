@@ -403,11 +403,14 @@ fn incompatible_first_frames_are_rejected_before_resolving_a_directory() {
             "client_too_old",
         ),
         (
-            json!({"version":"0.25.3","min_compatible_version":"0.25.3"}),
+            json!({"version":"999.0.0","min_compatible_version":"999.0.0"}),
             "host_too_old",
         ),
         (
-            json!({"version":"not-a-version","min_compatible_version":"0.25.2"}),
+            json!({
+                "version":"not-a-version",
+                "min_compatible_version": assistant_protocol::MIN_COMPATIBLE_VERSION,
+            }),
             "invalid_declaration",
         ),
     ] {

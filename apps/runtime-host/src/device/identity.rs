@@ -130,17 +130,22 @@ impl InstallationIdentity {
 }
 
 fn prepare_private_directory(path: &Path) -> Result<(), IdentityError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if !metadata.file_type().is_dir()
-            || platform::is_reparse_or_link(&metadata)
-            || !platform::owned_by_current_user(path, &metadata)
-        {
-            return Err(IdentityError::UnsafePath(path.to_path_buf()));
+    let initial = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(IdentityError::CreateDirectory)?;
+            fs::symlink_metadata(path).map_err(IdentityError::CreateDirectory)?
         }
-    } else {
-        fs::create_dir(path).map_err(IdentityError::CreateDirectory)?;
+        Err(source) => return Err(IdentityError::Read(source)),
+    };
+    if !initial.file_type().is_dir()
+        || platform::is_reparse_or_link(&initial)
+        || !platform::owned_by_current_user(path, &initial)
+    {
+        return Err(IdentityError::UnsafePath(path.to_path_buf()));
     }
-    platform::tighten_private_file_at(path).map_err(IdentityError::Permissions)
+    // Unix 通过目录句柄收紧为 0700 并复核身份；Windows 保留已核验的 Profile ACL。
+    platform::tighten_private_directory(path, &initial).map_err(IdentityError::Permissions)
 }
 
 fn ensure_regular_private_file(path: &Path) -> Result<(), IdentityError> {
@@ -232,6 +237,9 @@ pub(crate) enum IdentityError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
 
     #[test]

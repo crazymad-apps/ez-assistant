@@ -78,7 +78,10 @@ fn metadata_and_missing_read_do_not_create_home() {
         .unwrap();
     assert_eq!(
         success(output),
-        json!({"version":"0.25.2","min_compatible_version":"0.25.2"})
+        json!({
+            "version": assistant_protocol::SOFTWARE_VERSION,
+            "min_compatible_version": assistant_protocol::MIN_COMPATIBLE_VERSION,
+        })
     );
     let read = success(invoke(&home, "read", b""));
     assert_eq!(read["revision"], Value::Null);

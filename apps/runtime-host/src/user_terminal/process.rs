@@ -75,7 +75,7 @@ impl TerminalProcess {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "ez-assistant");
-        let (pair, reader, writer, child, job) = tokio::task::spawn_blocking(move || {
+        let spawned = tokio::task::spawn_blocking(move || {
             #[cfg(windows)]
             let job =
                 crate::platform::job::Job::new().map_err(|_| failure("无法创建终端进程组。"))?;
@@ -114,9 +114,11 @@ impl TerminalProcess {
         })
         .await
         .map_err(|_| failure("终端创建任务异常。"))??;
-        drop(pair.slave);
+        #[cfg(windows)]
+        let (pair, reader, writer, child, job) = spawned;
         #[cfg(unix)]
-        let _ = job;
+        let (pair, reader, writer, child, ()) = spawned;
+        drop(pair.slave);
         let process = Arc::new(Self {
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),

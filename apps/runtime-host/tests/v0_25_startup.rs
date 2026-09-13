@@ -362,7 +362,10 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(health["min_compatible_host_version"], "0.25.3");
+    assert_eq!(
+        health["min_compatible_host_version"],
+        assistant_protocol::MIN_COMPATIBLE_VERSION
+    );
     let configuration = fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
     assert!(configuration.contains("[host_access]"));

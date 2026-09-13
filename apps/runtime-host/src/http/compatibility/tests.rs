@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+const FUTURE_VERSION: &str = "999.0.0";
+
 struct Fixture {
     address: String,
     state: HttpState,
@@ -70,8 +72,11 @@ impl Fixture {
         let issued: Value = self
             .request(Method::POST, "/auth/login")
             .bearer_auth("native-fixture")
-            .header(CLIENT_VERSION_HEADER, "0.25.3")
-            .header(MIN_COMPATIBLE_VERSION_HEADER, "0.25.2")
+            .header(CLIENT_VERSION_HEADER, assistant_protocol::SOFTWARE_VERSION)
+            .header(
+                MIN_COMPATIBLE_VERSION_HEADER,
+                assistant_protocol::MIN_COMPATIBLE_VERSION,
+            )
             .json(&json!({"method":"desktop"}))
             .send()
             .await
@@ -84,8 +89,11 @@ impl Fixture {
         let token = issued["token"].as_str().unwrap();
         let response = self
             .request(Method::POST, "/auth/login")
-            .header(CLIENT_VERSION_HEADER, "0.25.4")
-            .header(MIN_COMPATIBLE_VERSION_HEADER, "0.25.2")
+            .header(CLIENT_VERSION_HEADER, FUTURE_VERSION)
+            .header(
+                MIN_COMPATIBLE_VERSION_HEADER,
+                assistant_protocol::MIN_COMPATIBLE_VERSION,
+            )
             .header("Origin", &self.address)
             .json(&json!({"method":"token","token":token}))
             .send()
@@ -101,7 +109,10 @@ impl Fixture {
             .to_owned();
         let old = self.state.access.credentials.authenticate(token).unwrap();
         let old = AccessPermit::new(false, Some(old), CancellationToken::new());
-        assert_eq!(old.compatibility().unwrap().version, "0.25.3");
+        assert_eq!(
+            old.compatibility().unwrap().version,
+            assistant_protocol::SOFTWARE_VERSION
+        );
         let current = self
             .state
             .access
@@ -109,7 +120,7 @@ impl Fixture {
             .authenticate(cookie.split_once('=').unwrap().1)
             .unwrap();
         let current = AccessPermit::new(false, Some(current), CancellationToken::new());
-        assert_eq!(current.compatibility().unwrap().version, "0.25.4");
+        assert_eq!(current.compatibility().unwrap().version, FUTURE_VERSION);
         cookie
     }
 }
@@ -162,7 +173,7 @@ async fn pairs_duplicates_invalid_and_both_version_floors_have_safe_errors() {
     let f = Fixture::new().await;
     for (version, minimum, expected) in [
         ("0.25.1", "0.25.1", "client_too_old"),
-        ("0.26.0", "0.26.0", "host_too_old"),
+        (FUTURE_VERSION, FUTURE_VERSION, "host_too_old"),
         ("invalid-secret", "0.25.2", "invalid_declaration"),
         ("0.25.2", "0.25.3", "invalid_declaration"),
     ] {
@@ -196,8 +207,11 @@ async fn pairs_duplicates_invalid_and_both_version_floors_have_safe_errors() {
     assert_eq!(
         f.request(Method::GET, "/auth/session")
             .bearer_auth("native-fixture")
-            .header(CLIENT_VERSION_HEADER, "0.25.3")
-            .header(MIN_COMPATIBLE_VERSION_HEADER, "0.25.2")
+            .header(CLIENT_VERSION_HEADER, assistant_protocol::SOFTWARE_VERSION)
+            .header(
+                MIN_COMPATIBLE_VERSION_HEADER,
+                assistant_protocol::MIN_COMPATIBLE_VERSION,
+            )
             .send()
             .await
             .unwrap()

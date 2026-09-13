@@ -37,6 +37,8 @@ impl McpConfigSource for LocalMcpConfigSource {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     use assistant_runtime::{ConfigSourceLoad, ConfigSourceReplace};
 

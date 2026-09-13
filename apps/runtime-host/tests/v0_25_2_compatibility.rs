@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use std::{fs, time::Duration};
 use support::HostProcess;
 
+const CURRENT_VERSION: &str = assistant_protocol::SOFTWARE_VERSION;
+const CURRENT_MINIMUM: &str = assistant_protocol::MIN_COMPATIBLE_VERSION;
+const FUTURE_VERSION: &str = "999.0.0";
+
 #[test]
 fn incompatible_requests_leave_the_ready_instance_running() {
     let directory = support::test_directory();
@@ -22,8 +26,8 @@ fn incompatible_requests_leave_the_ready_instance_running() {
     for (version, minimum, expected) in [
         (None, None, "missing_declaration"),
         (Some("0.25.1"), Some("0.25.1"), "client_too_old"),
-        (Some("0.25.3"), Some("0.25.3"), "host_too_old"),
-        (Some("0.25.2"), None, "invalid_declaration"),
+        (Some(FUTURE_VERSION), Some(FUTURE_VERSION), "host_too_old"),
+        (Some(CURRENT_VERSION), None, "invalid_declaration"),
     ] {
         for (method, path) in [
             (reqwest::Method::POST, "/commands"),
@@ -46,12 +50,15 @@ fn incompatible_requests_leave_the_ready_instance_running() {
             assert_eq!(response.json::<Value>().unwrap()["error"]["code"], expected);
         }
     }
-    for version in ["0.25.2", "0.25.3"] {
+    for version in [CURRENT_VERSION, FUTURE_VERSION] {
         assert!(
             http.get(format!("{}/auth/session", host.base_url()))
                 .bearer_auth(host.access_token())
                 .header(assistant_protocol::CLIENT_VERSION_HEADER, version)
-                .header(assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER, "0.25.2")
+                .header(
+                    assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
+                    CURRENT_MINIMUM,
+                )
                 .send()
                 .unwrap()
                 .status()
@@ -185,8 +192,11 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
     let browser = http
         .post(format!("{}/auth/login", host.base_url()))
         .header("Origin", host.base_url())
-        .header(assistant_protocol::CLIENT_VERSION_HEADER, "0.25.3")
-        .header(assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER, "0.25.2")
+        .header(assistant_protocol::CLIENT_VERSION_HEADER, CURRENT_VERSION)
+        .header(
+            assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
+            CURRENT_MINIMUM,
+        )
         .json(&json!({"method":"token","token":quick["token"]}))
         .send()
         .unwrap();

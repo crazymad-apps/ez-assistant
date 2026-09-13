@@ -1,5 +1,7 @@
 //! Attachment 文件名、Blob 路径和 Session 稳定视图的局部文件系统规则。
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::{
     fs, io,
     io::{BufReader, Read},
