@@ -3,6 +3,15 @@
 本文是 ez-assistant macOS arm64 站外发布的可重复操作手册。完整发布只使用
 `apps/desktop` 中的 `npm run release:macos`；不从聊天记录拼接临时命令。
 
+## 2026-09-14 v0.25.3 发布记录
+
+- 源码标签 `v0.25.3` 指向提交 `ec834abf69b94745b889a66aca1ab6aaa43f1cf3`。用户使用本手册入口完成 macOS arm64 手工打包；最终本地 DMG 为 `target/aarch64-apple-darwin/release/bundle/dmg/EZ Assistant_0.25.3_aarch64.dmg`，大小 39,575,747 字节，SHA-256 为 `6e4d473fdaf38e53e55e1ab491401fddedd133e1d3d0890e46a3ff953a8cbd92`。
+- Developer ID 为 `Developer ID Application: Jaile Chen (89423ZTFD9)`，Team ID `89423ZTFD9`；证书有效期为 2026-08-19 02:17:53 UTC 至 2031-08-20 02:17:52 UTC，SHA-256 指纹 `03:2F:21:CE:A6:DF:48:71:B3:26:96:D3:DA:72:47:C9:8E:42:A6:08:9B:DE:5A:AE:E0:A1:46:FC:3C:DD:A0:C7`。
+- App 公证 submission `acf4c7c2-f3f1-4744-8d69-b97dfa3602a3`、DMG 公证 submission `22d1abea-32e1-4269-8b16-d40dfb870cda` 均已从 Apple 回读为 `Accepted`。
+- 独立 `verify:macos-release` 通过：App、Desktop 和内嵌 Runtime 均为 arm64，Developer ID／Hardened Runtime／entitlements／Gatekeeper／stapled ticket 有效；DMG 签名、票据、CRC、只读挂载内容和挂载后 App 验证通过。
+- GitHub Release 公共文件名规范化为 `EZ-Assistant_0.25.3_macos_arm64.dmg`，同时上传同名 `.sha256`。远程资产 digest 与上述 SHA-256 一致；回下载 DMG 与本地产物逐字节一致，校验文件可直接通过 `shasum -a 256 -c`。发布页：[EZ Assistant v0.25.3](https://github.com/crazymad-apps/ez-assistant/releases/tag/v0.25.3)。
+- 本次补发不重新执行 macOS 干净环境安装和交互操作；用户此前已完成人工交互验收，当前记录只把最终签名、公证产物与公开下载闭环对应起来。
+
 ## 1. 入口与边界
 
 - 总控脚本：`apps/desktop/scripts/release-macos.mjs`
