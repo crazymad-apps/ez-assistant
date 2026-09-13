@@ -4,6 +4,31 @@
 
 本文从 v0.25.2 M6 发布流程整理，v0.25.2 已于 2026-09-11 经用户授权发布到官方 npm 源，发布记录见下节。Desktop 的 App/DMG 继续使用[macOS 发布流程](macOS发布流程.md)，不与 npm 发布绑定。
 
+## 2026-09-14 官方发布记录
+
+- Registry：`https://registry.npmjs.org/`；发布账号 `crazy_mad`（组织 owner）。
+- `@ez-assistant/client`、`@ez-assistant/client-darwin-arm64`、`@ez-assistant/client-linux-arm64`、`@ez-assistant/client-linux-x64` 均已发布 `0.25.3`；四包的 `next`、`latest` 回读均为 `0.25.3`。主包精确依赖三个同版本平台附件，Windows 继续通过 Desktop MSI 交付，不存在 Windows npm 附件。
+- 产品源码与标签 `v0.25.3` 对应提交 `ec834abf69b94745b889a66aca1ab6aaa43f1cf3`。装配时工作区在其后的发布文档提交上，产品源码没有变化；装配使用 Node 24.21.0／npm 11.19.0。macOS arm64 Host 为 Release 构建并通过基础代码签名验证；Linux arm64 在原生 arm64、glibc 2.17 环境构建和运行；Linux x64 复用用户实机验收通过且清单摘要已核对的同版本 Host。
+- 四包 dry-run 通过，发布后 `dist.shasum`／`dist.integrity` 与 `pack-report.json` 一致；从官方 registry 回下载的四个 tgz 与发布前原文件 SHA-256 一致：
+
+| 包 | tgz SHA-256 | npm shasum |
+| --- | --- | --- |
+| `@ez-assistant/client@0.25.3` | `dc501414f92462cce29119b302dadec4e00022d7806e1206b4448d0d818c7473` | `9a065b29794bf04ff08fb08977e857ed45151c61` |
+| `@ez-assistant/client-darwin-arm64@0.25.3` | `84394a6bbe6fd0342dc3702b27f21633dd4f63ce80c4d89f4b62fe9020e563da` | `24be067845da1ca4a4b85d508ae75b4b78d734e8` |
+| `@ez-assistant/client-linux-arm64@0.25.3` | `a319039463b8afd5b9547596103d4c9b4ae42d96f6d36cbd8b3b971a0bb62cae` | `1031d02153ca2a4c78534453659627999dc96f4a` |
+| `@ez-assistant/client-linux-x64@0.25.3` | `8e628221324d483159be830244e037e4d64df6abfada98a22f6c4d3db74c2c2e` | `fe66da2530516e1376828bc3b4a16c88b7030847` |
+
+- 使用全新 prefix、空缓存和不带版本号的安装命令从官方源安装，确认主包和 macOS arm64 附件均选择 `0.25.3`，CLI 与 Host build-info 均为 `0.25.3`。隔离 Runtime Home 完成 Host Ready、Web 200、受控停止；实际 SQLite 与独立 Backup 都是 43 张表，`integrity_check=ok`。候选包另完成卸载／重装、数据全表数量与字段摘要不变，以及缺失附件、摘要篡改、旧 Node 失败路径验证。
+- 本地临时证据位于 `/tmp/ez-client-npm-official-v0253`、`/tmp/ez-client-npm-official-v0253-registry` 和 `/tmp/ez-client-official-registry-install-0253.kOcUEL`；临时路径不作为长期归档保证。Linux x64 的真实跨版本升级停止闭环由用户在实机完成；本轮不重复 Windows 验证。
+
+普通用户安装命令：
+
+```sh
+npm install -g @ez-assistant/client --registry=https://registry.npmjs.org/
+ez-assistant config
+ez-assistant start
+```
+
 ## 2026-09-11 官方发布记录
 
 - Registry：`https://registry.npmjs.org/`；发布账号 `crazy_mad`（组织 owner）。
@@ -152,7 +177,7 @@ node apps/client/tests/npm-package-failures.mjs \
 
 Linux 的运行依赖和 Docker 驱动方式见[Linux 成品包验收](../../apps/client/tests/linux/README.md#m6-npm-候选包验收)。仅拷贝成品包和 Node/npm 工具链进入运行容器，测试驱动可通过 stdin 执行。Linux systemd 验证需专用普通用户的 manager／D-Bus／linger 条件；不要为了让测试通过而改生产账号。
 
-该驱动创建隔离 prefix 和 Runtime Home，选择空闲端口；验证安装、只读查询、先停止再重装，以及卸载后包内 Host 删除、再次安装后的管理能力，并核验新建测试库和独立备份。失败时保留证据、查询实际状态，不扩大为生产修复。它当前验证的是**同版本重装**，而且版本断言固定为 `0.25.2`；后续版本需先更新驱动的版本引用，不能直接宣称通用跨版本升级已验证。
+该驱动创建隔离 prefix 和 Runtime Home，选择空闲端口；验证安装、只读查询、先停止再重装，以及卸载后包内 Host 删除、再次安装后的管理能力，并核验新建测试库和独立备份。失败时保留证据、查询实际状态，不扩大为生产修复。它验证的是**同版本重装**，版本断言从 `pack-report.json` 读取；该用例不能直接宣称通用跨版本升级已验证。
 
 还需按版本计划补齐：真实跨软件版本升级、协议／数据库不兼容拒绝、独立构建与 Desktop 共存、服务开机路径、实际 Web 功能。复用已有证据须能对应本批产物和未变代码；不为发包重复无关全量测试，也不能用旧包的结果冒充改变后的文件已验收。
 

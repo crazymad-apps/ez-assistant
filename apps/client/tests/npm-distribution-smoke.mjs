@@ -51,7 +51,7 @@ const events = [];
 let unit;
 try {
   await npm("install", "-g", `@ez-assistant/client@${report.clientPackageVersion ?? report.version}`);
-  assert.match((await cli("--version")).stdout, /0\.25\.2/);
+  assert.match((await cli("--version")).stdout, new RegExp(report.version.replaceAll(".", "\\.")));
   await cli("status"); assert(await absent(home));
   events.push("npm global install --ignore-scripts / platform selection / bin / readonly status");
   // 驱动和被测模块使用同一隔离环境，服务的真实 HOME 仍为当前普通用户。
@@ -116,7 +116,7 @@ async function audit(name) {
         const rows = db.prepare(`SELECT * FROM ${quoted}`).all().map((row) => JSON.stringify(row)).sort();
         tables[table] = { count, sha256: createHash("sha256").update(JSON.stringify(rows)).digest("hex") };
       }
-      assert.equal(Object.keys(tables).length, 42); return tables;
+      assert.equal(Object.keys(tables).length, 43); return tables;
     } finally { db.close(); }
   };
   const result = inspect(destination); assert.deepEqual(result, inspect(path));
