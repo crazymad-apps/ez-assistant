@@ -33,8 +33,7 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 #[cfg(test)]
 use {
     assistant_protocol::{
-        PreviewSessionResourceFileResult, SessionResourceEntryKind, SessionResourceEntryState,
-        SessionResourcePreviewKind,
+        PreviewSessionResourceFileResult, SessionResourceEntryKind, SessionResourcePreviewKind,
     },
     std::cmp::Ordering,
 };
@@ -187,20 +186,39 @@ pub(super) async fn resolve_session_resource_path(
     locator: &SessionResourceLocator,
 ) -> Result<(PathBuf, PathBuf), RuntimeErrorInfo> {
     let relative = normalize_relative_path(&locator.relative_path)?;
-    let canonical_root = tokio::fs::canonicalize(root)
+    #[cfg(windows)]
+    {
+        let root = PathBuf::from(root);
+        host::read(move || {
+            let canonical_root = files::canonicalize(&root)?;
+            let resolved = files::canonicalize(&canonical_root.join(relative))?;
+            if !resolved.starts_with(&canonical_root) {
+                return Err(RuntimeErrorInfo::new(
+                    RuntimeErrorCode::OperationNotAllowed,
+                    "resource is outside the authorized root",
+                ));
+            }
+            Ok((canonical_root, resolved))
+        })
         .await
-        .map_err(|_| resource_unavailable())?;
-    let candidate = canonical_root.join(relative);
-    let resolved = tokio::fs::canonicalize(candidate)
-        .await
-        .map_err(|_| resource_unavailable())?;
-    if !resolved.starts_with(&canonical_root) {
-        return Err(RuntimeErrorInfo::new(
-            RuntimeErrorCode::OperationNotAllowed,
-            "resource is outside the authorized root",
-        ));
     }
-    Ok((canonical_root, resolved))
+    #[cfg(unix)]
+    {
+        let canonical_root = tokio::fs::canonicalize(root)
+            .await
+            .map_err(|_| resource_unavailable())?;
+        let candidate = canonical_root.join(relative);
+        let resolved = tokio::fs::canonicalize(candidate)
+            .await
+            .map_err(|_| resource_unavailable())?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err(RuntimeErrorInfo::new(
+                RuntimeErrorCode::OperationNotAllowed,
+                "resource is outside the authorized root",
+            ));
+        }
+        Ok((canonical_root, resolved))
+    }
 }
 
 fn normalize_relative_path(value: &str) -> Result<PathBuf, RuntimeErrorInfo> {
@@ -900,6 +918,7 @@ mod tests {
     #[tokio::test]
     async fn directory_entries_are_filtered_sorted_and_mark_outside_links() {
         let root = tempdir().expect("root");
+        #[cfg(unix)]
         let outside = tempdir().expect("outside");
         tokio::fs::create_dir(root.path().join("src"))
             .await
@@ -913,6 +932,7 @@ mod tests {
         tokio::fs::write(root.path().join(".hidden"), b"secret")
             .await
             .expect("hidden file");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), root.path().join("escape"))
             .expect("outside symlink");
         let canonical_root = tokio::fs::canonicalize(root.path())
@@ -938,12 +958,18 @@ mod tests {
                 .iter()
                 .map(|entry| entry.display_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["src", "escape", "README.md"]
+            if cfg!(unix) {
+                vec!["src", "escape", "README.md"]
+            } else {
+                vec!["src", "README.md"]
+            }
         );
+        #[cfg(unix)]
         assert_eq!(
             result.entries[1].state,
-            SessionResourceEntryState::OutsideRoot
+            assistant_protocol::SessionResourceEntryState::OutsideRoot
         );
+        #[cfg(unix)]
         assert!(result.entries[1].is_symbolic_link);
     }
 

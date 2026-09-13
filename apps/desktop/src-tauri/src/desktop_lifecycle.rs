@@ -6,9 +6,10 @@ use std::sync::{
 };
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use tauri::image::Image;
 use tauri::{
     AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent,
-    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
 };
@@ -206,7 +207,9 @@ impl DesktopLifecycleCoordinator {
         )?;
         let application_menu = Menu::default(app_handle)?;
         application_menu.append(&runtime_menu)?;
-        app_handle.set_menu(application_menu)?;
+        if !cfg!(windows) {
+            app_handle.set_menu(application_menu)?;
+        }
 
         let tray_status = MenuItem::with_id(
             app_handle,
@@ -639,7 +642,9 @@ pub(crate) fn desktop_platform() -> &'static str {
     return "macos";
     #[cfg(target_os = "linux")]
     return "linux";
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    return "windows";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     "unsupported"
 }
 

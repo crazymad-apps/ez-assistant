@@ -42,8 +42,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for path in files {
         let relative = path
             .strip_prefix(&directory)?
-            .to_str()
-            .ok_or("non-UTF8 asset path")?;
+            .components()
+            .map(|component| component.as_os_str().to_str().ok_or("non-UTF8 asset path"))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/");
         if relative != "index.html" && !relative.starts_with("assets/") {
             continue;
         }

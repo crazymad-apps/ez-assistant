@@ -350,6 +350,7 @@ impl ControllerToolCoordinator {
         let accepted = self
             .store
             .accept_input(NewStoredInput {
+                agent_shell_target: None,
                 input_id,
                 run_id,
                 session_id: target_session_id.clone(),
@@ -524,6 +525,7 @@ pub(crate) fn build_proxy_report_input(
     let idempotency_key =
         proxy_report_idempotency_key(&draft.source_session_id, &draft.source_run_id)?;
     Ok(NewStoredInput {
+        agent_shell_target: None,
         input_id,
         run_id,
         session_id: draft.controller_session_id,

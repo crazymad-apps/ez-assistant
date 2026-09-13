@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod handshake_tests;
+#[cfg(windows)]
+mod windows;
 
 use std::{
     borrow::Cow,
@@ -70,6 +72,11 @@ const INHERITED_ENVIRONMENT: &[&str] = &[
     "LC_CTYPE",
     "SYSTEMROOT",
     "WINDIR",
+    "COMSPEC",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 ];
@@ -281,6 +288,8 @@ async fn connect_stdio(
     };
     let cwd = resolve_working_directory(runtime_home, server, configured_cwd.as_deref())?;
     let environment = resolve_secret_map(environment)?;
+    #[cfg(windows)]
+    let program = windows::resolve_program(program, &cwd, &environment)?;
     let mut command = Command::new(program);
     command
         .args(args)
@@ -296,10 +305,15 @@ async fn connect_stdio(
     }
     command.envs(environment);
 
-    let mut child = spawn_managed(command).map_err(|_| {
+    let mut child = spawn_managed(command).map_err(|error| {
         connection_error(
             McpConnectionFailureKind::Connect,
-            "MCP stdio process could not be started",
+            match error.kind() {
+                io::ErrorKind::NotFound => "MCP stdio executable or interpreter was not found; check the configured command and PATH",
+                io::ErrorKind::PermissionDenied => "MCP stdio executable access was denied",
+                io::ErrorKind::InvalidInput => "MCP stdio arguments cannot be represented safely by the configured launcher",
+                _ => "MCP stdio process could not be started",
+            },
         )
     })?;
     let stdin = child.stdin().take().ok_or_else(|| {
@@ -798,7 +812,12 @@ mod tests {
     ) -> ManagedStdioTransport {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stdio_server.py");
-        let mut command = Command::new("python3");
+        // Windows 的 python3 可能是 Store 占位程序；原生 Python 安装提供 python.exe。
+        let mut command = Command::new(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python3"
+        });
         command.arg(fixture);
         if let Some(mode) = mode {
             command.arg(mode);
@@ -809,6 +828,12 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        for name in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         let mut child = spawn_managed(command).expect("start stdio fixture");
         let stdin = child.stdin().take().expect("fixture stdin");
         let stdout = child.stdout().take().expect("fixture stdout");

@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 mod support;
 
@@ -33,7 +33,7 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
         "server_key":"local_fixture", "display_name":"Local fixture",
         "description":"Two safe fixture tools", "enabled":true,
         "transport":{"type":"stdio","payload":{
-            "command":{"mode":"replace","value":"python3"},
+            "command":{"mode":"replace","value":fixture_python()},
             "args":{"mode":"replace","value":["-u",fixture]},
             "environment":{"TOKEN":{"mode":"replace","value":"offline-mcp-secret"}}
         }}
@@ -51,7 +51,7 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
     assert_eq!(initial["needs_refresh"], false);
 
     let document = json!({"mcpServers":{"local_fixture":{
-        "command":"python3", "args":["-u",fixture],
+        "command":fixture_python(), "args":["-u",fixture],
         "env":{"TOKEN":"offline-mcp-secret"}
     }}})
     .to_string();
@@ -258,7 +258,7 @@ fn host_is_ready_while_mcp_initializes_and_shutdown_cancels_initialization() {
         std::fs::write(
             home.path().join("mcp.json"),
             json!({"mcpServers":{"slow_fixture":{
-                "command":"python3", "args":["-u",fixture],
+                "command":fixture_python(), "args":["-u",fixture],
                 "env":{"MCP_FIXTURE_START_GATE":gate}
             }}})
             .to_string(),
@@ -314,5 +314,13 @@ fn host_is_ready_while_mcp_initializes_and_shutdown_cancels_initialization() {
         client.runtime("shutdown_runtime", json!({}));
         drop(client);
         assert!(host.wait().status.success());
+    }
+}
+
+fn fixture_python() -> &'static str {
+    if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python3"
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.25.2",
+  "version": "0.25.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,8 @@
     "check:version": "node scripts/check-version.mjs",
     "generate:icon:macos": "node scripts/generate-macos-icon.mjs",
     "check:icon:macos": "node scripts/generate-macos-icon.mjs --check",
+    "generate:icon:windows": "node scripts/generate-windows-icon.mjs",
+    "check:icon:windows": "node scripts/generate-windows-icon.mjs --check",
     "generate:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs",
     "check:icon:tray:macos": "node scripts/generate-macos-tray-icon.mjs --check",
     "cargo": "node scripts/run-cargo.mjs",
@@ -16,12 +18,14 @@
     "check:protocol": "npm run cargo -- run -p assistant-protocol --example export_typescript -- --check",
     "lint": "oxlint src tests vite.config.ts vitest.config.ts playwright.config.ts",
     "test": "npm run check:protocol && vitest run",
+    "test:packaging": "node --test tests/unit/sidecar-packaging.test.mjs",
     "test:e2e": "npm run build:host && playwright test",
     "test:e2e:web": "npm run build:host && playwright test --config playwright.web.config.ts",
     "preview": "vite preview",
     "build:host": "node scripts/build-host.mjs",
     "prepare:sidecar": "npm run build:host -- --release && node scripts/prepare-sidecar.mjs",
     "release:macos": "node scripts/release-macos.mjs",
+    "release:windows": "node scripts/release-windows.mjs",
     "verify:macos-release": "node scripts/verify-macos-release.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },

@@ -13,7 +13,9 @@ export function QueueCommandRow(props: Readonly<{
   const executing = props.item.state === "executing";
   const label = props.item.command.type === "skill_refresh"
     ? "技能刷新"
-    : `MCP 刷新：${props.item.command.payload.server ?? "全部"}`;
+    : props.item.command.type === "mcp_refresh"
+      ? `MCP 刷新：${props.item.command.payload.server ?? "全部"}`
+      : "Shell 切换";
   let action_label = props.item.is_prioritized ? "已优先" : "优先";
   let on_action = props.on_prioritize;
   if (props.needs_resume && !props.held_by_goal) {

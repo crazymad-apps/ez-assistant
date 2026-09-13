@@ -162,7 +162,7 @@ async fn pairs_duplicates_invalid_and_both_version_floors_have_safe_errors() {
     let f = Fixture::new().await;
     for (version, minimum, expected) in [
         ("0.25.1", "0.25.1", "client_too_old"),
-        ("0.25.3", "0.25.3", "host_too_old"),
+        ("0.26.0", "0.26.0", "host_too_old"),
         ("invalid-secret", "0.25.2", "invalid_declaration"),
         ("0.25.2", "0.25.3", "invalid_declaration"),
     ] {

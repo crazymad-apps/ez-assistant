@@ -141,6 +141,30 @@
   b { color: var(--ez-text-secondary); font-size: var(--ez-font-base); font-weight: 600; }
 }
 
+.shell_setting {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ez-border);
+
+  small { display: block; margin-top: 6px; color: var(--ez-text-muted); }
+}
+
+.shell_actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shell_setting [data-shell-unavailable="true"] {
+  display: block;
+  color: var(--ez-warning-text);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+
 .context_ring {
   width: 28px;
   height: 28px;

@@ -24,6 +24,7 @@
   font-size: var(--ez-font-base);
   line-height: 1;
   color: var(--ez-text-secondary);
+  &:has([aria-label="窗口控制"]) { padding-right: 0; }
 }
 .title_bar small {
   color: var(--ez-text-muted);

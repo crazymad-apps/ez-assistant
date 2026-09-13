@@ -48,6 +48,7 @@ pub(crate) struct RunRecord {
     variant: AgentVariant,
     approval_mode: ApprovalMode,
     reasoning_effort: Option<ReasoningEffortKey>,
+    shell: Option<crate::FrozenShellEnvironment>,
     cancel_requested: bool,
     active_step: Option<u32>,
     reasoning: String,
@@ -71,6 +72,7 @@ impl RunRecord {
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
             reasoning_effort: run.reasoning_effort,
+            shell: run.shell.clone(),
             cancel_requested: false,
             active_step: None,
             reasoning: String::new(),
@@ -94,6 +96,7 @@ impl RunRecord {
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
             reasoning_effort: run.reasoning_effort,
+            shell: run.shell,
             cancel_requested: run.cancel_requested,
             active_step: None,
             reasoning: String::new(),
@@ -176,9 +179,18 @@ impl RunRecord {
         }
     }
 
-    pub(crate) fn freeze_reasoning_effort(&mut self, effort: Option<ReasoningEffortKey>) {
+    pub(crate) fn freeze_execution(
+        &mut self,
+        effort: Option<ReasoningEffortKey>,
+        shell: Option<crate::FrozenShellEnvironment>,
+    ) {
         debug_assert_eq!(self.status, RunStatus::Accepted);
         self.reasoning_effort = effort;
+        self.shell = shell;
+    }
+
+    pub(crate) fn shell(&self) -> Option<&crate::FrozenShellEnvironment> {
+        self.shell.as_ref()
     }
 
     pub(crate) fn mark_cancelling(&mut self) -> bool {

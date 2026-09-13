@@ -104,8 +104,8 @@ fn os_str_ends_with(value: &OsStr, suffix: &OsStr) -> bool {
     {
         let value = value.as_encoded_bytes();
         let suffix = suffix.as_encoded_bytes();
-        return value.len() >= suffix.len()
-            && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix);
+        value.len() >= suffix.len()
+            && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     }
 
     #[cfg(not(windows))]
@@ -117,9 +117,8 @@ fn os_str_ends_with(value: &OsStr, suffix: &OsStr) -> bool {
 fn names_equal(left: &OsStr, right: &OsStr) -> bool {
     #[cfg(windows)]
     {
-        return left
-            .as_encoded_bytes()
-            .eq_ignore_ascii_case(right.as_encoded_bytes());
+        left.as_encoded_bytes()
+            .eq_ignore_ascii_case(right.as_encoded_bytes())
     }
 
     #[cfg(not(windows))]

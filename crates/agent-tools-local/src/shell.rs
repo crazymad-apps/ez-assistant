@@ -37,12 +37,14 @@ const PARENT_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::fr
 
 /// 平台 Shell 启动器。
 ///
-/// `program` 和 `fixed_args` 是 Adapter 配置，不是模型输入。执行时会将
-/// 模型给出的完整 command 原样追加为最后一个参数。
+/// `program`、`fixed_args` 和 `command_prefix` 是宿主配置。执行时仅在完整
+/// command 前执行冻结的编码初始化语句，不做方言转换；CMD 在初始化后启动命令解释器。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellLauncher {
     pub program: OsString,
     pub fixed_args: Vec<OsString>,
+    /// 宿主冻结的编码初始化语句；不分析或改写模型 command，二者拼成唯一脚本参数。
+    pub command_prefix: String,
 }
 
 #[cfg(unix)]
@@ -51,6 +53,7 @@ impl Default for ShellLauncher {
         Self {
             program: OsString::from("/bin/sh"),
             fixed_args: vec![OsString::from("-c")],
+            command_prefix: String::new(),
         }
     }
 }
@@ -64,6 +67,7 @@ impl Default for ShellLauncher {
         Self {
             program,
             fixed_args: vec![OsString::from("/C")],
+            command_prefix: String::new(),
         }
     }
 }
@@ -123,14 +127,13 @@ impl LocalShell {
 
         let mut command = Command::new(&self.config.launcher.program);
         command
-            .args(&self.config.launcher.fixed_args)
-            .arg(&request.command)
             .current_dir(request.workdir.as_path())
             .env_clear()
             .envs(self.config.environment.resolve_current())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        append_script_argument(&mut command, &self.config.launcher, request.command.clone());
 
         let spawn = match request.process_mode {
             ShellProcessMode::Managed => process::spawn,
@@ -262,6 +265,41 @@ impl LocalShell {
     }
 }
 
+fn append_script_argument(command: &mut Command, launcher: &ShellLauncher, script: String) {
+    #[cfg(windows)]
+    if std::path::Path::new(&launcher.program)
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+    {
+        if !launcher.command_prefix.is_empty() {
+            command.arg("/v:on");
+        }
+        command.args(&launcher.fixed_args);
+        // 无窗口控制台初始为 OEM 代码页。先在外层完成 chcp，再让内层 CMD 在
+        // UTF-8 环境初始化输出编码；同一个 /c 中 chcp & echo 会沿用旧的编码缓存。
+        let script = if launcher.command_prefix.is_empty() {
+            script
+        } else {
+            // 延迟展开只负责把原文传给内层，防止外层提前展开模型脚本中的 %VAR%。
+            // 内层关闭延迟展开，保留 CMD 默认的 ! 与 ^ 语义；变量只存在于本次子进程。
+            command.env("EZ_ASSISTANT_CMD_SCRIPT", script);
+            format!(
+                "{}\"{}\" /d /v:off /s /c \"!EZ_ASSISTANT_CMD_SCRIPT!\"",
+                launcher.command_prefix,
+                launcher.program.to_string_lossy()
+            )
+        };
+        // CMD 不使用 CRT 的参数解码规则；arg 会把脚本中的双引号变成反斜杠+引号。
+        // 按 std::os::windows::process::CommandExt::raw_arg 的 CMD 约定包裹整个脚本。
+        // 此处接收的是已授权完整 Shell 程序，而非需要转义成单个词的外部数据。
+        command.raw_arg(format!("\"{script}\""));
+        return;
+    }
+    command
+        .args(&launcher.fixed_args)
+        .arg(format!("{}{script}", launcher.command_prefix));
+}
+
 impl ShellTool for LocalShell {
     fn exec<'a>(
         &'a self,
@@ -285,7 +323,14 @@ async fn wait_for_parent(
     cancellation: &CancellationToken,
 ) -> Result<ProcessCompletion, ShellToolError> {
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| ShellToolError::Io {
+        // 此处只观察根解释器，不消费 Job 的完成端口。process-wrap 9.1 的 Windows
+        // try_wait 会取走通知，随后 wait 可能永远等待已被取走的完成事件。
+        // 保留包装层与其 Job，直到 terminate_and_wait 统一回收整个进程树。
+        #[cfg(windows)]
+        let status = child.inner_mut().try_wait();
+        #[cfg(not(windows))]
+        let status = child.try_wait();
+        if let Some(status) = status.map_err(|error| ShellToolError::Io {
             message: format!("check shell parent status failed: {error}"),
         })? {
             return Ok(ProcessCompletion::Exited(status));

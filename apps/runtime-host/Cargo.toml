@@ -9,8 +9,9 @@ rust-version = "1.89"
 name = "ez-assistant-runtime"
 path = "src/main.rs"
 
-[lints]
-workspace = true
+[lints.rust]
+# 2026-09-12 用户批准：仅 platform/windows 原生安全适配函数局部 allow。
+unsafe_code = "deny"
 
 [dependencies]
 agent-context = { path = "../../crates/agent-context" }
@@ -36,7 +37,6 @@ getrandom.workspace = true
 hmac.workspace = true
 image.workspace = true
 infer.workspace = true
-libc.workspace = true
 mdns-sd = { version = "0.21.0", default-features = false, features = ["async"] }
 pakery-core = "0.2.1"
 pakery-crypto = { version = "0.2.1", default-features = false, features = ["std", "p256", "spake2"] }
@@ -49,7 +49,6 @@ rmcp.workspace = true
 process-wrap.workspace = true
 rustls-pki-types = { version = "1.14.0", features = ["std"] }
 rusqlite = { version = "0.40.1", features = ["bundled", "backup", "hooks"], default-features = false }
-rustix = { version = "1.1.4", features = ["fs"] }
 schemars = "1.2.1"
 semver = "1.0.28"
 serde.workspace = true
@@ -69,6 +68,11 @@ portable-pty = "=0.9.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal", "fs"] }
+libc.workspace = true
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tungstenite = "=0.29.0"

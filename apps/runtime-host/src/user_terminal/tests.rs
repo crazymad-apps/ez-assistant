@@ -1,3 +1,6 @@
+// 本夹具运行 /bin/sh 与 Unix 命令；Windows ConPTY 的独立行为矩阵归 M2。
+#![cfg(unix)]
+
 use super::{TerminalEvent, process::TerminalProcess};
 use portable_pty::CommandBuilder;
 use std::{sync::Arc, time::Duration};

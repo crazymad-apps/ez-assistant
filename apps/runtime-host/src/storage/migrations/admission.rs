@@ -47,11 +47,7 @@ impl ExistingDatabase {
         };
         let mut options = fs::OpenOptions::new();
         options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
+        crate::platform::apply_read_no_follow(&mut options);
         let mut file = options.open(path)?;
         if !same_snapshot(&metadata, &file.metadata()?)? {
             return Err(MigrationError::DatabaseChanged);
@@ -82,12 +78,8 @@ impl ExistingDatabase {
 }
 
 fn same_snapshot(left: &fs::Metadata, right: &fs::Metadata) -> Result<bool> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if left.dev() != right.dev() || left.ino() != right.ino() {
-            return Ok(false);
-        }
+    if !crate::platform::same_file_identity(left, right) {
+        return Ok(false);
     }
     Ok(right.is_file() && left.len() == right.len() && left.modified()? == right.modified()?)
 }

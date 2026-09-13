@@ -66,6 +66,8 @@ impl AssistantRuntime {
             source_skill_activations,
             source_mcp_selections,
             source_commands,
+            agent_shell_kind,
+            agent_shell_environment,
         ) = {
             let state = source.lock_state()?;
             (
@@ -91,6 +93,8 @@ impl AssistantRuntime {
                 state.skill_activations.clone(),
                 state.mcp_selections.clone(),
                 state.commands.values().cloned().collect::<Vec<_>>(),
+                state.agent_shell_kind,
+                state.agent_shell_environment.clone(),
             )
         };
         if source_generation != request.expected_generation {
@@ -119,6 +123,32 @@ impl AssistantRuntime {
             end += 1;
         }
         let mut conversation = ConversationSnapshot::new(current.messages[..end].to_vec());
+        // Fork 不复制 Run；把切换结果保存为不可变展示上下文，仍由独立 Session 绑定控制执行。
+        let projection = self.projection_context(&source, &[]).await?;
+        let results = super::product::project_conversation(&conversation, &projection)?;
+        for item in results {
+            if let assistant_protocol::ConversationItem::ShellSwitchResult {
+                message_id,
+                shell,
+                success,
+                error,
+                ..
+            } = item
+            {
+                for message in &mut conversation.messages {
+                    if let ConversationMessage::User(user) = message
+                        && user.id.as_str() == message_id.as_str()
+                    {
+                        crate::shell::InheritedShellSwitchResult {
+                            shell,
+                            success,
+                            error: error.clone(),
+                        }
+                        .append_to(user)?;
+                    }
+                }
+            }
+        }
         conversation
             .validate_tool_exchange_pairs()
             .map_err(|_| RuntimeError::InvalidRequest {
@@ -310,6 +340,8 @@ impl AssistantRuntime {
                 source_session_id: request.session_id,
                 source_generation,
                 session: NewStoredSession {
+                    agent_shell_kind,
+                    agent_shell_environment,
                     session_id: session_id.clone(),
                     title: fork_title(&title),
                     title_origin: SessionTitleOrigin::Generated,
@@ -1201,6 +1233,7 @@ impl AssistantRuntime {
             &config,
             &self.config_registry,
             RunCompilationResources {
+                shell: None,
                 skill_catalog: self.current_skill_catalog(&session).await?,
                 model_factory: self.model_factory.as_ref(),
                 context_window: self.context_window.clone(),
@@ -1256,6 +1289,7 @@ impl AssistantRuntime {
                 target_user_message_id: target_message_id,
                 conversation: replacement.clone(),
                 input: NewStoredInput {
+                    agent_shell_target: None,
                     input_id: input_id.clone(),
                     run_id: run_id.clone(),
                     session_id: request.session_id,

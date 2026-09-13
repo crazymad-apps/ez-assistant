@@ -1209,7 +1209,9 @@ mod tests {
                                 "server".to_owned(),
                             ),
                             args: assistant_protocol::McpFieldChange::Replace(Vec::new()),
-                            cwd: assistant_protocol::McpFieldChange::Replace("/tmp".to_owned()),
+                            cwd: assistant_protocol::McpFieldChange::Replace(
+                                if cfg!(windows) { "C:/tmp" } else { "/tmp" }.to_owned(),
+                            ),
                             environment: BTreeMap::new(),
                         },
                         startup_timeout_ms: None,
@@ -1320,8 +1322,9 @@ mod tests {
     #[tokio::test]
     async fn editing_redacted_fields_keeps_values_and_explicit_removal_drops_them() {
         use assistant_protocol::McpFieldChange;
+        let expected_cwd = if cfg!(windows) { "C:/tmp" } else { "/tmp" };
         let source = Arc::new(MemorySource::new(Some(
-            r#"{"mcpServers":{"local":{"command":"server","args":["hidden-argument"],"cwd":"/tmp","env":{"TOKEN":"secret"}},"remote":{"url":"https://example.test/mcp?token=secret-query","headers":{"Authorization":"secret-header"}}}}"#,
+            &r#"{"mcpServers":{"local":{"command":"server","args":["hidden-argument"],"cwd":"/tmp","env":{"TOKEN":"secret"}},"remote":{"url":"https://example.test/mcp?token=secret-query","headers":{"Authorization":"secret-header"}}}}"#.replace("/tmp", expected_cwd),
         )));
         let store = McpConfigStore::new(source.clone());
         let snapshot = store.snapshot().await.expect("redacted snapshot");
@@ -1357,7 +1360,7 @@ mod tests {
             .await
             .expect("test draft resolves kept fields");
         assert!(
-            matches!(resolved.transport(), McpServerTransportConfig::Stdio { args, cwd, .. } if args == &["hidden-argument"] && cwd.as_deref() == Some("/tmp"))
+            matches!(resolved.transport(), McpServerTransportConfig::Stdio { args, cwd, .. } if args == &["hidden-argument"] && cwd.as_deref() == Some(expected_cwd))
         );
         draft.transport = McpServerTransportDraft::Stdio {
             command: McpFieldChange::Keep,

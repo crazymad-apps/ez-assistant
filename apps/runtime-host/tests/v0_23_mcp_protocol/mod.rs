@@ -242,7 +242,7 @@ fn configure(home: &Path, fixture: &WireFixture, protocol: &str, transport: &str
     } else {
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stdio_server.py");
-        json!({"command":"python3","args":["-u",script],"env":{"TOKEN":SECRET,"MCP_FIXTURE_IMAGE":fixture.state.image,"MCP_FIXTURE_AUDIT":home.join("fixture-calls"),"MCP_FIXTURE_STDERR_FLOOD":"1"}})
+        json!({"command":crate::fixture_python(),"args":["-u",script],"env":{"TOKEN":SECRET,"MCP_FIXTURE_IMAGE":fixture.state.image,"MCP_FIXTURE_AUDIT":home.join("fixture-calls"),"MCP_FIXTURE_STDERR_FLOOD":"1"}})
     };
     let mode = fixture.state.behavior.as_str();
     if mode != "reply" {

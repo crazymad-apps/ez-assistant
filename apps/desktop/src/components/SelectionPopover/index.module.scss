@@ -206,3 +206,8 @@ div.trigger[data-variant="field"] {
 .check {
   color: var(--ez-primary);
 }
+
+.option[aria-disabled="true"] {
+  color: var(--ez-text-muted);
+  cursor: not-allowed;
+}

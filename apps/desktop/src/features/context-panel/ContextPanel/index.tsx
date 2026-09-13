@@ -41,6 +41,7 @@ import {
   sessionStatusLabel,
 } from "./contextDisplay";
 import styles from "./index.module.scss";
+import { SessionShellSetting } from "./SessionShellSetting";
 
 type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "children" | "runs";
 
@@ -249,6 +250,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
               <div><dt>消息</dt><dd>{session.message_count}</dd></div>
             </dl>
           ) : <p className={styles.empty_row}>尚未选择会话</p>}
+          {session_view && <SessionShellSetting key={session_view.session.session_id} view={session_view} />}
           {session_view?.usage.context && (
             <div className={styles.context_usage}>
               <ContextRing basis_points={session_view.usage.context.usage_basis_points} />

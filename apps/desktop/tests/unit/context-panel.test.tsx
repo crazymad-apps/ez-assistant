@@ -11,6 +11,76 @@ afterEach(() => {
 });
 
 describe("ContextPanel", () => {
+  it("queues an explicit refresh of the bound Shell", async () => {
+    const store = contextStore();
+    const submit = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    renderPanel(store);
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Shell 环境" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", { type: "agent_shell_switch", payload: { shell: "cmd" } }));
+    expect(store.projection.session_views.get("session-1")?.agent_shell_kind).toBe("cmd");
+  });
+  it("does not mark an unbound Unix session as unavailable", async () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({ observed_sequence: 2, value: { ...view, agent_shell_kind: undefined } });
+    vi.mocked(store.getAgentShellSettings).mockResolvedValue({
+      default_agent_shell: null,
+      catalog: [{ kind: "posix_sh", available: true, reason: null }],
+    });
+    renderPanel(store);
+    const trigger = screen.getByRole("button", { name: "切换会话 Agent Shell" });
+    await waitFor(() => expect(trigger).toHaveTextContent("/bin/sh"));
+    expect(screen.queryByText(/当前绑定不可用/)).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])("keeps an unavailable binding visible and clears its warning after catalog recovery (missing=%s)", async (missing) => {
+    const store = contextStore();
+    vi.mocked(store.getAgentShellSettings).mockResolvedValue({
+      default_agent_shell: "powershell_7",
+      catalog: missing ? [] : [{ kind: "cmd", available: false, reason: "未检测到解释器" }],
+    });
+    renderPanel(store);
+    expect(await screen.findByText(/当前绑定不可用/)).toBeVisible();
+    const trigger = screen.getByRole("button", { name: "切换会话 Agent Shell" });
+    expect(trigger).toHaveTextContent("CMD");
+    expect(store.projection.session_views.get("session-1")?.agent_shell_kind).toBe("cmd");
+    vi.mocked(store.getAgentShellSettings).mockResolvedValue({
+      default_agent_shell: "powershell_7",
+      catalog: [{ kind: "cmd", available: true, reason: null }],
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("option", { name: "CMD" })).toBeVisible();
+    expect(screen.queryByText(/当前绑定不可用/)).not.toBeInTheDocument();
+    expect(trigger).toHaveTextContent("CMD");
+  });
+
+  it("submits Shell intent while keeping the committed binding visible", async () => {
+    const store = contextStore();
+    const submit = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    renderPanel(store);
+    const trigger = screen.getByRole("button", { name: "切换会话 Agent Shell" });
+    expect(trigger).toHaveTextContent("CMD");
+    fireEvent.click(trigger);
+    const target = await screen.findByRole("option", { name: "PowerShell 7" });
+    fireEvent.click(target);
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", { type: "agent_shell_switch", payload: { shell: "powershell_7" } }));
+    expect(trigger).toHaveTextContent("CMD");
+    expect(store.projection.session_views.get("session-1")?.agent_shell_kind).toBe("cmd");
+  });
+
+  it("allows queuing the current Shell after another pending target", async () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({ observed_sequence: 2, value: { ...view, queue: {
+      ...view.queue, items: [{ type: "command", payload: { input_id: "switch", command: { type: "agent_shell_switch", payload: { shell: "powershell_7" } }, submitted_at_ms: 1, position: 0, is_prioritized: true, state: "queued" } }],
+    } } });
+    const submit = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    renderPanel(store);
+    expect(screen.getByText("切换排队中 → PowerShell 7")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "切换会话 Agent Shell" }));
+    fireEvent.click(await screen.findByRole("option", { name: "CMD" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", { type: "agent_shell_switch", payload: { shell: "cmd" } }));
+  });
   it("opens the exact session private root from the workspace card", () => {
     const store = contextStore();
     renderPanel(store);
@@ -280,6 +350,11 @@ function renderPanel(store: RootStore) {
 
 function contextStore(): RootStore {
   const store = new RootStore();
+  vi.spyOn(store, "getAgentShellSettings").mockResolvedValue({ default_agent_shell: "cmd", catalog: [
+    { kind: "cmd", available: true, reason: null },
+    { kind: "powershell_7", available: true, reason: null },
+    { kind: "git_bash", available: false, reason: "Not installed" },
+  ] });
   vi.spyOn(store, "listSkills").mockResolvedValue(skillList(["review-skill"]));
   store.projection.applyApplicationSnapshot({
     observed_sequence: 1,
@@ -324,6 +399,7 @@ function contextStore(): RootStore {
         additional_directories: ["/workspace/old-docs"],
         directories_match_current: false,
       },
+      agent_shell_kind: "cmd",
       composer_capabilities: {
         selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],

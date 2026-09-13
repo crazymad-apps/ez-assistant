@@ -3,6 +3,7 @@ import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } fro
 import { startupMessage } from "./startupStatus";
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
+  ShellKind,
   DeviceGatewayCommand,
   HostAccessCommand,
   HostAccessStatus,
@@ -103,8 +104,8 @@ export class RuntimeClient {
     }
   }
 
-  openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void): TerminalSocket {
-    return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal);
+  openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void, shell: ShellKind | null = null): TerminalSocket {
+    return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal, shell);
   }
 
   /** 文件 HTTP 请求复用当前连接的凭据、取消和登录失效处理，不重新发现本机 Host。 */

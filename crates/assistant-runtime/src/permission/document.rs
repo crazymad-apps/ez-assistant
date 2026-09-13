@@ -326,7 +326,12 @@ mod tests {
             variants: vec![AgentVariant::Build],
             matcher: PermissionMatcher::File(FilePermissionMatcher {
                 operation: PermissionFileOperation::Write,
-                path: "/tmp/output.txt".to_owned(),
+                path: if cfg!(windows) {
+                    "C:/tmp/output.txt"
+                } else {
+                    "/tmp/output.txt"
+                }
+                .to_owned(),
                 path_match: PathMatch::Exact,
             }),
         }

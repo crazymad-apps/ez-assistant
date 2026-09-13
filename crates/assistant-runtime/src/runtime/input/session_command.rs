@@ -1,4 +1,4 @@
-//! 与普通消息共享 FIFO、但不创建 Run 的 Session 控制指令。
+//! Session 控制入口；Shell、MCP 和 Skill 刷新共用可靠队列，不创建 Run。
 
 use agent_types::ConversationMessage;
 use assistant_protocol::{
@@ -41,6 +41,16 @@ impl AssistantRuntime {
         let (input_id, agent_variant) = {
             let state = session.lock_state()?;
             if let Some(key) = request.idempotency_key.as_ref()
+                && state
+                    .inputs
+                    .values()
+                    .any(|input| input.stored.idempotency_key.as_ref() == Some(key))
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "session command idempotency key belongs to a Run input",
+                });
+            }
+            if let Some(key) = request.idempotency_key.as_ref()
                 && let Some(existing) = state
                     .commands
                     .values()
@@ -53,6 +63,7 @@ impl AssistantRuntime {
                 }
                 return Ok(SubmitSessionCommandResult {
                     accepted: AcceptedSessionCommand {
+                        run_id: None,
                         input_id: existing.input_id.clone(),
                         command: existing.command.clone(),
                         is_duplicate: true,
@@ -77,6 +88,7 @@ impl AssistantRuntime {
             .map_err(|source| RuntimeError::from_store("accept session command", source))?;
         let result = SubmitSessionCommandResult {
             accepted: AcceptedSessionCommand {
+                run_id: None,
                 input_id: accepted.command.input_id.clone(),
                 command: accepted.command.command.clone(),
                 is_duplicate: accepted.is_duplicate,
@@ -115,6 +127,44 @@ pub(super) async fn execute_session_command(
     command: StoredSessionCommand,
 ) -> RuntimeResult<()> {
     let (result, source, text) = match &command.command {
+        SessionCommand::AgentShellSwitch { shell } => {
+            let previous_shell = session.lock_state()?.agent_shell_kind;
+            let factory = context.run_tool_factory.clone();
+            let target = *shell;
+            let discovered =
+                tokio::task::spawn_blocking(move || factory.freeze_shell(Some(target)))
+                    .await
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "shell discovery task",
+                    })?;
+            let (environment, error) = match discovered {
+                Ok(Some(environment)) => (Some(environment), None),
+                Ok(None) => (
+                    None,
+                    Some(
+                        RuntimeError::InvalidRequest {
+                            reason: "target shell is unavailable",
+                        }
+                        .to_protocol_info(),
+                    ),
+                ),
+                Err(source) => (
+                    None,
+                    Some(RuntimeError::RunToolsBuildFailed { source }.to_protocol_info()),
+                ),
+            };
+            let text = format!(
+                "{CONTROL_RESULT_MARKER} agent_shell_switch: target={target:?}, success={}. Applies to subsequent user inputs; no model reply is requested.",
+                environment.is_some()
+            );
+            let result = StoredSessionCommandResult::ShellSwitch {
+                shell: target,
+                previous_shell,
+                environment: environment.map(Box::new),
+                error,
+            };
+            (result, InternalBoundarySource::ShellSwitchResult, text)
+        }
         SessionCommand::McpRefresh { server } => {
             let result = match super::super::mcp::refresh_mcp_registry_with(
                 context.mcp_config_store.as_ref(),
@@ -179,6 +229,9 @@ pub(super) async fn execute_session_command(
     let mut message =
         InternalBoundaryCoordinator::visible_message(InternalBoundaryRequest { source, text })?.0;
     message.id = command.user_message_id.clone();
+    if let StoredSessionCommandResult::ShellSwitch { previous_shell, .. } = &result {
+        crate::shell::append_switch_previous(&mut message, *previous_shell)?;
+    }
     let _mutation = session.mutation().await;
     let committed_at_ms = super::super::now_ms()?;
     let committed = context
@@ -224,6 +277,15 @@ pub(super) async fn execute_session_command(
                     component: "session command conversation generation",
                 },
             )?;
+            if let Some(StoredSessionCommandResult::ShellSwitch {
+                shell,
+                environment: Some(environment),
+                ..
+            }) = &committed.result
+            {
+                state.agent_shell_kind = Some(*shell);
+                state.agent_shell_environment = Some(environment.as_ref().clone());
+            }
             state.commands.insert(command.input_id, committed);
             state.executing_command = None;
             state.queue_revision = state.queue_revision.saturating_add(1);

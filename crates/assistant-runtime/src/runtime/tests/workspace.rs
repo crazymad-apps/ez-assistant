@@ -369,7 +369,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     let first_workspace = runtime
         .register_workspace(RegisterWorkspaceRequest {
             label: "first".to_owned(),
-            primary_directory: "/workspace/first".to_owned(),
+            primary_directory: test_absolute_path("/workspace/first"),
             additional_directories: Vec::new(),
         })
         .await
@@ -378,7 +378,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     let second_workspace = runtime
         .register_workspace(RegisterWorkspaceRequest {
             label: "second".to_owned(),
-            primary_directory: "/workspace/second".to_owned(),
+            primary_directory: test_absolute_path("/workspace/second"),
             additional_directories: Vec::new(),
         })
         .await
@@ -430,8 +430,8 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     assert_eq!(
         *observed.lock().expect("observed environments"),
         vec![
-            "/workspace/first".to_owned(),
-            "/workspace/second".to_owned()
+            test_absolute_path("/workspace/first"),
+            test_absolute_path("/workspace/second")
         ]
     );
 }

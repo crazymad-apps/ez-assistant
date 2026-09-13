@@ -22,6 +22,8 @@ pub(super) enum AppendPurpose {
     Messages,
     /// 首次 User Message 已写入，提交 Input 并启动 Run。
     UserMessage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<assistant_runtime::FrozenShellEnvironment>,
         #[serde(default)]
         reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
     },
@@ -101,13 +103,17 @@ pub(super) fn apply_purpose(
     match (purpose, target) {
         (AppendPurpose::Messages, _) => Ok(()),
         (
-            AppendPurpose::UserMessage { reasoning_effort },
+            AppendPurpose::UserMessage {
+                reasoning_effort,
+                shell,
+            },
             ConversationStorageTarget::Session { session_id, run_id },
         ) => apply_user_message_start(
             transaction,
             run_id,
             session_id,
             *reasoning_effort,
+            shell.as_ref(),
             created_at_ms,
         ),
         (
@@ -273,13 +279,42 @@ fn apply_child_settlement(
     Ok(())
 }
 
-fn apply_user_message_start(
+pub(super) fn apply_user_message_start(
     transaction: &Transaction<'_>,
     run_id: &RunId,
     session_id: &SessionId,
     reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
+    shell: Option<&assistant_runtime::FrozenShellEnvironment>,
     created_at_ms: i64,
 ) -> StorageResult<()> {
+    let target: Option<String> = transaction.query_row(
+        "SELECT agent_shell_target FROM inputs WHERE input_id = (SELECT input_id FROM runs WHERE run_id = ?1) AND session_id = ?2",
+        params![run_id.as_str(), session_id.as_str()],
+        |row| row.get(0),
+    ).map_err(|source| internal_error("shell switch intent could not be read", source))?;
+    if let Some(target) = super::mode::parse_shell_kind(target)? {
+        if shell.map(|shell| shell.kind) != Some(target) {
+            return Err(conflict(
+                "shell switch snapshot does not match the queued target",
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE sessions SET agent_shell_kind = ?1 WHERE session_id = ?2 AND lifecycle = 'active'",
+            params![super::mode::shell_kind_value(target), session_id.as_str()],
+        ).map_err(|source| internal_error("session shell binding could not be changed", source))?;
+        if changed != 1 {
+            return Err(conflict("shell switch session is not active"));
+        }
+    }
+    transaction
+        .execute(
+        "UPDATE sessions SET agent_shell_environment_json=?1 WHERE session_id=?2 AND agent_shell_environment_json IS NOT ?1",
+            params![
+                super::agent_shell::encode_environment(shell)?,
+                session_id.as_str()
+            ],
+        )
+        .map_err(|source| internal_error("session shell environment could not be saved", source))?;
     let input_updated = transaction
         .execute(
             "UPDATE inputs
@@ -292,13 +327,14 @@ fn apply_user_message_start(
     let run_updated = transaction
         .execute(
             "UPDATE runs
-             SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2
+           SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2, shell_snapshot_json = ?5
              WHERE run_id = ?3 AND session_id = ?4 AND status = 'accepted'",
             params![
                 created_at_ms,
                 reasoning_effort.map(super::mode::reasoning_effort_value),
                 run_id.as_str(),
-                session_id.as_str()
+                session_id.as_str(),
+                shell.map(serde_json::to_string).transpose().map_err(|source| internal_error("shell snapshot could not be encoded", source))?
             ],
         )
         .map_err(|source| internal_error("run could not be started", source))?;

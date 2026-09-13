@@ -540,7 +540,7 @@ mod tests {
             Err(FileToolError::UnsupportedEncoding { .. })
         ));
 
-        let nul_path = directory.path().join("nul.txt");
+        let nul_path = directory.path().join("embedded-nul.txt");
         tokio::fs::write(&nul_path, b"text\0data")
             .await
             .expect("write NUL fixture");

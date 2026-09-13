@@ -175,6 +175,7 @@
   button { margin-top: 10px; }
 }
 .runtime_actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.runtime_dependencies { grid-column: 1 / -1; }
 
 .runtime_grid button,
 .diagnostic_card button,

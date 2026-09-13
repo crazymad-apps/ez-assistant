@@ -8,7 +8,7 @@ license.workspace = true
 name = "ez_assistant_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 经用户确认，仅 browser_resource/platform.rs 的 macOS FFI 可局部允许 unsafe。
+# 经用户确认，macOS 浏览器 FFI 及 Windows process_is_alive 可局部允许 unsafe。
 # 其他桌面代码仍默认拒绝，workspace 其他成员继续继承 forbid。
 [lints.rust]
 unsafe_code = "deny"
@@ -54,3 +54,6 @@ objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

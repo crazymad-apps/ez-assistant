@@ -66,8 +66,9 @@
 
 ## Shell 约束
 
-- 模型提供完整 command；平台 launcher 只负责 program 与 fixed args，不解析、重写
-  或风险评估 Shell 语法。
+- 模型提供完整 command；平台 launcher 负责 program、fixed args 和宿主显式冻结的编码
+  初始化前缀，不解析、改写或风险评估模型语法。Windows CMD 脚本使用其原生命令行引用
+  规则传递，不能使用 CRT 参数转义向模型命令插入反斜杠。
 - POSIX 默认 `/bin/sh -c`；Windows 默认 `COMSPEC /C`，缺失时使用 `cmd.exe /C`；
   构造时允许测试或宿主覆盖。
 - stdin 关闭，stdout/stderr 分离并并发排空。

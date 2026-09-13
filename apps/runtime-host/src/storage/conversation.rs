@@ -4,14 +4,14 @@ use std::{
     collections::{HashSet, VecDeque},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use agent_types::{ConversationMessage, ConversationSnapshot, MessageId};
 
-use super::{PRIVATE_FILE_MODE, StorageResult, internal_error, invalid_data};
+use super::{StorageResult, internal_error, invalid_data};
+use crate::platform;
 
 const INDEX_CACHE_CAPACITY: usize = 32;
 
@@ -338,14 +338,12 @@ pub(super) fn reconcile_append(
 }
 
 pub(super) fn write_replacement(path: &Path, payload: &[u8]) -> StorageResult<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)
-        .map_err(|source| {
-            internal_error("replacement conversation could not be created", source)
-        })?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    platform::apply_private_open_options(&mut options);
+    let mut file = options.open(path).map_err(|source| {
+        internal_error("replacement conversation could not be created", source)
+    })?;
     file.write_all(payload).map_err(|source| {
         internal_error("replacement conversation could not be written", source)
     })?;

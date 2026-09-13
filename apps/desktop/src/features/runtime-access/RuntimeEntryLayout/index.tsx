@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import appLogo from "../../../../app-icon.svg";
 import { DotsBackground } from "./DotsBackground";
 import styles from "./index.module.scss";
+import { DesktopWindowControls } from "../../desktop-lifecycle/DesktopWindowControls";
 
 type RuntimeEntryLayoutProps = {
   readonly description: string;
@@ -23,6 +24,7 @@ export function RuntimeEntryLayout({
       >
         <span data-tauri-drag-region>ez-assistant</span>
         <small data-tauri-drag-region>v{__APP_VERSION__}</small>
+        <DesktopWindowControls />
       </header>
       <DotsBackground />
       <section className={styles.content} data-runtime-entry-content>

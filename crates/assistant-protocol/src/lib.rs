@@ -187,7 +187,8 @@ pub use snapshot::{
 
 mod user_terminal;
 pub use user_terminal::{
-    UserTerminalControl, UserTerminalNotice, UserTerminalSize, UserTerminalSource,
+    AgentShellSettings, ShellCatalogEntry, ShellKind, UserTerminalControl, UserTerminalNotice,
+    UserTerminalSize, UserTerminalSource,
 };
 
 pub use model_management::{

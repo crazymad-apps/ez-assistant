@@ -1,9 +1,9 @@
 //! Host 唯一图片嗅探、解码、模型预处理与缩略图实现。
 
+use crate::platform;
 use std::{
     fs,
     io::{BufReader, Cursor, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -475,10 +475,10 @@ fn commit_tool_image(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let temporary = directory.join(format!(".{suffix}.part"));
-    let mut file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    platform::apply_private_open_options(&mut options);
+    let mut file = options
         .open(&temporary)
         .map_err(|_| ImageResourceError::Unavailable)?;
     let result = (|| {
@@ -493,11 +493,8 @@ fn commit_tool_image(
             }
             Err(_) => return Err(ImageResourceError::Unavailable),
         }
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o400))
-            .map_err(|_| ImageResourceError::Unavailable)?;
-        fs::File::open(directory)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| ImageResourceError::Unavailable)?;
+        platform::set_private_readonly_at(&target).map_err(|_| ImageResourceError::Unavailable)?;
+        platform::sync_directory(directory).map_err(|_| ImageResourceError::Unavailable)?;
         validate_tool_image_file(directory, reference)
     })();
     drop(file);
@@ -571,7 +568,7 @@ fn encode_jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, ImageResour
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::MetadataExt, sync::Arc};
+    use std::sync::Arc;
 
     use image::{
         Delay, Frame,
@@ -697,14 +694,17 @@ mod tests {
 
         copy_tool_image(&source, &target, &first).expect("copy image");
         validate_tool_image_file(&target, &first).expect("copied image");
-        assert_ne!(
+        #[cfg(unix)]
+        let (source_identity, target_identity) = (
             fs::metadata(source.join(first.relative_path()))
                 .expect("source metadata")
                 .ino(),
             fs::metadata(target.join(first.relative_path()))
                 .expect("target metadata")
-                .ino()
+                .ino(),
         );
+        #[cfg(unix)]
+        assert_ne!(source_identity, target_identity);
     }
 
     #[test]

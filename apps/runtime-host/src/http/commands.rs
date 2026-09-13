@@ -325,6 +325,16 @@ async fn dispatch_runtime(
             RuntimeCommandResult::GetModelSettings(runtime.get_model_settings()?),
             false,
         ),
+        RuntimeCommand::GetAgentShellSettings {} => (
+            RuntimeCommandResult::GetAgentShellSettings(runtime.get_agent_shell_settings().await?),
+            false,
+        ),
+        RuntimeCommand::SetDefaultAgentShell { shell } => (
+            RuntimeCommandResult::SetDefaultAgentShell(
+                runtime.set_default_agent_shell(shell).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetModelConfiguration(request) => (
             RuntimeCommandResult::GetModelConfiguration(
                 runtime.get_model_configuration(request).await?,

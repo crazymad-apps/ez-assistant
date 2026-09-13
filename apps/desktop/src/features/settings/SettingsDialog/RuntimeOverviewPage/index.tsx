@@ -7,6 +7,7 @@ import { SettingsPageContainer } from "../SettingsPageContainer";
 import { SettingsMessages } from "../SettingsMessages";
 import { connectionLabel } from "../runtimePresentation";
 import styles from "./index.module.scss";
+import { AgentShellSetting } from "./AgentShellSetting";
 
 export const RuntimeOverviewPage = observer(function RuntimeOverviewPage(props: Readonly<{
   onNavigate: (page: RuntimeSettingsPageId) => void;
@@ -49,6 +50,7 @@ export const RuntimeOverviewPage = observer(function RuntimeOverviewPage(props: 
         <Icon name="chevron-right" size={16} />
       </button>}
     </div>
+    <AgentShellSetting />
     <SettingsMessages />
   </SettingsPageContainer>;
 });

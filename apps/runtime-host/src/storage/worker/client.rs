@@ -192,6 +192,18 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
+        Box::pin(async move {
+            self.request(|reply| Command::LoadDefaultAgentShell { reply })
+                .await
+        })
+    }
+    fn save_default_agent_shell(&self, kind: assistant_protocol::ShellKind) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::SaveDefaultAgentShell { kind, reply })
+                .await
+        })
+    }
     fn load_providers(&self) -> StoreFuture<'_, Vec<assistant_runtime::StoredProvider>> {
         Box::pin(async move { self.request(|reply| Command::LoadProviders { reply }).await })
     }

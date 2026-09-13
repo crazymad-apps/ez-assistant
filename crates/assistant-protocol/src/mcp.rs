@@ -327,6 +327,9 @@ pub struct McpSelectionTagSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SessionCommand {
+    AgentShellSwitch {
+        shell: crate::ShellKind,
+    },
     SkillRefresh,
     McpRefresh {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,6 +351,9 @@ pub struct SubmitSessionCommandRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct AcceptedSessionCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_id: Option<crate::RunId>,
     pub input_id: InputId,
     pub command: SessionCommand,
     pub is_duplicate: bool,

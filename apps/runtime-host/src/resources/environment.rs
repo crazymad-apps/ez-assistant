@@ -25,7 +25,8 @@ pub(super) struct HostSessionEnvironmentFactory {
 impl HostSessionEnvironmentFactory {
     pub(super) fn new(runtime_home: &Path) -> Self {
         Self {
-            sessions_directory: runtime_home.join("data/sessions"),
+            // 与 Store 使用同样的原生路径组件，避免 Windows Fork 校验中的分隔符差异。
+            sessions_directory: runtime_home.join("data").join("sessions"),
         }
     }
 }
@@ -112,9 +113,15 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         request: ForkSessionEnvironmentFactoryRequest<'_>,
     ) -> Result<PreparedSessionEnvironment, SessionEnvironmentFactoryError> {
         let session_directory = self.sessions_directory.join(request.session_id.as_str());
+        let private_directory = path_text(&session_directory.join("private"))?;
         let environment = SessionExecutionEnvironment {
             workspace_id: request.source_environment.workspace_id.clone(),
-            working_directory: request.source_environment.working_directory.clone(),
+            // 无工作区会话的 cwd 属于自身 private；Fork 不能继续指向源会话的私有目录。
+            working_directory: if request.source_environment.workspace_id.is_some() {
+                request.source_environment.working_directory.clone()
+            } else {
+                private_directory.clone()
+            },
             additional_workspace_directories: request
                 .source_environment
                 .additional_workspace_directories
@@ -125,7 +132,7 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
                 .clone(),
             session_attachment_directory: path_text(&session_directory.join("attachments"))?,
             session_tool_image_directory: path_text(&session_directory.join("tool-images"))?,
-            session_private_directory: path_text(&session_directory.join("private"))?,
+            session_private_directory: private_directory,
         };
         let mut parts = request.source_system_prompt.parts().to_vec();
         if parts.pop().is_none() {
@@ -312,7 +319,7 @@ mod tests {
     #[test]
     fn bound_and_unbound_environments_have_stable_distinct_directory_prompts() {
         let root = TempDir::new().expect("runtime home");
-        let workspace = root.path().join("project<&");
+        let workspace = root.path().join("project&");
         let agent_directory = root.path().join("agent");
         fs::create_dir_all(&workspace).expect("workspace");
         fs::create_dir_all(&agent_directory).expect("agent directory");
@@ -326,11 +333,15 @@ mod tests {
                 memory_context: &memory_context,
             })
             .expect("unbound environment");
-        assert!(
-            unbound
-                .environment
-                .working_directory
-                .ends_with("data/sessions/s-one/private")
+        assert_eq!(
+            unbound.environment.working_directory,
+            root.path()
+                .join("data")
+                .join("sessions")
+                .join("s-one")
+                .join("private")
+                .to_str()
+                .unwrap()
         );
         assert!(!unbound.system_prompt.parts()[1].contains("workspace_private_directory"));
 
@@ -348,7 +359,7 @@ mod tests {
             .expect("bound environment");
         assert_eq!(bound.environment.workspace_id, Some(workspace_id));
         assert!(bound.system_prompt.parts()[1].contains("Example Workspace"));
-        assert!(bound.system_prompt.parts()[1].contains("project&lt;&amp;"));
+        assert!(bound.system_prompt.parts()[1].contains("project&amp;"));
         assert!(bound.system_prompt.parts()[2].contains("workspace_private_directory"));
     }
 

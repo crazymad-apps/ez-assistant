@@ -2,6 +2,7 @@
 
 mod environment;
 mod model;
+pub(crate) mod shell;
 mod skills;
 mod task_workspace;
 mod tools;

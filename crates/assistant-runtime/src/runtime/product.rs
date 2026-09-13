@@ -71,6 +71,7 @@ pub(super) struct ProjectionContext {
 }
 
 struct MessageRunProjection {
+    shell_switch: Option<(assistant_protocol::ShellKind, bool)>,
     snapshot: RunSnapshot,
     finished_at_ms: Option<i64>,
     step: Option<u32>,
@@ -341,12 +342,13 @@ impl AssistantRuntime {
             let usage = project_usage(&stored_usage, context_window);
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let workspace = self.session_workspace_snapshot(&session)?;
-            let (work_plan, goal, active_skills) = {
+            let (work_plan, goal, active_skills, agent_shell_kind) = {
                 let state = session.lock_state()?;
                 (
                     state.work_plan.as_ref().map(project_work_plan),
                     state.goal.as_ref().map(project_goal).transpose()?,
                     project_active_skills(&state)?,
+                    state.agent_shell_kind,
                 )
             };
             let title_generation = session
@@ -366,6 +368,7 @@ impl AssistantRuntime {
                         observed_sequence: end,
                         value: SessionViewSnapshot {
                             session: summary,
+                            agent_shell_kind,
                             title_generation,
                             workspace,
                             conversation_generation: generation,
@@ -1159,7 +1162,7 @@ impl AssistantRuntime {
         })
     }
 
-    async fn projection_context(
+    pub(super) async fn projection_context(
         &self,
         session: &crate::session::SessionController,
         attachments: &[assistant_protocol::AttachmentSummary],
@@ -1177,10 +1180,30 @@ impl AssistantRuntime {
             let mut run_by_message = HashMap::new();
             for run in state.runs.values() {
                 let snapshot = run.snapshot();
+                let input = state.inputs.get(run.input_id());
+                let target = input.and_then(|input| input.stored.agent_shell_target);
                 for message_id in run.message_ids() {
+                    // 归属首次实际提交该消息的 attempt；启动前失败后的重试仍可首次提交。
+                    if target.is_some()
+                        && run.attempt() != 1
+                        && input.is_some_and(|input| &input.stored.user_message_id == message_id)
+                        && state.runs.values().any(|earlier| {
+                            earlier.input_id() == run.input_id()
+                                && earlier.attempt() < run.attempt()
+                                && earlier.message_ids().contains(message_id)
+                        })
+                    {
+                        continue;
+                    }
                     run_by_message.insert(
                         message_id.as_str().to_owned(),
                         MessageRunProjection {
+                            shell_switch: target.map(|target| {
+                                (
+                                    target,
+                                    run.shell().is_some_and(|shell| shell.kind == target),
+                                )
+                            }),
                             snapshot: snapshot.clone(),
                             finished_at_ms: run.finished_at_ms(),
                             step: run.message_step(message_id),
@@ -1591,6 +1614,7 @@ pub(super) fn queue_snapshot(
                     .unwrap_or_default();
                 return Some(QueuedSessionItemSnapshot::Message(QueuedInputSnapshot {
                     input_id: input_id.clone(),
+                    agent_shell_target: input.stored.agent_shell_target,
                     text_preview: truncate_chars(&text_preview, TOOL_SUMMARY_CHARS),
                     submitted_at_ms: input.stored.accepted_at_ms,
                     position,
@@ -1751,9 +1775,51 @@ pub(super) fn project_conversation(
     for message in &snapshot.messages {
         match message {
             ConversationMessage::User(user) if user.transcript_visibility.is_visible() => {
+                if let Some(result) = crate::shell::InheritedShellSwitchResult::from_message(user)?
+                {
+                    items.push(ConversationItem::ShellSwitchResult {
+                        message_id: protocol_message_id(user.id.as_str())?,
+                        previous_shell: crate::shell::switch_previous(user)?,
+                        run_id: None,
+                        shell: result.shell,
+                        success: result.success,
+                        error: result.error,
+                    });
+                    continue;
+                }
+                if let Some(run) = context.run_by_message.get(user.id.as_str())
+                    && let Some((shell, success)) = run.shell_switch
+                {
+                    items.push(ConversationItem::ShellSwitchResult {
+                        message_id: protocol_message_id(user.id.as_str())?,
+                        previous_shell: crate::shell::switch_previous(user)?,
+                        run_id: Some(run.snapshot.run_id.clone()),
+                        shell,
+                        success,
+                        error: if success {
+                            None
+                        } else {
+                            run.snapshot.error.clone()
+                        },
+                    });
+                    continue;
+                }
                 if let Some(result) = context.control_result_by_message.get(user.id.as_str()) {
                     let message_id = protocol_message_id(user.id.as_str())?;
                     items.push(match result {
+                        crate::StoredSessionCommandResult::ShellSwitch {
+                            shell,
+                            previous_shell,
+                            environment,
+                            error,
+                        } => ConversationItem::ShellSwitchResult {
+                            message_id,
+                            previous_shell: *previous_shell,
+                            run_id: None,
+                            shell: *shell,
+                            success: environment.is_some(),
+                            error: error.clone(),
+                        },
                         crate::StoredSessionCommandResult::Mcp(result) => {
                             ConversationItem::ControlResult {
                                 message_id,

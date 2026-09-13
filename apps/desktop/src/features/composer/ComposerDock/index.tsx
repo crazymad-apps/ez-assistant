@@ -98,7 +98,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
 
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
-    setSlashActiveIndex(Math.max(0, first_enabled));
+    const exact_index = slash_items.findIndex((item) => item.name === slash_query);
+    setSlashActiveIndex(exact_index >= 0 ? exact_index : Math.max(0, first_enabled));
   }, [slash_query]);
 
   useEffect(() => {
@@ -193,9 +194,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     );
   }
 
-  async function submitDraft() {
+  async function submitDraft(value = draft) {
     const owner = input_owner.current;
-    const value = draft;
     const control = parseSessionCommand(value);
     if (control.type === "invalid") {
       store.showInteractionError(control.message);
@@ -251,10 +251,9 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     if (command.name === "/mcp refresh" || command.name === "/skill refresh") {
       if (command.disabled_reason) {
         store.showInteractionError(command.disabled_reason);
-      } else if (draft.trim() === command.name) {
-        void submitDraft();
       } else {
         setDraft(command.name);
+        void submitDraft(command.name);
         requestAnimationFrame(() => textarea_ref.current?.focus());
       }
       return;
@@ -338,6 +337,11 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
+      if (selected_command) {
+        handleSlashCommand(selected_command);
+        return;
+      }
       const exact_command = SLASH_COMMANDS.find(
         (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
       );
@@ -348,12 +352,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
         handleSlashCommand(exact);
         return;
       }
-      const command = slash_items[slash_active_index];
-      if (command && slash_query !== null) {
-        handleSlashCommand(command);
-      } else {
-        void submitDraft();
-      }
+      void submitDraft();
     }
   }
 
@@ -666,7 +665,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
 
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
-    setSlashActiveIndex(Math.max(0, first_enabled));
+    const exact_index = slash_items.findIndex((item) => item.name === slash_query);
+    setSlashActiveIndex(exact_index >= 0 ? exact_index : Math.max(0, first_enabled));
   }, [slash_query]);
   useEffect(() => {
     setSkillPickerOpen(false);
@@ -740,12 +740,17 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
+      if (selected_command) {
+        handleSlashCommand(selected_command);
+        return;
+      }
       const exact_command = SLASH_COMMANDS.find(
         (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
       );
       const command = exact_command
         ? { ...exact_command, disabled_reason: draftSlashDisabledReason(exact_command.name) }
-        : slash_query === null ? undefined : slash_items[slash_active_index];
+        : undefined;
       if (command) handleSlashCommand(command);
       else submitNewDraft();
     }

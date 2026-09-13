@@ -210,8 +210,8 @@ impl StorageEngine {
                         session_id, title, model_id, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin,
-                        materialization_key, automatic_title_pending, model_provider_instance_id
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11, ?12, ?13, ?14)",
+                        materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, 0, ?10, ?10, NULL, 0, ?11, ?12, ?13, ?14, ?15, ?16)",
                     params![
                         session.session_id.as_str(),
                         session.title,
@@ -233,6 +233,8 @@ impl StorageEngine {
                         session.materialization_key.as_ref().map(|key| key.as_str()),
                         i64::from(session.automatic_title_pending),
                         session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
+                        session.agent_shell_kind.map(super::mode::shell_kind_value),
+super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())?,
                     ],
                 )
                 .map_err(|source| {
@@ -266,6 +268,8 @@ impl StorageEngine {
         let _ = self.initialize_recall_owner(&recall_owner, 1, session.created_at_ms);
 
         Ok(StoredSession {
+            agent_shell_kind: session.agent_shell_kind,
+            agent_shell_environment: session.agent_shell_environment.clone(),
             session_id: session.session_id,
             title: session.title,
             model_selection: session.model_selection,
@@ -465,7 +469,7 @@ impl StorageEngine {
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
                         archived_at_ms, is_pinned, title_origin,
                         sessions.pc_output_device_id, devices.display_name,
-                        sessions.materialization_key, sessions.automatic_title_pending
+                        sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json
                  FROM sessions
                  LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
                  WHERE {predicate} ORDER BY created_at_ms, session_id"))
@@ -498,6 +502,8 @@ impl StorageEngine {
                         row.get::<_, Option<String>>(20)?,
                         row.get::<_, Option<String>>(21)?,
                         row.get::<_, i64>(22)?,
+                        row.get::<_, Option<String>>(23)?,
+                        row.get::<_, Option<String>>(24)?,
                     ))
                 },
             )
@@ -529,6 +535,8 @@ impl StorageEngine {
                 pc_output_device_name,
                 materialization_key,
                 automatic_title_pending,
+                agent_shell_kind,
+                agent_shell_environment,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -551,6 +559,13 @@ impl StorageEngine {
                 _ => return Err(invalid_data("stored session lifecycle is invalid")),
             };
             sessions.push(StoredSession {
+                agent_shell_kind: super::mode::parse_shell_kind(agent_shell_kind)?,
+                agent_shell_environment: agent_shell_environment
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|source| {
+                        invalid_data_with_source("stored shell environment is invalid", source)
+                    })?,
                 session_id: parsed_session_id.clone(),
                 title,
                 model_selection: parsed_model_selection,

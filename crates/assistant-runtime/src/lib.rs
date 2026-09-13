@@ -56,6 +56,9 @@ pub use environment::{
     WorkspaceEnvironmentSource,
 };
 pub use error::{RuntimeError, RuntimeResult};
+mod shell;
+pub use shell::FrozenShellEnvironment;
+
 pub use factory::{
     ChildTaskWorkspaceError, ChildTaskWorkspaceFactory, ChildTaskWorkspaceFuture,
     ChildTaskWorkspaceLease, DiscoveredModel, ModelDiscoveryError, ModelDiscoveryErrorKind,

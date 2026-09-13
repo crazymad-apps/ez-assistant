@@ -188,10 +188,26 @@ mod tests {
         }
     }
 
+    const WORKSPACE: &str = if cfg!(windows) {
+        r"C:\workspace"
+    } else {
+        "/workspace"
+    };
+    const CHART: &str = if cfg!(windows) {
+        r"C:\workspace\chart.png"
+    } else {
+        "/workspace/chart.png"
+    };
+    const REFERENCE: &str = if cfg!(windows) {
+        r"C:\tmp\reference.png"
+    } else {
+        "/tmp/reference.png"
+    };
+
     fn tool() -> InspectImagesTool {
         InspectImagesTool::new(
             Arc::new(FixtureInspector),
-            SessionPathResolver::new(AbsolutePath::new("/workspace").expect("workspace")),
+            SessionPathResolver::new(AbsolutePath::new(WORKSPACE).expect("workspace")),
         )
     }
 
@@ -221,23 +237,20 @@ mod tests {
     #[test]
     fn resolve_accepts_workspace_absolute_and_relative_paths_with_batch_read_facts() {
         let valid = || InspectImagesInput {
-            image_paths: vec!["chart.png".to_owned(), "/tmp/reference.png".to_owned()],
+            image_paths: vec!["chart.png".to_owned(), REFERENCE.to_owned()],
             goal: "read the chart".to_owned(),
             background: None,
         };
         let resolution = tool().resolve(valid()).expect("resolve paths");
         let resolved = resolution.into_input();
-        assert_eq!(
-            resolved.image_paths,
-            vec!["/workspace/chart.png", "/tmp/reference.png"]
-        );
+        assert_eq!(resolved.image_paths, vec![CHART, REFERENCE]);
 
         let mut blank = valid();
         blank.goal = "  ".to_owned();
         assert!(tool().resolve(blank).is_err());
 
         let duplicate = InspectImagesInput {
-            image_paths: vec!["chart.png".to_owned(), "/workspace/./chart.png".to_owned()],
+            image_paths: vec!["chart.png".to_owned(), format!("{WORKSPACE}/./chart.png")],
             goal: "compare".to_owned(),
             background: None,
         };
@@ -267,7 +280,7 @@ mod tests {
                 id: ToolCallId::new("call-inspect").expect("call id"),
                 name: ToolName::new("inspect_images").expect("tool name"),
                 arguments: serde_json::json!({
-                    "image_paths": ["chart.png", "/tmp/reference.png"],
+                    "image_paths": ["chart.png", REFERENCE],
                     "goal": "compare"
                 }),
             }],
@@ -285,7 +298,7 @@ mod tests {
                 .iter()
                 .map(AbsolutePath::as_str)
                 .collect::<Vec<_>>(),
-            vec!["/workspace/chart.png", "/tmp/reference.png"]
+            vec![CHART, REFERENCE]
         );
     }
 

@@ -444,7 +444,7 @@ impl StorageEngine {
             }
             apply_goal_resume(&transaction, goal)?;
         }
-        transaction.execute("INSERT INTO inputs (priority_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)", params![priority_order, input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant), input_origin_value(input.origin), input.goal_binding.as_ref().map(|binding| binding.goal_id.as_str()), input.goal_binding.as_ref().map(|binding| i64::try_from(binding.generation)).transpose().map_err(|source| internal_error("Goal input generation exceeds storage range", source))?, input.goal_binding.as_ref().map(|binding| i64::from(binding.turn)), goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json]).map_err(|source| database_write_error("input could not be accepted", source))?;
+        transaction.execute("INSERT INTO inputs (priority_order, input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json, agent_shell_target) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)", params![priority_order, input.input_id.as_str(), input.session_id.as_str(), input.idempotency_key.as_ref().map(IdempotencyKey::as_str), input.message.id.as_str(), message_json, input.accepted_at_ms, agent_variant_value(input.agent_variant), input_origin_value(input.origin), input.goal_binding.as_ref().map(|binding| binding.goal_id.as_str()), input.goal_binding.as_ref().map(|binding| i64::try_from(binding.generation)).transpose().map_err(|source| internal_error("Goal input generation exceeds storage range", source))?, input.goal_binding.as_ref().map(|binding| i64::from(binding.turn)), goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json, input.agent_shell_target.map(super::mode::shell_kind_value)]).map_err(|source| database_write_error("input could not be accepted", source))?;
         if let Some(selection) = input.mcp_selection.as_ref() {
             transaction
                 .execute(
@@ -497,6 +497,7 @@ impl StorageEngine {
             database_write_error("input acceptance could not be committed", source)
         })?;
         let stored = StoredInput {
+            agent_shell_target: input.agent_shell_target,
             queue_order,
             input_id: input.input_id.clone(),
             session_id: input.session_id.clone(),
@@ -513,6 +514,7 @@ impl StorageEngine {
             accepted_at_ms: input.accepted_at_ms,
         };
         let run = StoredRun {
+            shell: None,
             run_id: input.run_id,
             session_id: input.session_id,
             input_id: input.input_id,
@@ -843,7 +845,7 @@ impl StorageEngine {
         } else {
             "?1 IS NULL"
         };
-        let mut statement = self.connection.prepare(&format!("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs WHERE input_kind = 'message' AND {predicate} ORDER BY COALESCE(priority_order, queue_order), queue_order")).map_err(|source| internal_error("runtime inputs could not be queried", source))?;
+        let mut statement = self.connection.prepare(&format!("SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json, agent_shell_target FROM inputs WHERE input_kind = 'message' AND {predicate} ORDER BY COALESCE(priority_order, queue_order), queue_order")).map_err(|source| internal_error("runtime inputs could not be queried", source))?;
         let rows = statement
             .query_map(
                 [session_id.map(assistant_protocol::SessionId::as_str)],
@@ -866,6 +868,7 @@ impl StorageEngine {
                         row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
                         row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<String>>(17)?,
                     ))
                 },
             )
@@ -889,6 +892,7 @@ impl StorageEngine {
                 skill_activation_json,
                 cross_session_json,
                 channel_source_json,
+                agent_shell_target,
             ) = row
                 .map_err(|source| internal_error("runtime input row could not be read", source))?;
             let state = match state.as_str() {
@@ -1002,6 +1006,7 @@ impl StorageEngine {
                 return Err(invalid_data("stored Runtime input has no binding"));
             }
             Ok(StoredInput {
+                agent_shell_target: super::mode::parse_shell_kind(agent_shell_target)?,
                 queue_order: u64::try_from(queue_order).map_err(|source| {
                     invalid_data_with_source("stored queue order is invalid", source)
                 })?,
@@ -1345,6 +1350,7 @@ pub(super) fn insert_proxy_report(
     })?;
     Ok(AcceptedInput {
         input: StoredInput {
+            agent_shell_target: None,
             queue_order,
             input_id: input.input_id.clone(),
             session_id: input.session_id.clone(),
@@ -1361,6 +1367,7 @@ pub(super) fn insert_proxy_report(
             accepted_at_ms: input.accepted_at_ms,
         },
         run: StoredRun {
+            shell: None,
             run_id: input.run_id.clone(),
             session_id: input.session_id.clone(),
             input_id: input.input_id.clone(),

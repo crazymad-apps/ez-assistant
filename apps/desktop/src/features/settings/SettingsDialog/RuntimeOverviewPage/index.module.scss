@@ -9,6 +9,8 @@
 .status[data-connected="true"] i { background: var(--ez-success); }
 .status > span { color: var(--ez-text-muted); }
 .sections { margin-top: 24px; }
+.shell_setting { display: grid; gap: 10px; margin-top: 24px; }
+.shell_setting small { color: var(--ez-text-secondary); }
 .row { display: flex; width: 100%; height: auto; align-items: center; gap: 13px; padding: 15px 6px; border: 0; border-bottom: 1px solid var(--ez-border); color: var(--ez-text); background: transparent; text-align: left; transition: background var(--ez-motion-fast); }
 .row:hover { background: var(--ez-surface-subtle); }
 .row > svg { flex: 0 0 auto; color: var(--ez-text-muted); }

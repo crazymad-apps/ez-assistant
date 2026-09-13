@@ -731,6 +731,7 @@ async fn recovery_interrupts_source_without_creating_proxy_report() {
     };
     store
         .commit_user_message(crate::UserMessageCommit {
+            shell: None,
             operation_id: "recovery-start".to_owned(),
             input_id,
             run_id: accepted.run.run_id.clone(),

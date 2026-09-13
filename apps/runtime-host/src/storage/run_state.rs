@@ -59,6 +59,7 @@ impl StorageEngine {
         let agent_variant = parse_agent_variant(&agent_variant)?;
         self.connection.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, ?4, 'accepted', 0, ?5, NULL, NULL, ?6, NULL, NULL)", params![attempt.run_id.as_str(), attempt.session_id.as_str(), input_id, next, approval_mode_value(attempt.approval_mode), attempt.created_at_ms]).map_err(|source| database_write_error("run attempt could not be created", source))?;
         Ok(StoredRun {
+            shell: None,
             run_id: attempt.run_id,
             session_id: attempt.session_id,
             input_id: InputId::new(input_id)
@@ -82,13 +83,36 @@ impl StorageEngine {
     /// 首次领取提交 User Message；后续 attempt 只把新的 Run 转为 Running。
     pub(super) fn commit_user_message(&mut self, commit: UserMessageCommit) -> StorageResult<()> {
         if commit.message.is_none() {
-            let changed = self.connection.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str()]).map_err(|source| database_write_error("run could not be started", source))?;
+            let shell = commit
+                .shell
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|source| internal_error("shell snapshot could not be encoded", source))?;
+            let changed = self.connection.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2, shell_snapshot_json = ?6 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str(), shell]).map_err(|source| database_write_error("run could not be started", source))?;
             if changed != 1 {
                 return Err(conflict("run cannot be started"));
             }
             return Ok(());
         }
         let message = commit.message.expect("checked message");
+
+        // 在正文写入前核验切换目标与冻结快照，避免可预知的冲突留下不可完成的 staged append。
+        let preflight = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| internal_error("run start preflight could not begin", source))?;
+        super::append_effect::apply_user_message_start(
+            &preflight,
+            &commit.run_id,
+            &commit.session_id,
+            commit.reasoning_effort,
+            commit.shell.as_ref(),
+            commit.created_at_ms,
+        )?;
+        preflight
+            .rollback()
+            .map_err(|source| internal_error("run start preflight could not roll back", source))?;
 
         let operation_id = commit.operation_id.clone();
         self.stage_append_for(
@@ -101,6 +125,7 @@ impl StorageEngine {
                 created_at_ms: commit.created_at_ms,
             },
             AppendPurpose::UserMessage {
+                shell: commit.shell,
                 reasoning_effort: commit.reasoning_effort,
             },
         )?;

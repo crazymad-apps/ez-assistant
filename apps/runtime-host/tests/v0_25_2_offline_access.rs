@@ -1,4 +1,6 @@
 //! Local management IPC only: these fixtures never open a Store or start a business Runtime.
+// 此历史矩阵验证 Unix mode、symlink 和 setsid；Windows 使用独立平台验收。
+#![cfg(unix)]
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, Permissions},

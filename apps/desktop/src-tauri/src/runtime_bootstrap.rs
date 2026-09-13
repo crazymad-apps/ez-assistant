@@ -1,15 +1,22 @@
 //! 受信任桌面进程中的 Runtime discovery、启动与 bootstrap。
 
+#[cfg(windows)]
+mod windows;
+
+#[cfg(any(not(windows), test))]
+use std::fs::OpenOptions;
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+#[cfg(unix)]
+use std::process::Command;
 
 use assistant_protocol::{
     GetSessionViewRequest, GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult,
@@ -617,7 +624,11 @@ impl RuntimeBootstrapCoordinator {
         if !executable.is_file() {
             return Err(source_unavailable());
         }
-        let mut child = tokio::process::Command::new(executable)
+        let mut command = tokio::process::Command::new(executable);
+        // 短启动器无窗口；正式 Host 仍按自身 DETACHED_PROCESS 路径独立运行。
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = command
             .arg("launch")
             .arg("--runtime-home")
             .arg(&self.runtime_home)
@@ -626,10 +637,10 @@ impl RuntimeBootstrapCoordinator {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|_| {
+            .map_err(|error| {
                 bootstrap_error(
                     RuntimeBootstrapErrorCode::RuntimeStartFailed,
-                    "无法启动 Host 短启动器。",
+                    format!("无法启动 Host 短启动器（系统错误：{error}）。"),
                 )
             })?;
         let status = tokio::time::timeout(CONNECT_TIMEOUT, child.wait())
@@ -649,9 +660,16 @@ impl RuntimeBootstrapCoordinator {
         if status.success() {
             Ok(())
         } else {
+            let message = match status.code() {
+                Some(code) => format!(
+                    "Host 启动器返回失败（退出码 {code}，0x{:08X}）。",
+                    code as u32
+                ),
+                None => "Host 启动器被信号终止。".to_owned(),
+            };
             Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::RuntimeStartFailed,
-                "Host 启动器返回失败。",
+                message,
             ))
         }
     }
@@ -800,11 +818,18 @@ fn read_discovery(runtime_home: &Path) -> Result<RuntimeDiscovery, RuntimeBootst
         }
     }
 
+    #[cfg(not(windows))]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(not(windows))]
     let file = options.open(&path).map_err(|_| invalid_discovery())?;
+    #[cfg(windows)]
+    let file =
+        windows::open_private_file(runtime_home, &path, false).map_err(|_| invalid_discovery())?;
+    #[cfg(unix)]
     let opened = file.metadata().map_err(|_| invalid_discovery())?;
     #[cfg(unix)]
     if metadata.dev() != opened.dev()
@@ -859,7 +884,34 @@ fn process_is_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn process_is_alive(pid: u32) -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: PID 是值参数；仅请求同步权限，句柄不可继承，无跨线程共享。
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        // SAFETY: 紧接失败的 OpenProcess 在同一线程读取错误，不插入其他 Win32 调用。
+        // 拒绝访问或未知错误不证明已退出，保守保留存活判断，后续仍须认证端点。
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: OpenProcess 成功返回独占有效句柄；OwnedHandle 在所有路径恰好关闭一次。
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    // SAFETY: 调用期间句柄始终有效；零超时只查询退出信号，不阻塞或转移所有权。
+    // 不比较退出码，避免将实际 exit(259) 误认作 STILL_ACTIVE。
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) != WAIT_OBJECT_0 }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_is_alive(_pid: u32) -> bool {
     false
 }
@@ -879,12 +931,18 @@ fn instance_changed() -> RuntimeBootstrapError {
 }
 
 fn instance_lock_released(home: &Path) -> Result<bool, RuntimeBootstrapError> {
+    #[cfg(not(windows))]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true).write(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(not(windows))]
     let file = options
         .open(home.join("run/runtime.lock"))
+        .map_err(|_| invalid_discovery())?;
+    #[cfg(windows)]
+    let file = windows::open_private_file(home, &home.join("run/runtime.lock"), true)
         .map_err(|_| invalid_discovery())?;
     let metadata = file.metadata().map_err(|_| invalid_discovery())?;
     if !metadata.is_file() {
@@ -943,24 +1001,76 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn failed_launcher_reports_its_exit_code() {
+        let directory = tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let coordinator =
+            RuntimeBootstrapCoordinator::new(directory.path().to_owned(), executable.clone())
+                .unwrap();
+        // 测试可执行文件拒绝 Host 的 --runtime-home 参数，稳定产生非零退出码。
+        let error = coordinator.launch_from(&executable).await.unwrap_err();
+        assert!(matches!(
+            error.code,
+            RuntimeBootstrapErrorCode::RuntimeStartFailed
+        ));
+        assert!(error.message.contains("退出码"));
+        assert!(error.message.contains("0x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_liveness_tracks_exit_even_with_still_active_exit_code() {
+        use std::{io::Write as _, os::windows::process::CommandExt as _};
+
+        assert!(process_is_alive(std::process::id()));
+        assert!(!process_is_alive(0));
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/q"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW，仅隔离测试子进程。
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("test command process");
+        let running = process_is_alive(child.id());
+        child
+            .stdin
+            .take()
+            .expect("command input")
+            .write_all(b"exit 259\r\n")
+            .expect("request child exit");
+        let exit = child.wait().expect("wait for command exit");
+        assert!(running);
+        assert_eq!(exit.code(), Some(259));
+        // Child 仍持有进程句柄，确保查询的是已退出的内核对象，而非已消失 PID。
+        assert!(!process_is_alive(child.id()));
+    }
+
     #[test]
     fn application_home_isolated_in_development_and_invalid_override_never_falls_back() {
-        let home = Some(PathBuf::from("/test-user"));
+        let user = PathBuf::from(if cfg!(windows) {
+            "C:/test-user"
+        } else {
+            "/test-user"
+        });
+        let home = Some(user.clone());
+        let isolated = PathBuf::from(if cfg!(windows) {
+            "C:/tmp/isolated-host"
+        } else {
+            "/tmp/isolated-host"
+        });
         assert_eq!(
             application_runtime_home(None, home.clone(), true),
-            PathBuf::from("/test-user/.ez-assistant-dev")
+            crate::runtime_source::canonical_home(&user.join(".ez-assistant-dev")).unwrap()
         );
         assert_eq!(
             application_runtime_home(None, home.clone(), false),
-            PathBuf::from("/test-user/.ez-assistant")
+            crate::runtime_source::canonical_home(&user.join(".ez-assistant")).unwrap()
         );
         assert_eq!(
-            application_runtime_home(
-                Some(PathBuf::from("/tmp/isolated-host")),
-                home.clone(),
-                false
-            ),
-            crate::runtime_source::canonical_home(Path::new("/tmp/isolated-host")).unwrap()
+            application_runtime_home(Some(isolated.clone()), home.clone(), false),
+            crate::runtime_source::canonical_home(&isolated).unwrap()
         );
         assert!(
             application_runtime_home(Some(PathBuf::from("relative")), home, false)
@@ -1084,10 +1194,10 @@ mod tests {
     async fn reachable_diagnostic_host_is_reused_without_launch_or_health_readiness_timeout() {
         use std::io::Read as _;
         for (version, minimum, accepted) in [
-            ("0.25.2", Some("0.25.2"), true),
-            ("0.25.3", Some("0.25.2"), true),
+            ("0.25.3", Some("0.25.3"), true),
+            ("0.25.4", Some("0.25.3"), true),
             ("0.25.1", Some("0.25.1"), false),
-            ("0.25.3", Some("0.25.3"), false),
+            ("0.25.4", Some("0.25.4"), false),
             ("0.25.1", None, false),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1266,6 +1376,7 @@ mod tests {
         let home = tempdir().unwrap();
         let run = home.path().join("run");
         fs::create_dir(&run).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
         let coordinator =
             RuntimeBootstrapCoordinator::new(home.path().to_owned(), home.path().join("absent"))
@@ -1295,6 +1406,7 @@ mod tests {
         }))
         .unwrap();
         fs::write(&path, &content).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(matches!(
             coordinator

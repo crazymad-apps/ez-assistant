@@ -1,5 +1,8 @@
 //! 单个 PTY 的 I/O 与回收。读/等待在阻塞池执行；监督任务持有并等待全部子任务。
 
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 use super::{TerminalError, TerminalEvent, failure};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::{
@@ -25,6 +28,8 @@ pub(super) struct TerminalProcess {
     ack: Semaphore,
     child_exited: AtomicBool,
     task: tokio::sync::Mutex<ProcessCompletion>,
+    #[cfg(windows)]
+    job: crate::platform::job::Job,
 }
 
 #[derive(Default)]
@@ -37,9 +42,13 @@ impl TerminalProcess {
     pub(super) async fn spawn(
         directory: PathBuf,
         size: PtySize,
+        shell: Option<assistant_protocol::ShellKind>,
         send: impl Fn(TerminalEvent) -> Result<(), TerminalError> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, TerminalError> {
-        Self::spawn_command(directory, size, CommandBuilder::new_default_prog(), send).await
+        let command = tokio::task::spawn_blocking(move || super::shell::interactive(shell))
+            .await
+            .map_err(|_| failure("Shell 探测任务异常。"))??;
+        Self::spawn_command(directory, size, command, send).await
     }
 
     pub(super) async fn spawn_command(
@@ -49,11 +58,29 @@ impl TerminalProcess {
         send: impl Fn(TerminalEvent) -> Result<(), TerminalError> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, TerminalError> {
         filter_environment(&mut command);
+        // CMD 把 canonicalize 返回的本机 verbatim 路径误认成 UNC 并回退 Windows 目录。
+        // 这里只把已授权本机盘符路径转换为等价普通形式，不重新解析目录或放宽访问边界。
+        #[cfg(windows)]
+        let directory = match directory.components().next() {
+            Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+                std::path::Prefix::VerbatimDisk(drive) => {
+                    PathBuf::from(format!("{}:\\", char::from(drive)))
+                        .join(directory.components().skip(2).collect::<PathBuf>())
+                }
+                _ => directory,
+            },
+            _ => directory,
+        };
         command.cwd(&directory);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "ez-assistant");
-        let (pair, reader, writer, child) = tokio::task::spawn_blocking(move || {
+        let (pair, reader, writer, child, job) = tokio::task::spawn_blocking(move || {
+            #[cfg(windows)]
+            let job =
+                crate::platform::job::Job::new().map_err(|_| failure("无法创建终端进程组。"))?;
+            #[cfg(unix)]
+            let job = ();
             let pair = portable_pty::native_pty_system()
                 .openpty(size)
                 .map_err(|_| failure("无法创建终端。"))?;
@@ -71,11 +98,25 @@ impl TerminalProcess {
                 .slave
                 .spawn_command(command)
                 .map_err(|_| failure("无法启动系统登录 Shell。"))?;
-            Ok::<_, TerminalError>((pair, reader, writer, child))
+            #[cfg(windows)]
+            if child
+                .process_id()
+                .ok_or_else(|| failure("终端进程没有标识。"))
+                .and_then(|pid| job.assign(pid).map_err(|_| failure("无法约束终端进程树。")))
+                .is_err()
+            {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failure("无法约束终端进程树。"));
+            }
+            Ok::<_, TerminalError>((pair, reader, writer, child, job))
         })
         .await
         .map_err(|_| failure("终端创建任务异常。"))??;
         drop(pair.slave);
+        #[cfg(unix)]
+        let _ = job;
         let process = Arc::new(Self {
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
@@ -84,6 +125,8 @@ impl TerminalProcess {
             ack: Semaphore::new(0),
             child_exited: AtomicBool::new(false),
             task: tokio::sync::Mutex::new(ProcessCompletion::default()),
+            #[cfg(windows)]
+            job,
         });
         let owner = process.clone();
         process.task.lock().await.task = Some(tokio::spawn(async move {
@@ -167,12 +210,25 @@ impl TerminalProcess {
         let reader_owner = self.clone();
         let read_task = tokio::task::spawn_blocking(move || {
             let mut buffer = [0; OUTPUT_BYTES];
-            while !reader_owner.cancel.is_cancelled() {
+            loop {
+                #[cfg(unix)]
+                if reader_owner.cancel.is_cancelled() {
+                    break;
+                }
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(count) => {
+                        // Windows ClosePseudoConsole 需要输出管道持续排空。取消后丢弃字节，
+                        // 仍读到 EOF；不得提前结束读线程再关闭 master。
+                        #[cfg(windows)]
+                        if reader_owner.cancel.is_cancelled() {
+                            continue;
+                        }
                         if output.blocking_send(buffer[..count].to_vec()).is_err() {
+                            #[cfg(unix)]
                             break;
+                            #[cfg(windows)]
+                            reader_owner.cancel();
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -182,6 +238,7 @@ impl TerminalProcess {
                         }
                         std::thread::sleep(IO_WAIT);
                     }
+                    #[cfg(unix)]
                     Err(error) if error.raw_os_error() == Some(5) => break,
                     Err(_) => return Err(failure("终端输出读取失败。")),
                 }
@@ -192,6 +249,16 @@ impl TerminalProcess {
         let wait_task = tokio::task::spawn_blocking(move || {
             let result = child.wait().map_err(|_| failure("无法取得终端退出状态。"));
             wait_owner.child_exited.store(true, Ordering::Release);
+            #[cfg(windows)]
+            {
+                // 根 Shell 自然退出也收回仍存活的后代；此时读线程独立排空 ConPTY 输出。
+                let cleanup = wait_owner
+                    .job
+                    .terminate()
+                    .map_err(|_| failure("终端后代尚未退出。"));
+                wait_owner.close_windows_pty()?;
+                cleanup?;
+            }
             result
         });
         loop {
@@ -325,15 +392,37 @@ impl TerminalProcess {
         }
         #[cfg(not(unix))]
         {
-            _killer
-                .kill()
-                .map_err(|_| failure("无法终止终端 Shell。"))?;
+            let _ = shell_pid;
+            let cleanup = self
+                .job
+                .terminate()
+                .map_err(|_| failure("无法回收终端进程树。"));
+            self.close_windows_pty()?;
+            cleanup?;
             Ok(Vec::new())
         }
     }
+
+    #[cfg(windows)]
+    fn close_windows_pty(&self) -> Result<(), TerminalError> {
+        // 先把所有权移出锁再执行可能阻塞的 ClosePseudoConsole，避免 resize/另一关闭者死锁。
+        let master = self
+            .master
+            .lock()
+            .map_err(|_| failure("终端状态异常。"))?
+            .take();
+        drop(master);
+        self.writer
+            .lock()
+            .map_err(|_| failure("终端输入状态异常。"))?
+            .take();
+        Ok(())
+    }
 }
 
-fn verify_groups_gone(mut groups: Vec<i32>) -> Result<(), TerminalError> {
+fn verify_groups_gone(groups: Vec<i32>) -> Result<(), TerminalError> {
+    #[cfg(unix)]
+    let mut groups = groups;
     #[cfg(unix)]
     {
         use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
@@ -371,7 +460,8 @@ fn nonblocking(master: &dyn MasterPty) -> Result<(), TerminalError> {
 
 #[cfg(not(unix))]
 fn nonblocking(_master: &dyn MasterPty) -> Result<(), TerminalError> {
-    Err(failure("当前平台尚不支持可取消的用户终端。"))
+    // ConPTY 用独立阻塞读线程；Job + master 关闭负责取消，不请求 Unix fd 模式。
+    Ok(())
 }
 
 fn filter_environment(command: &mut CommandBuilder) {

@@ -3,7 +3,6 @@
 use std::{
     fs, io,
     io::{BufReader, Read},
-    os::unix::fs::{PermissionsExt, symlink},
     path::{Component, Path, PathBuf},
 };
 
@@ -14,6 +13,7 @@ use sha2::Digest;
 use super::{StorageResult, internal_error, invalid_data};
 use crate::attachment_hash;
 use crate::config_source::prepare_private_directory;
+use crate::platform;
 
 pub(super) fn validate_original_name(name: &str) -> StorageResult<()> {
     if name.is_empty()
@@ -142,7 +142,7 @@ pub(super) fn ensure_blob(
             fs::rename(staging_path, &blob).map_err(|source| {
                 internal_error("attachment blob could not be committed", source)
             })?;
-            fs::set_permissions(&blob, fs::Permissions::from_mode(0o400)).map_err(|source| {
+            platform::set_private_readonly_at(&blob).map_err(|source| {
                 internal_error("attachment blob permissions could not be set", source)
             })?;
             super::sync_directory(parent)?;
@@ -207,6 +207,7 @@ pub(super) fn relative_blob_link(blob_hash: &str, original_name: &str) -> PathBu
         .join(blob_file_name(blob_hash, original_name))
 }
 
+#[cfg(unix)]
 fn legacy_relative_blob_link(blob_hash: &str) -> PathBuf {
     PathBuf::from("../../../../")
         .join("blobs")
@@ -216,6 +217,9 @@ fn legacy_relative_blob_link(blob_hash: &str) -> PathBuf {
 }
 
 /// 创建缺失视图；遇到任何已有未知对象都 fail-closed，不覆盖用户可观察内容。
+///
+/// 平台差异：Unix 以相对 symlink 指向 Blob；Windows 普通用户无 symlink 特权，
+/// 改为复制 Blob 字节（Blob 内容寻址且发布后只读，副本与链接等价可读）。
 pub(super) fn ensure_stable_view(
     view: &Path,
     blob_hash: &str,
@@ -223,6 +227,19 @@ pub(super) fn ensure_stable_view(
 ) -> StorageResult<bool> {
     let expected = relative_blob_link(blob_hash, original_name);
     match fs::symlink_metadata(view) {
+        // Windows 副本也必须匹配内容身份；未知或损坏对象不能被当作有效视图。
+        #[cfg(windows)]
+        Ok(metadata)
+            if metadata.file_type().is_file() && !platform::is_reparse_or_link(&metadata) =>
+        {
+            if hash_blob_file(view, original_name)? != blob_hash {
+                return Err(invalid_data(
+                    "attachment view content does not match its blob",
+                ));
+            }
+            Ok(false)
+        }
+        #[cfg(unix)]
         Ok(metadata) if metadata.file_type().is_symlink() => {
             let target = fs::read_link(view)
                 .map_err(|source| internal_error("attachment view could not be read", source))?;
@@ -247,8 +264,11 @@ pub(super) fn ensure_stable_view(
             prepare_private_directory(parent).map_err(|source| {
                 internal_error("attachment view directory could not be prepared", source)
             })?;
+            #[cfg(unix)]
             symlink(&expected, view)
                 .map_err(|source| internal_error("attachment view could not be created", source))?;
+            #[cfg(windows)]
+            copy_stable_view(&expected, view, parent)?;
             super::sync_directory(parent)?;
             Ok(true)
         }
@@ -256,5 +276,32 @@ pub(super) fn ensure_stable_view(
             "attachment view could not be inspected",
             source,
         )),
+    }
+}
+
+/// Windows 稳定视图：把 expected 相对目标解析到绝对 Blob 路径并复制字节。
+#[cfg(windows)]
+fn copy_stable_view(expected: &Path, view: &Path, parent: &Path) -> StorageResult<()> {
+    let blob = parent.join(expected);
+    fs::copy(&blob, view)
+        .map_err(|source| internal_error("attachment view could not be created", source))?;
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_windows_view_requires_matching_content() {
+        let root = tempfile::tempdir().unwrap();
+        let view = root.path().join("view.txt");
+        let name = "original.txt";
+        let hash = attachment_hash::digest_bytes(name, b"expected");
+        fs::write(&view, b"expected").unwrap();
+        assert!(!ensure_stable_view(&view, &hash, name).unwrap());
+        fs::write(&view, b"replaced").unwrap();
+        assert!(ensure_stable_view(&view, &hash, name).is_err());
+        assert_eq!(fs::read(view).unwrap(), b"replaced");
     }
 }

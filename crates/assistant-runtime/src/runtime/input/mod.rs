@@ -26,7 +26,8 @@ use super::{
     model::{RunAuthorizationInput, RunCompilationResources, compile_run_agent},
 };
 use crate::{
-    RuntimeResult, RuntimeStore, StoredInputState, StoredRunSettlement, UserMessageCommit,
+    RuntimeError, RuntimeResult, RuntimeStore, StoredInputState, StoredRunSettlement,
+    UserMessageCommit,
     config::ConfigRegistry,
     context_compaction::{
         MAX_AUTOMATIC_COMPACTIONS, compact_parent_context, compaction_reason_label,
@@ -66,7 +67,15 @@ struct QueueDriverContext {
 fn with_disclosure_context(
     mut conversation: agent_types::ConversationSnapshot,
     context: Option<&agent_types::UserMessage>,
+    shell_context: Option<&agent_types::UserMessage>,
 ) -> agent_types::ConversationSnapshot {
+    if let Some(shell_context) = shell_context
+        && !crate::shell::context_is_current(&conversation, shell_context)
+    {
+        conversation
+            .messages
+            .push(ConversationMessage::User(shell_context.clone()));
+    }
     if let Some(context) = context {
         conversation
             .messages
@@ -290,6 +299,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 run.snapshot(),
                 state.body_generation,
                 state.model_selection.clone(),
+                state.agent_shell_kind,
             )
         };
         let model_diagnostics = Arc::new(RunModelDiagnostics::new(
@@ -302,7 +312,30 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         let mut preparation_events = context.events.subscribe();
         // 准备只读取配置和目录；唯一队列驱动仍保留消费权，但不阻塞入队、取消或置顶。
         drop(mutation);
+        let confirmed_shell = match session.lock_state() {
+            Ok(state) => state.agent_shell_environment.clone(),
+            Err(_) => {
+                fault_driver(&session);
+                return;
+            }
+        };
         let preparation = async {
+            let factory = context.run_tool_factory.clone();
+            let target = if next.1.stored.state == StoredInputState::Queued {
+                next.1.stored.agent_shell_target.or(next.5)
+            } else {
+                next.5
+            };
+            let shell = if next.1.stored.agent_shell_target.is_none() && confirmed_shell.is_some() {
+                confirmed_shell
+            } else {
+                tokio::task::spawn_blocking(move || factory.freeze_shell(target))
+                    .await
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "shell discovery task",
+                    })?
+                    .map_err(|source| RuntimeError::RunToolsBuildFailed { source })?
+            };
             let skill_catalog = super::skills::prepare_current_catalog(
                 context.store.as_ref(),
                 context.skill_package_source.as_ref(),
@@ -317,6 +350,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 &config,
                 &context.config_registry,
                 RunCompilationResources {
+                    shell,
                     skill_catalog: skill_catalog?,
                     model_factory: context.model_factory.as_ref(),
                     context_window: context.context_window.clone(),
@@ -404,6 +438,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     .is_some_and(|input| input.latest_run_id == next.2.run_id)
                 && state.body_generation == next.3
                 && state.model_selection == next.4
+                && state.agent_shell_kind == next.5
         });
         if !still_current {
             // 取消、暂停或置顶使本次准备失效，不得为旧 Run 写入失败或用户正文。
@@ -416,6 +451,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         let start_error = match prepared {
             Ok(compiled) => {
                 let super::model::CompiledRunParts {
+                    shell,
                     model_binding,
                     agent,
                     authorizer,
@@ -426,10 +462,21 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     can_speak,
                     disclosure_context,
                 } = compiled.into_parts();
+                let shell_context = match shell
+                    .as_ref()
+                    .map(|shell| shell.context_message(&session.environment().working_directory))
+                    .transpose()
+                {
+                    Ok(context) => context,
+                    Err(_) => {
+                        fault_driver(&session);
+                        return;
+                    }
+                };
                 if let Ok(mut state) = session.lock_state() {
                     state.model_binding = Some(model_binding);
                 }
-                let message = if next.1.stored.state == StoredInputState::Queued {
+                let mut message = if next.1.stored.state == StoredInputState::Queued {
                     let plan = match session.lock_state() {
                         Ok(state) => state.work_plan.clone(),
                         Err(_) => {
@@ -450,6 +497,28 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 } else {
                     None
                 };
+                // 首次或环境变化随用户消息一起落账；恢复/压缩续接仍从本 Run 快照补回缺失事实。
+                if let (Some(message), Some(shell_context)) = (&mut message, &shell_context) {
+                    let current = match session.lock_state() {
+                        Ok(state) => state.journal.as_ref().is_some_and(|journal| {
+                            crate::shell::context_is_current(&journal.snapshot(), shell_context)
+                        }),
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
+                    };
+                    if !current {
+                        message.parts.extend(shell_context.parts.iter().cloned());
+                    }
+                }
+                if next.1.stored.agent_shell_target.is_some()
+                    && let Some(message) = &mut message
+                    && crate::shell::append_switch_previous(message, next.5).is_err()
+                {
+                    fault_driver(&session);
+                    return;
+                }
                 let started_at = match super::now_ms() {
                     Ok(value) => value,
                     Err(_) => {
@@ -467,6 +536,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 if context
                     .store
                     .commit_user_message(UserMessageCommit {
+                        shell: shell.clone(),
                         operation_id,
                         input_id: next.0.clone(),
                         run_id: next.2.run_id.clone(),
@@ -486,6 +556,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         Ok(state) => state,
                         Err(_) => return,
                     };
+                    state.agent_shell_environment = shell.clone();
+                    if next.1.stored.state == StoredInputState::Queued
+                        && let Some(target) = next.1.stored.agent_shell_target
+                    {
+                        state.agent_shell_kind = Some(target);
+                    }
                     let queue_revision = match state.pop_runnable_input(&next.0) {
                         Some(true) => {
                             state.queue_revision = state.queue_revision.saturating_add(1);
@@ -556,7 +632,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         .runs
                         .get_mut(&next.2.run_id)
                         .expect("run exists")
-                        .freeze_reasoning_effort(reasoning_effort);
+                        .freeze_execution(reasoning_effort, shell);
                     let conversation = state
                         .journal
                         .as_ref()
@@ -567,6 +643,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             conversation: with_disclosure_context(
                                 conversation,
                                 disclosure_context.as_ref(),
+                                shell_context.as_ref(),
                             ),
                         },
                         cancellation,
@@ -580,6 +657,14 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     },
                     generation,
                 });
+                if next.1.stored.state == StoredInputState::Queued
+                    && next.1.stored.agent_shell_target.is_some()
+                    && next.1.stored.agent_shell_target != next.5
+                {
+                    let _ = context.events.send(RuntimeEvent::SessionChanged {
+                        session_id: session.id().clone(),
+                    });
+                }
                 if let Some(queue_revision) = queue_revision {
                     let _ = context.events.send(RuntimeEvent::QueueChanged {
                         session_id: session.id().clone(),
@@ -693,6 +778,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                                 conversation: with_disclosure_context(
                                                     journal.snapshot(),
                                                     disclosure_context.as_ref(),
+                                                    shell_context.as_ref(),
                                                 ),
                                             })
                                         })
@@ -746,6 +832,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 conversation: with_disclosure_context(
                                     journal.snapshot(),
                                     disclosure_context.as_ref(),
+                                    shell_context.as_ref(),
                                 ),
                             })
                         }) {
@@ -791,6 +878,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 conversation: with_disclosure_context(
                                     replacement,
                                     disclosure_context.as_ref(),
+                                    shell_context.as_ref(),
                                 ),
                             };
                         }
@@ -1041,6 +1129,37 @@ async fn fail_before_start(
         fault_driver(session);
         return;
     };
+    let target = session.lock_state().ok().and_then(|state| {
+        state
+            .runs
+            .get(run_id)
+            .and_then(|run| state.inputs.get(run.input_id()))
+            .and_then(|input| input.stored.agent_shell_target)
+            .map(|target| (target, state.agent_shell_kind))
+    });
+    let messages = if let Some((target, previous_shell)) = target {
+        use crate::internal_boundary::{
+            InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+        };
+        let result = InternalBoundaryCoordinator::visible_message(InternalBoundaryRequest {
+            source: InternalBoundarySource::ShellSwitchResult,
+            text: format!(
+                "Agent Shell switch to {target:?} failed; the session shell binding is unchanged. {}",
+                error.message
+            ),
+        });
+        let Ok((mut message, _)) = result else {
+            fault_driver(session);
+            return;
+        };
+        if crate::shell::append_switch_previous(&mut message, previous_shell).is_err() {
+            fault_driver(session);
+            return;
+        }
+        vec![ConversationMessage::User(message)]
+    } else {
+        Vec::new()
+    };
     let stored_result = context
         .store
         .settle_run(StoredRunSettlement {
@@ -1050,7 +1169,7 @@ async fn fail_before_start(
             status: RunStatus::Failed,
             cancel_requested: false,
             error: Some(error.clone()),
-            messages: Vec::new(),
+            messages: messages.clone(),
             message_step: None,
             goal_effect: None,
             proxy_report,
@@ -1062,6 +1181,18 @@ async fn fail_before_start(
         return;
     };
     if let Ok(mut state) = session.lock_state() {
+        for message in &messages {
+            let Some(journal) = state.journal.as_mut() else {
+                fault_locked_driver(&mut state);
+                return;
+            };
+            if journal.append_completed(message.clone()).is_err() {
+                fault_locked_driver(&mut state);
+                return;
+            }
+            state.persisted_message_count += 1;
+            state.message_count += 1;
+        }
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
         if let Some(input_id) = failed_input_id.as_ref()
             && let Some(is_user) = state.pop_runnable_input(input_id)
@@ -1070,6 +1201,10 @@ async fn fail_before_start(
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
         if let Some(run) = state.runs.get_mut(run_id) {
+            run.extend_message_ids(messages.iter().filter_map(|message| match message {
+                ConversationMessage::User(message) => Some(message.id.clone()),
+                _ => None,
+            }));
             run.fail_before_start(error.clone(), finished_at);
         }
         if state
@@ -1081,6 +1216,16 @@ async fn fail_before_start(
         }
         state.updated_at_ms = finished_at;
         state.is_queue_driver_running = false;
+    }
+    if !messages.is_empty()
+        && let Ok(state) = session.lock_state()
+    {
+        let _ = context.events.send(RuntimeEvent::ConversationCommitted {
+            owner: ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+            generation: state.body_generation,
+        });
     }
     let _ = context
         .events

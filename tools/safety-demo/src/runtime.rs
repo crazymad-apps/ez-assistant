@@ -1176,7 +1176,7 @@ mod tests {
                     "call-shell-denied",
                     "shell",
                     serde_json::json!({
-                        "command": "printf denied > must-not-exist.txt",
+                        "command": if cfg!(windows) { "echo denied>must-not-exist.txt" } else { "printf denied > must-not-exist.txt" },
                         "workdir": root.path(),
                     }),
                 ),
@@ -1215,7 +1215,7 @@ mod tests {
                     "call-shell-ask",
                     "shell",
                     serde_json::json!({
-                        "command": "printf approved > approved.txt",
+                        "command": if cfg!(windows) { "echo approved>approved.txt" } else { "printf approved > approved.txt" },
                         "workdir": root.path(),
                     }),
                 ),
@@ -1257,7 +1257,14 @@ mod tests {
             Err(ApprovalError::NotPending)
         );
         let snapshot = wait_for_snapshot(&runtime, |snapshot| !snapshot.active_run).await;
-        assert_eq!(std::fs::read_to_string(marker).expect("marker"), "approved");
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("marker"),
+            if cfg!(windows) {
+                "approved\r\n"
+            } else {
+                "approved"
+            }
+        );
         let run = snapshot.run.as_ref().expect("run");
         assert_eq!(run.execution_mode, ExecutionMode::Build);
         assert_eq!(run.approval_mode, crate::policy::ApprovalMode::Ask);
@@ -1280,7 +1287,7 @@ mod tests {
                     "call-shell-deny",
                     "shell",
                     serde_json::json!({
-                        "command": "printf denied > denied.txt",
+                        "command": if cfg!(windows) { "echo denied>denied.txt" } else { "printf denied > denied.txt" },
                         "workdir": root.path(),
                     }),
                 ),
@@ -1324,7 +1331,7 @@ mod tests {
                     "call-shell-auto",
                     "shell",
                     serde_json::json!({
-                        "command": "printf auto > auto.txt",
+                        "command": if cfg!(windows) { "echo auto>auto.txt" } else { "printf auto > auto.txt" },
                         "workdir": root.path(),
                     }),
                 ),
@@ -1340,7 +1347,10 @@ mod tests {
             .await
             .expect("start run");
         let snapshot = wait_for_snapshot(&runtime, |snapshot| !snapshot.active_run).await;
-        assert_eq!(std::fs::read_to_string(marker).expect("marker"), "auto");
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("marker"),
+            if cfg!(windows) { "auto\r\n" } else { "auto" }
+        );
         assert!(!snapshot.pending_approval);
         assert!(snapshot.audit.iter().any(|entry| {
             entry.call_id == "call-shell-auto" && entry.policy == "auto_allow_all"

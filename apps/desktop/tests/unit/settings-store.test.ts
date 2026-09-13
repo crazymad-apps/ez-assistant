@@ -1,12 +1,48 @@
 import { modelProvider, modelSelection, modelParameters } from "../support/modelManagement";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AgentShellSettings,
   PermissionDocumentSnapshot,
   RuntimeCommand,
 } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { SettingsStore } from "../../src/stores/SettingsStore";
 import { serverDraft } from "../../src/features/settings/SettingsDialog/McpSettingsPage/draft";
+
+describe("SettingsStore Agent Shell", () => {
+  const original: AgentShellSettings = {
+    default_agent_shell: "cmd",
+    catalog: [{ kind: "cmd", available: true, reason: null }, { kind: "git_bash", available: false, reason: "Unavailable" }],
+  };
+
+  it("retains the saved default when the Host rejects an unavailable target", async () => {
+    const client = { command: async (command: RuntimeCommand) => {
+      if (command.type === "get_agent_shell_settings") return { type: command.type, payload: original };
+      throw new Error("unavailable");
+    } } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    await store.loadAgentShellSettings();
+    expect(await store.setDefaultAgentShell("git_bash")).toBe(false);
+    expect(store.agent_shell_settings).toEqual(original);
+    expect(store.error_message).not.toBeNull();
+  });
+
+  it("ignores a read that completes after a successful save", async () => {
+    let finish_read: (value: unknown) => void = () => undefined;
+    const saved: AgentShellSettings = { ...original, default_agent_shell: "powershell_7" };
+    const client = { command: async (command: RuntimeCommand) => {
+      if (command.type === "get_agent_shell_settings") return new Promise((resolve) => { finish_read = resolve; });
+      return { type: command.type, payload: saved };
+    } } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    const reading = store.loadAgentShellSettings();
+    expect(await store.setDefaultAgentShell("powershell_7")).toBe(true);
+    finish_read({ type: "get_agent_shell_settings", payload: original });
+    await reading;
+    expect(store.agent_shell_settings).toEqual(saved);
+    expect(store.shell_loading).toBe(false);
+  });
+});
 
 describe("SettingsStore MCP management", () => {
   it("cancels a pending test by its own ID and ignores late results", async () => {

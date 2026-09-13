@@ -1,12 +1,16 @@
+#[cfg(unix)]
+use assistant_runtime::{StoredWorkspaceLifecycle, WorkspaceRemoval};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     hint::black_box,
     io::Write,
-    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::Path,
     time::Instant,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use agent_core::ExchangeReceipt;
 use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry, PinnedMemoryId};
@@ -23,8 +27,8 @@ use agent_types::{
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, DeviceId,
     GoalId, IdempotencyKey, InputId, McpServerKey, MessageFeedback, ModelSelection,
-    PermissionDiagnosticCode, ProviderInstanceId, RunId, RunStatus, SessionHistoryCleanupStatus,
-    SessionId, SessionTitleOrigin, TodoItemId, WorkspaceId,
+    ProviderInstanceId, RunId, RunStatus, SessionHistoryCleanupStatus, SessionId,
+    SessionTitleOrigin, TodoItemId, WorkspaceId,
 };
 use assistant_runtime::{
     ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
@@ -49,9 +53,8 @@ use assistant_runtime::{
     StoredConversationState, StoredGoal, StoredGoalBudget, StoredGoalObjective,
     StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
     StoredMcpSelection, StoredRunSettlement, StoredSession, StoredSessionLifecycle,
-    StoredTodoItemStatus, StoredWorkPlanItem, StoredWorkspaceLifecycle, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkspaceRemoval,
-    WorkspaceUpdate,
+    StoredTodoItemStatus, StoredWorkPlanItem, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkspaceUpdate,
 };
 use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
@@ -99,6 +102,8 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     let session_directory = sessions_directory.join(value);
     let private_directory = session_directory.join("private");
     NewStoredSession {
+        agent_shell_kind: None,
+        agent_shell_environment: None,
         session_id: session_id(value),
         materialization_key: None,
         title: format!("Session {value}"),
@@ -128,6 +133,106 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         role: assistant_runtime::SessionRole::Standard,
         created_at_ms: 1_000,
     }
+}
+
+#[test]
+fn agent_shell_binding_and_global_default_survive_reopen_independently() {
+    use assistant_protocol::ShellKind;
+    let root = TempDir::new().expect("isolated runtime home");
+    let mut engine = open_engine(&root);
+    assert_eq!(engine.load_default_agent_shell().unwrap(), None);
+    engine
+        .save_default_agent_shell(ShellKind::Powershell7)
+        .unwrap();
+    let mut request = new_session("shell-persist", &engine.sessions_directory);
+    request.agent_shell_kind = Some(ShellKind::Cmd);
+    let confirmed = assistant_runtime::FrozenShellEnvironment {
+        kind: ShellKind::Cmd,
+        operating_system: "windows".into(),
+        program: "C:/confirmed/cmd.exe".into(),
+        fixed_args: vec!["/d".into(), "/s".into(), "/c".into()],
+        command_prefix: "chcp 65001>nul & ".into(),
+        dialect: "CMD fixture".into(),
+    };
+    request.agent_shell_environment = Some(confirmed.clone());
+    let created = engine.create_session(request).unwrap();
+    assert_eq!(created.agent_shell_kind, Some(ShellKind::Cmd));
+    engine.save_default_agent_shell(ShellKind::GitBash).unwrap();
+    let mut fork_request = new_session("shell-fork", &engine.sessions_directory);
+    fork_request.agent_shell_kind = created.agent_shell_kind;
+    fork_request.agent_shell_environment = created.agent_shell_environment.clone();
+    let forked = engine
+        .fork_session(SessionFork {
+            source_session_id: created.session_id.clone(),
+            source_generation: 1,
+            session: fork_request,
+            conversation: ConversationSnapshot::new(Vec::new()),
+            attachments: Vec::new(),
+            tool_images: Vec::new(),
+            skill_activations: Vec::new(),
+            mcp_selections: Vec::new(),
+            session_commands: Vec::new(),
+            work_plan: None,
+            goal: None,
+        })
+        .unwrap();
+    assert_eq!(forked.session.agent_shell_kind, Some(ShellKind::Cmd));
+    for archived in [true, false] {
+        engine
+            .set_session_archive(ArchiveChange {
+                session_id: created.session_id.clone(),
+                archived,
+                changed_at_ms: 2_000,
+            })
+            .unwrap();
+    }
+    let cleared = engine
+        .clear_session_history(SessionHistoryClear {
+            operation_id: IdempotencyKey::new("shell-clear").unwrap(),
+            session_id: created.session_id.clone(),
+            expected_generation: 1,
+            system_prompt: created.system_prompt.clone(),
+            environment: created.environment.clone(),
+            expected_role: SessionRole::Standard,
+            changed_at_ms: 3_000,
+        })
+        .unwrap();
+    assert_eq!(cleared.session.agent_shell_kind, Some(ShellKind::Cmd));
+    assert_eq!(
+        cleared.session.agent_shell_environment.as_ref(),
+        Some(&confirmed)
+    );
+    drop(engine);
+    let engine = open_engine(&root);
+    assert_eq!(
+        engine.load_default_agent_shell().unwrap(),
+        Some(ShellKind::GitBash)
+    );
+    let restored = engine
+        .load_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.session_id == created.session_id)
+        .unwrap();
+    assert_eq!(restored.agent_shell_kind, Some(ShellKind::Cmd));
+    assert_eq!(restored.agent_shell_environment.as_ref(), Some(&confirmed));
+    assert!(
+        engine
+            .load_sessions()
+            .unwrap()
+            .iter()
+            .all(|session| session.agent_shell_environment.as_ref() == Some(&confirmed))
+    );
+    assert_eq!(
+        engine
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.session_id == forked.session.session_id)
+            .unwrap()
+            .agent_shell_kind,
+        Some(ShellKind::Cmd)
+    );
 }
 
 fn assert_default_session_permissions(session: &StoredSession) {
@@ -369,6 +474,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
     let controller_message = raw_user_message("m-delivery-controller", "controller request");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: controller_input_id.clone(),
             run_id: controller_run_id.clone(),
             session_id: controller_session_id.clone(),
@@ -390,6 +496,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
         .expect("accept controller input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-delivery-controller".to_owned(),
             input_id: controller_input_id,
             run_id: controller_run_id.clone(),
@@ -430,6 +537,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
     };
     let accepted = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("i-delivery-target").expect("input id"),
             run_id: run_id("r-delivery-target"),
             session_id: target_session_id.clone(),
@@ -461,6 +569,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
 
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("i-user-takeover").expect("input id"),
             run_id: run_id("r-user-takeover"),
             session_id: target_session_id.clone(),
@@ -528,6 +637,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
     let controller_message = raw_user_message("m-goal-delivery-controller", "delegate task");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: controller_input_id.clone(),
             run_id: controller_run_id.clone(),
             session_id: controller_session_id.clone(),
@@ -549,6 +659,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
         .expect("accept controller input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-goal-delivery-controller".to_owned(),
             input_id: controller_input_id,
             run_id: controller_run_id.clone(),
@@ -638,6 +749,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
     };
     let accepted = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("i-goal-delivery-target").expect("input id"),
             run_id: run_id("r-goal-delivery-target"),
             session_id: target_session_id.clone(),
@@ -707,6 +819,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
     let source_message = raw_user_message("m-report-source", "managed work");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: source_input_id.clone(),
             run_id: source_run_id.clone(),
             session_id: source_session_id.clone(),
@@ -728,6 +841,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         .expect("accept source input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-report-source".to_owned(),
             input_id: source_input_id,
             run_id: source_run_id.clone(),
@@ -758,6 +872,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         .expect("report source"),
     ));
     let report_input = NewStoredInput {
+        agent_shell_target: None,
         input_id: InputId::new("i-proxy-report").expect("input id"),
         run_id: run_id("r-proxy-report"),
         session_id: controller_session_id.clone(),
@@ -1025,6 +1140,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
     };
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: input_id.clone(),
             run_id: run_id.clone(),
             session_id: source_id.clone(),
@@ -1046,6 +1162,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
         .expect("accept skill input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-skill-activation".to_owned(),
             input_id,
             run_id: run_id.clone(),
@@ -1476,6 +1593,7 @@ fn fork_copies_tool_images_without_cross_session_links() {
         fs::read(&source).expect("source bytes"),
         fs::read(&forked).expect("fork bytes")
     );
+    #[cfg(unix)]
     assert_ne!(
         fs::metadata(&source).expect("source metadata").ino(),
         fs::metadata(&forked).expect("fork metadata").ino()
@@ -1518,7 +1636,18 @@ fn failed_tool_image_fork_rolls_back_target_session_directory() {
     )
     .expect("store source image");
     let source = source_directory.join(reference.relative_path());
+    #[cfg(unix)]
     fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).expect("make source writable");
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(&source)
+            .expect("source metadata")
+            .permissions();
+        // 仅清除 Windows 测试文件的只读属性，不改变 Unix 权限。
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&source, permissions).expect("make source writable");
+    }
     fs::write(&source, b"corrupt").expect("corrupt source image");
 
     let result = engine.fork_session(SessionFork {
@@ -1757,7 +1886,8 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
         .expect("migrated workspace");
     let expected_agent = target_root
         .path()
-        .join("data/workspaces")
+        .join("data")
+        .join("workspaces")
         .join(workspace_id.as_str())
         .join("agent");
     assert_eq!(
@@ -1832,6 +1962,7 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
         .expect("create session");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-navigation-persistence").expect("input id"),
             run_id: run_id("run-navigation-persistence"),
             session_id: session.clone(),
@@ -2338,6 +2469,7 @@ fn commit_completed_turn(
     let message = raw_user_message(&format!("user-{suffix}"), suffix);
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
@@ -2359,6 +2491,7 @@ fn commit_completed_turn(
         .expect("accept fixture input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: format!("commit-{suffix}"),
             input_id,
             run_id: run_id.clone(),
@@ -2653,6 +2786,105 @@ fn deletion_staging_recovers_precommit_and_cleans_postcommit_interruptions() {
     assert_eq!(recovered.sessions[0].session_id, restored_id);
 }
 
+#[test]
+fn queued_shell_intent_survives_reopen_without_changing_session_binding() {
+    let root = TempDir::new().unwrap();
+    let mut engine = open_engine(&root);
+    let mut session = new_session("shell-intent", &engine.sessions_directory);
+    session.agent_shell_kind = Some(assistant_protocol::ShellKind::Cmd);
+    let id = session.session_id.clone();
+    engine.create_session(session).unwrap();
+    let accepted = engine
+        .accept_input(NewStoredInput {
+            agent_shell_target: Some(assistant_protocol::ShellKind::Powershell7),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: assistant_runtime::InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
+            skill_activation: None,
+            mcp_selection: None,
+            new_goal: None,
+            resumed_goal: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            input_id: InputId::new("shell-intent-input").unwrap(),
+            run_id: run_id("shell-intent-run"),
+            session_id: id.clone(),
+            idempotency_key: None,
+            message: raw_user_message("shell-intent-message", "switch shell"),
+            generated_title: None,
+            accepted_at_ms: 2_000,
+        })
+        .unwrap();
+    assert_eq!(
+        accepted.input.agent_shell_target,
+        Some(assistant_protocol::ShellKind::Powershell7)
+    );
+    assert!(accepted.run.shell.is_none());
+    drop(engine);
+    let restored = open_engine(&root).load_session_state(&id).unwrap();
+    assert_eq!(
+        restored.state.inputs[0].agent_shell_target,
+        accepted.input.agent_shell_target
+    );
+    assert_eq!(
+        restored.state.sessions[0].agent_shell_kind,
+        Some(assistant_protocol::ShellKind::Cmd)
+    );
+    assert_eq!(
+        restored.state.inputs[0].state,
+        assistant_runtime::StoredInputState::Queued
+    );
+    assert!(restored.state.runs[0].shell.is_none());
+    let mut engine = open_engine(&root);
+    let shell = assistant_runtime::FrozenShellEnvironment {
+        kind: assistant_protocol::ShellKind::Powershell7,
+        operating_system: "windows".to_owned(),
+        program: "pwsh.exe".to_owned(),
+        fixed_args: vec!["-Command".to_owned()],
+        command_prefix: String::new(),
+        dialect: "PowerShell 7".to_owned(),
+    };
+    let commit = |snapshot| UserMessageCommit {
+        shell: Some(snapshot),
+        operation_id: "shell-intent-claim".to_owned(),
+        input_id: accepted.input.input_id.clone(),
+        run_id: accepted.run.run_id.clone(),
+        session_id: id.clone(),
+        message: accepted.input.queued_message.clone(),
+        reasoning_effort: None,
+        created_at_ms: 2_001,
+    };
+    let mut wrong_shell = shell.clone();
+    wrong_shell.kind = assistant_protocol::ShellKind::Cmd;
+    assert!(engine.commit_user_message(commit(wrong_shell)).is_err());
+    assert_eq!(engine.staged_append_count().unwrap(), 0);
+    let rejected = engine.load_session_state(&id).unwrap();
+    assert_eq!(
+        rejected.state.sessions[0].agent_shell_kind,
+        Some(assistant_protocol::ShellKind::Cmd)
+    );
+    assert_eq!(rejected.state.sessions[0].message_count, 0);
+    assert_eq!(
+        rejected.state.inputs[0].state,
+        assistant_runtime::StoredInputState::Queued
+    );
+    engine.commit_user_message(commit(shell.clone())).unwrap();
+    drop(engine);
+    let claimed = open_engine(&root).load_session_state(&id).unwrap();
+    assert_eq!(claimed.state.sessions[0].agent_shell_kind, Some(shell.kind));
+    assert_eq!(
+        claimed.state.sessions[0].agent_shell_environment.as_ref(),
+        Some(&shell)
+    );
+    assert_eq!(claimed.state.runs[0].shell.as_ref(), Some(&shell));
+    assert_eq!(
+        claimed.state.inputs[0].state,
+        assistant_runtime::StoredInputState::Committed
+    );
+    assert_eq!(claimed.state.sessions[0].message_count, 1);
+}
+
 fn seed_session_and_run(engine: &mut StorageEngine, session: &str, run: &str) {
     let new_session = new_session(session, &engine.sessions_directory);
     engine
@@ -2791,23 +3023,26 @@ fn initializes_private_database_and_current_schema() {
         .expect("table count");
     assert_eq!(table_count, 12);
 
-    let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
-    assert_eq!(
-        fs::metadata(database)
-            .expect("database metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    assert_eq!(
-        fs::metadata(root.path().join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY))
-            .expect("sessions metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
+    #[cfg(unix)]
+    {
+        let database = root.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
+        assert_eq!(
+            fs::metadata(database)
+                .expect("database metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(root.path().join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY))
+                .expect("sessions metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
 }
 
 #[test]
@@ -2844,6 +3079,7 @@ fn paired_device_and_controller_hosting_survive_restart_and_revoke_atomically() 
     );
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-device-durable").expect("input id"),
             run_id: run_id("run-device-durable"),
             session_id: controller_id.clone(),
@@ -2960,6 +3196,7 @@ fn paired_device_input_can_target_an_active_standard_session() {
 
     let accepted = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-device-standard").expect("input id"),
             run_id: run_id("run-device-standard"),
             session_id: target_id,
@@ -3285,6 +3522,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
         completed_at_ms: None,
     };
     let input = NewStoredInput {
+        agent_shell_target: None,
         input_id: InputId::new("input-goal-first").expect("input id"),
         run_id: RunId::new("run-goal-first").expect("run id"),
         session_id: session_id.clone(),
@@ -3314,6 +3552,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
     assert!(!accepted.is_duplicate);
     let duplicate = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-goal-duplicate").expect("input id"),
             run_id: RunId::new("run-goal-duplicate").expect("run id"),
             ..input.clone()
@@ -3324,6 +3563,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
     assert_eq!(duplicate.run.run_id, accepted.run.run_id);
 
     let rejected = engine.accept_input(NewStoredInput {
+        agent_shell_target: None,
         input_id: InputId::new("input-second-goal").expect("input id"),
         run_id: RunId::new("run-second-goal").expect("run id"),
         idempotency_key: None,
@@ -3403,6 +3643,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
     };
     let first = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-goal-settlement").expect("input id"),
             run_id: RunId::new("run-goal-settlement").expect("run id"),
             session_id: session.clone(),
@@ -3429,6 +3670,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
         .expect("accept first Goal input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "start-goal-settlement".to_owned(),
             input_id: first.input.input_id,
             run_id: first.run.run_id.clone(),
@@ -3523,6 +3765,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
     let held_message = raw_user_message("goal-resume-user", "use stable channel");
     let held = engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-goal-resume").expect("input id"),
             run_id: RunId::new("run-goal-resume").expect("run id"),
             session_id: session.clone(),
@@ -3598,6 +3841,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
         .expect("resume Goal with held input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "start-goal-resume".to_owned(),
             input_id: resumed.input.input_id,
             run_id: resumed.run.run_id.clone(),
@@ -3683,6 +3927,7 @@ fn running_goal_is_durably_paused_once_during_recovery() {
         .expect("seed running goal");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: InputId::new("input-recovery-continuation").expect("input id"),
             run_id: RunId::new("run-recovery-continuation").expect("run id"),
             session_id: session.clone(),
@@ -3940,6 +4185,27 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
     let permission_bytes = fs::read(&permission_path).expect("read legacy permission document");
 
     // 构造当前迁移契约认可的无账本旧结构；缺失 persona 等业务表属于损坏库，不应自动补齐。
+    let fixture_backup = root.path().join("before-legacy.sqlite3");
+    engine
+        .connection
+        .backup("main", &fixture_backup, None)
+        .expect("independent backup before legacy fixture conversion");
+    let saved =
+        Connection::open_with_flags(&fixture_backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("read independent backup");
+    for table in ["sessions", "inputs", "runs", "child_tasks", "attachments"] {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        assert_eq!(
+            saved
+                .query_row(&query, [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            engine
+                .connection
+                .query_row(&query, [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        );
+    }
+    drop(saved);
     engine
         .connection
         .execute_batch(
@@ -3949,6 +4215,11 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE providers;
              DROP TABLE schema_migrations;
              DROP TABLE database_compatibility;
+             DROP TABLE agent_shell_settings;
+             ALTER TABLE sessions DROP COLUMN agent_shell_kind;
+             ALTER TABLE sessions DROP COLUMN agent_shell_environment_json;
+             ALTER TABLE inputs DROP COLUMN agent_shell_target;
+             ALTER TABLE runs DROP COLUMN shell_snapshot_json;
              ALTER TABLE sessions DROP COLUMN model_id;
              ALTER TABLE sessions DROP COLUMN model_provider_instance_id;
              ALTER TABLE sessions ADD COLUMN model_key TEXT NOT NULL DEFAULT 'discarded-old-model';
@@ -4334,6 +4605,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_id() {
     let root = TempDir::new().expect("runtime home");
@@ -4408,6 +4680,7 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
     assert_eq!(restored.lifecycle, StoredWorkspaceLifecycle::Active);
 }
 
+#[cfg(unix)]
 #[test]
 fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspace_identity() {
     let root = TempDir::new().expect("runtime home");
@@ -4601,9 +4874,11 @@ fn runtime_recovery_removes_only_the_exact_legacy_workspace_rule_set() {
         .expect("legacy permission document"),
     )
     .expect("legacy permissions");
+    #[cfg(unix)]
     fs::set_permissions(&first_path, fs::Permissions::from_mode(0o600))
         .expect("legacy permissions mode");
     fs::write(&second_path, &custom).expect("custom permissions");
+    #[cfg(unix)]
     fs::set_permissions(&second_path, fs::Permissions::from_mode(0o600))
         .expect("custom permissions mode");
 
@@ -4860,6 +5135,7 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
     for (suffix, at) in [("one", 1_001), ("two", 1_002), ("three", 1_003)] {
         engine
             .accept_input(NewStoredInput {
+                agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
@@ -5094,21 +5370,22 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
         b"external edit\n"
     );
 
+    #[cfg(unix)]
     fs::set_permissions(&global_path, fs::Permissions::from_mode(0o644))
         .expect("broaden fixture permissions");
+    #[cfg(unix)]
     let warning = store
         .load_permission_file(&PermissionFileScope::Global)
         .await
         .expect("broad permissions remain loadable");
-    assert!(
-        warning
-            .diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.code == PermissionDiagnosticCode::UnsafePermissions })
-    );
+    #[cfg(unix)]
+    assert!(warning.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == assistant_protocol::PermissionDiagnosticCode::UnsafePermissions
+    }));
     store.shutdown().await.expect("shutdown worker");
 }
 
+#[cfg(unix)]
 #[test]
 fn permission_loader_rejects_symlinks_and_non_regular_files() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5171,6 +5448,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     };
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
@@ -5198,6 +5476,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     );
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-files".to_owned(),
             input_id: InputId::new("input-files").expect("input id"),
             run_id: run_id("run-files"),
@@ -5970,11 +6249,19 @@ fn startup_finishes_staged_run_start_before_runtime_settlement() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
     seed_session_and_run(&mut engine, "s-start", "r-start");
+    let shell = assistant_runtime::FrozenShellEnvironment {
+        kind: assistant_protocol::ShellKind::Powershell7,
+        operating_system: "windows".to_owned(),
+        program: "C:/Program Files/PowerShell/7/pwsh.exe".to_owned(),
+        fixed_args: vec!["-NoProfile".to_owned(), "-Command".to_owned()],
+        command_prefix: "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ".to_owned(),
+        dialect: "PowerShell 7".to_owned(),
+    };
     engine
         .connection
         .execute(
             "UPDATE inputs
-             SET state = 'queued', queued_message_json = '{}'
+             SET state = 'queued', queued_message_json = '{}', agent_shell_target = 'powershell_7'
              WHERE input_id = 'input-r-start'",
             [],
         )
@@ -5990,6 +6277,7 @@ fn startup_finishes_staged_run_start_before_runtime_settlement() {
                 created_at_ms: 2_000,
             },
             AppendPurpose::UserMessage {
+                shell: Some(shell.clone()),
                 reasoning_effort: None,
             },
         )
@@ -6013,6 +6301,13 @@ fn startup_finishes_staged_run_start_before_runtime_settlement() {
     assert_eq!(input_state, "committed");
     assert_eq!(recovered.sessions[0].message_count, 1);
     assert_eq!(recovered.runs[0].message_ids.len(), 1);
+    assert_eq!(recovered.runs[0].shell.as_ref(), Some(&shell));
+    assert_eq!(recovered.sessions[0].agent_shell_kind, Some(shell.kind));
+    // 再次打开不得重新探测解释器或重复提交正文。
+    drop(reopened);
+    let recovered_again = open_engine(&root).load_runtime().unwrap();
+    assert_eq!(recovered_again.runs[0].shell.as_ref(), Some(&shell));
+    assert_eq!(recovered_again.sessions[0].message_count, 1);
 }
 
 #[test]
@@ -6075,6 +6370,338 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
             .len(),
         2
     );
+}
+
+#[test]
+fn shell_failure_message_and_terminal_state_recover_together() {
+    for body_already_written in [false, true] {
+        let root = TempDir::new().unwrap();
+        let mut engine = open_engine(&root);
+        seed_session_and_run(&mut engine, "shell-failure", "shell-failure-run");
+        let queued = raw_user_message("user-shell-failure-run", "Switch Shell to Git Bash");
+        engine.connection.execute(
+            "UPDATE inputs SET state = 'queued', queued_message_json = ?1, agent_shell_target = 'git_bash' WHERE session_id = 'shell-failure'",
+            [serde_json::to_string(&queued).unwrap()],
+        ).unwrap();
+        engine
+            .connection
+            .execute(
+                "UPDATE sessions SET agent_shell_kind = 'cmd' WHERE session_id = 'shell-failure'",
+                [],
+            )
+            .unwrap();
+        let message = agent_types::ConversationMessage::User(agent_types::UserMessage {
+            id: agent_types::MessageId::new("shell-failed-result").unwrap(),
+            origin: agent_types::UserMessageOrigin::Runtime,
+            transcript_visibility: agent_types::TranscriptVisibility::Visible,
+            parts: vec![
+                agent_types::UserPart::InternalContext(
+                    agent_types::InternalContextPart::new(
+                        agent_types::PartId::new("shell-failed-part").unwrap(),
+                        "shell-failed-boundary",
+                        "shell_switch_result",
+                        "Shell switch failed; the previous binding is unchanged.",
+                    )
+                    .unwrap(),
+                ),
+                agent_types::UserPart::InternalContext(
+                    agent_types::InternalContextPart::new(
+                        agent_types::PartId::new("shell-previous-part").unwrap(),
+                        "shell-previous-boundary",
+                        "shell_switch_previous",
+                        r#"{"previous_shell":"cmd"}"#,
+                    )
+                    .unwrap(),
+                ),
+            ],
+        });
+        let error = assistant_protocol::RuntimeErrorInfo::new(
+            assistant_protocol::RuntimeErrorCode::Internal,
+            "Shell unavailable",
+        );
+        engine
+            .stage_append_for(
+                AppendRequest {
+                    operation_id: "shell-failure-settlement".to_owned(),
+                    session_id: session_id("shell-failure"),
+                    run_id: run_id("shell-failure-run"),
+                    messages: vec![message.clone()],
+                    message_step: None,
+                    created_at_ms: 3_000,
+                },
+                AppendPurpose::RunSettlement {
+                    status: RunStatus::Failed,
+                    cancel_requested: false,
+                    error: Some(error.clone()),
+                    goal_effect: None,
+                    proxy_report: None,
+                },
+            )
+            .unwrap();
+        if body_already_written {
+            engine
+                .write_staged_append("shell-failure-settlement")
+                .unwrap();
+        }
+        drop(engine);
+        // 两个真实持久化断点，以及一次已恢复后的再次重开，都必须得到相同历史。
+        for _ in 0..2 {
+            let mut reopened = open_engine(&root);
+            let restored = reopened
+                .prepare_session_execution(&session_id("shell-failure"))
+                .unwrap();
+            assert_eq!(
+                restored.state.sessions[0].agent_shell_kind,
+                Some(assistant_protocol::ShellKind::Cmd)
+            );
+            assert_eq!(restored.state.sessions[0].message_count, 1);
+            assert_eq!(restored.state.runs[0].status, RunStatus::Failed);
+            assert_eq!(restored.state.runs[0].error.as_ref(), Some(&error));
+            assert!(restored.state.runs[0].shell.is_none());
+            assert_eq!(
+                restored.state.runs[0].message_ids,
+                [agent_types::MessageId::new("shell-failed-result").unwrap()]
+            );
+            assert_eq!(
+                restored.state.inputs[0].state,
+                assistant_runtime::StoredInputState::Queued
+            );
+            assert_eq!(
+                restored.state.inputs[0].queued_message.as_ref(),
+                Some(&queued)
+            );
+            assert_eq!(
+                reopened
+                    .load_conversation(&session_id("shell-failure"))
+                    .unwrap()
+                    .messages
+                    .as_slice(),
+                std::slice::from_ref(&message)
+            );
+            assert_eq!(reopened.staged_append_count().unwrap(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn shell_switch_forks_reopen_with_historical_results_and_without_source_runs() {
+    verify_shell_fork_reopen(false).await;
+}
+
+#[tokio::test]
+async fn failed_shell_switch_history_survives_retry_forks_and_reopen() {
+    verify_shell_fork_reopen(true).await;
+}
+
+async fn verify_shell_fork_reopen(include_failed_attempt: bool) {
+    use assistant_protocol::ShellKind;
+    use std::sync::Arc;
+
+    let root = TempDir::new().unwrap();
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "shell-fork-source", "shell-source-run");
+    let frozen = assistant_runtime::FrozenShellEnvironment {
+        kind: ShellKind::Powershell7,
+        operating_system: "windows".into(),
+        program: "fixture-pwsh.exe".into(),
+        fixed_args: vec!["-Command".into()],
+        command_prefix: String::new(),
+        dialect: "PowerShell".into(),
+    };
+    // 仅在临时库构造已完成切换的可靠源事实；后续 Fork 和投影均走正式 Runtime。
+    engine.connection.execute("UPDATE sessions SET agent_shell_kind = 'powershell_7' WHERE session_id = 'shell-fork-source'", []).unwrap();
+    engine.connection.execute("UPDATE inputs SET agent_shell_target = 'powershell_7' WHERE session_id = 'shell-fork-source'", []).unwrap();
+    engine.connection.execute("UPDATE runs SET status = 'completed', started_at_ms = 1100, finished_at_ms = 1200, shell_snapshot_json = ?1 WHERE run_id = 'shell-source-run'", [serde_json::to_string(&frozen).unwrap()]).unwrap();
+    let failure = assistant_protocol::RuntimeErrorInfo::new(
+        assistant_protocol::RuntimeErrorCode::Internal,
+        "Shell unavailable at first attempt",
+    );
+    if include_failed_attempt {
+        engine
+            .connection
+            .execute(
+                "UPDATE runs SET attempt = 2 WHERE run_id = 'shell-source-run'",
+                [],
+            )
+            .unwrap();
+        engine.connection.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, error_code, error_message, created_at_ms, finished_at_ms) VALUES ('shell-failed-run', 'shell-fork-source', 'input-shell-source-run', 1, 'failed', 0, 'internal', ?1, 1000, 1050)", [&failure.message]).unwrap();
+        let failed_message = UserMessage {
+            id: MessageId::new("shell-failed-message").unwrap(),
+            origin: UserMessageOrigin::Runtime,
+            transcript_visibility: TranscriptVisibility::Visible,
+            parts: vec![
+                UserPart::InternalContext(
+                    InternalContextPart::new(
+                        PartId::new("failed-result-part").unwrap(),
+                        "failed-result-boundary",
+                        "shell_switch_result",
+                        "Shell switch failed; the previous binding is unchanged.",
+                    )
+                    .unwrap(),
+                ),
+                UserPart::InternalContext(
+                    InternalContextPart::new(
+                        PartId::new("failed-old-part").unwrap(),
+                        "failed-old-boundary",
+                        "shell_switch_previous",
+                        r#"{"previous_shell":"windows_powershell_51"}"#,
+                    )
+                    .unwrap(),
+                ),
+            ],
+        };
+        engine
+            .append_messages(AppendRequest {
+                operation_id: "shell-failed-history".into(),
+                session_id: session_id("shell-fork-source"),
+                run_id: run_id("shell-failed-run"),
+                messages: vec![ConversationMessage::User(failed_message)],
+                message_step: None,
+                created_at_ms: 1050,
+            })
+            .unwrap();
+    }
+    let mut message = raw_user_message(
+        "user-shell-source-run",
+        "Switch Agent Shell to PowerShell 7",
+    );
+    message.parts.push(UserPart::InternalContext(
+        InternalContextPart::new(
+            PartId::new("shell-old-part").unwrap(),
+            "shell-old-boundary",
+            "shell_switch_previous",
+            r#"{"previous_shell":"windows_powershell_51"}"#,
+        )
+        .unwrap(),
+    ));
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "shell-source-history".into(),
+            session_id: session_id("shell-fork-source"),
+            run_id: run_id("shell-source-run"),
+            messages: vec![
+                ConversationMessage::User(message),
+                assistant_message("shell-fork-point", "done"),
+            ],
+            message_step: Some(1),
+            created_at_ms: 1200,
+        })
+        .unwrap();
+    drop(engine);
+
+    let mut source_id = session_id("shell-fork-source");
+    for generation in 0..3 {
+        let store = Arc::new(LocalRuntimeStore::open(root.path(), 32).await.unwrap());
+        let resources = crate::resources::HostResources::new(root.path()).unwrap();
+        let runtime = assistant_runtime::AssistantRuntime::open_with_recall_key(
+            assistant_runtime::RuntimeConfig::new(std::num::NonZeroUsize::new(32).unwrap()),
+            Arc::new(crate::config_source::LocalConfigSource::new(
+                root.path().join("config.toml"),
+            )),
+            resources.model_factory,
+            resources.session_environment_factory,
+            resources.skill_package_source,
+            resources.run_tool_factory,
+            resources.child_task_workspace_factory,
+            store.clone(),
+            store.clone(),
+            [17; 32],
+        )
+        .await
+        .unwrap();
+        let view = runtime
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: source_id.clone(),
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        assert_eq!(view.agent_shell_kind, Some(ShellKind::Powershell7));
+        let page = runtime
+            .list_conversation_page(assistant_protocol::ListConversationPageRequest {
+                owner: ConversationOwner::MainSession {
+                    session_id: source_id.clone(),
+                },
+                cursor: None,
+                limit: 30,
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        let results = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                assistant_protocol::ConversationItem::ShellSwitchResult {
+                    previous_shell,
+                    shell,
+                    run_id,
+                    success,
+                    error,
+                    ..
+                } => Some((
+                    *previous_shell,
+                    *shell,
+                    run_id.clone(),
+                    *success,
+                    error.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        if include_failed_attempt {
+            expected.push((
+                Some(ShellKind::WindowsPowershell51),
+                ShellKind::Powershell7,
+                (generation == 0).then(|| run_id("shell-failed-run")),
+                false,
+                Some(failure.clone()),
+            ));
+        }
+        expected.push((
+            Some(ShellKind::WindowsPowershell51),
+            ShellKind::Powershell7,
+            (generation == 0).then(|| run_id("shell-source-run")),
+            true,
+            None,
+        ));
+        assert_eq!(results, expected);
+        let state = store.load_session_state(&source_id).await.unwrap();
+        if generation > 0 {
+            let environment = &state.state.sessions[0].environment;
+            assert_eq!(
+                environment.working_directory,
+                environment.session_private_directory
+            );
+            assert!(!environment.working_directory.contains("shell-fork-source"));
+            assert!(state.state.runs.is_empty());
+            assert!(state.state.inputs.is_empty());
+            let history = store.load_conversation(&source_id).await.unwrap();
+            assert_eq!(
+                serde_json::to_string(&history)
+                    .unwrap()
+                    .matches("inherited_shell_switch_result")
+                    .count(),
+                if include_failed_attempt { 2 } else { 1 }
+            );
+        }
+        if generation < 2 {
+            source_id = runtime
+                .fork_session(assistant_protocol::ForkSessionRequest {
+                    session_id: source_id,
+                    fork_point: assistant_protocol::MessageId::new("shell-fork-point").unwrap(),
+                    expected_generation: view.conversation_generation,
+                })
+                .await
+                .unwrap()
+                .session
+                .session_id;
+        }
+        runtime.shutdown(Default::default()).await.unwrap();
+    }
 }
 
 #[test]
@@ -6628,6 +7255,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         let user_message = raw_user_message(user, user);
         engine
             .accept_input(NewStoredInput {
+                agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
@@ -6649,6 +7277,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             .expect("accept input");
         engine
             .commit_user_message(UserMessageCommit {
+                shell: None,
                 operation_id: format!("start-{run}"),
                 input_id: InputId::new(input).expect("input id"),
                 run_id: run_id(run),
@@ -6706,6 +7335,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 replacement_user.clone(),
             )]),
             input: NewStoredInput {
+                agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
                 goal_binding: None,
@@ -6799,6 +7429,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     let queued_message = raw_user_message("queued-user", "queued");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
             goal_binding: None,
@@ -6893,6 +7524,7 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
         })
         .expect("upload attachment");
     assert_eq!(first.state, StoredAttachmentState::Ready);
+    #[cfg(unix)]
     assert!(
         fs::symlink_metadata(&first.agent_readable_path)
             .expect("stable view")
@@ -6975,6 +7607,16 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
         2
     );
 
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(&first.agent_readable_path)
+            .expect("view metadata")
+            .permissions();
+        // 仅清除 Windows 测试文件的只读属性，不改变 Unix 权限。
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&first.agent_readable_path, permissions).expect("make view removable");
+    }
     fs::remove_file(&first.agent_readable_path).expect("remove repairable view");
     drop(engine);
     let mut reopened = open_engine(&root);
@@ -6987,7 +7629,12 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             .iter()
             .all(|attachment| attachment.state == StoredAttachmentState::Ready)
     );
+    #[cfg(unix)]
     assert!(Path::new(&first.agent_readable_path).is_symlink());
+    assert_eq!(
+        fs::read(&first.agent_readable_path).expect("repaired view bytes"),
+        bytes
+    );
 
     let blob = root
         .path()
@@ -6996,6 +7643,14 @@ fn attachment_upload_uses_name_and_bytes_for_blob_identity_and_repairs_known_vie
             &hash,
             original_name,
         ));
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(&blob).expect("blob metadata").permissions();
+        // 仅清除 Windows 测试文件的只读属性，不改变 Unix 权限。
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&blob, permissions).expect("make blob removable");
+    }
     fs::remove_file(blob).expect("remove blob for unavailable recovery");
     drop(reopened);
     let mut reopened = open_engine(&root);
@@ -7085,6 +7740,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
                 created_at_ms: 2_000,
             }],
             input: NewStoredInput {
+                agent_shell_target: None,
                 input_id: InputId::new(input_name).expect("input id"),
                 run_id: run_id(run_name),
                 session_id: session_id(session_name),
@@ -7124,6 +7780,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
     assert_eq!(engine.load_runs().expect("runs").len(), 1);
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-materialized-first".to_owned(),
             input_id: first.accepted.input.input_id.clone(),
             run_id: first.accepted.run.run_id.clone(),
@@ -7244,6 +7901,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn attachment_recovery_migrates_extensionless_blobs_and_known_views() {
     let root = TempDir::new().expect("tempdir");
@@ -8239,6 +8897,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
     let source_message = raw_user_message("user-clear-target", "clear target");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: source_input_id.clone(),
             run_id: source_run_id.clone(),
             session_id: target_session_id.clone(),
@@ -8260,6 +8919,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         .expect("accept clear source input");
     engine
         .commit_user_message(UserMessageCommit {
+            shell: None,
             operation_id: "commit-clear-target".to_owned(),
             input_id: source_input_id,
             run_id: source_run_id.clone(),
@@ -8299,6 +8959,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         reply_route: assistant_runtime::ReplyRoute::SessionDefault,
     };
     let report_input = NewStoredInput {
+        agent_shell_target: None,
         input_id: report_input_id.clone(),
         run_id: run_id("r-clear-cross-session-report"),
         session_id: session_id("s-clear-controller"),
@@ -8441,6 +9102,7 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
     let queued_input_id = InputId::new("i-clear-busy").expect("input id");
     engine
         .accept_input(NewStoredInput {
+            agent_shell_target: None,
             input_id: queued_input_id.clone(),
             run_id: run_id("r-clear-busy"),
             session_id: session_id.clone(),
@@ -8881,6 +9543,9 @@ fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
     for (index, command) in [
         SessionCommand::McpRefresh { server: None },
         SessionCommand::SkillRefresh,
+        SessionCommand::AgentShellSwitch {
+            shell: assistant_protocol::ShellKind::Cmd,
+        },
     ]
     .into_iter()
     .enumerate()
@@ -8908,10 +9573,24 @@ fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
                 outcome: McpRefreshOutcome::Success,
                 servers: Vec::new(),
             })
-        } else {
+        } else if index == 1 {
             StoredSessionCommandResult::SkillRefresh {
                 success: true,
                 skill_count: 0,
+            }
+        } else {
+            StoredSessionCommandResult::ShellSwitch {
+                shell: assistant_protocol::ShellKind::Cmd,
+                previous_shell: None,
+                environment: Some(Box::new(assistant_runtime::FrozenShellEnvironment {
+                    kind: assistant_protocol::ShellKind::Cmd,
+                    operating_system: "windows".to_owned(),
+                    program: "fixture-cmd.exe".to_owned(),
+                    fixed_args: vec!["/c".to_owned()],
+                    command_prefix: String::new(),
+                    dialect: "cmd".to_owned(),
+                })),
+                error: None,
             }
         };
         let commit = SessionCommandCommit {
@@ -8933,8 +9612,20 @@ fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
     let mut engine = open_engine(&root);
     let recovered = engine.load_runtime().expect("reopen");
     assert_eq!(recovered.sessions[0].system_prompt, prompt);
-    assert_eq!(recovered.sessions[0].body_generation, 3);
-    assert_eq!(recovered.session_commands.len(), 2);
+    assert_eq!(recovered.sessions[0].body_generation, 4);
+    assert_eq!(recovered.session_commands.len(), 3);
+    assert_eq!(
+        recovered.sessions[0].agent_shell_kind,
+        Some(assistant_protocol::ShellKind::Cmd)
+    );
+    assert_eq!(
+        recovered.sessions[0]
+            .agent_shell_environment
+            .as_ref()
+            .unwrap()
+            .program,
+        "fixture-cmd.exe"
+    );
     assert!(recovered.runs.is_empty());
     assert_eq!(
         engine
@@ -8942,7 +9633,7 @@ fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
             .expect("conversation")
             .messages
             .len(),
-        2
+        3
     );
 }
 

@@ -37,7 +37,6 @@ impl McpConfigSource for LocalMcpConfigSource {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
 
     use assistant_runtime::{ConfigSourceLoad, ConfigSourceReplace};
 
@@ -57,9 +56,12 @@ mod tests {
         let ConfigSourceReplace::Applied(document) = first else {
             panic!("first write should be applied");
         };
-        let path = temporary.path().join("mcp.json");
-        let metadata = std::fs::metadata(&path).expect("MCP configuration metadata");
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            let path = temporary.path().join("mcp.json");
+            let metadata = std::fs::metadata(&path).expect("MCP configuration metadata");
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
 
         let conflict = source
             .replace(Some("stale".to_owned()), "{}\n".to_owned())

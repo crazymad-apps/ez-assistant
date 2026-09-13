@@ -271,8 +271,10 @@ impl Tool for ParallelReadTool {
         &self,
         input: Self::Input,
     ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
-        let path = AbsolutePath::new(std::path::Path::new("/workspace").join(input.path))
-            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        let path = AbsolutePath::new(
+            std::path::Path::new(&test_absolute_path("/workspace")).join(input.path),
+        )
+        .map_err(|error| ToolError::invalid_input(error.to_string()))?;
         Ok(ToolResolution::with_facts(
             path.clone(),
             FileAuthorizationFacts {
@@ -470,7 +472,7 @@ async fn permission_documents_are_projected_replaced_and_guarded_by_revision() {
             variants: vec![AgentVariant::Build],
             matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
                 operation: PermissionFileOperationDefinition::Read,
-                path: "/private/session".to_owned(),
+                path: test_absolute_path("/private/session"),
                 path_match: PermissionPathMatch::Exact,
             }),
         }],
@@ -612,7 +614,7 @@ async fn saving_an_exact_file_rule_drains_matching_approvals_from_the_queue_head
                     variants: vec![AgentVariant::Build],
                     matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
                         operation: PermissionFileOperationDefinition::Read,
-                        path: "/workspace/repeated.txt".to_owned(),
+                        path: test_absolute_path("/workspace/repeated.txt"),
                         path_match: PermissionPathMatch::Exact,
                     }),
                 }],
@@ -693,7 +695,7 @@ async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
                     variants: vec![AgentVariant::Build],
                     matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
                         operation: PermissionFileOperationDefinition::Read,
-                        path: "/workspace".to_owned(),
+                        path: test_absolute_path("/workspace"),
                         path_match: PermissionPathMatch::Recursive,
                     }),
                 }],

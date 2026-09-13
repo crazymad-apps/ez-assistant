@@ -48,6 +48,10 @@ pub enum StoredConversationState {
 /// 创建持久化 Session 所需的完整冻结事实。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewStoredSession {
+    /// 最近一次初始化或显式刷新确认的环境；普通输入直接复用。
+    pub agent_shell_environment: Option<crate::FrozenShellEnvironment>,
+    /// 已由 Runtime 解析的初始绑定；None 保留既有平台默认语义。
+    pub agent_shell_kind: Option<assistant_protocol::ShellKind>,
     pub session_id: SessionId,
     pub title: String,
     pub title_origin: SessionTitleOrigin,
@@ -182,6 +186,8 @@ pub struct SessionHistoryCompactionFinish {
 /// 从存储恢复或创建完成的 Session 投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSession {
+    pub agent_shell_environment: Option<crate::FrozenShellEnvironment>,
+    pub agent_shell_kind: Option<assistant_protocol::ShellKind>,
     pub session_id: SessionId,
     pub title: String,
     pub model_selection: Option<ModelSelection>,

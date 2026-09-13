@@ -343,11 +343,22 @@ mod tests {
 
     #[test]
     fn batch_file_rules_allow_all_paths_but_deny_or_ask_any_path() {
+        let workspace = if cfg!(windows) {
+            "C:/workspace"
+        } else {
+            "/workspace"
+        };
+        let private = if cfg!(windows) {
+            "C:/session/private"
+        } else {
+            "/session/private"
+        };
+        let root = if cfg!(windows) { "C:/" } else { "/" };
         let mut registry = ToolRegistry::new();
         registry
             .register(InspectImagesTool::new(
                 Arc::new(NeverInspector),
-                SessionPathResolver::new(AbsolutePath::new("/workspace").expect("workspace")),
+                SessionPathResolver::new(AbsolutePath::new(workspace).expect("workspace")),
             ))
             .expect("register inspect images");
         let batch = Dispatcher::resolve_batch(
@@ -355,7 +366,7 @@ mod tests {
             &[call(
                 "inspect_images",
                 json!({
-                    "image_paths": ["a.png", "/session/private/b.png"],
+                    "image_paths": ["a.png", &format!("{private}/b.png")],
                     "goal": "compare"
                 }),
             )],
@@ -375,22 +386,22 @@ mod tests {
         };
 
         assert!(!matches_rule(
-            &rule(PermissionEffect::Allow, "/workspace"),
+            &rule(PermissionEffect::Allow, workspace),
             AgentVariant::Build,
             invocation
         ));
         assert!(matches_rule(
-            &rule(PermissionEffect::Allow, "/"),
+            &rule(PermissionEffect::Allow, root),
             AgentVariant::Build,
             invocation
         ));
         assert!(matches_rule(
-            &rule(PermissionEffect::Deny, "/session/private"),
+            &rule(PermissionEffect::Deny, private),
             AgentVariant::Build,
             invocation
         ));
         assert!(matches_rule(
-            &rule(PermissionEffect::Ask, "/workspace"),
+            &rule(PermissionEffect::Ask, workspace),
             AgentVariant::Build,
             invocation
         ));

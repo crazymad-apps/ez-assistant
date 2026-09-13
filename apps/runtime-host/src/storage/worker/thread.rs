@@ -27,6 +27,12 @@ pub(super) fn run_worker(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
+            Command::LoadDefaultAgentShell { reply } => {
+                let _ = reply.send(engine.load_default_agent_shell());
+            }
+            Command::SaveDefaultAgentShell { kind, reply } => {
+                let _ = reply.send(engine.save_default_agent_shell(kind));
+            }
             Command::LoadProviders { reply } => {
                 let _ = reply.send(engine.load_providers());
             }

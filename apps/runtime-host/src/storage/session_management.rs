@@ -155,6 +155,17 @@ impl StorageEngine {
             if changed != 1 {
                 return Err(conflict("session command generation changed"));
             }
+            if let assistant_runtime::StoredSessionCommandResult::ShellSwitch {
+                shell,
+                environment: Some(environment),
+                ..
+            } = &commit.result
+            {
+                transaction.execute(
+                    "UPDATE sessions SET agent_shell_kind = ?1, agent_shell_environment_json = ?2 WHERE session_id = ?3",
+                    params![super::mode::shell_kind_value(*shell), super::agent_shell::encode_environment(Some(environment))?, commit.session_id.as_str()],
+                ).map_err(|source| database_write_error("session shell could not be stored", source))?;
+            }
             transaction.commit().map_err(|source| {
                 database_write_error("session command commit could not finish", source)
             })
@@ -849,6 +860,7 @@ impl StorageEngine {
                 database_write_error("replacement message reference could not be created", source)
             })?;
         let input = StoredInput {
+            agent_shell_target: None,
             queue_order,
             input_id: rewrite.input.input_id.clone(),
             session_id: rewrite.session_id.clone(),
@@ -865,6 +877,7 @@ impl StorageEngine {
             accepted_at_ms: rewrite.input.accepted_at_ms,
         };
         let run = StoredRun {
+            shell: None,
             run_id: rewrite.input.run_id.clone(),
             session_id: rewrite.session_id.clone(),
             input_id: rewrite.input.input_id.clone(),

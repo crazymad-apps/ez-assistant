@@ -2413,12 +2413,30 @@ mod tests {
     #[test]
     fn local_file_uri_accepts_encoded_local_paths_and_rejects_remote_or_qualified_urls() {
         assert_eq!(
-            file_uri_path("file:///tmp/%E6%8A%A5%E5%91%8A%20final.md").expect("encoded local path"),
-            PathBuf::from("/tmp/报告 final.md")
+            file_uri_path(if cfg!(windows) {
+                "file:///C:/tmp/%E6%8A%A5%E5%91%8A%20final.md"
+            } else {
+                "file:///tmp/%E6%8A%A5%E5%91%8A%20final.md"
+            })
+            .expect("encoded local path"),
+            PathBuf::from(if cfg!(windows) {
+                "C:/tmp/报告 final.md"
+            } else {
+                "/tmp/报告 final.md"
+            })
         );
         assert_eq!(
-            file_uri_path("file://localhost/tmp/report.md").expect("localhost path"),
-            PathBuf::from("/tmp/report.md")
+            file_uri_path(if cfg!(windows) {
+                "file://localhost/C:/tmp/report.md"
+            } else {
+                "file://localhost/tmp/report.md"
+            })
+            .expect("localhost path"),
+            PathBuf::from(if cfg!(windows) {
+                "C:/tmp/report.md"
+            } else {
+                "/tmp/report.md"
+            })
         );
         for invalid in [
             "https://example.com/report.md",

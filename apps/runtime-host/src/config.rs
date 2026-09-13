@@ -165,6 +165,9 @@ pub(crate) fn canonical_runtime_home(path: &Path) -> Result<PathBuf, ConfigError
     let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
+            // Windows 盘符前缀本身（尤其 \\?\C:）不是完整根路径；等待 RootDir 后再访问文件系统。
+            // 否则 launch 传给子进程的 canonical 路径会在第二次解析时失败。
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
             Component::ParentDir => {
                 resolved.pop();
             }
@@ -197,6 +200,17 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_home_accepts_its_own_verbatim_output_and_missing_children() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = canonical_runtime_home(root.path()).unwrap();
+        assert_eq!(canonical_runtime_home(&canonical).unwrap(), canonical);
+        let missing = canonical.join("not-created").join("home");
+        assert_eq!(canonical_runtime_home(&missing).unwrap(), missing);
+        assert!(!missing.exists());
+    }
 
     fn expect_serve(action: CliAction) -> ServeArguments {
         match action {

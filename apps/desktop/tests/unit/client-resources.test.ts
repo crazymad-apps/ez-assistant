@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { ClientResources } from "../../src/runtime-client/ClientResources";
 import { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
@@ -15,10 +15,15 @@ vi.mock("@tauri-apps/api/core", async (original) => ({
   ...(await original<typeof import("@tauri-apps/api/core")>()),
   isTauri: () => false,
 }));
+beforeEach(() => {
+  // Browser preferences use the isolated jsdom store, never Node's optional disk-backed store.
+  const environment = globalThis as typeof globalThis & { jsdom: { window: Window } };
+  vi.stubGlobal("localStorage", environment.jsdom.window.localStorage);
+});
 afterEach(() => {
+  localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  localStorage.clear();
   document.body.replaceChildren();
 });
 function runtime(origin = "http://host.test:7240") {

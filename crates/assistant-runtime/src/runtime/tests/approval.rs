@@ -226,7 +226,7 @@ async fn workspace_allow_applies_to_another_session_bound_to_the_same_workspace(
     let workspace_id = runtime
         .register_workspace(RegisterWorkspaceRequest {
             label: "shared-approval".to_owned(),
-            primary_directory: "/workspace/shared-approval".to_owned(),
+            primary_directory: test_absolute_path("/workspace/shared-approval"),
             additional_directories: Vec::new(),
         })
         .await

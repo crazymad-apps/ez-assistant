@@ -3,7 +3,6 @@
 use std::{
     fs::{self, File, OpenOptions},
     io,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -11,21 +10,20 @@ use assistant_protocol::{AttachmentId, ChildTaskId, SessionId, WorkspaceId};
 use assistant_runtime::{StoreError, StoreErrorKind};
 use rusqlite::ErrorCode;
 
-use super::{PRIVATE_FILE_MODE, StorageResult};
+use super::StorageResult;
+use crate::platform;
 
 pub(super) fn prepare_private_file(path: &Path) -> StorageResult<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => return Err(invalid_data("runtime database path is not a regular file")),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            let file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(PRIVATE_FILE_MODE)
-                .open(path)
-                .map_err(|source| {
-                    internal_error("runtime database file could not be created", source)
-                })?;
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            platform::apply_private_open_options(&mut options);
+            let file = options.open(path).map_err(|source| {
+                internal_error("runtime database file could not be created", source)
+            })?;
             file.sync_all().map_err(|source| {
                 internal_error("runtime database file could not be synchronized", source)
             })?;
@@ -40,39 +38,34 @@ pub(super) fn prepare_private_file(path: &Path) -> StorageResult<()> {
             ));
         }
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).map_err(|source| {
+    platform::tighten_private_file_at(path).map_err(|source| {
         internal_error("runtime database permissions could not be set", source)
     })?;
     Ok(())
 }
 
 pub(super) fn create_new_private_file(path: &Path) -> StorageResult<File> {
-    let file = OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)
-        .map_err(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists {
-                StoreError::with_source(
-                    StoreErrorKind::Conflict,
-                    "conversation file already exists",
-                    source,
-                )
-            } else {
-                internal_error("conversation file could not be created", source)
-            }
-        })?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    platform::apply_private_open_options(&mut options);
+    let file = options.open(path).map_err(|source| {
+        if source.kind() == io::ErrorKind::AlreadyExists {
+            StoreError::with_source(
+                StoreErrorKind::Conflict,
+                "conversation file already exists",
+                source,
+            )
+        } else {
+            internal_error("conversation file could not be created", source)
+        }
+    })?;
     file.sync_all()
         .map_err(|source| internal_error("conversation file could not be synchronized", source))?;
     Ok(file)
 }
 
 pub(super) fn sync_directory(path: &Path) -> StorageResult<()> {
-    let directory = File::open(path)
-        .map_err(|source| internal_error("runtime data directory could not be opened", source))?;
-    directory.sync_all().map_err(|source| {
+    platform::sync_directory(path).map_err(|source| {
         internal_error("runtime data directory could not be synchronized", source)
     })
 }

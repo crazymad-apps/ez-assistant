@@ -34,6 +34,13 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    LoadDefaultAgentShell {
+        reply: oneshot::Sender<Result<Option<assistant_protocol::ShellKind>, StoreError>>,
+    },
+    SaveDefaultAgentShell {
+        kind: assistant_protocol::ShellKind,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     LoadProviders {
         reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredProvider>, StoreError>>,
     },

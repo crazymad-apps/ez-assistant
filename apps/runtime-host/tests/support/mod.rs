@@ -1201,6 +1201,13 @@ impl HostProcess {
         let user_directory = runtime_home.join("fixture-user-home");
         fs::create_dir_all(&user_directory).expect("create isolated test user directory");
         let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command
+                .env("USERPROFILE", &user_directory)
+                .creation_flags(0x08000000);
+        }
         command
             .env("HOME", &user_directory)
             .arg("serve")

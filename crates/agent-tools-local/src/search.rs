@@ -442,6 +442,7 @@ mod tests {
         path::Path,
     };
 
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     use super::*;

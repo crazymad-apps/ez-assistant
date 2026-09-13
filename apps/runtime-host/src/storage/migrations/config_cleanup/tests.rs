@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use assistant_runtime::{ConfigSourceFuture, ConfigSourceReplaceFuture};
@@ -30,6 +31,7 @@ async fn cleanup_preserves_other_values_and_is_byte_stable_on_repeated_startup()
     let source = LocalConfigSource::new(path.clone());
     let backup = cleanup(&source, directory.path()).await.unwrap().unwrap();
     assert_eq!(fs::read_to_string(&backup).unwrap(), LEGACY);
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
         0o600
@@ -55,9 +57,11 @@ async fn cleanup_preserves_other_values_and_is_byte_stable_on_repeated_startup()
     assert_eq!(document["host_access"]["port"].as_integer(), Some(9999));
     assert!(cleaned.contains("# keep this comment"));
     assert!(!cleaned.contains("fixture-secret"));
+    #[cfg(unix)]
     let inode = fs::metadata(&path).unwrap().ino();
     assert!(cleanup(&source, directory.path()).await.unwrap().is_none());
     assert_eq!(fs::read_to_string(&path).unwrap(), cleaned);
+    #[cfg(unix)]
     assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
     assert_eq!(
         fs::read_dir(backup.parent().unwrap().parent().unwrap())
@@ -106,11 +110,15 @@ async fn invalid_syntax_missing_and_unsafe_files_are_never_rewritten() {
     fs::remove_file(&path).unwrap();
     let target = directory.path().join("target");
     fs::write(&target, LEGACY).unwrap();
+    // Windows 普通用户无 symlink 特权；链接拒绝路径仅 Unix 验收。
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &path).unwrap();
+    #[cfg(unix)]
     assert!(matches!(
         cleanup(&source, directory.path()).await,
         Err(CleanupError::Unavailable)
     ));
+    #[cfg(unix)]
     assert_eq!(fs::read_to_string(&target).unwrap(), LEGACY);
 }
 

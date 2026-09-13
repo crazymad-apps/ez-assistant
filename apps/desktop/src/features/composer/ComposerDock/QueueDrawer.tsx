@@ -1,4 +1,5 @@
 import { observer } from "mobx-react-lite";
+import { shellLabels } from "../../../runtime-client/shellPresentation";
 import type { GoalSnapshot, QueueSnapshot } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
@@ -56,7 +57,7 @@ export const QueueDrawer = observer(function QueueDrawer(props: Readonly<{
             return (
             <div className={styles.queue_item} key={item.input_id}>
               <span>{item.position}</span>
-              <p title={item.text_preview}>{item.text_preview}</p>
+              <p title={item.text_preview}>{item.agent_shell_target ? `切换 Agent Shell → ${shellLabels[item.agent_shell_target]}` : item.text_preview}</p>
               <small>{queueSourceLabel(item.source, store.projection.application) ?? (item.held_by_goal ? "目标暂存" : "")}</small>
               <div className={styles.queue_actions}>
                 {item.skill && <span className={styles.queue_skill} title={item.skill.name}>{item.skill.name}</span>}

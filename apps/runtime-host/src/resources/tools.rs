@@ -61,10 +61,33 @@ impl HostRunToolFactory {
 }
 
 impl RunToolFactory for HostRunToolFactory {
+    fn shell_catalog(&self) -> Vec<assistant_protocol::ShellCatalogEntry> {
+        super::shell::catalog()
+    }
+
+    fn freeze_shell(
+        &self,
+        kind: Option<assistant_protocol::ShellKind>,
+    ) -> Result<Option<assistant_runtime::FrozenShellEnvironment>, RunToolFactoryError> {
+        #[cfg(unix)]
+        if kind.is_none() {
+            return Ok(None);
+        }
+        super::shell::freeze(kind).map(Some)
+    }
     fn compile(
         &self,
         request: RunToolFactoryRequest<'_>,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
+        if request
+            .shell
+            .is_some_and(|shell| shell.operating_system != std::env::consts::OS)
+        {
+            // 恢复的确认环境不得跨平台执行；这里只核对冻结事实，不重新探测解释器。
+            return Err(RunToolFactoryError::new(
+                RunToolFactoryErrorKind::InvalidConfiguration,
+            ));
+        }
         let resolver = checked_resolver(request.environment)?;
         self.resources
             .compile(request, resolver, self.sessions_root.clone())
@@ -160,7 +183,19 @@ impl LocalToolResources {
         )?;
         register(
             &mut registry,
-            ShellExecTool::new(self.shell.clone(), resolver.clone(), self.shell_config),
+            ShellExecTool::new(
+                request.shell.map_or_else(
+                    || self.shell.clone(),
+                    |snapshot| {
+                        Arc::new(LocalShell::new(LocalShellConfig {
+                            launcher: super::shell::launcher(snapshot),
+                            environment: EnvironmentPolicy::default(),
+                        }))
+                    },
+                ),
+                resolver.clone(),
+                self.shell_config,
+            ),
         )?;
         let limits = pinned_memory_limits();
         register(
@@ -459,6 +494,7 @@ mod tests {
             .compile(RunToolFactoryRequest {
                 session_id: &session_id,
                 environment,
+                shell: None,
                 pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
                 conversation_recall: conversation_recall.clone(),
                 conversation_recall_reader: conversation_recall,
@@ -466,6 +502,42 @@ mod tests {
                 read_image_enabled,
             })
             .expect("tool bundle")
+    }
+
+    #[test]
+    fn confirmed_shell_compilation_rejects_a_foreign_platform_without_rediscovery() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("work")).unwrap();
+        let environment = environment(&root, "work");
+        let factory = HostRunToolFactory::new(root.path()).unwrap();
+        let session_id = assistant_protocol::SessionId::new("confirmed-shell").unwrap();
+        let recall = Arc::new(ScriptedMemoryRecall::new(Ok(MemoryRecallResponse {
+            items: Vec::new(),
+            failures: Vec::new(),
+            truncated: false,
+            window: None,
+        })));
+        for operating_system in [std::env::consts::OS, "foreign-platform"] {
+            let shell = assistant_runtime::FrozenShellEnvironment {
+                kind: assistant_protocol::ShellKind::Cmd,
+                operating_system: operating_system.into(),
+                program: "confirmed-but-not-installed.exe".into(),
+                fixed_args: vec!["/c".into()],
+                command_prefix: String::new(),
+                dialect: "fixture".into(),
+            };
+            let result = factory.compile(RunToolFactoryRequest {
+                session_id: &session_id,
+                environment: &environment,
+                shell: Some(&shell),
+                pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
+                conversation_recall: recall.clone(),
+                conversation_recall_reader: recall.clone(),
+                image_inspector: None,
+                read_image_enabled: false,
+            });
+            assert_eq!(result.is_ok(), operating_system == std::env::consts::OS);
+        }
     }
 
     #[tokio::test]

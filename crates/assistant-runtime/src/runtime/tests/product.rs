@@ -361,6 +361,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
             ConversationItem::Assistant(message) => Some(message),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::ShellSwitchResult { .. }
             | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })
@@ -486,6 +487,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
             ConversationItem::Assistant(message) => Some(message.message_id),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::ShellSwitchResult { .. }
             | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })
@@ -541,6 +543,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
             ConversationItem::Assistant(message) => Some(message.feedback),
             ConversationItem::User(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::ShellSwitchResult { .. }
             | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         });

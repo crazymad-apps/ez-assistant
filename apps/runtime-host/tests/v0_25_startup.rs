@@ -362,7 +362,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(health["min_compatible_host_version"], "0.25.2");
+    assert_eq!(health["min_compatible_host_version"], "0.25.3");
     let configuration = fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
     assert!(configuration.contains("[host_access]"));
@@ -395,7 +395,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(ledger.0, "0.25.2");
+    assert_eq!(ledger.0, env!("CARGO_PKG_VERSION"));
     let count = |table: &str| {
         database
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -403,7 +403,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 2);
+    assert_eq!(count("schema_migrations"), 3);
     assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
@@ -460,7 +460,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     assert_eq!(
         database

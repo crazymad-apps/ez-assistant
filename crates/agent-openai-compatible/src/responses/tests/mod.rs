@@ -153,6 +153,8 @@ fn feed_sse_with_adapter(
 ) -> Result<Vec<ModelEvent>, ModelError> {
     let mut assembler = ResponsesAssembler::new(adapter, model.to_owned());
     let mut events = Vec::new();
+    // 仓库 fixture 在 Windows checkout 可为 CRLF；事件边界不应依赖 Git 换行设置。
+    let document = document.replace("\r\n", "\n");
     for block in document.split("\n\n") {
         let Some(data) = block.strip_prefix("data: ") else {
             continue;

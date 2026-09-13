@@ -224,7 +224,22 @@ async fn health(
 }
 
 async fn capabilities() -> Json<RuntimeHostCapabilities> {
+    // 只在 capabilities 查询时读取 PATH；不启动命令、不探测 Shell 环境，不进入普通输入路径。
+    let rg_on_path = tokio::task::spawn_blocking(|| {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| {
+                directory
+                    .join(if cfg!(windows) { "rg.exe" } else { "rg" })
+                    .is_file()
+            })
+        })
+    })
+    .await
+    .ok();
     Json(RuntimeHostCapabilities {
+        platform: Some(std::env::consts::OS.to_owned()),
+        architecture: Some(std::env::consts::ARCH.to_owned()),
+        rg_on_path,
         min_compatible_version: MIN_COMPATIBLE_VERSION.to_owned(),
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
         max_command_bytes: MAX_COMMAND_BYTES as u64,

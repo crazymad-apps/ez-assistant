@@ -57,6 +57,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
             ConversationItem::User(message) => Some(message.message_id.clone()),
             ConversationItem::Assistant(_)
             | ConversationItem::ControlResult { .. }
+            | ConversationItem::ShellSwitchResult { .. }
             | ConversationItem::SkillRefreshResult { .. }
             | ConversationItem::ContextSummary { .. } => None,
         })

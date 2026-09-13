@@ -3,12 +3,12 @@
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::Path,
 };
 
+use crate::platform;
+
 const KEY_FILE: &str = "recall-reference.key";
-const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub(crate) fn load_or_create(runtime_home: &Path) -> io::Result<[u8; 32]> {
     let path = runtime_home.join(KEY_FILE);
@@ -40,11 +40,10 @@ pub(crate) fn load_or_create(runtime_home: &Path) -> io::Result<[u8; 32]> {
 fn create(path: &Path) -> io::Result<[u8; 32]> {
     let mut key = [0_u8; 32];
     getrandom::fill(&mut key).map_err(io::Error::other)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    platform::apply_private_open_options(&mut options);
+    let mut file = options.open(path)?;
     if let Err(error) = file.write_all(&key).and_then(|_| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(path);
@@ -53,7 +52,7 @@ fn create(path: &Path) -> io::Result<[u8; 32]> {
     Ok(key)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, symlink};
 
@@ -71,7 +70,8 @@ mod tests {
         assert_eq!(created, loaded);
         let metadata = fs::metadata(home.path().join(KEY_FILE)).expect("key metadata");
         assert_eq!(metadata.len(), 32);
-        assert_eq!(metadata.mode() & 0o777, PRIVATE_FILE_MODE);
+        #[cfg(unix)]
+        assert_eq!(metadata.mode() & 0o777, 0o600);
     }
 
     #[test]

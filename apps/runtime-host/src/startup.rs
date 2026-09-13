@@ -26,8 +26,17 @@ use tokio_util::sync::CancellationToken;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let (mut terminate, mut interrupt) = {
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        (terminate, interrupt)
+    };
+    // Windows 无 SIGTERM/SIGINT 流；两个 Ctrl+C 流独立接收同一控制台事件。
+    #[cfg(windows)]
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    #[cfg(windows)]
+    let mut terminate = tokio::signal::windows::ctrl_c()?;
     prepare_runtime_home(&config.runtime_home)?;
     let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
     let config_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));

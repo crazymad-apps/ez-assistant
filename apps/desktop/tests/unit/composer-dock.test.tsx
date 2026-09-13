@@ -209,6 +209,40 @@ describe("ComposerDock", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["/mcp", "ArrowDown"], ["/mcp", "ArrowUp"],
+    ["/skill", "ArrowDown"], ["/skill", "ArrowUp"],
+  ])("confirms the highlighted refresh option for %s using %s", async (prefix, key) => {
+    const store = renderComposer();
+    const command = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    const picker = vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([]);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: prefix } });
+    const option = screen.getByRole("option", { name: new RegExp(`${prefix} refresh`) });
+    option.scrollIntoView = vi.fn();
+    fireEvent.keyDown(input, { key });
+    expect(option).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(picker).not.toHaveBeenCalled();
+    await waitFor(() => expect(command).toHaveBeenCalledWith("session-1", prefix === "/mcp"
+      ? { type: "mcp_refresh", payload: {} } : { type: "skill_refresh" }));
+    expect(command).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it.each(["/mcp", "/skill"])("executes %s refresh on click and retains a failed command for retry", async (prefix) => {
+    const store = renderComposer();
+    const command = vi.spyOn(store, "submitSessionCommand").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: prefix } });
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(`${prefix} refresh`) }));
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue(`${prefix} refresh`);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
   it("submits MCP refresh as a command and keeps failed commands in the draft", async () => {
     const store = renderComposer();
     const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);

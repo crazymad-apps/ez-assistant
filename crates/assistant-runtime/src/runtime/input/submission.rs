@@ -60,7 +60,9 @@ impl AssistantRuntime {
             }
             input.idempotency_key = Some(device_input_idempotency_key(source)?);
         }
-        self.accept_session_input(input, request.source).await
+        self.accept_session_input(input, request.source, None)
+            .await
+            .map(|(result, _)| result)
     }
 
     /// 单元测试使用的 Desktop 输入便利入口；产品 Host 只调用统一 Session 输入用例。
@@ -82,11 +84,12 @@ impl AssistantRuntime {
     /// 同 Session 写入顺序稳定；短期 Session 状态锁不会跨越 Store `await`。Store 成功前不修改
     /// Session 投影、不发布事件、不唤醒队列。可靠事实已经提交但后续投影失败时不回滚 Store，
     /// 调用返回错误，后续可从 Store 权威事实恢复。
-    async fn accept_session_input(
+    pub(in crate::runtime) async fn accept_session_input(
         &self,
-        request: SubmitInputRequest,
+        mut request: SubmitInputRequest,
         channel_source: InputChannelSource,
-    ) -> RuntimeResult<SubmitInputResult> {
+        agent_shell_target: Option<assistant_protocol::ShellKind>,
+    ) -> RuntimeResult<(SubmitInputResult, bool)> {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
@@ -101,14 +104,38 @@ impl AssistantRuntime {
         let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
+        if let Some(key) = request.idempotency_key.as_ref()
+            && session
+                .lock_state()?
+                .commands
+                .values()
+                .any(|command| command.idempotency_key.as_ref() == Some(key))
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "input idempotency key belongs to a session control command",
+            });
+        }
         // 先命中 Session 内已恢复的幂等事实，使合法重试不受当前配置、附件或 Skill 变化影响。
         if let Some(key) = request.idempotency_key.as_ref()
             && let Some((input_id, run)) = session.find_idempotent(key)?
         {
-            return Ok(SubmitInputResult { input_id, run });
+            if session
+                .lock_state()?
+                .inputs
+                .get(&input_id)
+                .is_none_or(|input| input.stored.agent_shell_target != agent_shell_target)
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "input idempotency key was reused with a different shell target",
+                });
+            }
+            return Ok((SubmitInputResult { input_id, run }, true));
         }
         session.ensure_not_compacting()?;
         session.ensure_healthy()?;
+        if agent_shell_target.is_some() {
+            request.variant = session.lock_state()?.current_variant;
+        }
         let quotes = self
             .normalize_quotes(&request.session_id, &request.quotes)
             .await?;
@@ -257,6 +284,7 @@ impl AssistantRuntime {
         let accepted = self
             .store
             .accept_input(NewStoredInput {
+                agent_shell_target,
                 input_id: input_id.clone(),
                 run_id: run_id.clone(),
                 session_id: session.id().clone(),
@@ -287,10 +315,13 @@ impl AssistantRuntime {
                 .ok_or(RuntimeError::InternalStateUnavailable {
                     component: "idempotent run projection",
                 })?;
-            return Ok(SubmitInputResult {
-                input_id: accepted.input.input_id,
-                run,
-            });
+            return Ok((
+                SubmitInputResult {
+                    input_id: accepted.input.input_id,
+                    run,
+                },
+                true,
+            ));
         }
         let goal_snapshot = prepared_goal
             .as_ref()
@@ -369,10 +400,13 @@ impl AssistantRuntime {
             });
         }
         self.wake_queue(session.clone())?;
-        Ok(SubmitInputResult {
-            input_id: projection.input_id,
-            run: projection.run,
-        })
+        Ok((
+            SubmitInputResult {
+                input_id: projection.input_id,
+                run: projection.run,
+            },
+            false,
+        ))
     }
 }
 

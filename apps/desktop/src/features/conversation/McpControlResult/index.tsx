@@ -1,6 +1,7 @@
 import type { ConversationItem, McpServerRefreshOutcome } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import styles from "./index.module.scss";
+import { shellLabels as shell_labels } from "../../../runtime-client/shellPresentation";
 
 const outcome_labels: Record<McpServerRefreshOutcome, string> = {
   refreshed: "已刷新",
@@ -11,10 +12,23 @@ const outcome_labels: Record<McpServerRefreshOutcome, string> = {
   not_found: "未找到服务",
 };
 
-/** 与普通用户气泡分离的可靠控制结果；不产生 Run、工具详情或重试模型按钮。 */
+/** 与普通用户气泡分离的可靠控制结果；Run 生命周期仍由 Runtime 投影负责。 */
 export function McpControlResult(props: Readonly<{
-  message: Extract<ConversationItem, { type: "control_result" | "skill_refresh_result" }>;
+  message: Extract<ConversationItem, { type: "control_result" | "skill_refresh_result" | "shell_switch_result" }>;
 }>) {
+  if (props.message.type === "shell_switch_result") {
+    const { success, shell, previous_shell, message_id, error } = props.message;
+    const previous = previous_shell ? shell_labels[previous_shell] : "原 Shell";
+    const operation = previous_shell === shell ? "刷新" : "切换";
+    const target = previous_shell === shell ? shell_labels[shell] : `${previous} → ${shell_labels[shell]}`;
+    const failed_operation = previous_shell === shell ? "刷新" : "切换到";
+    const title = success ? `已${operation} Agent Shell：${target}` : `${failed_operation} ${shell_labels[shell]} 失败`;
+    return <article aria-label={title} className={styles.control_result} data-message-id={message_id} data-outcome={success ? "success" : "failure"}>
+      <div className={styles.result_heading}><Icon name="refresh" size={14} /><span>{title}</span>
+        <small>{success ? `从这条指令开始，后续命令使用 ${shell_labels[shell]} 语法。` : `此次${operation}未生效，已保留${previous}。${error?.message ?? ""}`}</small>
+      </div>
+    </article>;
+  }
   if (props.message.type === "skill_refresh_result") {
     const { success, skill_count, message_id } = props.message;
     const title = success ? "技能刷新完成" : "技能刷新失败";

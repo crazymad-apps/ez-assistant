@@ -41,6 +41,7 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         assistant_protocol::RuntimeCompatibilityError,
         UserTerminalControl,
         UserTerminalNotice,
+        assistant_protocol::ShellCatalogEntry,
         HostAccessCommand,
         HostAccessStatus,
         HostLoginRequest,

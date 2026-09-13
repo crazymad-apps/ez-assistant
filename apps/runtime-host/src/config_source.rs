@@ -1,9 +1,11 @@
-//! Unix Runtime Home 建立与私有 `config.toml` 安全读取。
+//! Runtime Home 建立与私有 `config.toml` 安全读取。
+//!
+//! 平台差异（mode/属主/O_NOFOLLOW/目录 fsync 与 Windows 等价物）收敛在
+//! [`crate::platform`]；本模块只保留业务语义：单一配置文件、CAS 替换与上限校验。
 
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,8 +17,8 @@ use assistant_runtime::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
-const PRIVATE_CONFIG_MODE: u32 = 0o600;
+use crate::platform;
+
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const RUN_DIRECTORY: &str = "run";
 
@@ -58,52 +60,19 @@ pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeEr
             });
         }
     };
-    if !initial.file_type().is_dir() || initial.uid() != nix::unistd::geteuid().as_raw() {
-        return Err(RuntimeHomeError::Unsafe {
-            path: path.to_owned(),
-        });
-    }
-
-    // 通过目录 fd 修改权限，避免检查后路径被替换为 symlink 时 chmod 到其他目标。
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|source| RuntimeHomeError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    let opened = directory
-        .metadata()
-        .map_err(|source| RuntimeHomeError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    if !opened.file_type().is_dir()
-        || initial.dev() != opened.dev()
-        || initial.ino() != opened.ino()
+    if !initial.file_type().is_dir()
+        || platform::is_reparse_or_link(&initial)
+        || !platform::owned_by_current_user(path, &initial)
     {
         return Err(RuntimeHomeError::Unsafe {
             path: path.to_owned(),
         });
     }
-    directory
-        .set_permissions(fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
-        .map_err(|source| RuntimeHomeError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    let secured = directory
-        .metadata()
-        .map_err(|source| RuntimeHomeError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    if secured.permissions().mode() & 0o777 != PRIVATE_DIRECTORY_MODE {
-        return Err(RuntimeHomeError::Unsafe {
-            path: path.to_owned(),
-        });
-    }
+    // Unix：通过目录 fd 收紧 0700 并复核；Windows：目录安全目标已在上方核验。
+    platform::tighten_private_directory(path, &initial).map_err(|source| RuntimeHomeError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -200,7 +169,10 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
             );
         }
     };
-    if !initial.file_type().is_file() || initial.uid() != nix::unistd::geteuid().as_raw() {
+    if !initial.file_type().is_file()
+        || platform::is_reparse_or_link(&initial)
+        || !platform::owned_by_current_user(path, &initial)
+    {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file must be a regular file",
@@ -213,12 +185,11 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
         );
     }
 
-    // O_NOFOLLOW closes the symlink swap window between metadata inspection and open.
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
+    // 平台原语附加 O_NOFOLLOW 等打开防护，关闭检查与 open 之间的替换窗口。
+    let mut options = OpenOptions::new();
+    options.read(true);
+    platform::apply_read_no_follow(&mut options);
+    let mut file = match options.open(path) {
         Ok(file) => file,
         Err(_) => {
             return unavailable(
@@ -236,10 +207,7 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
             );
         }
     };
-    if !opened.file_type().is_file()
-        || initial.dev() != opened.dev()
-        || initial.ino() != opened.ino()
-    {
+    if !opened.file_type().is_file() || !platform::same_file_identity(&initial, &opened) {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file changed during its safety check",
@@ -251,17 +219,15 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
             "configuration file exceeds the size limit",
         );
     }
-    if !repair && opened.permissions().mode() & 0o077 != 0 {
+    if !repair && !platform::private_file_mode_is_secured(&opened) {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file permissions are not private",
         );
     }
     if repair
-        && opened.permissions().mode() & 0o777 != PRIVATE_CONFIG_MODE
-        && file
-            .set_permissions(fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
-            .is_err()
+        && !platform::private_file_mode_is_exact(&opened)
+        && platform::tighten_private_file(&file).is_err()
     {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
@@ -277,7 +243,7 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
             );
         }
     };
-    if !secured.file_type().is_file() || secured.permissions().mode() & 0o077 != 0 {
+    if !secured.file_type().is_file() || !platform::private_file_mode_is_secured(&secured) {
         return unavailable(
             ConfigSourceFailureKind::Unsafe,
             "configuration file permissions are not private",
@@ -352,11 +318,10 @@ fn replace_private_config(
         .unwrap_or_default();
     let temp_path = parent.join(format!(".config.toml.{}.{}.tmp", std::process::id(), nonce));
     let write_result = (|| -> std::io::Result<()> {
-        let mut temp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(PRIVATE_CONFIG_MODE)
-            .open(&temp_path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        platform::apply_private_open_options(&mut options);
+        let mut temp = options.open(&temp_path)?;
         temp.write_all(document.as_bytes())?;
         temp.sync_all()?;
 
@@ -371,7 +336,9 @@ fn replace_private_config(
         }
 
         fs::rename(&temp_path, path)?;
-        fs::File::open(parent)?.sync_all()?;
+        // Unix：父目录 fsync；Windows：rename 后重读内容校验。
+        platform::sync_directory(parent)?;
+        platform::verify_replacement_contents(path, document.as_bytes())?;
         Ok(())
     })();
 
@@ -413,12 +380,14 @@ fn unavailable(kind: ConfigSourceFailureKind, message: &'static str) -> ConfigSo
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use tempfile::tempdir;
 
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn creates_and_normalizes_private_runtime_directories() {
         let directory = tempdir().expect("tempdir");
@@ -426,7 +395,7 @@ mod tests {
         prepare_runtime_home(&home).expect("prepare");
         assert_eq!(
             fs::metadata(&home).expect("metadata").permissions().mode() & 0o777,
-            PRIVATE_DIRECTORY_MODE
+            0o700
         );
         assert_eq!(
             fs::metadata(home.join(RUN_DIRECTORY))
@@ -434,7 +403,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            PRIVATE_DIRECTORY_MODE
+            0o700
         );
 
         fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).expect("permissions");
@@ -443,7 +412,7 @@ mod tests {
         prepare_runtime_home(&home).expect("normalize");
         assert_eq!(
             fs::metadata(&home).expect("metadata").permissions().mode() & 0o777,
-            PRIVATE_DIRECTORY_MODE
+            0o700
         );
         assert_eq!(
             fs::metadata(home.join(RUN_DIRECTORY))
@@ -451,12 +420,12 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            PRIVATE_DIRECTORY_MODE
+            0o700
         );
 
         let target = directory.path().join("other-runtime");
         fs::create_dir(&target).expect("target directory");
-        fs::set_permissions(&target, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
             .expect("target permissions");
         let linked_home = directory.path().join("linked-runtime");
         symlink(&target, &linked_home).expect("runtime symlink");
@@ -474,14 +443,15 @@ mod tests {
         assert!(matches!(source.load().await, ConfigSourceLoad::Missing));
 
         fs::write(&path, "version = 1\n").expect("write");
-        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
-            .expect("permissions");
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
         let ConfigSourceLoad::Document(document) = source.load().await else {
             panic!("document");
         };
         assert_eq!(document.contents(), "version = 1\n");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn normalizes_broad_mode_and_rejects_symlink_non_file_and_oversized_file() {
         let directory = tempdir().expect("tempdir");
@@ -496,29 +466,26 @@ mod tests {
         assert_eq!(document.contents(), "secret");
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
-            PRIVATE_CONFIG_MODE
+            0o600
         );
 
         fs::remove_file(&path).expect("remove");
         let target = directory.path().join("target.toml");
         fs::write(&target, "secret").expect("target");
-        fs::set_permissions(&target, fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
-            .expect("permissions");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("permissions");
         symlink(&target, &path).expect("symlink");
         assert_unsafe(LocalConfigSource::new(path.clone()).load().await);
 
         fs::remove_file(&path).expect("remove symlink");
         fs::create_dir(&path).expect("directory");
-        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
-            .expect("permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
         assert_unsafe(LocalConfigSource::new(path.clone()).load().await);
 
         fs::remove_dir(&path).expect("remove directory");
         let file = fs::File::create(&path).expect("create");
         file.set_len(MAX_CONFIG_BYTES + 1).expect("size");
-        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_CONFIG_MODE))
-            .expect("permissions");
-        assert_unsafe(LocalConfigSource::new(path).load().await);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
+        assert_unsafe(LocalConfigSource::new(path.clone()).load().await);
     }
 
     #[tokio::test]
@@ -534,9 +501,10 @@ mod tests {
             panic!("created");
         };
         assert_eq!(created.contents(), "schema_version = 1\n");
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
-            PRIVATE_CONFIG_MODE
+            0o600
         );
 
         assert!(matches!(
@@ -577,6 +545,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn assert_unsafe(load: ConfigSourceLoad) {
         let ConfigSourceLoad::Unavailable(failure) = load else {
             panic!("unavailable");

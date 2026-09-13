@@ -16,6 +16,7 @@ export type SelectionOption<T extends string> = Readonly<{
   value: T;
   label: string;
   description?: string;
+  disabled?: boolean;
   icon?: ReactNode;
 }>;
 
@@ -116,6 +117,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
   }
 
   function selectOption(value: T) {
+    if (props.options.find((option) => option.value === value)?.disabled) return;
     props.on_open_change(false);
     setQuery("");
     focus_target_ref.current?.focus();
@@ -347,6 +349,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
       <div className={styles.option_scroll}>
         {props.options.map((option, index) => (
           <button
+            aria-disabled={option.disabled || undefined}
             aria-selected={option.value === props.selected}
             className={styles.option}
             data-active={props.active_index === index}
@@ -359,7 +362,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
             onPointerDown={(event) => {
               if (props.active_index !== null) event.preventDefault();
             }}
-            onClick={() => props.on_select(option.value)}
+            onClick={() => { if (!option.disabled) props.on_select(option.value); }}
             role="option"
             tabIndex={option.value === props.selected ? 0 : -1}
             type="button"

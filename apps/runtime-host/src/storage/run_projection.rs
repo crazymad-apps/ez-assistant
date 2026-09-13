@@ -33,7 +33,7 @@ impl StorageEngine {
             .prepare(&format!("SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
                         runs.cancel_requested, inputs.agent_variant, runs.approval_mode, runs.reasoning_effort,
                         runs.error_code, runs.error_message, runs.created_at_ms,
-                        runs.started_at_ms, runs.finished_at_ms
+                        runs.started_at_ms, runs.finished_at_ms, runs.shell_snapshot_json
                  FROM runs JOIN inputs ON inputs.input_id = runs.input_id
                  WHERE {predicate} ORDER BY runs.created_at_ms, runs.run_id"))
             .map_err(|source| internal_error("runtime runs could not be queried", source))?;
@@ -56,6 +56,7 @@ impl StorageEngine {
                         row.get::<_, i64>(11)?,
                         row.get::<_, Option<i64>>(12)?,
                         row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
                     ))
                 },
             )
@@ -77,6 +78,7 @@ impl StorageEngine {
                 created_at_ms,
                 started_at_ms,
                 finished_at_ms,
+                shell_json,
             ) =
                 row.map_err(|source| internal_error("runtime run row could not be read", source))?;
             if !matches!(cancel_requested, 0 | 1) {
@@ -96,6 +98,13 @@ impl StorageEngine {
             };
             let (message_ids, message_steps) = self.load_run_message_refs(&run_id)?;
             runs.push(StoredRun {
+                shell: shell_json
+                    .map(|json| {
+                        serde_json::from_str(&json).map_err(|source| {
+                            invalid_data_with_source("stored shell snapshot is invalid", source)
+                        })
+                    })
+                    .transpose()?,
                 message_ids,
                 message_steps,
                 run_id,

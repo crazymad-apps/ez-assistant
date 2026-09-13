@@ -4,7 +4,6 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -15,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use thiserror::Error;
 
+use crate::platform;
+
 const RUN_DIRECTORY: &str = "run";
 const LOCK_FILE: &str = "runtime.lock";
 const DISCOVERY_FILE: &str = "runtime.json";
-const PRIVATE_FILE_MODE: u32 = 0o600;
 const TOKEN_BYTES: usize = 32;
 const INSTANCE_ID_BYTES: usize = 16;
 
@@ -78,13 +78,11 @@ impl RuntimeInstanceGuard {
         let run_directory = runtime_home.join(RUN_DIRECTORY);
         let lock_path = run_directory.join(LOCK_FILE);
         validate_regular_file_or_missing(&lock_path, true)?;
-        let instance_lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(PRIVATE_FILE_MODE)
-            .custom_flags(libc::O_NOFOLLOW)
+        // 私有打开语义（0600/O_NOFOLLOW 或平台等价物）由平台原语附加。
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        platform::apply_private_open_options(&mut options);
+        let instance_lock = options
             .open(&lock_path)
             .map_err(|source| EndpointError::Io {
                 path: lock_path.clone(),
@@ -101,20 +99,19 @@ impl RuntimeInstanceGuard {
             source,
         })?;
         if !opened.is_file()
-            || opened.uid() != nix::unistd::geteuid().as_raw()
-            || opened.dev() != current.dev()
-            || opened.ino() != current.ino()
+            || !platform::owned_by_current_user(&lock_path, &opened)
+            || !platform::same_file_identity(&opened, &current)
         {
             return Err(EndpointError::UnsafeLockFile { path: lock_path });
         }
         match instance_lock.try_lock() {
             Ok(()) => {
-                instance_lock
-                    .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
-                    .map_err(|source| EndpointError::Io {
+                platform::tighten_private_file(&instance_lock).map_err(|source| {
+                    EndpointError::Io {
                         path: lock_path.clone(),
                         source,
-                    })?;
+                    }
+                })?;
                 Ok(Self {
                     run_directory,
                     instance_lock,
@@ -224,8 +221,7 @@ fn executable_identity() -> std::io::Result<(PathBuf, String)> {
         digest.update(&buffer[..length]);
     }
     let after = fs::metadata(&path)?;
-    if before.dev() != after.dev()
-        || before.ino() != after.ino()
+    if !platform::same_file_identity(&before, &after)
         || before.len() != after.len()
         || before.modified()? != after.modified()?
     {
@@ -269,7 +265,7 @@ impl Drop for OwnedEndpoint {
         if fs::remove_file(&self.discovery_path).is_ok()
             && let Some(parent) = self.discovery_path.parent()
         {
-            let _ = sync_directory(parent);
+            let _ = platform::sync_directory(parent);
         }
     }
 }
@@ -304,11 +300,10 @@ fn write_discovery_atomic(
 ) -> Result<(), EndpointError> {
     let bytes = serde_json::to_vec_pretty(discovery)?;
     let staging_path = run_directory.join(format!(".runtime-{}.tmp", discovery.instance_id));
-    let mut staging = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE_FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    platform::apply_private_open_options(&mut options);
+    let mut staging = options
         .open(&staging_path)
         .map_err(|source| EndpointError::Io {
             path: staging_path.clone(),
@@ -326,10 +321,13 @@ fn write_discovery_atomic(
             source,
         });
     }
-    if let Err(source) = sync_directory(run_directory) {
-        // rename 已经让新发现文件可见；父目录同步失败时撤掉本实例内容，不能回报失败却留出伪入口。
+    // Unix：目录 fsync；Windows：rename 后重读内容校验（平台原语内部区分）。
+    // 任一失败都撤掉本实例内容，不能回报失败却留出伪入口。
+    if let Err(source) = platform::sync_directory(run_directory)
+        .and_then(|()| platform::verify_replacement_contents(discovery_path, &bytes))
+    {
         let _ = fs::remove_file(discovery_path);
-        let _ = sync_directory(run_directory);
+        let _ = platform::sync_directory(run_directory);
         return Err(EndpointError::Io {
             path: discovery_path.to_owned(),
             source,
@@ -338,12 +336,9 @@ fn write_discovery_atomic(
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::tempdir;
@@ -363,6 +358,7 @@ mod tests {
         let home = directory.path().join("runtime-home");
         let run = home.join(RUN_DIRECTORY);
         fs::create_dir_all(&run).expect("run directory");
+        #[cfg(unix)]
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("private run mode");
         (directory, home)
     }
@@ -394,13 +390,14 @@ mod tests {
         assert_eq!(endpoint.address().ip(), Ipv4Addr::LOCALHOST);
         assert_ne!(endpoint.address().port(), 0);
         assert!(endpoint.access_token().len() >= 40);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(endpoint.discovery_path())
                 .expect("discovery metadata")
                 .permissions()
                 .mode()
                 & 0o777,
-            PRIVATE_FILE_MODE
+            0o600
         );
         let discovery: RuntimeDiscovery =
             serde_json::from_slice(&fs::read(endpoint.discovery_path()).expect("read discovery"))

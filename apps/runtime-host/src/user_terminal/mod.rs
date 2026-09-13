@@ -1,6 +1,7 @@
 //! Host 私有用户终端 owner：连接任务由 Supervisor 收齐，PTY 不进入 Agent 或 Runtime Store。
 
 mod process;
+mod shell;
 pub(crate) mod socket;
 #[cfg(test)]
 mod tests;
@@ -166,7 +167,7 @@ impl UserTerminals {
         &self,
         origin: TerminalOrigin,
         directory: PathBuf,
-        size: UserTerminalSize,
+        terminal: (UserTerminalSize, Option<assistant_protocol::ShellKind>),
         permit: &AccessPermit,
         events: mpsc::Sender<TerminalEvent>,
     ) -> Result<(String, Arc<TerminalProcess>, CancellationToken), TerminalError> {
@@ -186,7 +187,8 @@ impl UserTerminals {
         {
             return Err(failure("当前登录最多同时打开 8 个终端。"));
         }
-        let process = TerminalProcess::spawn(directory, pty_size(size)?, move |event| {
+        let (size, shell) = terminal;
+        let process = TerminalProcess::spawn(directory, pty_size(size)?, shell, move |event| {
             events
                 .try_send(event)
                 .map_err(|_| failure("终端输出连接已关闭。"))

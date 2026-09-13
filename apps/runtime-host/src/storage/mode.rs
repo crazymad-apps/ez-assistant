@@ -4,6 +4,28 @@ use assistant_protocol::{AgentVariant, ApprovalMode, ChildTaskStatus, ReasoningE
 
 use super::{StorageResult, invalid_data};
 
+pub(super) fn shell_kind_value(value: assistant_protocol::ShellKind) -> &'static str {
+    use assistant_protocol::ShellKind::*;
+    match value {
+        WindowsPowershell51 => "windows_powershell_51",
+        Cmd => "cmd",
+        Powershell7 => "powershell_7",
+        GitBash => "git_bash",
+        PosixSh => "posix_sh",
+    }
+}
+
+pub(super) fn parse_shell_kind(
+    value: Option<String>,
+) -> StorageResult<Option<assistant_protocol::ShellKind>> {
+    value
+        .map(|value| {
+            serde_json::from_value(serde_json::Value::String(value))
+                .map_err(|_| invalid_data("stored shell kind is invalid"))
+        })
+        .transpose()
+}
+
 pub(super) fn agent_variant_value(value: AgentVariant) -> &'static str {
     match value {
         AgentVariant::Plan => "plan",

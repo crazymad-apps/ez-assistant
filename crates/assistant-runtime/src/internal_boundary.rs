@@ -18,6 +18,10 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InternalBoundarySource {
     AgentVariant,
+    ShellEnvironment,
+    ShellSwitchResult,
+    ShellSwitchPrevious,
+    InheritedShellSwitchResult,
     ChannelInput,
     SkillActivation,
     McpServerDirectory,
@@ -41,6 +45,10 @@ impl InternalBoundarySource {
     const fn kind(self) -> &'static str {
         match self {
             Self::AgentVariant => "agent_variant",
+            Self::ShellEnvironment => "shell_environment",
+            Self::ShellSwitchResult => "shell_switch_result",
+            Self::ShellSwitchPrevious => "shell_switch_previous",
+            Self::InheritedShellSwitchResult => "inherited_shell_switch_result",
             Self::ChannelInput => "channel_input",
             Self::SkillActivation => "skill_activation",
             Self::McpServerDirectory => "mcp_server_directory",

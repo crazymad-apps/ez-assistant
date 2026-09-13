@@ -40,15 +40,16 @@ pub(crate) async fn serve(
             _ => Err(failure("终端连接认证超时或已断开。")),
         },
     };
-    let (permit, source, size, client_compatibility) =
+    let (permit, source, size, shell, client_compatibility) =
         match open.and_then(|message| match message {
             Control::Open {
                 client_compatibility,
                 bearer,
                 source,
                 size,
+                shell,
             } => terminals::authenticate(&auth, bearer.as_ref().map(|token| token.expose()))
-                .map(|permit| (permit, source, size, client_compatibility))
+                .map(|permit| (permit, source, size, shell, client_compatibility))
                 .map_err(|_| failure("登录已失效，请重新登录。")),
             _ => Err(failure("终端连接必须先认证并选择启动目录。")),
         }) {
@@ -72,6 +73,11 @@ pub(crate) async fn serve(
         return Ok(());
     }
     let (events, mut output) = mpsc::channel(2);
+    let shell = shell.or(if cfg!(windows) {
+        Some(assistant_protocol::ShellKind::WindowsPowershell51)
+    } else {
+        None
+    });
     // 不可取消 PTY spawn 的 JoinHandle；取得结果并登记后才观察关闭，避免中途丢下子进程。
     let created = async {
         let _gate = tokio::select! { biased;
@@ -90,7 +96,7 @@ pub(crate) async fn serve(
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".into());
         let (id, process, cancelled) = owner
-            .create(origin, directory, size, &permit, events)
+            .create(origin, directory, (size, shell), &permit, events)
             .await?;
         Ok::<_, TerminalError>((id, directory_name, process, cancelled))
     }
@@ -123,7 +129,7 @@ pub(crate) async fn serve(
         Ok::<_, TerminalError>(())
     });
     let result = async {
-        notice(&mut socket, Notice::Created { terminal_id: id.clone(), directory_name }).await?;
+        notice(&mut socket, Notice::Created { terminal_id: id.clone(), directory_name, shell }).await?;
         let mut heartbeat = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
         let mut last_seen = Instant::now();
         loop {

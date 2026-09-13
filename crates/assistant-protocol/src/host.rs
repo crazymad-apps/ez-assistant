@@ -81,6 +81,17 @@ pub enum RuntimeHostFeature {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RuntimeHostCapabilities {
+    /// Host 构建平台，不从客户端 UA 推断；旧 Host 未提供时保持未知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub architecture: Option<String>,
+    /// 本次查询在 Host PATH 中是否找到 rg；只报告发现，不承诺执行成功。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rg_on_path: Option<bool>,
     pub min_compatible_version: String,
     pub runtime_version: String,
     pub max_command_bytes: u64,
@@ -112,6 +123,9 @@ mod tests {
         );
 
         let capabilities = RuntimeHostCapabilities {
+            platform: Some("windows".into()),
+            architecture: Some("x86_64".into()),
+            rg_on_path: Some(false),
             min_compatible_version: "0.25.2".into(),
             runtime_version: "0.1.0".to_owned(),
             max_command_bytes: 1024 * 1024,

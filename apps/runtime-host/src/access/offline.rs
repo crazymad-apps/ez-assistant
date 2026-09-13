@@ -162,12 +162,12 @@ async fn status(source: &LocalConfigSource, saved: bool) -> Result<Status, Acces
 }
 
 fn check_home(home: &Path) -> Result<(), AccessError> {
-    use std::os::unix::fs::MetadataExt as _;
     match std::fs::symlink_metadata(home) {
         Ok(metadata)
             if metadata.is_dir()
-                && metadata.uid() == nix::unistd::geteuid().as_raw()
-                && metadata.mode() & 0o077 == 0 =>
+                && !crate::platform::is_reparse_or_link(&metadata)
+                && crate::platform::owned_by_current_user(home, &metadata)
+                && crate::platform::private_directory_mode_is_secured(&metadata) =>
         {
             Ok(())
         }
@@ -180,11 +180,7 @@ fn check_home(home: &Path) -> Result<(), AccessError> {
 
 /// 只观察现有内核锁，供没有原生 flock API 的调用方确认停止；不以 PID 代替锁。
 fn probe(arguments: &AccessArguments) -> Result<bool, AccessError> {
-    use std::{
-        fs,
-        fs::OpenOptions,
-        os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
-    };
+    use std::{fs, fs::OpenOptions};
     let home = arguments
         .runtime_home()
         .map_err(|_| AccessError::Invalid("Runtime Home 无效。"))?;
@@ -194,16 +190,16 @@ fn probe(arguments: &AccessArguments) -> Result<bool, AccessError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Ok(meta)
             if meta.is_dir()
-                && meta.uid() == nix::unistd::geteuid().as_raw()
-                && meta.mode() & 0o077 == 0 => {}
+                && !crate::platform::is_reparse_or_link(&meta)
+                && crate::platform::owned_by_current_user(&run, &meta)
+                && crate::platform::private_directory_mode_is_secured(&meta) => {}
         _ => return Err(AccessError::Unavailable),
     }
     let path = run.join("runtime.lock");
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-    {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    crate::platform::apply_read_no_follow(&mut options);
+    let file = match options.open(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Ok(file) => file,
         Err(_) => return Err(AccessError::Unavailable),
@@ -211,10 +207,9 @@ fn probe(arguments: &AccessArguments) -> Result<bool, AccessError> {
     let opened = file.metadata().map_err(|_| AccessError::Unavailable)?;
     let current = fs::symlink_metadata(&path).map_err(|_| AccessError::Unavailable)?;
     if !opened.is_file()
-        || opened.uid() != nix::unistd::geteuid().as_raw()
-        || opened.mode() & 0o077 != 0
-        || opened.dev() != current.dev()
-        || opened.ino() != current.ino()
+        || !crate::platform::owned_by_current_user(&path, &opened)
+        || !crate::platform::private_file_mode_is_secured(&opened)
+        || !crate::platform::same_file_identity(&opened, &current)
     {
         return Err(AccessError::Unavailable);
     }

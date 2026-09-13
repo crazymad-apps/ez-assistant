@@ -117,6 +117,12 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
+        self.inner.load_default_agent_shell()
+    }
+    fn save_default_agent_shell(&self, kind: assistant_protocol::ShellKind) -> StoreFuture<'_, ()> {
+        self.inner.save_default_agent_shell(kind)
+    }
     fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>> {
         self.inner.load_providers()
     }

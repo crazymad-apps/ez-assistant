@@ -317,12 +317,42 @@ impl SessionEnvironmentFactory for StaticSystemPromptFactory {
     }
 }
 
+fn test_runtime_root() -> &'static str {
+    if cfg!(windows) {
+        "C:/runtime"
+    } else {
+        "/runtime"
+    }
+}
+
+// 仅用于内存夹具：保留同一逻辑路径，在 Windows 补齐绝对路径要求的盘符。
+fn test_absolute_path(path: &str) -> String {
+    assert!(path.starts_with('/'));
+    if cfg!(windows) {
+        format!("C:{path}")
+    } else {
+        path.to_owned()
+    }
+}
+
 fn test_fork_environment(
     request: ForkSessionEnvironmentFactoryRequest<'_>,
 ) -> PreparedSessionEnvironment {
-    let private = format!("/runtime/sessions/{}/private", request.session_id);
-    let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
-    let tool_images = format!("/runtime/sessions/{}/tool-images", request.session_id);
+    let private = format!(
+        "{}/sessions/{}/private",
+        test_runtime_root(),
+        request.session_id
+    );
+    let attachment = format!(
+        "{}/sessions/{}/attachments",
+        test_runtime_root(),
+        request.session_id
+    );
+    let tool_images = format!(
+        "{}/sessions/{}/tool-images",
+        test_runtime_root(),
+        request.session_id
+    );
     let mut parts = request.source_system_prompt.parts().to_vec();
     if let Some(directory_prompt) = parts.last_mut() {
         *directory_prompt = format!("Session directories for {}", request.session_id);
@@ -351,9 +381,21 @@ fn test_environment(
     request: SessionEnvironmentFactoryRequest<'_>,
     system_prompt: SystemPromptSnapshot,
 ) -> PreparedSessionEnvironment {
-    let private = format!("/runtime/sessions/{}/private", request.session_id);
-    let attachment = format!("/runtime/sessions/{}/attachments", request.session_id);
-    let tool_images = format!("/runtime/sessions/{}/tool-images", request.session_id);
+    let private = format!(
+        "{}/sessions/{}/private",
+        test_runtime_root(),
+        request.session_id
+    );
+    let attachment = format!(
+        "{}/sessions/{}/attachments",
+        test_runtime_root(),
+        request.session_id
+    );
+    let tool_images = format!(
+        "{}/sessions/{}/tool-images",
+        test_runtime_root(),
+        request.session_id
+    );
     let (
         workspace_id,
         working_directory,
@@ -890,6 +932,7 @@ mod runs;
 mod session_commands;
 mod session_management;
 mod sessions;
+mod shell;
 mod store;
 mod work_plan;
 mod workspace;

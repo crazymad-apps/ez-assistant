@@ -1,6 +1,8 @@
 import { McpSettingsStore } from "../features/settings";
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
 import type {
+  AgentShellSettings,
+  ShellKind,
   ConfigurationStatus,
   ConnectionValidationFailure,
   ModelConfigOrigin,
@@ -45,6 +47,7 @@ export class SettingsStore {
   #skill_request = 0;
   // 仅标识前端读取；新读取或已提交 mutation 使先前响应失效，不属于持久化版本。
   #model_read = 0;
+  #shell_read = 0;
   readonly mcp: McpSettingsStore;
   is_open = false;
   page: SettingsPage = "runtime";
@@ -53,6 +56,8 @@ export class SettingsStore {
   status: ConfigurationStatus | null = null;
   providers: readonly ProviderSummary[] = [];
   model_settings: ModelSettings = { default_model: null, vision_model: null };
+  agent_shell_settings: AgentShellSettings | null = null;
+  shell_loading = false;
   error_message: string | null = null;
   notice_message: string | null = null;
   configuration_conflict = false;
@@ -75,6 +80,10 @@ export class SettingsStore {
       status: observableRef,
       providers: observableRef,
       model_settings: observableRef,
+      agent_shell_settings: observableRef,
+      shell_loading: observable,
+      loadAgentShellSettings: action,
+      setDefaultAgentShell: action,
       error_message: observable,
       notice_message: observable,
       configuration_conflict: observable,
@@ -431,6 +440,45 @@ export class SettingsStore {
         this.notice_message = "默认模型已更新。";
       });
       await this.refreshAfterModelMutation(client);
+    });
+  }
+
+  async loadAgentShellSettings(): Promise<void> {
+    const client = this.dependencies.get_client();
+    const request = ++this.#shell_read;
+    this.agent_shell_settings = null;
+    this.shell_loading = Boolean(client);
+    if (!client) return;
+    try {
+      const result = await client.command({ type: "get_agent_shell_settings", payload: {} });
+      runInAction(() => {
+        if (client === this.dependencies.get_client() && request === this.#shell_read) {
+          this.agent_shell_settings = result.payload;
+        }
+      });
+    } catch (error: unknown) {
+      runInAction(() => {
+        if (client === this.dependencies.get_client() && request === this.#shell_read) {
+          this.error_message = displayError(error);
+        }
+      });
+    } finally {
+      runInAction(() => { if (request === this.#shell_read) this.shell_loading = false; });
+    }
+  }
+
+  async setDefaultAgentShell(shell: ShellKind): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction("default-shell", async () => {
+      const result = await client.command({ type: "set_default_agent_shell", payload: { shell } });
+      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+      ++this.#shell_read;
+      runInAction(() => {
+        this.shell_loading = false;
+        this.agent_shell_settings = result.payload;
+        this.notice_message = "默认 Agent Shell 已更新，仅影响之后新建的会话。";
+      });
     });
   }
 

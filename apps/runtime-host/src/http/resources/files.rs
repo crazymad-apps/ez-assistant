@@ -1,4 +1,7 @@
 //! Host 文件读取基础。Session 先校验根，任意目录入口不附加 Session 边界；两者都从已打开句柄读取。
+//!
+//! 平台差异：Unix 以 `openat`+`O_NOFOLLOW` 从 `/` 逐组件打开；Windows 以最终组件
+//! 逐级目录句柄固定、reparse 拒绝和完整 File ID 核验（规范见 v0.25.3 技术方案 4.2）。
 
 use assistant_protocol::{
     HostFileEntry, ListHostFilesResult, PreviewSessionResourceFileResult, RuntimeErrorCode,
@@ -6,11 +9,14 @@ use assistant_protocol::{
     SessionResourcePreviewKind,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(unix)]
 use rustix::fs::{Dir, Mode, OFlags, open, openat};
+#[cfg(unix)]
+use std::path::Component;
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 pub(super) const MAX_DIRECTORY_ENTRIES: usize = 2_000;
@@ -62,13 +68,26 @@ pub(super) fn host_path(value: Option<&str>) -> Result<PathBuf, RuntimeErrorInfo
     if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(super::invalid_request("请输入 Host 上的绝对路径。"));
     }
-    let path = std::fs::canonicalize(path).map_err(error)?;
+    let path = canonicalize(&path)?;
     path_text(&path)?;
     Ok(path)
 }
 
+pub(super) fn canonicalize(path: &Path) -> Result<PathBuf, RuntimeErrorInfo> {
+    #[cfg(windows)]
+    {
+        crate::platform::resource_file::local_path(path).map_err(|_| {
+            super::invalid_request("仅支持本机盘符绝对路径，不支持 UNC、设备路径或路径穿越。")
+        })?;
+        crate::platform::resource_file::canonicalize(path).map_err(error)
+    }
+    #[cfg(unix)]
+    std::fs::canonicalize(path).map_err(error)
+}
+
 /// canonicalize 的结果不是永久授权。逐级以目录句柄打开且拒绝再次跟随链接，校验后替换的链接无法改变读取目标。
-/// NONBLOCK 避免被替换成 FIFO 时阻塞；最终文件类型由句柄核验。仅支持正式 Host 现有 Unix 平台。
+/// NONBLOCK 避免被替换成 FIFO 时阻塞；最终文件类型由句柄核验。
+#[cfg(unix)]
 pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
     if !path.is_absolute() {
         return Err(super::invalid_request("文件路径必须为绝对路径。"));
@@ -101,6 +120,13 @@ pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, Runtim
     Ok(file)
 }
 
+/// Windows 逐级固定目录并拒绝 reparse，返回核验过身份的最终句柄。
+#[cfg(windows)]
+pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
+    crate::platform::resource_file::open(path, directory)
+        .map(|opened| opened.file)
+        .map_err(error)
+}
 pub(super) fn list(
     directory: &Path,
     boundary: Option<&Path>,
@@ -108,7 +134,7 @@ pub(super) fn list(
     generated: bool,
 ) -> Result<ListHostFilesResult, RuntimeErrorInfo> {
     let file = open_resolved(directory, true)?;
-    let reader = Dir::read_from(&file).map_err(error)?;
+    let names = directory_entry_names(&file, directory)?;
     let mut result = ListHostFilesResult {
         path: path_text(directory)?,
         parent_path: directory.parent().map(path_text).transpose()?,
@@ -116,30 +142,26 @@ pub(super) fn list(
         truncated: false,
         skipped_entries: 0,
     };
-    let mut scanned = 0;
-    for entry in reader {
-        let entry = entry.map_err(error)?;
-        let bytes = entry.file_name().to_bytes();
-        if bytes == b"." || bytes == b".." {
-            continue;
-        }
+    for (scanned, name) in names.into_iter().enumerate() {
         if scanned == MAX_DIRECTORY_ENTRIES {
             result.truncated = true;
             break;
         }
-        scanned += 1;
-        let Ok(name) = std::str::from_utf8(bytes) else {
+        let Some(name) = name else {
             result.skipped_entries += 1;
             continue;
         };
-        if (!hidden && name.starts_with('.')) || (!generated && is_generated(name)) {
+        if (!hidden && name.starts_with('.')) || (!generated && is_generated(&name)) {
             continue;
         }
-        let candidate = directory.join(name);
+        let candidate = directory.join(&name);
+        #[cfg(unix)]
         let known_directory = std::fs::metadata(&candidate).is_ok_and(|m| m.is_dir());
-        let is_symbolic_link =
-            std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
-        let resolved = std::fs::canonicalize(&candidate);
+        #[cfg(windows)]
+        let known_directory = std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.is_dir());
+        let is_symbolic_link = std::fs::symlink_metadata(&candidate)
+            .is_ok_and(|m| crate::platform::is_reparse_or_link(&m));
+        let resolved = canonicalize(&candidate);
         let (kind, state, size) = match resolved {
             Ok(path) if boundary.is_some_and(|root| !path.starts_with(root)) => (
                 SessionResourceEntryKind::File,
@@ -182,7 +204,7 @@ pub(super) fn list(
         };
         result.entries.push(HostFileEntry {
             path: path_text(&candidate)?,
-            display_name: name.to_owned(),
+            display_name: name,
             kind,
             state,
             size_bytes: size,
@@ -200,6 +222,53 @@ pub(super) fn list(
             .then_with(|| a.display_name.cmp(&b.display_name))
     });
     Ok(result)
+}
+
+/// 平台各自的目录列举来源；无法以 UTF-8 表示的条目以 `None` 透出，由调用方计入
+/// `skipped_entries`，不伪造可操作路径。
+#[cfg(unix)]
+fn directory_entry_names(
+    file: &File,
+    _directory: &Path,
+) -> Result<Vec<Option<String>>, RuntimeErrorInfo> {
+    let reader = Dir::read_from(file).map_err(error)?;
+    let mut names = Vec::new();
+    for entry in reader {
+        let entry = entry.map_err(error)?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        names.push(std::str::from_utf8(bytes).ok().map(str::to_owned));
+        if names.len() > MAX_DIRECTORY_ENTRIES {
+            break;
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(windows)]
+fn directory_entry_names(
+    file: &File,
+    directory: &Path,
+) -> Result<Vec<Option<String>>, RuntimeErrorInfo> {
+    // read_dir 按路径列举，因此在整个扫描期间固定全部父目录并确认与调用方句柄同源。
+    let guarded = crate::platform::resource_file::open(directory, true).map_err(error)?;
+    if crate::platform::resource_file::identity(file).map_err(error)?
+        != crate::platform::resource_file::identity(&guarded.file).map_err(error)?
+    {
+        return Err(super::invalid_request("目录在读取前已变化，请重试。"));
+    }
+    let reader = std::fs::read_dir(directory).map_err(error)?;
+    let mut names = Vec::new();
+    for entry in reader {
+        let entry = entry.map_err(error)?;
+        names.push(entry.file_name().into_string().ok());
+        if names.len() > MAX_DIRECTORY_ENTRIES {
+            break;
+        }
+    }
+    Ok(names)
 }
 
 pub(super) fn is_generated(name: &str) -> bool {
@@ -305,4 +374,5 @@ fn too_large() -> RuntimeErrorInfo {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests;

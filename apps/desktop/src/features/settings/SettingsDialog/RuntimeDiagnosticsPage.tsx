@@ -1,5 +1,7 @@
 import { copyText } from "../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
+import { useEffect } from "react";
+import { shellLabels } from "../../../runtime-client/shellPresentation";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import { SettingsMessages } from "./SettingsMessages";
@@ -13,6 +15,15 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
   const capabilities = connection.capabilities;
   const runtime_lifecycle = store.projection.application?.runtime_lifecycle ?? null;
   const status = settings.status ?? store.projection.application?.configuration ?? null;
+  const address = connection.address;
+  const connection_state = connection.state;
+  const windows = capabilities?.platform === "windows";
+  useEffect(() => {
+    if (windows) void settings.loadAgentShellSettings();
+  }, [settings, windows, address, connection_state]);
+  const architecture = capabilities?.architecture === "x86_64" ? "x64" : capabilities?.architecture;
+  let rg_status = "尚未读取";
+  if (capabilities?.rg_on_path != null) rg_status = capabilities.rg_on_path ? "已找到" : "PATH 中未找到";
 
   async function copyDiagnostics() {
     const diagnostics = [
@@ -28,6 +39,9 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
       `configuration_revision=${status?.revision ?? "-"}`,
       `configuration_path=${status?.config_path ?? "-"}`,
       `features=${capabilities?.features?.join(",") ?? "-"}`,
+      `platform=${capabilities?.platform ?? "-"}`,
+      `architecture=${capabilities?.architecture ?? "-"}`,
+      `rg_on_path=${capabilities?.rg_on_path ?? "-"}`,
     ].join("\n");
     await copyText(diagnostics);
     settings.showNotice("诊断信息已复制。");
@@ -53,6 +67,7 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
             <div><dt>实例</dt><dd title={connection.instance_id ?? undefined}>{connection.instance_id ?? "—"}</dd></div>
             <div><dt>Host 地址</dt><dd>{connection.address ?? "—"}</dd></div>
             <div><dt>运行时版本</dt><dd>{capabilities?.runtime_version ?? "—"}</dd></div>
+            {capabilities?.platform ? <div><dt>Host 平台</dt><dd>{windows ? "Windows" : capabilities.platform} · {architecture ?? "未知架构"}</dd></div> : null}
             <div><dt>最低兼容软件版本</dt><dd>{capabilities?.min_compatible_version ?? "—"}</dd></div>
             <div><dt>最近连接</dt><dd>{formatDateTime(connection.last_connected_at_ms)}</dd></div>
             <div><dt>错误分类</dt><dd>{connection.last_error_code ?? "—"}</dd></div>
@@ -69,6 +84,16 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
             <div><dt>修订</dt><dd title={status?.revision ?? undefined}>{status?.revision?.slice(0, 12) ?? "—"}</dd></div>
           </dl>
         </article>
+      {windows ? <article className={styles.runtime_dependencies}>
+        <h4>平台依赖</h4>
+        <dl>
+          <div><dt>rg</dt><dd>{rg_status}</dd></div>
+          {settings.agent_shell_settings?.catalog.filter((entry) => entry.kind !== "posix_sh").map((entry) => (
+            <div key={entry.kind}><dt>{shellLabels[entry.kind]}</dt><dd>{entry.available ? "可用" : entry.reason ?? "未安装"}</dd></div>
+          ))}
+          {!settings.agent_shell_settings ? <div><dt>Shell</dt><dd>{settings.shell_loading ? "正在读取…" : "尚未读取"}</dd></div> : null}
+        </dl>
+      </article> : null}
       </div>
       <article className={styles.diagnostic_card}>
         <div className={styles.diagnostic_heading}>

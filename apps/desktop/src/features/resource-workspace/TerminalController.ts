@@ -1,4 +1,5 @@
-import { action, computed, makeObservable, observable, runInAction } from "mobx";
+import { action, computed, makeObservable, observable, observableRef, runInAction } from "mobx";
+import type { ShellCatalogEntry, ShellKind } from "@ez-assistant/protocol";
 import type { TerminalEvent, TerminalSize, TerminalSource, TerminalSocket } from "../../runtime-client/TerminalSocket";
 import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { createTerminalEmulator, type TerminalEmulator } from "./terminalEmulator";
@@ -13,6 +14,9 @@ export class TerminalController {
   error: string | null = null;
   exit_code: number | null = null;
   terminal_id: string | null = null;
+  shell_kind: ShellKind | null = null;
+  selected_shell: ShellKind | null = null;
+  shell_catalog: readonly ShellCatalogEntry[] = [];
   ready = false;
   readonly source: TerminalSource;
   readonly title = "终端";
@@ -35,17 +39,37 @@ export class TerminalController {
     this.#on_exit = onExit;
     makeObservable(this, {
       status: observable, error: observable, exit_code: observable, terminal_id: observable,
+      shell_kind: observable, selected_shell: observable, shell_catalog: observableRef,
       ready: observable, needs_close_confirmation: computed,
-      start: action, restart: action, reportError: action,
+      start: action, restart: action, reportError: action, selectShell: action,
     });
     this.status = deferred ? "idle" : "starting";
-    if (!deferred) this.#pending = this.#start();
+    if (!deferred) this.#pending = this.#prepare();
   }
 
   start(): void {
     if (this.status !== "idle") return;
     this.status = "starting";
-    this.#pending = this.#start();
+    this.#pending = this.#prepare();
+  }
+
+  selectShell(shell: ShellKind): void {
+    if (this.#closing || !["running", "error", "exited"].includes(this.status) || shell === this.shell_kind) return;
+    if (!this.shell_catalog.some((entry) => entry.kind === shell && entry.available)) return;
+    this.selected_shell = shell;
+    this.restart();
+  }
+  async #prepare(): Promise<void> {
+    try {
+      const client = this.getClient();
+      if (!client) throw new Error("Host 尚未连接。");
+      const result = await client.command({ type: "get_agent_shell_settings", payload: {} });
+      if (this.status === "closing" || this.status === "closed") return;
+      if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
+      runInAction(() => { this.shell_catalog = result.payload.catalog; });
+      // 新标签不指定类型，由 Host 使用平台默认交互 Shell；不继承 Agent 配置或上次选择。
+      await this.#start();
+    } catch (failure: unknown) { if (this.status !== "closing" && this.status !== "closed") this.reportError(failure); }
   }
 
   get needs_close_confirmation(): boolean { return this.status === "starting" || this.status === "running"; }
@@ -81,15 +105,14 @@ export class TerminalController {
   }
 
   restart(): void {
-    if (this.#closing || (this.status !== "exited" && this.status !== "error")) return;
+    if (this.#closing || (this.status !== "exited" && this.status !== "error" && this.status !== "running")) return;
     this.status = "starting";
     this.error = null;
     this.exit_code = null;
     this.#last_size = "";
     this.#input = [];
     this.#input_bytes = 0;
-    this.#emulator?.terminal.reset();
-    this.#pending = this.#pending.then(() => this.#start());
+    this.#pending = this.#pending.then(() => this.selected_shell || this.shell_kind ? this.#start() : this.#prepare());
   }
 
   close(): Promise<void> {
@@ -135,12 +158,16 @@ export class TerminalController {
       if (this.status === "closing") return;
       const size = this.#size();
       await this.#socket?.close();
+      if (this.#closing) return;
+      this.#emulator.terminal.reset();
+      runInAction(() => { this.terminal_id = null; });
       const client = this.getClient();
       if (!client) throw new Error("Host 尚未连接。");
-      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); });
+      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); }, this.selected_shell);
       this.#socket = socket;
       const created = await socket.created;
-      runInAction(() => { this.terminal_id = created.terminal_id; });
+      runInAction(() => { this.terminal_id = created.terminal_id; this.shell_kind = created.shell; });
+
       runInAction(() => { if (this.status === "starting") this.status = "running"; });
       this.fit();
       void this.#flushInput();
@@ -155,7 +182,7 @@ export class TerminalController {
           if (socket === this.#socket && !this.#closing) socket.acknowledge();
         }).catch((failure: unknown) => { if (!this.#closing) this.reportError(failure); });
       });
-    } else if (!this.#closing) {
+    } else if (!this.#closing && !(this.status === "starting" && this.terminal_id)) {
       runInAction(() => {
         if (event.type === "exited") { this.status = "exited"; this.exit_code = event.code; }
         else this.reportError(event.message);

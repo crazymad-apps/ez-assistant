@@ -139,7 +139,10 @@ impl AssistantRuntime {
             .await?;
         let system_prompt = skill_catalog.augment_system_prompt(prepared_environment.system_prompt);
         let created_at_ms = super::now_ms()?;
+        let (agent_shell_kind, agent_shell_environment) = self.initial_agent_shell().await?;
         let new_session = NewStoredSession {
+            agent_shell_kind,
+            agent_shell_environment,
             session_id: session_id.clone(),
             title: automatic_session_title(&manifest.message),
             title_origin: SessionTitleOrigin::Generated,
@@ -281,6 +284,7 @@ impl AssistantRuntime {
             .filter(|goal| matches!(goal.persistence, GoalSubmissionPersistence::Start))
             .map(|goal| goal.control.to_stored(session_id.clone()));
         let input = NewStoredInput {
+            agent_shell_target: None,
             input_id,
             run_id,
             session_id: session_id.clone(),
@@ -448,6 +452,8 @@ fn validate_manifest(
 
 fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
     crate::StoredSession {
+        agent_shell_kind: session.agent_shell_kind,
+        agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id.clone(),
         title: session.title.clone(),
         title_origin: session.title_origin,

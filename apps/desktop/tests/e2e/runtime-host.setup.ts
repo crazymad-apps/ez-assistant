@@ -41,18 +41,18 @@ server_names = []
 `,
   );
 
-  const executable = resolve(process.cwd(), "../../target/debug/ez-assistant-runtime");
+  const executable = resolve(process.cwd(), `../../target/debug/ez-assistant-runtime${process.platform === "win32" ? ".exe" : ""}`);
   // 只在隔离 Runtime Home 中启用安全 stdio fixture，不读取或变更用户 MCP 配置。
   await writeFile(join(runtime_home, "mcp.json"), JSON.stringify({ mcpServers: {
     local_fixture: {
-      command: "python3", args: ["-u", resolve(process.cwd(), "../runtime-host/tests/fixtures/mcp_stdio_server.py")],
+      command: process.platform === "win32" ? "python" : "python3", args: ["-u", resolve(process.cwd(), "../runtime-host/tests/fixtures/mcp_stdio_server.py")],
       displayName: "MCP fixture", description: "Two safe fixture tools",
       env: { TOKEN: mcp_secret },
     },
   } }));
   const child = spawn(executable, ["serve", "--runtime-home", runtime_home], {
     // Home 仅覆盖测试子进程，避免正式技能发现读取开发者个人目录。
-    env: { ...process.env, HOME: user_directory },
+    env: { ...process.env, HOME: user_directory, ...(process.platform === "win32" ? { USERPROFILE: user_directory } : {}) },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -104,6 +104,7 @@ server_names = []
       started_runtime: true,
     });
     process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE = additional_workspace;
+    process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME = runtime_home;
     process.env.EZ_ASSISTANT_E2E_MCP_SECRET = mcp_secret;
     process.env.EZ_ASSISTANT_E2E_SKILL_ROOT = join(user_directory, ".agents", "skills");
   } catch (error) {
@@ -131,6 +132,7 @@ server_names = []
     await removeTemporaryDirectories(runtime_home, workspace, additional_workspace);
     delete process.env.EZ_ASSISTANT_E2E_BOOTSTRAP;
     delete process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE;
+    delete process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME;
     delete process.env.EZ_ASSISTANT_E2E_MCP_SECRET;
     if (stderr.includes(mcp_secret)) throw new Error("MCP credential leaked to Host stderr");
   };

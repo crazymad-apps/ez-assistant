@@ -16,6 +16,7 @@ use tempfile::TempDir;
 
 use super::*;
 
+#[cfg(unix)]
 fn shell(environment: EnvironmentPolicy) -> LocalShell {
     LocalShell::new(LocalShellConfig::new(environment))
 }
@@ -126,6 +127,7 @@ async fn custom_launcher_receives_fixed_args_then_complete_command() {
         launcher: ShellLauncher {
             program: launcher_path.into_os_string(),
             fixed_args: vec![OsString::from("fixed")],
+            command_prefix: String::new(),
         },
         environment: EnvironmentPolicy::default(),
     });
@@ -468,6 +470,7 @@ async fn pre_cancelled_request_does_not_spawn_launcher() {
         launcher: ShellLauncher {
             program: OsString::from("definitely-missing-shell-launcher"),
             fixed_args: Vec::new(),
+            command_prefix: String::new(),
         },
         environment: EnvironmentPolicy::default(),
     });
@@ -478,6 +481,121 @@ async fn pre_cancelled_request_does_not_spawn_launcher() {
         .await
         .expect_err("pre-cancelled request must not spawn");
     assert_eq!(error, ShellToolError::Cancelled);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_shell_has_no_console_in_both_process_modes() {
+    const DETACHED_TEST_HOST: &str = "EZ_ASSISTANT_TEST_DETACHED_SHELL_HOST";
+    if std::env::var_os(DETACHED_TEST_HOST).is_none() {
+        // 正式 Host 没有父控制台；测试也以独立 Host 形态运行，避免终端继承掩盖弹窗。
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "shell::tests::windows_shell_has_no_console_in_both_process_modes",
+                "--nocapture",
+            ])
+            .env(DETACHED_TEST_HOST, "1")
+            .creation_flags(0x0000_0008)
+            .output()
+            .await
+            .expect("run detached test host");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let directory = TempDir::new().expect("temporary working directory");
+    let shell = LocalShell::new(LocalShellConfig {
+        launcher: ShellLauncher {
+            program: OsString::from("powershell.exe"),
+            fixed_args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+                .map(OsString::from)
+                .to_vec(),
+            command_prefix: String::new(),
+        },
+        environment: EnvironmentPolicy::default(),
+    });
+    // 从实际 Shell 内查询控制台句柄，避免只断言构造参数却漏掉 JobObject 覆盖标志。
+    let script = r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd); }'; if ([ConsoleProbe]::IsWindowVisible([ConsoleProbe]::GetConsoleWindow())) { exit 9 }; [Console]::Out.Write('no-console'); [Console]::Error.Write('stderr-ok')"#;
+    for mode in [ShellProcessMode::Managed, ShellProcessMode::Detached] {
+        let mut input = request(&directory, script);
+        input.process_mode = mode;
+        input.timeout = Duration::from_secs(20);
+        let (sink, _) = recording_sink();
+        let result = shell
+            .exec(input, sink, CancellationToken::new())
+            .await
+            .expect("Shell completes");
+        assert_eq!(result.exit_code, Some(0), "{mode:?}: {}", result.stderr);
+        assert_eq!(result.stdout, "no-console");
+        assert_eq!(result.stderr, "stderr-ok");
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cmd_utf8_initialization_does_not_expand_script_twice() {
+    let directory = TempDir::new().expect("temporary directory");
+    let mut config = LocalShellConfig::new(EnvironmentPolicy::default());
+    config.launcher.fixed_args = ["/d", "/s", "/c"].map(OsString::from).to_vec();
+    config.launcher.command_prefix = "chcp 65001>nul & ".to_owned();
+    config
+        .environment
+        .overrides
+        .insert("LITERAL".into(), Some("%OTHER%".into()));
+    config
+        .environment
+        .overrides
+        .insert("OTHER".into(), Some("expanded-twice".into()));
+    let shell = LocalShell::new(config);
+    let (sink, _) = recording_sink();
+    let result = shell
+        .exec(
+            request(
+                &directory,
+                "echo %LITERAL% & echo 中文 ^& !literal! & exit /b 7",
+            ),
+            sink,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("CMD completes");
+    assert_eq!(result.exit_code, Some(7));
+    assert!(result.stdout.contains("%OTHER%"), "{}", result.stdout);
+    assert!(
+        result.stdout.contains("中文 & !literal!"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cmd_quoted_file_and_repeated_managed_exit_complete() {
+    let directory = TempDir::new().expect("temporary working directory");
+    std::fs::write(directory.path().join("a & b.txt"), "quoted-file").expect("file fixture");
+    let shell = LocalShell::new(LocalShellConfig::new(EnvironmentPolicy::default()));
+    // 多次启动可暴露根进程轮询先消费 Job 完成通知、后续清理 wait 卡住的竞态。
+    for _ in 0..5 {
+        let (sink, _) = recording_sink();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            shell.exec(
+                request(&directory, "type \"a & b.txt\" & exit /b 7"),
+                sink,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("managed cleanup deadline")
+        .expect("CMD result");
+        assert_eq!(outcome.stdout, "quoted-file");
+        assert_eq!(outcome.exit_code, Some(7));
+    }
 }
 
 #[cfg(unix)]

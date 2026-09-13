@@ -36,8 +36,13 @@ pub async fn read_binary_file(
     if cancellation.is_cancelled() {
         return Err(BinaryReadError::Cancelled);
     }
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    // Windows 目录需 BACKUP_SEMANTICS 才能取得句柄并准确返回 NotRegularFile。
+    #[cfg(windows)]
+    options.custom_flags(0x0200_0000);
     let mut file = tokio::select! {
-        result = tokio::fs::File::open(path.as_path()) => result.map_err(BinaryReadError::Io)?,
+        result = options.open(path.as_path()) => result.map_err(BinaryReadError::Io)?,
         () = cancellation.cancelled() => return Err(BinaryReadError::Cancelled),
     };
     let metadata = tokio::select! {

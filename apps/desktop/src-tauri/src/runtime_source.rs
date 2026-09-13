@@ -20,7 +20,11 @@ pub(crate) async fn verify(
     if check(path.to_owned()).await.map_err(|_| ())?? != expected_hash {
         return Err(());
     }
-    let mut child = tokio::process::Command::new(path)
+    let mut command = tokio::process::Command::new(path);
+    // CLI Host 的短版本查询不应为 GUI 客户端创建控制台。
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut child = command
         .arg("--build-info-json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -98,6 +102,9 @@ pub(crate) fn canonical_home(path: &Path) -> Option<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
+            // Windows 的 verbatim 盘符前缀（\\?\C:）单独不是可访问路径；
+            // 等 RootDir 拼成完整盘符根再 canonicalize，避免拒绝已规范化的 Home。
+            Component::Prefix(_) => resolved.push(component.as_os_str()),
             Component::ParentDir => {
                 resolved.pop();
             }
@@ -117,6 +124,23 @@ pub(crate) fn canonical_home(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(resolved)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_home_accepts_native_verbatim_and_not_yet_created_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(canonical_home(root.path()), Some(canonical.clone()));
+        assert_eq!(canonical_home(&canonical), Some(canonical.clone()));
+        assert_eq!(
+            canonical_home(&canonical.join("new/home")),
+            Some(canonical.join("new/home"))
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

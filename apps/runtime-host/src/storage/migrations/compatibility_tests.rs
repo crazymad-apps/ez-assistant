@@ -96,7 +96,7 @@ fn high_minimum_blocks_store_and_exposes_only_safe_versions_before_business_dire
     preserve_before_fault(home.path());
     open(home.path())
         .execute(
-            "UPDATE database_compatibility SET min_compatible_host_version='0.25.3'",
+            "UPDATE database_compatibility SET min_compatible_host_version='0.26.0'",
             [],
         )
         .unwrap();
@@ -110,7 +110,7 @@ fn high_minimum_blocks_store_and_exposes_only_safe_versions_before_business_dire
     startup.fail(assistant_protocol::RuntimeHostStartupError::DatabaseHostTooOld);
     assert_eq!(
         startup.health().min_compatible_host_version.as_deref(),
-        Some("0.25.3")
+        Some("0.26.0")
     );
     assert!(super::super::engine::StorageEngine::open(home.path()).is_err());
     assert_eq!(snapshot(home.path()), before);
@@ -290,16 +290,23 @@ fn nonempty_journal_and_changed_file_identity_are_rejected_without_recovery() {
     migrate(home.path(), "0.25.2", &manifest()).unwrap();
     preserve_before_fault(home.path());
     let path = path(home.path());
+    #[cfg(unix)]
     let inspected = admission::ExistingDatabase::inspect(&path)
         .unwrap()
         .unwrap();
-    let replacement = home.path().join("replacement");
-    fs::copy(&path, &replacement).unwrap();
-    fs::rename(&replacement, &path).unwrap();
-    assert!(matches!(
-        inspected.check_unchanged(&path),
-        Err(MigrationError::DatabaseChanged)
-    ));
+    // 换文件身份检测依赖 dev/ino（Unix）；Windows 按技术方案 3.1 不做私有文件强身份，
+    // NTFS 名称隧道与 CopyFile 的时间戳保留使时间戳启发式不可靠。
+    #[cfg(unix)]
+    {
+        let replacement = home.path().join("replacement");
+        fs::copy(&path, &replacement).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(matches!(
+            inspected.check_unchanged(&path),
+            Err(MigrationError::DatabaseChanged)
+        ));
+    }
+
     fs::write(
         path.with_file_name(format!("{DATABASE_FILE}-journal")),
         [0; 512],

@@ -22,6 +22,7 @@ import { useBrowserSurface } from "../ResourceBrowser/useBrowserSurface";
 import { ResourceAddMenu } from "../ResourceAddMenu";
 import { supportsNativeResourceMenu } from "../../../native-bridge/resourceMenu";
 import styles from "./index.module.scss";
+import { shellBadges, shellLabels } from "../../../runtime-client/shellPresentation";
 
 export const ResourceWorkspace = observer(function ResourceWorkspace(props: Readonly<{ hidden?: boolean; overlay_root_ref?: RefObject<HTMLDivElement | null> }>) {
   const root_store = useRootStore();
@@ -124,6 +125,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
             const key = resourceTabKey(tab);
             const title = tab.type === "browser" ? store.browsers.get(tab.browserId)?.title ?? resourceTabTitle(tab) : tab.type === "terminal" ? store.terminals.get(tab.terminalId)?.title ?? resourceTabTitle(tab) : resourceTabTitle(tab);
             const active = store.active_tab_key === key;
+            const shell = tab.type === "terminal" ? store.terminals.get(tab.terminalId)?.shell_kind : null;
             return (
               <div
                 className={styles.tab_item}
@@ -157,6 +159,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
                 >
                   <Icon name={tabIcon(tab)} size={15} />
                   <span>{title}</span>
+                  {shell && <small title={shellLabels[shell]}>{shellBadges[shell]}</small>}
                 </button>
                 {key !== CONTEXT_TAB_KEY && (
                   <Button

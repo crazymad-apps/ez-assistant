@@ -2,6 +2,7 @@ import { ClientResources } from "../runtime-client/ClientResources";
 import type { ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 import { action, makeObservable, observable, reaction, runInAction, type IReactionDisposer } from "mobx";
 import type {
+  AgentShellSettings,
   AgentVariant,
   AttachmentId,
   ApprovalDecision,
@@ -1144,6 +1145,14 @@ export class RootStore {
       payload: { session_id },
     });
     return result.payload.snapshot;
+  }
+
+  async getAgentShellSettings(): Promise<AgentShellSettings> {
+    const client = this.#runtime.client;
+    if (!client) throw new RuntimeClientError("runtime_unavailable", "Runtime 当前不可用。");
+    const result = await client.command({ type: "get_agent_shell_settings", payload: {} });
+    if (client !== this.#runtime.client) throw new RuntimeClientError("runtime_unavailable", "Runtime 连接已切换。");
+    return result.payload;
   }
 
   async reloadSelectedConversation(): Promise<void> {

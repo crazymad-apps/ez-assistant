@@ -445,6 +445,9 @@ mod tests {
             access_token: secret.into(),
             started_runtime: false,
             capabilities: RuntimeHostCapabilities {
+                platform: None,
+                architecture: None,
+                rg_on_path: None,
                 min_compatible_version: assistant_protocol::MIN_COMPATIBLE_VERSION.into(),
                 runtime_version: env!("CARGO_PKG_VERSION").into(),
                 max_command_bytes: 1048576,

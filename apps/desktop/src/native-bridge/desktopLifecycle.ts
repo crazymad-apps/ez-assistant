@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { RuntimeBootstrap } from "./runtimeBootstrap";
 
-export type DesktopPlatform = "macos" | "linux" | "unsupported";
+export type DesktopPlatform = "macos" | "linux" | "windows" | "unsupported";
 export type DesktopLifecycleIntent = "quit_desktop" | "stop_runtime" | "restart_runtime";
 export type NativeRuntimeState =
   | "connecting"

@@ -84,6 +84,9 @@ pub trait RuntimeStore: Send + Sync {
         id: assistant_protocol::ProviderInstanceId,
     ) -> StoreFuture<'_, assistant_protocol::ProviderUsage>;
     fn load_model_settings(&self) -> StoreFuture<'_, assistant_protocol::ModelSettings>;
+    /// 全局 Shell 默认仅用于新 Session；不修改既有绑定。
+    fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>>;
+    fn save_default_agent_shell(&self, kind: assistant_protocol::ShellKind) -> StoreFuture<'_, ()>;
     fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,

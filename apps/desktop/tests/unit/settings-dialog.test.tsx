@@ -28,6 +28,30 @@ afterEach(() => {
 });
 
 describe("SettingsDialog model management", () => {
+  it("shows the target Host platform and missing dependencies without changing Shell settings", async () => {
+    const store = settingsStore();
+    store.settings.page = "runtime_diagnostics";
+    store.connection.capabilities = {
+      platform: "windows", architecture: "x86_64", rg_on_path: false,
+      runtime_version: "0.25.3", min_compatible_version: "0.25.3", max_command_bytes: 1000,
+      max_attachment_bytes: null, sse: true, streaming_upload: true, features: [],
+    };
+    store.settings.agent_shell_settings = {
+      default_agent_shell: "cmd", catalog: [
+        { kind: "cmd", available: true, reason: null },
+        { kind: "powershell_7", available: false, reason: "未安装" },
+      ],
+    };
+    const load = vi.spyOn(store.settings, "loadAgentShellSettings").mockResolvedValue();
+    const submit = vi.spyOn(store, "submitSessionCommand");
+    renderDialog(store);
+    expect(screen.getByText("Windows · x64")).toBeVisible();
+    expect(screen.getByText("PATH 中未找到")).toBeVisible();
+    expect(screen.getByText("PowerShell 7")).toBeVisible();
+    expect(screen.getByText("未安装")).toBeVisible();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    expect(submit).not.toHaveBeenCalled();
+  });
   it("manages MCP configuration without session refresh actions", () => {
     const store = mcpSettingsStore();
     const enqueue = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);

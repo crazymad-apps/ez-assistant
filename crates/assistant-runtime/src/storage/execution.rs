@@ -18,6 +18,8 @@ use crate::{InputChannelSource, ReplyRoute};
 /// 队列执行器领取一次 Run 时提交的 User Message 与结构化关联。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserMessageCommit {
+    /// 与领取状态同一可靠点保存，执行器只使用这份已准备的快照。
+    pub shell: Option<crate::FrozenShellEnvironment>,
     pub operation_id: String,
     pub input_id: InputId,
     pub run_id: RunId,
@@ -133,6 +135,8 @@ pub struct CrossSessionInputEnvelope {
 /// Runtime 从 Store 恢复的 Input 投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredInput {
+    /// 排队的 Shell 切换意图；在领取时生效，不在接纳时改变 Session。
+    pub agent_shell_target: Option<assistant_protocol::ShellKind>,
     pub queue_order: u64,
     pub input_id: InputId,
     pub session_id: SessionId,
@@ -198,8 +202,17 @@ pub struct StoredSessionCommand {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum StoredSessionCommandResult {
+    ShellSwitch {
+        shell: assistant_protocol::ShellKind,
+        previous_shell: Option<assistant_protocol::ShellKind>,
+        environment: Option<Box<crate::FrozenShellEnvironment>>,
+        error: Option<assistant_protocol::RuntimeErrorInfo>,
+    },
     Mcp(McpRefreshControlResultSnapshot),
-    SkillRefresh { success: bool, skill_count: u32 },
+    SkillRefresh {
+        success: bool,
+        skill_count: u32,
+    },
 }
 
 /// 同一可靠队列中的互斥载荷；Message 有首次 Run，Command 永远没有 Run。
@@ -242,10 +255,27 @@ pub struct SessionCommandCommit {
 impl StoredSessionCommandResult {
     /// 防止恢复或提交把另一类控制结果归到本指令。
     pub fn matches_command(&self, command: &SessionCommand) -> bool {
+        if let Self::ShellSwitch {
+            shell,
+            environment,
+            error,
+            ..
+        } = self
+        {
+            return matches!(command, SessionCommand::AgentShellSwitch { shell: target } if shell == target)
+                && match environment {
+                    Some(value) => value.kind == *shell && error.is_none(),
+                    None => error.is_some(),
+                };
+        }
         matches!(
             (self, command),
             (Self::Mcp(_), SessionCommand::McpRefresh { .. })
                 | (Self::SkillRefresh { .. }, SessionCommand::SkillRefresh)
+                | (
+                    Self::ShellSwitch { .. },
+                    SessionCommand::AgentShellSwitch { .. }
+                )
         )
     }
 }
@@ -253,6 +283,7 @@ impl StoredSessionCommandResult {
 /// 原子接受 Input 及其首次 Run 所需的完整事实。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewStoredInput {
+    pub agent_shell_target: Option<assistant_protocol::ShellKind>,
     pub input_id: InputId,
     pub run_id: RunId,
     pub session_id: SessionId,
@@ -487,6 +518,7 @@ pub struct StoredRunSettlementResult {
 /// Runtime 启动时恢复的 Run 结构化投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredRun {
+    pub shell: Option<crate::FrozenShellEnvironment>,
     pub run_id: RunId,
     pub session_id: SessionId,
     pub input_id: InputId,

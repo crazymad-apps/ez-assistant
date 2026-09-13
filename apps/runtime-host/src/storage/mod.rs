@@ -7,6 +7,7 @@
 //! `recovery` 只处理正文文件 staged append/generation；`append_effect` 描述文件提交后的业务效果；
 //! `input_state`、`run_state` 和 `run_projection` 分别负责输入、Run 状态转换与数据库投影。
 
+mod agent_shell;
 mod append_effect;
 mod attachment;
 mod attachment_io;
@@ -67,7 +68,6 @@ const BLOBS_DIRECTORY: &str = "blobs";
 const STAGING_DIRECTORY: &str = "staging/uploads";
 const DELETION_STAGING_DIRECTORY: &str = "staging/deletions";
 const DATABASE_FILE: &str = "runtime.sqlite3";
-const PRIVATE_FILE_MODE: u32 = 0o600;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 存储线程发布的启动进度；版本只来自已核验账本或已提交迁移，不是预期目标。
@@ -105,13 +105,14 @@ mod directory_decode_tests {
 
     #[test]
     fn additional_directory_json_round_trips_in_order() {
+        #[cfg(unix)]
+        let fixture = r#"["/workspace/docs","/workspace/assets"]"#;
+        #[cfg(windows)]
+        let fixture = r#"["C:\\workspace\\docs","C:\\workspace\\assets"]"#;
         assert_eq!(
-            decode_additional_directories(
-                r#"["/workspace/docs","/workspace/assets"]"#,
-                "invalid directories",
-            )
-            .expect("valid directory list"),
-            ["/workspace/docs", "/workspace/assets"]
+            decode_additional_directories(fixture, "invalid directories")
+                .expect("valid directory list"),
+            serde_json::from_str::<Vec<String>>(fixture).expect("decode fixture")
         );
     }
 

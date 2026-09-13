@@ -24,13 +24,13 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it("uses matching WSS with the credential only in the first frame; input awaits Host acknowledgement", async () => {
   const owner = new AbortController();
-  const terminal = new TerminalSocket("https://runtime.test:7240", "private-token", source, { cols: 80, rows: 24 }, vi.fn(), owner.signal);
+  const terminal = new TerminalSocket("https://runtime.test:7240", "private-token", source, { cols: 80, rows: 24 }, vi.fn(), owner.signal, "powershell_7");
   const socket = SocketFixture.connections[0]!;
   expect(socket.url.toString()).toBe("wss://runtime.test:7240/user-terminals/socket");
   socket.open();
-  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: "private-token", source, client_compatibility: currentCompatibility() });
-  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace" });
-  await terminal.created;
+  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: "private-token", source, client_compatibility: currentCompatibility(), shell: "powershell_7" });
+  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "powershell_7" });
+  expect((await terminal.created).shell).toBe("powershell_7");
   let written = false;
   const input = terminal.write(new TextEncoder().encode("中文")).then(() => { written = true; });
   await Promise.resolve();

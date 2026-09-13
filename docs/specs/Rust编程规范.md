@@ -29,9 +29,18 @@
   `manager.rs` 等无稳定领域含义的杂物箱。
 - 抽象必须服务于真实调用方、替换边界或测试边界；不为假想扩展提前创建公共 trait。
 - workspace 默认禁止 `unsafe`，以根 `Cargo.toml` 的 `unsafe_code = "forbid"` 为准。
-  2026-09-06 用户明确批准的唯一例外：Desktop 的
+  2026-09-06 用户明确批准的例外：Desktop 的
   `apps/desktop/src-tauri/src/browser_resource/platform.rs` 内 WKWebView 截图与页面生命周期适配。
   该 package 使用 `deny` 并仅对 FFI 函数局部 `allow`，必须说明主线程、指针与回调生命周期；
+  2026-09-12 用户另批准 Host `apps/runtime-host/src/platform/windows` 原生适配中的
+  owner SID、File ID 与 Job Object FFI；Host package 使用 `deny`，仅对应 FFI 函数局部
+  `allow`，必须说明缓冲区、指针、句柄所有权和线程条件，对外提供安全 Rust 接口。
+  2026-09-13 用户批准提前修复 M4 的 Desktop Windows 进程存活检查以完成 M3 验收；
+  `runtime_bootstrap.rs::process_is_alive` 允许函数级 FFI 例外，句柄由标准库 OwnedHandle
+  独占回收，零超时查询，无新线程；不扩展为 Desktop 其他 Windows FFI 的许可。
+  2026-09-13 用户在 M4 明确批准 Desktop discovery／锁文件 owner SID 核验的局部 FFI：
+  `runtime_bootstrap/windows.rs::owned_by_current_user`。只借用文件句柄，Token 由 OwnedHandle
+  回收，安全描述符在 SID 比较结束后释放；不增加线程或 DACL 改写。
   其他代码不得借此增加 unsafe，其他 workspace 成员仍继承 `forbid`。
 
 ## 三、Workspace、package 与依赖

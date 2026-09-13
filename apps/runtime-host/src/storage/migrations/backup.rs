@@ -61,7 +61,8 @@ pub(super) fn create(
         }
     }
     destination.close().map_err(|(_, error)| error)?;
-    fs::File::open(&database)?.sync_all()?;
+    // Windows 的 FlushFileBuffers 需要写权限句柄，只读打开后 sync 会拒绝访问。
+    crate::platform::sync_file_at(&database)?;
     verify(&database, &expected)?;
 
     let config_path = home.join("config.toml");

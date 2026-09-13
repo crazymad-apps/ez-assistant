@@ -36,7 +36,13 @@ fn spawn_wrapped(command: Command, kill_on_drop: bool) -> std::io::Result<Manage
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(JobObject);
-    command.spawn()
+    command.spawn_with(|command| {
+        // process-wrap 9.1 的 spawn_with 会暂时移出 wrappers，JobObject 无法读到
+        // CreationFlags。最后设置无窗口标志，并保留其先挂 Job 再恢复线程所需的挂起位。
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
+        command.spawn()
+    })
 }
 
 /// 终止受管进程树并等待所有可管理后代收敛。

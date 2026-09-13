@@ -62,6 +62,7 @@ pub(crate) struct ParentDelegationController {
     skill_catalog: SkillCatalog,
     mcp_registry: Arc<McpRegistry>,
     disclosure_context: Option<agent_types::UserMessage>,
+    shell_context: Option<agent_types::UserMessage>,
 }
 
 pub(crate) struct ParentDelegationResources {
@@ -82,12 +83,21 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) skill_catalog: SkillCatalog,
     pub(crate) mcp_registry: Arc<McpRegistry>,
     pub(crate) disclosure_context: Option<agent_types::UserMessage>,
+    pub(crate) shell_context: Option<agent_types::UserMessage>,
 }
 
 fn with_disclosure_context(
     mut conversation: ConversationSnapshot,
     context: Option<&agent_types::UserMessage>,
+    shell_context: Option<&agent_types::UserMessage>,
 ) -> ConversationSnapshot {
+    if let Some(shell_context) = shell_context
+        && !crate::shell::context_is_current(&conversation, shell_context)
+    {
+        conversation
+            .messages
+            .push(ConversationMessage::User(shell_context.clone()));
+    }
     if let Some(context) = context {
         conversation
             .messages
@@ -122,6 +132,7 @@ impl ParentDelegationController {
             skill_catalog: resources.skill_catalog,
             mcp_registry: resources.mcp_registry,
             disclosure_context: resources.disclosure_context,
+            shell_context: resources.shell_context,
         }
     }
 
@@ -356,7 +367,11 @@ impl ParentDelegationController {
             .as_ref()
             .ok_or_else(|| ToolError::execution("child task journal is unavailable"))?
             .snapshot();
-        let conversation = with_disclosure_context(conversation, self.disclosure_context.as_ref());
+        let conversation = with_disclosure_context(
+            conversation,
+            self.disclosure_context.as_ref(),
+            self.shell_context.as_ref(),
+        );
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
         let child_agent = self
@@ -437,6 +452,7 @@ impl ParentDelegationController {
                             })?
                             .snapshot(),
                         self.disclosure_context.as_ref(),
+                        self.shell_context.as_ref(),
                     ),
                 };
                 continue;
@@ -472,6 +488,7 @@ impl ParentDelegationController {
                         conversation: with_disclosure_context(
                             replacement,
                             self.disclosure_context.as_ref(),
+                            self.shell_context.as_ref(),
                         ),
                     };
                 }

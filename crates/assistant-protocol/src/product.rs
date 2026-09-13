@@ -215,6 +215,21 @@ pub struct ConversationPage {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationItem {
+    ShellSwitchResult {
+        message_id: MessageId,
+        /// 切换领取或失败结算时的旧绑定，不能从当前会话状态倒推。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        previous_shell: Option<crate::ShellKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        run_id: Option<RunId>,
+        shell: crate::ShellKind,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        error: Option<crate::RuntimeErrorInfo>,
+    },
     User(UserMessageSnapshot),
     Assistant(AssistantMessageSnapshot),
     /// Runtime 控制指令的可靠结算，不渲染为普通用户气泡。
@@ -644,6 +659,10 @@ pub enum QueueExecutionState {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct QueuedInputSnapshot {
     pub input_id: InputId,
+    /// 该输入请求的 Shell 切换目标；尚未改变会话绑定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_shell_target: Option<crate::ShellKind>,
     pub text_preview: String,
     pub submitted_at_ms: i64,
     pub position: u32,
@@ -700,6 +719,10 @@ pub struct SessionWorkspaceSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SessionViewSnapshot {
     pub session: SessionSummary,
+    /// 已提交的会话 Shell 绑定；Unix 不持有多 Shell 绑定时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_shell_kind: Option<crate::ShellKind>,
     /// 当前进程中正在执行的标题旁路调用；重启后由 pending 事实按需重建。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

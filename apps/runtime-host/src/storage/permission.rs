@@ -7,10 +7,10 @@
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
+use crate::platform;
 use assistant_protocol::PermissionDiagnosticCode;
 use assistant_runtime::{
     FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
@@ -20,7 +20,7 @@ use assistant_runtime::{
 };
 use sha2::{Digest, Sha256};
 
-use super::{PRIVATE_FILE_MODE, StorageEngine, StorageResult, internal_error, sync_directory};
+use super::{StorageEngine, StorageResult, internal_error, sync_directory};
 use crate::config_source::prepare_private_directory;
 
 const PERMISSION_FILE: &str = "permissions.json";
@@ -382,12 +382,10 @@ fn operation_name(operation: PermissionFileOperation) -> &'static str {
 }
 
 fn write_default_permission_file(path: &Path, content: &[u8]) -> StorageResult<bool> {
-    let mut file = match OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)
-    {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    platform::apply_private_open_options(&mut options);
+    let mut file = match options.open(path) {
         Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(source) => {
@@ -449,7 +447,7 @@ fn load_path(path: &Path) -> StorageResult<PermissionFileLoad> {
     }
     let content = fs::read(path)
         .map_err(|source| internal_error("permission file could not be read", source))?;
-    let diagnostics = if metadata.permissions().mode() & 0o077 == 0 {
+    let diagnostics = if platform::private_file_mode_is_secured(&metadata) {
         Vec::new()
     } else {
         vec![PermissionSourceDiagnostic {
@@ -475,12 +473,10 @@ fn create_temporary_file(parent: &Path) -> StorageResult<(PathBuf, fs::File)> {
             internal_error("permission temporary name could not be generated", source)
         })?;
         let path = parent.join(format!(".permissions-{}.tmp", hex(&random)));
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(PRIVATE_FILE_MODE)
-            .open(&path)
-        {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        platform::apply_private_open_options(&mut options);
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => {

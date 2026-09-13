@@ -54,6 +54,13 @@ use crate::{
     StoredSkillActivation,
 };
 
+// 虚拟资源仍须满足平台绝对路径契约；不创建或访问该目录。
+const VOLATILE_ROOT: &str = if cfg!(windows) {
+    "C:/volatile"
+} else {
+    "/volatile"
+};
+
 struct VolatilePendingExchange {
     session_id: SessionId,
     run_id: RunId,
@@ -78,6 +85,7 @@ struct VolatileCompactionReceipt {
 
 #[derive(Default)]
 struct State {
+    default_agent_shell: Option<assistant_protocol::ShellKind>,
     providers: BTreeMap<assistant_protocol::ProviderInstanceId, crate::StoredProvider>,
     model_settings: assistant_protocol::ModelSettings,
     fixed_models:
@@ -118,6 +126,15 @@ pub(crate) struct VolatileRuntimeStore {
 }
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
+        Box::pin(async move { Ok(self.lock()?.default_agent_shell) })
+    }
+    fn save_default_agent_shell(&self, kind: assistant_protocol::ShellKind) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.lock()?.default_agent_shell = Some(kind);
+            Ok(())
+        })
+    }
     fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>> {
         Box::pin(async move { Ok(self.lock()?.providers.values().cloned().collect()) })
     }
@@ -946,7 +963,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 user_directory: registration.requested_primary_directory,
                 additional_directories: registration.requested_additional_directories,
                 agent_directory: format!(
-                    "/volatile/workspaces/{}/agent",
+                    "{VOLATILE_ROOT}/workspaces/{}/agent",
                     registration.workspace_id
                 ),
                 lifecycle: StoredWorkspaceLifecycle::Active,
@@ -1021,7 +1038,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("attachment session does not exist"));
             }
             let agent_readable_path = format!(
-                "/volatile/sessions/{}/attachments/{}/file",
+                "{VOLATILE_ROOT}/sessions/{}/attachments/{}/file",
                 upload.session_id, upload.attachment_id
             );
             let stored = StoredAttachment {
@@ -1291,6 +1308,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 state.next_queue_order
             };
             let stored = StoredInput {
+                agent_shell_target: input.agent_shell_target,
                 queue_order,
                 input_id: input.input_id.clone(),
                 session_id: input.session_id.clone(),
@@ -1307,6 +1325,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 accepted_at_ms: input.accepted_at_ms,
             };
             let run = StoredRun {
+                shell: None,
                 run_id: input.run_id,
                 session_id: input.session_id,
                 input_id: input.input_id.clone(),
@@ -1552,6 +1571,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 return Err(conflict("only the latest run can be retried"));
             }
             let run = StoredRun {
+                shell: None,
                 run_id: attempt.run_id,
                 session_id: attempt.session_id,
                 input_id: source.input_id,
@@ -1581,6 +1601,8 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             let stored = StoredSession {
                 session_id: session.session_id.clone(),
+                agent_shell_kind: session.agent_shell_kind,
+                agent_shell_environment: session.agent_shell_environment.clone(),
                 title: session.title,
                 title_origin: session.title_origin,
                 model_selection: session.model_selection,
@@ -1788,6 +1810,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             let mcp_selection = input.mcp_selection.clone();
             let queue_order = state.next_queue_order.saturating_add(1);
             let stored_input = StoredInput {
+                agent_shell_target: input.agent_shell_target,
                 queue_order,
                 input_id: input.input_id.clone(),
                 session_id: input.session_id.clone(),
@@ -1804,6 +1827,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 accepted_at_ms: input.accepted_at_ms,
             };
             let run = StoredRun {
+                shell: None,
                 run_id: input.run_id,
                 session_id: input.session_id,
                 input_id: input.input_id,
@@ -2006,7 +2030,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                     .filter(|attachment| attachment.session_id == fork.source_session_id)
                     .ok_or_else(|| conflict("fork attachment does not belong to source session"))?;
                 let readable_path = format!(
-                    "/volatile/sessions/{}/attachments/{}/file",
+                    "{VOLATILE_ROOT}/sessions/{}/attachments/{}/file",
                     fork.session.session_id, reference.attachment_id
                 );
                 path_rewrites.insert(source.agent_readable_path.clone(), readable_path.clone());
@@ -2028,6 +2052,8 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .map_err(|_| conflict("fork conversation is too large"))?;
             let stored = StoredSession {
                 session_id: fork.session.session_id.clone(),
+                agent_shell_kind: fork.session.agent_shell_kind,
+                agent_shell_environment: fork.session.agent_shell_environment.clone(),
                 title: fork.session.title,
                 title_origin: fork.session.title_origin,
                 model_selection: fork.session.model_selection,
@@ -2952,6 +2978,24 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn commit_user_message(&self, commit: UserMessageCommit) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.lock()?;
+            let target = if commit.message.is_some() {
+                state
+                    .inputs
+                    .get(&commit.input_id)
+                    .and_then(|input| input.agent_shell_target)
+            } else {
+                None
+            };
+            if let Some(target) = target {
+                if commit.shell.as_ref().map(|shell| shell.kind) != Some(target) {
+                    return Err(conflict(
+                        "shell switch snapshot does not match the queued target",
+                    ));
+                }
+                if !state.sessions.contains_key(&commit.session_id) {
+                    return Err(conflict("shell switch session does not exist"));
+                }
+            }
             if state.runs.contains_key(&commit.run_id) {
                 let run = state.runs.get(&commit.run_id).expect("checked run");
                 if run.input_id != commit.input_id || run.status != RunStatus::Accepted {
@@ -2981,9 +3025,22 @@ impl RuntimeStore for VolatileRuntimeStore {
             let run = state.runs.get_mut(&commit.run_id).expect("checked run");
             run.status = RunStatus::Running;
             run.reasoning_effort = commit.reasoning_effort;
+            run.shell = commit.shell.clone();
             run.started_at_ms = Some(commit.created_at_ms);
             if let Some(message) = message.as_ref() {
                 run.message_ids.push(message_id(message).clone());
+            }
+            state
+                .sessions
+                .get_mut(&commit.session_id)
+                .expect("checked session")
+                .agent_shell_environment = commit.shell;
+            if let Some(target) = target {
+                state
+                    .sessions
+                    .get_mut(&commit.session_id)
+                    .expect("checked session")
+                    .agent_shell_kind = Some(target);
             }
             Ok(())
         })
@@ -3068,6 +3125,15 @@ impl RuntimeStore for VolatileRuntimeStore {
                 .body_generation
                 .checked_add(1)
                 .ok_or_else(|| conflict("session generation is exhausted"))?;
+            if let crate::StoredSessionCommandResult::ShellSwitch {
+                shell,
+                environment: Some(environment),
+                ..
+            } = &commit.result
+            {
+                session.agent_shell_kind = Some(*shell);
+                session.agent_shell_environment = Some(environment.as_ref().clone());
+            }
             session.message_count = u64::try_from(message_count)
                 .map_err(|_| conflict("session message count exceeds storage range"))?;
             session.updated_at_ms = commit.committed_at_ms;
@@ -4163,6 +4229,7 @@ impl RuntimeStore for VolatileRuntimeStore {
             }
             state.next_queue_order += 1;
             let input = StoredInput {
+                agent_shell_target: None,
                 queue_order: state.next_queue_order,
                 input_id: rewrite.input.input_id.clone(),
                 session_id: rewrite.session_id.clone(),
@@ -4179,6 +4246,7 @@ impl RuntimeStore for VolatileRuntimeStore {
                 accepted_at_ms: rewrite.input.accepted_at_ms,
             };
             let run = StoredRun {
+                shell: None,
                 run_id: rewrite.input.run_id,
                 session_id: rewrite.session_id.clone(),
                 input_id: input.input_id.clone(),
@@ -4447,6 +4515,7 @@ fn insert_volatile_proxy_report(
 ) -> Result<AcceptedInput, StoreError> {
     state.next_queue_order = state.next_queue_order.saturating_add(1);
     let stored_input = StoredInput {
+        agent_shell_target: None,
         queue_order: state.next_queue_order,
         input_id: report.input_id.clone(),
         session_id: report.session_id.clone(),
@@ -4463,6 +4532,7 @@ fn insert_volatile_proxy_report(
         accepted_at_ms: report.accepted_at_ms,
     };
     let stored_run = StoredRun {
+        shell: None,
         run_id: report.run_id,
         session_id: report.session_id,
         input_id: report.input_id,
@@ -4889,6 +4959,8 @@ fn validate_volatile_input_activation(
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        agent_shell_kind: session.agent_shell_kind,
+        agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id,
         title: session.title,
         title_origin: session.title_origin,

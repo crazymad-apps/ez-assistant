@@ -396,9 +396,9 @@ impl StorageEngine {
                         priority_order, input_id, session_id, idempotency_key, user_message_id,
                         state, queued_message_json, accepted_at_ms, agent_variant, origin,
                         goal_id, goal_generation, goal_turn, goal_reply_route_json,
-                        skill_activation_json, cross_session_json, channel_source_json
+                        skill_activation_json, cross_session_json, channel_source_json, agent_shell_target
                      ) VALUES (0, ?1, ?2, NULL, ?3, 'queued', ?4, ?5, ?6, ?7,
-                               ?8, ?9, ?10, ?11, ?12, NULL, ?13)",
+                               ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14)",
                     params![
                         materialization.input.input_id.as_str(),
                         materialization.input.session_id.as_str(),
@@ -435,6 +435,7 @@ impl StorageEngine {
                                 source
                             )
                         )?,
+                        materialization.input.agent_shell_target.map(super::mode::shell_kind_value),
                     ],
                 )
                 .map_err(|source| database_write_error("input could not be accepted", source))?;
@@ -599,9 +600,9 @@ fn insert_session(
                 session_id, title, model_id, reasoning_effort, system_prompt_json,
                 skill_catalog_json, current_variant, approval_mode, role, lifecycle,
                 body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms,
-                is_pinned, title_origin, materialization_key, automatic_title_pending, model_provider_instance_id
+                is_pinned, title_origin, materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'standard', 'active',
-                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12, ?13)",
+                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 session.session_id.as_str(),
                 session.title,
@@ -619,6 +620,8 @@ fn insert_session(
                 session.materialization_key.as_ref().map(|key| key.as_str()),
                 i64::from(session.automatic_title_pending),
                         session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
+                session.agent_shell_kind.map(super::mode::shell_kind_value),
+super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())?,
             ],
         )
         .map_err(|source| database_write_error("session could not be materialized", source))?;
@@ -627,6 +630,7 @@ fn insert_session(
 
 fn accepted_input(input: assistant_runtime::NewStoredInput) -> AcceptedInput {
     let stored = StoredInput {
+        agent_shell_target: input.agent_shell_target,
         queue_order: 0,
         input_id: input.input_id.clone(),
         session_id: input.session_id.clone(),
@@ -643,6 +647,7 @@ fn accepted_input(input: assistant_runtime::NewStoredInput) -> AcceptedInput {
         accepted_at_ms: input.accepted_at_ms,
     };
     let run = StoredRun {
+        shell: None,
         run_id: input.run_id,
         session_id: input.session_id,
         input_id: input.input_id,
@@ -668,6 +673,8 @@ fn accepted_input(input: assistant_runtime::NewStoredInput) -> AcceptedInput {
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        agent_shell_kind: session.agent_shell_kind,
+        agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id,
         title: session.title,
         title_origin: session.title_origin,

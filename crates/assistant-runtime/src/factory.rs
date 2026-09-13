@@ -155,6 +155,8 @@ pub struct RunToolBundle {
 pub struct RunToolFactoryRequest<'a> {
     pub session_id: &'a assistant_protocol::SessionId,
     pub environment: &'a SessionExecutionEnvironment,
+    /// Runtime 在队首准备阶段可靠冻结，后续重建工具不能再次读取全局默认。
+    pub shell: Option<&'a crate::FrozenShellEnvironment>,
     pub pinned_memory: Arc<dyn PinnedMemoryStore>,
     pub conversation_recall: Arc<dyn MemoryRecall>,
     pub conversation_recall_reader: Arc<dyn RecallReferenceReader>,
@@ -218,6 +220,29 @@ impl RunToolFactoryError {
 
 /// 根据 Session 创建时冻结的目录事实编译单次 Run 工具。
 pub trait RunToolFactory: Send + Sync {
+    /// 宿主固定解释器目录；不提供真实 Shell 的验证宿主默认返回空目录。
+    /// 具体实现若访问文件或注册表，调用方必须在阻塞任务边界执行。
+    fn shell_catalog(&self) -> Vec<assistant_protocol::ShellCatalogEntry> {
+        Vec::new()
+    }
+
+    /// 从受限枚举编译启动事实；None 表示平台默认，不允许静默回退显式目标。
+    /// 返回 None 仅供未装配真实 Shell 的宿主使用。
+    ///
+    /// # Errors
+    /// 目标未安装、平台不支持或配置无效时返回构造错误。
+    fn freeze_shell(
+        &self,
+        kind: Option<assistant_protocol::ShellKind>,
+    ) -> Result<Option<crate::FrozenShellEnvironment>, RunToolFactoryError> {
+        if kind.is_some() {
+            return Err(RunToolFactoryError::new(
+                RunToolFactoryErrorKind::InvalidConfiguration,
+            ));
+        }
+        Ok(None)
+    }
+
     fn compile(
         &self,
         request: RunToolFactoryRequest<'_>,

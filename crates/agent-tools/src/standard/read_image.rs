@@ -110,11 +110,22 @@ mod tests {
         }
     }
 
+    const WORKSPACE: &str = if cfg!(windows) {
+        r"C:\workspace"
+    } else {
+        "/workspace"
+    };
+    const CHART: &str = if cfg!(windows) {
+        r"C:\workspace\chart.png"
+    } else {
+        "/workspace/chart.png"
+    };
+
     fn tool() -> ReadImageTool {
         ReadImageTool::new(
             Arc::new(FixtureMaterializer),
             crate::SessionPathResolver::new(
-                crate::AbsolutePath::new("/workspace").expect("absolute workspace"),
+                crate::AbsolutePath::new(WORKSPACE).expect("absolute workspace"),
             ),
         )
     }
@@ -155,10 +166,7 @@ mod tests {
             .facts::<FileAuthorizationFacts>()
             .expect("file facts");
         assert_eq!(facts.operation, FileOperation::Read);
-        assert_eq!(
-            facts.path.as_path(),
-            std::path::Path::new("/workspace/chart.png")
-        );
+        assert_eq!(facts.path.as_path(), std::path::Path::new(CHART));
         assert_eq!(
             invocation.execution_mode(),
             ToolExecutionMode::ParallelEligible
@@ -169,7 +177,7 @@ mod tests {
     fn execution_returns_an_image_part() {
         let output = block_on(tool().execute(
             ReadImageRequest {
-                path: crate::AbsolutePath::new("/workspace/chart.png").expect("path"),
+                path: crate::AbsolutePath::new(CHART).expect("path"),
             },
             ToolContext::default(),
         ))

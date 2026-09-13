@@ -3,6 +3,7 @@ import { TerminalController } from "../../src/features/resource-workspace/Termin
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 
 const fake = vi.hoisted(() => ({
+  catalog: vi.fn(),
   create: vi.fn(), restart: vi.fn(), close: vi.fn(), ack: vi.fn(), input: vi.fn(), resize: vi.fn(),
   receive: null as null | ((event: { type: "output"; bytes: number[] } | { type: "exited"; code: number } | { type: "error"; message: string }) => void),
   onData: null as null | ((data: string) => void),
@@ -10,10 +11,10 @@ const fake = vi.hoisted(() => ({
   write: vi.fn(), dispose: vi.fn(),
 }));
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
-const client = { openUserTerminal: (source: unknown, size: unknown, receive: unknown) => {
+const client = { command: () => fake.catalog(), openUserTerminal: (source: unknown, size: unknown, receive: unknown, shell: unknown) => {
   let id = "";
   return {
-    created: fake.create(source, size, receive).then((created: {terminal_id: string}) => { id = created.terminal_id; return created; }),
+    created: fake.create(source, size, receive, shell).then((created: {terminal_id: string}) => { id = created.terminal_id; return created; }),
     close: () => fake.close(id), acknowledge: () => fake.ack(id), write: (bytes: Uint8Array) => fake.input(id, bytes), resize: (size: unknown) => fake.resize(id, size), disconnect: vi.fn(),
   };
 } } as unknown as RuntimeClient;
@@ -32,12 +33,58 @@ const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 
 
 beforeEach(() => {
   vi.clearAllMocks(); fake.parsed = []; fake.onData = null;
-  fake.create.mockImplementation(async (_source, _size, receive) => { fake.receive = receive; return { terminal_id: "pty-1", directory_name: "fixture" }; });
+  fake.catalog.mockResolvedValue({ type: "get_agent_shell_settings", payload: { default_agent_shell: null, catalog: [{ kind: "posix_sh", available: true, reason: null }] } });
+  fake.create.mockImplementation(async (_source, _size, receive, shell) => { fake.receive = receive; return { terminal_id: "pty-1", directory_name: "fixture", shell }; });
   fake.close.mockResolvedValue(undefined); fake.ack.mockResolvedValue(undefined); fake.input.mockResolvedValue(undefined);
   fake.restart.mockResolvedValue(undefined);
 });
 
 describe("user terminal ownership", () => {
+  it("opens the platform default immediately and switches only after the old PTY closes", async () => {
+    fake.catalog.mockResolvedValue({ payload: { default_agent_shell: "cmd", catalog: [
+      { kind: "windows_powershell_51", available: true }, { kind: "cmd", available: true },
+      { kind: "git_bash", available: false },
+    ] } });
+    fake.create.mockImplementation(async (_source, _size, receive, shell) => {
+      fake.receive = receive;
+      return { terminal_id: shell ? "pty-2" : "pty-1", shell: shell ?? "windows_powershell_51" };
+    });
+    const exited = vi.fn();
+    const controller = new TerminalController(source, exited, false, () => client);
+    await settle();
+    expect(controller.status).toBe("running");
+    expect(fake.create).toHaveBeenLastCalledWith(source, expect.anything(), expect.any(Function), null);
+    expect(controller.shell_kind).toBe("windows_powershell_51");
+    controller.selectShell("git_bash");
+    expect(fake.create).toHaveBeenCalledTimes(1);
+    let cleaned!: () => void;
+    fake.close.mockImplementationOnce(() => new Promise<void>((resolve) => { cleaned = resolve; }));
+    controller.selectShell("cmd");
+    await settle();
+    fake.receive?.({ type: "exited", code: 0 });
+    expect(exited).not.toHaveBeenCalled();
+    expect(controller.shell_kind).toBe("windows_powershell_51");
+    expect(fake.create).toHaveBeenCalledTimes(1);
+    cleaned();
+    await settle();
+    expect(controller.shell_kind).toBe("cmd");
+    expect(controller.status).toBe("running");
+    expect(fake.create).toHaveBeenLastCalledWith(source, expect.anything(), expect.any(Function), "cmd");
+    await controller.close();
+  });
+
+  it("does not create the replacement if cleanup fails", async () => {
+    fake.catalog.mockResolvedValue({ payload: { catalog: [{ kind: "cmd", available: true }] } });
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
+    await settle();
+    fake.close.mockRejectedValueOnce(new Error("cleanup failed"));
+    controller.selectShell("cmd");
+    await settle();
+    expect(controller.status).toBe("error");
+    expect(controller.error).toBe("cleanup failed");
+    expect(fake.create).toHaveBeenCalledTimes(1);
+    await controller.close();
+  });
   it("waits for a pending Host creation before releasing a closed tab", async () => {
     let created!: (value: { terminal_id: string; directory_name: string }) => void;
     fake.create.mockImplementation(() => new Promise((resolve) => { created = resolve; }));

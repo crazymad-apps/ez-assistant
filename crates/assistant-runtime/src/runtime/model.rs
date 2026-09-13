@@ -369,6 +369,7 @@ impl ModelService for ObservedModelService {
 
 /// 单次 Run 已同时冻结 Agent 规格和对应授权闸。
 pub(super) struct CompiledRunAgent {
+    shell: Option<crate::FrozenShellEnvironment>,
     prepared_model: crate::config::PreparedModel,
     auxiliary_model: Option<crate::config::PreparedModel>,
     auxiliary_selection: Option<assistant_protocol::ModelSelection>,
@@ -383,6 +384,7 @@ pub(super) struct CompiledRunAgent {
 }
 
 pub(super) struct CompiledRunParts {
+    pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) model_binding: Arc<crate::config::PreparedModel>,
     pub(super) agent: Agent,
     pub(super) authorizer: Arc<dyn ToolAuthorizer>,
@@ -412,6 +414,7 @@ impl CompiledRunAgent {
 
     pub(super) fn into_parts(self) -> CompiledRunParts {
         CompiledRunParts {
+            shell: self.shell,
             model_binding: Arc::new(self.prepared_model),
             agent: self.agent,
             authorizer: self.authorizer,
@@ -440,6 +443,7 @@ pub(super) struct RunAuthorizationInput {
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
 pub(super) struct RunCompilationResources<'a> {
+    pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) skill_catalog: crate::SkillCatalog,
     pub(super) model_factory: &'a dyn crate::ModelServiceFactory,
     pub(super) context_window: Arc<agent_sdk::ContextWindowEvaluator>,
@@ -628,6 +632,7 @@ pub(super) async fn compile_run_agent(
         .compile(crate::RunToolFactoryRequest {
             session_id: session.id(),
             environment: session.environment(),
+            shell: resources.shell.as_ref(),
             pinned_memory: Arc::new(crate::RuntimePinnedMemoryStore::new(
                 resources.store.clone(),
                 session.id().clone(),
@@ -972,6 +977,11 @@ pub(super) async fn compile_run_agent(
                 skill_catalog: resources.skill_catalog.clone(),
                 mcp_registry: resources.mcp_registry.clone(),
                 disclosure_context: mcp_disclosure.context.clone(),
+                shell_context: resources
+                    .shell
+                    .as_ref()
+                    .map(|shell| shell.context_message(&session.environment().working_directory))
+                    .transpose()?,
             }));
         tool_assembly.contribute(
             RunToolContribution::tool(DelegateTaskTool::new(delegation_controller)).map_err(
@@ -1008,6 +1018,7 @@ pub(super) async fn compile_run_agent(
         .build()
         .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
     let result = CompiledRunAgent {
+        shell: resources.shell,
         prepared_model: prepared,
         auxiliary_model: auxiliary_prepared,
         auxiliary_selection,

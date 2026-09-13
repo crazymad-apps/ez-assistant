@@ -49,6 +49,18 @@ function EditableSelection() {
 }
 
 describe("SelectionPopover", () => {
+  it("keeps unavailable options discoverable but rejects pointer and keyboard selection", async () => {
+    const select = vi.fn();
+    const user = userEvent.setup();
+    render(<SelectionPopover aria_label="Shell" open on_open_change={vi.fn()} on_select={select}
+      selected="installed" options={[{ value: "installed", label: "Installed" }, { value: "missing", label: "Missing", disabled: true }]} />);
+    const missing = screen.getByRole("option", { name: "Missing" });
+    expect(missing).toHaveAttribute("aria-disabled", "true");
+    await user.click(missing);
+    missing.focus();
+    await user.keyboard("{Enter} ");
+    expect(select).not.toHaveBeenCalled();
+  });
   it.each(["small", "default", "large"] as const)("uses the same %s size contract for button and editable triggers", (size) => {
     const shared = { size, open: false, on_open_change: vi.fn(), on_select: vi.fn(), selected: "keep", options: [{ value: "keep", label: "保持原值" }] };
     render(<><SelectionPopover {...shared} aria_label="尺寸选择" trigger_variant="field" />

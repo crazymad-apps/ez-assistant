@@ -43,6 +43,8 @@ pub(crate) struct SessionController {
 ///
 /// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
+    pub(crate) agent_shell_kind: Option<assistant_protocol::ShellKind>,
+    pub(crate) agent_shell_environment: Option<crate::FrozenShellEnvironment>,
     pub(crate) execution_prepared: bool,
     pub(crate) title: String,
     pub(crate) is_pinned: bool,
@@ -193,6 +195,8 @@ impl SessionController {
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                agent_shell_kind: stored.agent_shell_kind,
+                agent_shell_environment: stored.agent_shell_environment,
                 execution_prepared: true,
                 title: stored.title,
                 is_pinned: stored.is_pinned,
@@ -324,6 +328,8 @@ impl SessionController {
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                agent_shell_kind: stored.agent_shell_kind,
+                agent_shell_environment: stored.agent_shell_environment,
                 execution_prepared: false,
                 title: stored.title,
                 is_pinned: stored.is_pinned,

@@ -3,10 +3,10 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
+use crate::platform;
 use getrandom::fill;
 use rcgen::generate_simple_self_signed;
 use rustls_pki_types::{CertificateDer, pem::PemObject};
@@ -131,43 +131,44 @@ impl InstallationIdentity {
 
 fn prepare_private_directory(path: &Path) -> Result<(), IdentityError> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        if !metadata.file_type().is_dir()
+            || platform::is_reparse_or_link(&metadata)
+            || !platform::owned_by_current_user(path, &metadata)
+        {
             return Err(IdentityError::UnsafePath(path.to_path_buf()));
         }
     } else {
         fs::create_dir(path).map_err(IdentityError::CreateDirectory)?;
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(IdentityError::Permissions)
+    platform::tighten_private_file_at(path).map_err(IdentityError::Permissions)
 }
 
 fn ensure_regular_private_file(path: &Path) -> Result<(), IdentityError> {
     let metadata = fs::symlink_metadata(path).map_err(IdentityError::Read)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    if !metadata.file_type().is_file()
+        || platform::is_reparse_or_link(&metadata)
+        || !platform::owned_by_current_user(path, &metadata)
+    {
         return Err(IdentityError::UnsafePath(path.to_path_buf()));
     }
-    if metadata.permissions().mode() & 0o077 != 0 {
+    if !platform::private_file_mode_is_secured(&metadata) {
         return Err(IdentityError::UnsafePermissions(path.to_path_buf()));
     }
     Ok(())
 }
 
 fn write_new_private(path: &Path, content: &[u8]) -> Result<(), IdentityError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(IdentityError::Write)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    platform::apply_private_open_options(&mut options);
+    let mut file = options.open(path).map_err(IdentityError::Write)?;
     file.write_all(content).map_err(IdentityError::Write)?;
     file.sync_all().map_err(IdentityError::Write)
 }
 
 fn sync_directory(path: &Path) -> Result<(), IdentityError> {
-    OpenOptions::new()
-        .read(true)
-        .open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(IdentityError::Publish)
+    // 平台原语：Windows 目录无 fsync 等价物；Unix 侧保持只读句柄 fsync。
+    platform::sync_directory(path).map_err(IdentityError::Publish)
 }
 
 fn certificate_fingerprint(certificate_pem: &[u8]) -> Result<String, IdentityError> {
@@ -244,6 +245,7 @@ mod tests {
             second.certificate_fingerprint
         );
         let device_directory = temporary.path().join(DEVICE_DIRECTORY);
+        #[cfg(unix)]
         for name in [INSTALLATION_FILE, CERTIFICATE_FILE, PRIVATE_KEY_FILE] {
             let mode = fs::metadata(device_directory.join(name))
                 .expect("metadata")

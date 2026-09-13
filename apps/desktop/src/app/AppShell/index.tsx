@@ -1,3 +1,4 @@
+import { DesktopWindowControls } from "../../features/desktop-lifecycle/DesktopWindowControls";
 import { HostDirectoryDialog } from "../../features/workspaces/HostDirectoryDialog";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
@@ -17,10 +18,6 @@ import { ConversationSearchDialog } from "../../features/sessions/ConversationSe
 import { WorkspaceEditorDialog } from "../../features/workspaces/WorkspaceEditorDialog";
 import {
   getDesktopPlatform,
-  isDesktopWindowMaximized,
-  listenDesktopWindowMaximized,
-  minimizeDesktopWindow,
-  requestDesktopClose,
   toggleMaximizeDesktopWindow,
   type DesktopPlatform,
 } from "../../native-bridge/desktopLifecycle";
@@ -39,7 +36,6 @@ export const AppShell = observer(function AppShell() {
   const store = useRootStore();
   const application_connection = useApplicationConnection();
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
-  const [window_maximized, setWindowMaximized] = useState(false);
   const application = store.projection.application;
   const session_id = store.navigation.selected_session_id;
   const session = application?.active_sessions.find((item) => item.session_id === session_id)
@@ -52,26 +48,12 @@ export const AppShell = observer(function AppShell() {
 
   useEffect(() => {
     let active = true;
-    let unlisten: () => void = () => undefined;
     void getDesktopPlatform().then((platform) => {
       if (!active) return;
       document.documentElement.dataset.platform = platform;
       setDesktopPlatform(platform);
-      if (platform !== "linux") return;
-      void isDesktopWindowMaximized().then((maximized) => {
-        if (active) setWindowMaximized(maximized);
-      });
-      void listenDesktopWindowMaximized((maximized) => {
-        if (active) setWindowMaximized(maximized);
-      }).then((dispose) => {
-        if (active) unlisten = dispose;
-        else dispose();
-      });
     });
-    return () => {
-      active = false;
-      unlisten();
-    };
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -84,8 +66,8 @@ export const AppShell = observer(function AppShell() {
   }, [navigation]);
 
   function handleTitleBarDoubleClick(event: React.MouseEvent<HTMLElement>) {
-    if (desktop_platform !== "linux" || (event.target as HTMLElement).closest("button")) return;
-    void toggleMaximizeDesktopWindow().then(setWindowMaximized);
+    if ((desktop_platform !== "linux" && desktop_platform !== "windows") || (event.target as HTMLElement).closest("button")) return;
+    void toggleMaximizeDesktopWindow();
   }
 
   return (
@@ -122,7 +104,7 @@ export const AppShell = observer(function AppShell() {
         </Tooltip>}
         <RuntimeStatus />
         {application_connection && !application_connection.desktop && <Button onClick={() => void application_connection.signOut()} variant="text">退出登录</Button>}
-        {desktop_platform === "linux" && <LinuxWindowControls maximized={window_maximized} on_maximized_change={setWindowMaximized} />}
+        <DesktopWindowControls />
       </header>
 
       <div className={styles.app_body}>
@@ -280,37 +262,3 @@ const SidebarResizeHandle = observer(function SidebarResizeHandle(props: Readonl
     </>
   );
 });
-
-function LinuxWindowControls(props: Readonly<{
-  maximized: boolean;
-  on_maximized_change: (maximized: boolean) => void;
-}>) {
-  return (
-    <div className={styles.window_controls} aria-label="窗口控制">
-      <Tooltip content="最小化">
-        <button aria-label="最小化窗口" onClick={() => void minimizeDesktopWindow()} type="button">
-          <span className={styles.minimize_icon} aria-hidden="true" />
-        </button>
-      </Tooltip>
-      <Tooltip content={props.maximized ? "还原" : "最大化"}>
-        <button
-          aria-label={props.maximized ? "还原窗口" : "最大化窗口"}
-          onClick={() => void toggleMaximizeDesktopWindow().then(props.on_maximized_change)}
-          type="button"
-        >
-          <span className={props.maximized ? styles.restore_icon : styles.maximize_icon} aria-hidden="true" />
-        </button>
-      </Tooltip>
-      <Tooltip content="关闭">
-        <button
-          aria-label="关闭窗口"
-          className={styles.close_window}
-          onClick={() => void requestDesktopClose()}
-          type="button"
-        >
-          <Icon name="x" size={15} />
-        </button>
-      </Tooltip>
-    </div>
-  );
-}

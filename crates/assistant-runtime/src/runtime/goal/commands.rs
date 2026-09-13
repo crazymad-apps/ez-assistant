@@ -329,6 +329,7 @@ impl AssistantRuntime {
         let accepted = self
             .store
             .accept_input(NewStoredInput {
+                agent_shell_target: None,
                 input_id,
                 run_id,
                 session_id: request.session_id.clone(),

@@ -316,6 +316,8 @@ mod tests {
         let run_id = RunId::new("r-recorder-child").expect("run id");
         store
             .create_session(NewStoredSession {
+                agent_shell_kind: None,
+                agent_shell_environment: None,
                 session_id: session_id.clone(),
                 materialization_key: None,
                 title: "recorder fixture".to_owned(),
@@ -343,6 +345,7 @@ mod tests {
             .expect("create session");
         store
             .accept_input(NewStoredInput {
+                agent_shell_target: None,
                 input_id: InputId::new("input-recorder-child").expect("input id"),
                 run_id: run_id.clone(),
                 session_id: session_id.clone(),

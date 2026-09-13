@@ -22,6 +22,7 @@ mod recovery;
 mod resource;
 mod session_loading;
 mod session_management;
+mod shell;
 mod shutdown;
 mod skills;
 mod tasks;
@@ -450,9 +451,12 @@ impl AssistantRuntime {
         if let Some(prepared) = &prepared_model {
             prepared.ensure_current(&self.config_registry)?;
         }
+        let (agent_shell_kind, agent_shell_environment) = self.initial_agent_shell().await?;
         let stored = self
             .store
             .create_session(NewStoredSession {
+                agent_shell_kind,
+                agent_shell_environment,
                 session_id: session_id.clone(),
                 title,
                 title_origin,
