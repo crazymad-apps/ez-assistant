@@ -9,7 +9,10 @@ import { canonicalHome, readDiscovery } from "../dist/host/discovery.js";
 import { request } from "../dist/host/http.js";
 import { currentCompatibility, checkCompatibility } from "@ez-assistant/protocol/node";
 
-const caps = { runtime_version: "0.25.2", min_compatible_version: "0.25.2", features: ["host_access", "startup_diagnostics"], sse: true };
+const current = currentCompatibility();
+const changePatch = (offset) => { const parts = current.version.split(".").map(Number); parts[2] += offset; return parts.join("."); };
+const previousVersion = changePatch(-1), futureVersion = changePatch(1);
+const caps = { runtime_version: current.version, min_compatible_version: current.min_compatible_version, features: ["host_access", "startup_diagnostics"], sse: true };
 const access = { revision: "initial", password_configured: true, configuration: { port: 7240, scheme: "http", remote_enabled: false, server_names: [], tls_certificate: null, tls_private_key: null }, restart_required: false, listener_state: "listening", error: null };
 async function fixture(handler = () => undefined) {
   const root = await mkdtemp(join(tmpdir(), "ez-client-http-"));
@@ -28,30 +31,42 @@ async function fixture(handler = () => undefined) {
   const path = join(root, "run/runtime.json"); await writeFile(path, JSON.stringify(discovery), { mode: 0o600 });
   return { root, path, discovery, requests, host: new HostControl(root, new AbortController().signal), async close() { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); await rm(root, { recursive: true }); } };
 }
-test("软件版本不兼容在任何业务命令前拒绝", async () => {
-  for (const versions of [{ runtime_version: "0.25.1", min_compatible_version: "0.25.1" }, { runtime_version: "0.25.3", min_compatible_version: "0.25.3" }, { runtime_version: "0.25.2", min_compatible_version: null }]) {
+test("软件版本不兼容在普通业务命令前拒绝", async () => {
+  for (const versions of [{ runtime_version: previousVersion, min_compatible_version: previousVersion }, { runtime_version: futureVersion, min_compatible_version: futureVersion }, { runtime_version: current.version, min_compatible_version: null }]) {
     const f = await fixture((r) => r.path === "/capabilities" ? { body: { ...caps, ...versions } } : undefined);
     try { await assert.rejects(f.host.start(), { code: "incompatible" }); assert.equal(f.requests.length, 1); assert.equal(f.requests[0].path, "/capabilities"); }
     finally { await f.close(); }
   }
 });
 test("当前及兼容较新 Host 被复用，诊断状态不伪装就绪", async () => {
-  const f = await fixture((r) => r.path === "/capabilities" ? { body: { ...caps, runtime_version: "0.25.3" } } : undefined);
-  try { const result = await f.host.start(); assert.equal(result.reused, true); assert.equal(result.target.health.status, "ready"); assert.ok(f.requests.every((r) => r.headers["x-ez-client-version"] === "0.25.2")); }
+  const f = await fixture((r) => r.path === "/capabilities" ? { body: { ...caps, runtime_version: futureVersion } } : undefined);
+  try { const result = await f.host.start(); assert.equal(result.reused, true); assert.equal(result.target.health.status, "ready"); assert.ok(f.requests.every((r) => r.headers["x-ez-client-version"] === current.version)); }
   finally { await f.close(); }
   const bad = await fixture((r) => r.path === "/health" ? { body: { status: "unavailable", error: "database_host_too_old", min_compatible_host_version: "0.25.3" } } : undefined);
   try { assert.equal((await bad.host.status()).health.status, "unavailable"); await assert.rejects(bad.host.start(), { code: "startup_failed" }); await assert.rejects(bad.host.configuration(), { code: "not_ready" }); }
   finally { await bad.close(); }
 });
-test("停止固定原凭据，发现后继者后不再补发 shutdown", async () => {
+test("停止不兼容 Host 时使用其声明并固定原凭据，发现后继者后不再补发 shutdown", async () => {
   let f;
   f = await fixture(async (r) => {
+    if (r.path === "/capabilities") return { body: { ...caps, runtime_version: previousVersion, min_compatible_version: previousVersion } };
     if (r.body?.command?.payload?.type === "shutdown_runtime") {
       await writeFile(f.path, JSON.stringify({ ...f.discovery, instance_id: "successor", access_token: "b".repeat(43) }));
       return { body: { request_id: r.body.request_id, result: { scope: "runtime", payload: { type: "shutdown_runtime", payload: { lifecycle: "shutting_down" } } } } };
     }
   });
-  try { await assert.rejects(f.host.stop(), { code: "instance_changed" }); const writes = f.requests.filter((r) => r.body); assert.equal(writes.length, 1); assert.equal(writes[0].headers.authorization, `Bearer ${f.discovery.access_token}`); }
+  try {
+    await assert.rejects(f.host.stop(), { code: "instance_changed" });
+    const writes = f.requests.filter((r) => r.body); assert.equal(writes.length, 1);
+    assert.equal(writes[0].headers.authorization, `Bearer ${f.discovery.access_token}`);
+    assert.equal(writes[0].headers["x-ez-client-version"], previousVersion);
+    assert.equal(writes[0].headers["x-ez-min-compatible-version"], previousVersion);
+  }
+  finally { await f.close(); }
+});
+test("停止不会借用无效 Host 声明绕过门禁", async () => {
+  const f = await fixture((r) => r.path === "/capabilities" ? { body: { ...caps, min_compatible_version: null } } : undefined);
+  try { await assert.rejects(f.host.stop(), { code: "incompatible" }); assert.equal(f.requests.filter((r) => r.body).length, 0); }
   finally { await f.close(); }
 });
 test("重启来源缺失在停止前拒绝", async () => {

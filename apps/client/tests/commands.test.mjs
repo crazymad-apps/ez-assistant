@@ -5,6 +5,7 @@ import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validServerName } from "../dist/config/index.js";
+import { SOFTWARE_VERSION } from "@ez-assistant/protocol/node";
 
 test("访问配置接受 IPv4、IPv6 和域名，不按地址类别拒绝", () => {
   for (const name of ["127.0.0.1", "172.16.20.4", "0.0.0.0", "::", "::1", "[::1]", "2001:db8::1", "localhost", "RUNTIME.EXAMPLE", "例子.测试"])
@@ -26,7 +27,7 @@ function run(args, env = {}) {
 }
 test("帮助、版本及参数错误不读取或创建 Home", () => {
   for (const args of [[], ["--help"], ["start", "--help"], ["config", "--help"], ["--version"]]) assert.equal(run(args).code, 0);
-  assert.match(run(["--version"]).output, /0.25.2/);
+  assert.ok(run(["--version"]).output.includes(SOFTWARE_VERSION));
   for (const args of [["unknown"], ["status", "--unknown"], ["--runtime-home", "relative", "start"], ["start", "--timeout", "59"], ["restart", "--timeout", "NaN"], ["stop", "--timeout", "29"]]) assert.equal(run(args).code, 2);
 });
 test("无 Host 的静态查询和 stop 成功，restart/web 失败且不隐式启动", () => {

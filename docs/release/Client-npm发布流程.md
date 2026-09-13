@@ -300,3 +300,11 @@ Client 主包 `0.25.2-7` 已发布公司仓库 `http://172.16.20.4:40087/`，回
 2026-09-11 M6 系统级 systemd：root 自动选 system scope，unit 位于 /etc/systemd/system，Type=simple、User=0、multi-user.target；普通用户保留 user scope、Type=exec 和 linger。scope 贯穿查询、预览、提交及生命周期；系统级不依赖 XDG_RUNTIME_DIR、用户总线和 loginctl，短锁目录 /run/ez-assistant-client 只在保存时创建。固定名称另一范围注册存在时拒绝隐式迁移。默认不开自启，不切换 Home 或运行身份，不替代 Desktop 自启。
 验证：构建通过，Node 22.12 定向状态／生命周期测试 8 项通过。独立 Docker 容器 ez-client-system-service-check（无宿主挂载、systemd 255、Node 22.15、Linux arm64），直接使用成品 tgz：root 预览无写入、注册／enable／start／restart／stop／disable 和跨范围冲突检查通过；普通用户 eztest 注册／enable／disable 通过。root 的全新测试 Home=/var/lib/ez-system-service-check，实际 Host 只在容器中运行；未执行直接 SQL 操作或迁移既有数据。最终所有测试 unit disabled、Host 已停止，容器已停止并保留证据。未在公司生产服务器修改服务，未执行全量回归、整机开机或旧 systemd/cgroup v1 验收。
 候选 /tmp/ez-client-npm-m6-system-service；主包版本 0.25.2-9，Host 附件保持 0.25.2-1。发布回读见 company/private-registry-verification.json。测试脚本 apps/client/tests/linux/system-service-smoke.mjs。仍处 M6。
+
+### 2026-09-14 v0.25.3 升级停止修订
+
+用户在家庭私库 Linux x64 候选验收中发现：Client 升级为 `0.25.3` 后，旧 `0.25.2` Host 会使 `stop` 在版本门禁处失败。修复保持普通命令的兼容拒绝，仅允许固定 `shutdown_runtime` 使用运行中 Host 自身的有效兼容声明；原实例、凭据、单次写入、回执与停止后核验均不放宽，无效声明在写请求前拒绝。
+
+用户确认后，主包 `@ez-assistant/client@0.25.3-1` 已发布家庭私库 `http://192.168.31.21:4873/` 的 `next`，精确依赖既有 `@ez-assistant/client-linux-x64@0.25.3`，平台附件内容未变且未重发。主包 SHA256 为 `d96aada2d5558dd54fbbe07adebbc8c84b42fedb4c2354da604f1594bbfcbd69`，registry shasum 为 `da9eed17d3af0c5380c3d29409944aa48d946715`，integrity 为 `sha512-Gaa0aIL5mo2e0BUq4ajJbGaWHii7CzdeNlWXEjNDHUtj3QNFzfzMZsRdL7mLBukIl7oWw4gNwUORD7jgackqRA==`；回下载与原候选逐字节一致。主包标签为 `next=0.25.3-1`、`latest=0.25.2`，附件为 `next=0.25.3`、`latest=0.25.2`，未提升 latest。
+
+Client 24 项测试通过。Linux amd64 隔离容器从私库安装 `0.25.2` 并启动旧 Host，再安装 `0.25.3-1` 后执行 stop 成功；旧 PID 与 discovery 均消失。全新容器回读安装版本为主包 `0.25.3-1`、附件 `0.25.3`、软件版本 `0.25.3`。测试只创建全新临时 Runtime Home，未访问用户或生产数据，容器退出后测试数据库一并删除。候选及 pack-report 位于 `/tmp/ez-client-npm-v0253-r1`。

@@ -1,7 +1,7 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { checkCompatibility, currentCompatibility, type HostAccessCommand, type HostAccessStatus, type RuntimeHostCapabilities, type RuntimeHostHealth } from "@ez-assistant/protocol/node";
+import { checkCompatibility, currentCompatibility, type ClientCompatibility, type HostAccessCommand, type HostAccessStatus, type RuntimeHostCapabilities, type RuntimeHostHealth } from "@ez-assistant/protocol/node";
 import { ClientError, cancelled, errorFromHost, object } from "../errors.js";
 import { alive, missing, privateDirectory, readDiscovery, sameInstance, type Discovery } from "./discovery.js";
 import { accessCommand, accessStatus, capabilities, health, shutdown } from "./http.js";
@@ -10,6 +10,7 @@ import { buildInfo, bundledSource, localProcess, verifySource } from "./process.
 import { launchService, runningService, serviceForHome, verifyServiceInstance, waitServiceStopped } from "../platform/systemd/lifecycle.js";
 
 export interface Target { discovery: Discovery; capabilities: RuntimeHostCapabilities; health: RuntimeHostHealth; }
+interface StopTarget { discovery: Discovery; compatibility: ClientCompatibility; }
 export class HostControl {
   constructor(readonly home: string, readonly signal: AbortSignal, readonly report: (message: string) => void = () => {}) {}
   async helper(operation: string, input?: unknown): Promise<unknown> {
@@ -42,6 +43,15 @@ export class HostControl {
     const target = await this.target();
     if (!target && await this.locked()) throw new ClientError("busy", "实例锁被占用，但 Host 尚未发布可验证的地址；当前状态待查询。");
     return target;
+  }
+  private async stopTarget(): Promise<StopTarget | null> {
+    cancelled(this.signal);
+    const discovery = await readDiscovery(this.home);
+    if (!discovery || !alive(discovery.pid)) return null;
+    const caps = await capabilities(discovery, this.signal);
+    const compatibility = { version: caps.runtime_version, min_compatible_version: caps.min_compatible_version };
+    if (checkCompatibility(compatibility, compatibility)) throw new ClientError("incompatible", "Host 软件版本声明无效，无法安全执行停止。");
+    return { discovery, compatibility };
   }
   async waitReady(timeout: number, expected?: Discovery): Promise<Target> {
     const deadline = Date.now() + timeout * 1000; let interval = 250; let last = "";
@@ -107,15 +117,16 @@ export class HostControl {
     throw new ClientError("timeout", "原 Host 尚未确认停止，结果待查询；未强制结束进程。");
   }
   async stop(timeout = 30): Promise<boolean> {
-    const target = await this.status();
+    const target = await this.stopTarget();
     if (!target) {
+      if (await this.locked()) throw new ClientError("busy", "实例锁被占用，但 Host 尚未发布可验证的地址；当前状态待查询。");
       const service = await serviceForHome(this.home);
       if (service?.source) await waitServiceStopped(this.home, service, timeout, this.signal);
       return false;
     }
     const service = await runningService(this.home, target.discovery);
     const deadline = Date.now() + timeout * 1000;
-    await shutdown(target.discovery, this.signal);
+    await shutdown(target.discovery, this.signal, target.compatibility);
     await this.waitStopped(target.discovery, timeout);
     if (service) await waitServiceStopped(this.home, service, Math.max(0.1, (deadline - Date.now()) / 1000), this.signal);
     return true;

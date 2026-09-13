@@ -6,7 +6,7 @@
 - 普通命令为 start／status／stop／restart／web；config 是唯一交互入口，访问设置与启动设置独立预览、提交。M5 已接入 Client 自启注册和服务生命周期；本机 Docker Linux 仅测试 Client／Host／自启，不运行 Desktop；不管理 remote、Agent 或 Session。
 - 共享 DTO 与版本判定消费 @ez-assistant/protocol，不手写业务协议副本。Client 只持有草稿和短生命周期连接，不持有业务权威状态。
 - Runtime Home 显式参数 > 环境变量 > 产品默认；发现、原生凭据、来源、锁和配置由 Host 拥有。禁止直接写 TOML、访问数据库、实现密码哈希或建立另一份实例账本。
-- stop 固定原地址／实例／凭据；restart 验证原来源，不能回退到调用方随包 Host。超时或取消不重放写请求、不强杀 Host。
+- stop 固定原地址／实例／凭据；升级后的 Client 允许仅为固定 `shutdown_runtime` 使用运行中 Host 自身的有效兼容声明，使不兼容旧 Host 可以受控停止，其他命令仍使用当前 Client 声明并严格执行版本门禁。restart 验证原来源，不能回退到调用方随包 Host。超时或取消不重放写请求、不强杀 Host。
 - 离线 config 使用 Host 有界 JSON IPC；提交后取消等待现有操作收敛，不强杀 helper，不假称回滚。普通输出不得包含 token、密码、哈希或证书内容。
 - 进入 config、status 与预览不创建 Home 或修复权限。发现或认证无法核实时不得当作离线。
 - 测试统一放 apps/client/tests，源码不导入测试夹具。真实验证始终使用临时 Home，不接触生产数据或安装版 GUI。

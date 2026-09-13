@@ -2,12 +2,21 @@ import http from "node:http";
 import https from "node:https";
 import * as tls from "node:tls";
 import { randomUUID } from "node:crypto";
-import { compatibilityHeaders, type HostAccessCommand, type HostAccessStatus, type RuntimeHostHealth, type RuntimeHostCapabilities } from "@ez-assistant/protocol/node";
+import { compatibilityHeaders, type ClientCompatibility, type HostAccessCommand, type HostAccessStatus, type RuntimeHostHealth, type RuntimeHostCapabilities } from "@ez-assistant/protocol/node";
 import { Cancelled, ClientError, object, errorFromHost } from "../errors.js";
 import type { Discovery } from "./discovery.js";
 
 /** 使用原生 Agent，不读取代理设置，不跟随重定向；凭据只发送至固定 loopback origin。 */
 export function request(target: Discovery, path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+  return requestWithHeaders(target, path, body, signal, compatibilityHeaders());
+}
+function requestAs(target: Discovery, path: string, body: unknown, signal: AbortSignal | undefined, compatibility: ClientCompatibility): Promise<unknown> {
+  return requestWithHeaders(target, path, body, signal, {
+    "x-ez-client-version": compatibility.version,
+    "x-ez-min-compatible-version": compatibility.min_compatible_version,
+  });
+}
+function requestWithHeaders(target: Discovery, path: string, body: unknown, signal: AbortSignal | undefined, versionHeaders: Record<string, string>): Promise<unknown> {
   return new Promise((accept, reject) => {
     const url = new URL(path, target.address);
     const secure = url.protocol === "https:";
@@ -18,7 +27,7 @@ export function request(target: Discovery, path: string, body?: unknown, signal?
       } : {}),
     }) : new http.Agent({ keepAlive: false });
     const req = (secure ? https : http).request(url, { agent, method: body === undefined ? "GET" : "POST", headers: {
-      authorization: `Bearer ${target.access_token}`, ...compatibilityHeaders(), ...(body === undefined ? {} : { "content-type": "application/json" }),
+      authorization: `Bearer ${target.access_token}`, ...versionHeaders, ...(body === undefined ? {} : { "content-type": "application/json" }),
     } });
     const timer = setTimeout(() => req.destroy(new Error("timeout")), 3000);
     const cancel = () => req.destroy(new Cancelled());
@@ -67,8 +76,10 @@ export async function accessCommand(target: Discovery, command: HostAccessComman
   if (response.request_id !== id || result.scope !== "host_access") throw new ClientError("invalid_response", "Host 配置响应与请求不匹配，结果待查询。");
   return accessStatus(result.payload);
 }
-export async function shutdown(target: Discovery, signal: AbortSignal): Promise<void> {
+export async function shutdown(target: Discovery, signal: AbortSignal, compatibility?: ClientCompatibility): Promise<void> {
   const id = randomUUID();
-  const response = object(await request(target, "/commands", { request_id: id, command: { scope: "runtime", payload: { type: "shutdown_runtime", payload: {} } } }, signal));
+  // 升级后的 Client 只为固定停止命令复用运行中 Host 的有效声明，使旧 Host 能完成自我关闭。
+  const body = { request_id: id, command: { scope: "runtime", payload: { type: "shutdown_runtime", payload: {} } } };
+  const response = object(await (compatibility ? requestAs(target, "/commands", body, signal, compatibility) : request(target, "/commands", body, signal)));
   if (response.request_id !== id || object(object(response.result).payload).type !== "shutdown_runtime") throw new ClientError("invalid_response", "停止回执不匹配，结果待查询。");
 }

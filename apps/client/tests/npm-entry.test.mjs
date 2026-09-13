@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { SOFTWARE_VERSION } from "@ez-assistant/protocol/node";
 
 test("npm 入口在加载依赖前拒绝低于 API 下限或未支持的 Node 主版本", async () => {
   const entry = new URL("../dist/distribution/npm-entry.js", import.meta.url);
@@ -25,7 +26,8 @@ test("npm 入口使用单参数 shebang，保留参数且不创建 Runtime Home"
   try {
     assert.equal((await readFile(entry, "utf8")).split("\n")[0], "#!/usr/bin/env node");
     // tsc 输出无可执行位，测试通过现有解释器执行；正式 npm pack 会赋予入口可执行位。
-    for (const [args, code, expected] of [[['--version'], 0, /0\.25\.2/], [['--help'], 0, /本机 Host 管理/], [['--unknown-flag'], 2, /unknown option/]]) {
+    const versionPattern = new RegExp(SOFTWARE_VERSION.replaceAll(".", "\\."));
+    for (const [args, code, expected] of [[['--version'], 0, versionPattern], [['--help'], 0, /本机 Host 管理/], [['--unknown-flag'], 2, /unknown option/]]) {
       const result = spawnSync(process.execPath, [entry, ...args], { env: { ...process.env, EZ_ASSISTANT_RUNTIME_HOME: join(root, 'missing') }, encoding: 'utf8' });
       assert.equal(result.status, code, result.stderr);
       assert.match(result.stdout + result.stderr, expected);
