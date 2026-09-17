@@ -17,6 +17,7 @@ import { useInputMethodGuard } from "../../../components/InputMethodGuard";
 import { Tooltip } from "../../../components/Tooltip";
 import type { NewSessionDraftKey } from "../../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { effectiveContextUsage } from "../../../stores/contextUsage";
 import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
 import { ComposerNotice } from "./ComposerNotice";
 import { AttachmentDetailDialog } from "./AttachmentDetailDialog";
@@ -166,6 +167,13 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     ? session.active_compaction
     : null;
   const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
+  const live_run = store.live_execution.runForSession(session.session_id);
+  const context_usage = effectiveContextUsage(
+    session_view.usage.context,
+    session_view.active_run?.run_id ?? null,
+    live_run?.run_id ?? null,
+    live_run?.usage ?? null,
+  );
 
   async function submitCompaction() {
     if (draft.trim() !== "/compact") {
@@ -460,7 +468,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       {!read_only && session.active_compaction && (
         <div className={styles.compaction_status} role="status">
           <span className={styles.loading_ring} />
-          <strong>{session.active_compaction.trigger.type === "manual" ? "正在压缩上下文" : "正在自动压缩上下文"}</strong>
+          <strong>{compactionStatusLabel(session.active_compaction.trigger)}</strong>
         </div>
       )}
       {approval && !approval_minimized ? (
@@ -581,7 +589,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
             />
             {session.role === "controller" && <OutputHostingMenu session={session} />}
             <span className={styles.action_spacer} />
-            <ContextUsageRing view={session_view} />
+            <ContextUsageRing context={context_usage} />
             <ModelSettingsPopover
               disabled={store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
               effort={session.reasoning_effort ?? null}
@@ -845,7 +853,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
             disabled={store.composer_pending}
             initial_category={null}
             on_approval_change={(mode) => {
-              store.new_session_drafts.updateApprovalMode(draft_key, mode);
+              store.setNewSessionDraftApprovalMode(draft_key, mode);
               return Promise.resolve(true);
             }}
             on_open_change={(open) => updateOverlay("execution", open)}
@@ -871,7 +879,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
               return Promise.resolve(true);
             }}
             on_model_change={(selection) => {
-              store.new_session_drafts.updateModel(draft_key, selection);
+              store.setNewSessionDraftModel(draft_key, selection);
               return Promise.resolve(true);
             }}
             on_open_change={(open) => updateOverlay("model", open)}
@@ -894,8 +902,9 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   );
 });
 
-function ContextUsageRing({ view }: Readonly<{ view: SessionViewSnapshot }>) {
-  const context = view.usage.context;
+function ContextUsageRing({ context }: Readonly<{
+  context: SessionViewSnapshot["usage"]["context"];
+}>) {
   const degrees = context ? Math.min(360, Math.max(0, context.usage_basis_points * 0.036)) : 0;
   const label = context ? `${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%` : "暂无用量数据";
   return (
@@ -909,6 +918,17 @@ function ContextUsageRing({ view }: Readonly<{ view: SessionViewSnapshot }>) {
       />
     </Tooltip>
   );
+}
+
+function compactionStatusLabel(
+  trigger: NonNullable<SessionViewSnapshot["session"]["active_compaction"]>["trigger"],
+): string {
+  if (trigger.type === "manual") {
+    return "正在压缩上下文";
+  }
+  return trigger.reason === "provider_overflow"
+    ? "模型报告上下文不足，正在自动压缩"
+    : "上下文达到阈值，正在自动压缩";
 }
 
 function ComposerAttachmentContext(props: Readonly<{

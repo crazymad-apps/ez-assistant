@@ -27,9 +27,9 @@ use super::{
     StoredGoal, StoredInput, StoredMcpSelection, StoredMessageFeedback, StoredRun,
     StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
     StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionMaterialization,
-    StoredSessionUsage, StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
-    WorkspaceUpdate,
+    StoredSessionUsage, StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
+    WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -73,6 +73,11 @@ pub struct LoadedSession {
 pub trait RuntimeStore: Send + Sync {
     fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>>;
     fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()>;
+    /// 只有持久连接仍与联网前捕获值一致时，才原子替换最后成功目录。
+    fn replace_provider_model_catalog(
+        &self,
+        replacement: crate::ProviderModelCatalogReplacement,
+    ) -> StoreFuture<'_, ()>;
     /// 同一提交边界内统计实际影响并删除连接与固定配置，保留所有模型引用。
     fn remove_provider(
         &self,
@@ -334,6 +339,12 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         settlement: StoredRunSettlement,
     ) -> StoreFuture<'_, StoredRunSettlementResult>;
+
+    /// 定向提交终态 Run 自身遗留的 queued Input；已正确提交时幂等返回。
+    fn reconcile_terminal_run_input(
+        &self,
+        reconciliation: StoredTerminalRunInputReconciliation,
+    ) -> StoreFuture<'_, ()>;
 
     /// CAS 暂停 Goal、作废排队 continuation，并可靠记录活动 Run 取消意图。
     fn stop_goal(&self, stop: GoalStop) -> StoreFuture<'_, GoalStopResult>;

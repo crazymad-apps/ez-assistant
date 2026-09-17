@@ -31,8 +31,9 @@ use assistant_runtime::{
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
     StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
-    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval, WorkspaceUpdate,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -210,6 +211,15 @@ impl RuntimeStore for LocalRuntimeStore {
     fn put_provider(&self, provider: assistant_runtime::StoredProvider) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             self.request(|reply| Command::PutProvider { provider, reply })
+                .await
+        })
+    }
+    fn replace_provider_model_catalog(
+        &self,
+        replacement: assistant_runtime::ProviderModelCatalogReplacement,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ReplaceProviderModelCatalog { replacement, reply })
                 .await
         })
     }
@@ -752,6 +762,19 @@ impl RuntimeStore for LocalRuntimeStore {
         Box::pin(async move {
             self.request(|reply| Command::SettleRun {
                 settlement: Box::new(settlement),
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn reconcile_terminal_run_input(
+        &self,
+        reconciliation: StoredTerminalRunInputReconciliation,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ReconcileTerminalRunInput {
+                reconciliation: Box::new(reconciliation),
                 reply,
             })
             .await

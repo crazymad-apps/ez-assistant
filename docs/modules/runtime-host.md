@@ -833,3 +833,30 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 - 通用 API CORS 使用 `*`，显式列出 Authorization／内容类型／兼容头，不返回 Allow-Credentials；预检不代表已认证。
 - WS 升级无凭据只能进入既有限额和五秒首帧认证；首帧复用 HTTP 凭据验证，已认证握手不允许切换身份。认证及兼容检查完成前不创建 PTY。
 - 本机特权仍由真实 peer、authority 和私有进程凭据共同证明，不用客户端名称、Origin 或 debug 标志授权。
+
+## v0.26.0 M0 模型目录存储与迁移
+
+- `v0_26_0` 迁移只给 `providers` 增加可空目录 JSON、刷新时间与连接变化标记三列；不新增目录表，
+  不扫描或改写 Session、Run、Input。旧 Provider 升级后是未刷新空目录，启动不联网回填。
+- 目录 JSON 与刷新时间必须同时为空或同时存在，JSON 必须是数组，时间非负；无目录时变化标记必须为
+  false。可通过表约束但无法解码为 `DiscoveredModel` 的内容只降级为
+  `stored_snapshot_invalid`，Provider 连接仍可加载，Host 不在启动时修补源库。
+- Provider 普通 upsert 保留目录列，只有发现输入或凭据改变才把已有目录标记为 stale；目录替换在
+  worker 所有的 SQLite 连接中执行完整连接 CAS，失败不清空旧值。v0.25.3 的旧 upsert SQL 不会覆盖
+  增量列，但旧 Host 会因较新迁移账本明确拒绝打开 v0.26.0 数据库。
+- 软件和迁移终点为 `0.26.0`，数据库最低兼容 Host 仍为最小必要值 `0.25.3`：本迁移是增量列且旧写
+  夹具不会破坏目录；该最低值不等同于允许旧 Host 忽略较新的迁移账本。升级沿用独立备份、只读回开、
+  全表精确计数／摘要和逐版本事务，M0 自动化只使用 TempDir 隔离库。
+
+## v0.26.0 M2 Run/Input staged 收敛
+
+- Host `settle_run` 在 queued 来源 Input 场景把原 `UserMessage` 放在 staged append 批次首位，并在
+  SQLite 完成点同事务校验 Run/Input/Session/message、清空 `queued_message_json`、提交 Input 和终结
+  Run；预检冲突发生在正文写入前，不允许只写 JSONL 或只改结构化状态。
+- `reconcile_terminal_run_input` 复用 staged append，只接受终态 Run 自己的 queued Input。恢复提交只
+  追加原用户消息并提交 Input，保留 Run 原终态；相同或新的恢复操作再次看到 committed 状态时直接
+  返回成功，无关 queued Input 保持不变。
+- Host 打开目标 Session 时仍先完成既有 staged append，再把状态交给 Runtime 的单 Session 恢复；
+  进程可在 staged、正文已写或 SQLite 已提交后的任一点重开，最终正文和关系投影都只出现一次。
+- M2 没有数据库 schema、应用协议或 minimum 变化，也不在迁移中扫描、批量修复 Run/Input；历史
+  异常只在目标 Session 被 `prepare` 时定向处理。

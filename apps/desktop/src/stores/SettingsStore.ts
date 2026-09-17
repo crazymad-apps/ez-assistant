@@ -11,6 +11,7 @@ import type {
   ProviderSummary,
   ProviderUsage,
   ProviderInstanceId,
+  ProviderModelCatalogSnapshot,
   DiscoveredModel,
   ProviderConnection,
   ProviderCredentialChange,
@@ -420,10 +421,22 @@ export class SettingsStore {
     }
   }
 
-  async listProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<DiscoveredModel[]> {
+  async loadProviderModelCatalog(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderModelCatalogSnapshot> {
     const client = this.requireClient();
     if (!client) throw new Error("运行时尚未连接。");
     const result = await client.command({ type: "list_provider_models", payload: { provider_instance_id } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    return result.payload;
+  }
+
+  async listProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<DiscoveredModel[]> {
+    return (await this.loadProviderModelCatalog(provider_instance_id, signal)).models;
+  }
+
+  async refreshProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderModelCatalogSnapshot> {
+    const client = this.requireClient();
+    if (!client) throw new Error("运行时尚未连接。");
+    const result = await client.command({ type: "refresh_provider_models", payload: { provider_instance_id } }, { signal });
     if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
     return result.payload;
   }

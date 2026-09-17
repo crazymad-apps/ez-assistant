@@ -92,6 +92,25 @@ pub struct DiscoveredModel {
     pub metadata: ModelParameters,
 }
 
+/// 本地模型目录无法完整恢复时的稳定诊断；不携带原始 JSON 或 Provider 响应。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum ModelCatalogDiagnosticCode {
+    StoredSnapshotInvalid,
+}
+
+/// Provider 最近一次成功显式刷新的本地目录投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ProviderModelCatalogSnapshot {
+    pub provider_instance_id: ProviderInstanceId,
+    pub models: Vec<DiscoveredModel>,
+    pub refreshed_at_ms: Option<i64>,
+    pub connection_changed: bool,
+    pub diagnostic: Option<ModelCatalogDiagnosticCode>,
+}
+
 /// 二元模型身份，model_id 保留服务商原值，不拼接成配置 key。
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]

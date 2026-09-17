@@ -7,6 +7,7 @@ import type {
   TokenUsageSnapshot,
   ToolActivityStatus,
   ToolCallId,
+  ToolInputProjection,
 } from "@ez-assistant/protocol";
 
 const MAX_TOOL_OUTPUT_CHARS = 4_000;
@@ -27,6 +28,7 @@ export type LiveToolSnapshot = Readonly<{
   call_id: ToolCallId;
   tool_name: string;
   mcp_identity?: McpToolIdentity;
+  input: ToolInputProjection;
   status: ToolActivityStatus;
   stdout: string;
   stderr: string;
@@ -85,7 +87,9 @@ export function ensureStep(
   steps: readonly LiveExecutionStep[],
   step: number,
 ): readonly LiveExecutionStep[] {
-  return steps.some((item) => item.step === step) ? steps : [...steps, { step, segments: [] }];
+  return steps.some((item) => item.step === step)
+    ? steps
+    : [...steps, { step, segments: [] }].sort((left, right) => left.step - right.step);
 }
 
 export function updateStep(

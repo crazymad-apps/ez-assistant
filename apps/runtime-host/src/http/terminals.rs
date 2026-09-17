@@ -244,7 +244,7 @@ mod compatibility_tests {
         );
         assert!(validate_compatibility(&headers, Some(&own)).is_ok());
         let newer = ClientCompatibility {
-            version: "0.26.0".into(),
+            version: "0.26.1".into(),
             ..own
         };
         assert_eq!(
@@ -281,8 +281,8 @@ mod compatibility_tests {
             Code::ClientTooOld
         );
         let newer_floor = ClientCompatibility {
-            version: "0.26.0".into(),
-            min_compatible_version: "0.26.0".into(),
+            version: "0.26.1".into(),
+            min_compatible_version: "0.26.1".into(),
         };
         assert_eq!(
             validate_compatibility(&HeaderMap::new(), Some(&newer_floor))

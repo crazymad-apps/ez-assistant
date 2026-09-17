@@ -417,7 +417,7 @@ async fn detached_inherited_output_is_cleaned_up_on_settlement_timeout() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn detached_output_settlement_responds_to_cancellation() {
+async fn detached_pre_handoff_cancellation_cleans_process_tree() {
     let directory = TempDir::new().expect("create temp directory");
     let pid_file = directory.path().join("child.pid");
     let shell = shell(EnvironmentPolicy::default());

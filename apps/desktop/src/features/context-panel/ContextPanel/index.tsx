@@ -13,6 +13,7 @@ import { InlineIconButton } from "../../../components/InlineIconButton";
 import { PresenceBoundary } from "../../../components/Presence";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { effectiveContextUsage } from "../../../stores/contextUsage";
 import {
   openAttachmentInSystem,
   revealAttachmentInDirectory,
@@ -58,6 +59,13 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
   const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
+  const live_run = session_id ? store.live_execution.runForSession(session_id) : null;
+  const context_usage = effectiveContextUsage(
+    session_view?.usage.context ?? null,
+    session_view?.active_run?.run_id ?? null,
+    live_run?.run_id ?? null,
+    live_run?.usage ?? null,
+  );
   const [skill_list] = useState(() => new SkillListStore());
   const skills = sessionSkillRows(session_view, skill_list.snapshot);
   const session_workspace = session_view?.workspace;
@@ -251,14 +259,14 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
             </dl>
           ) : <p className={styles.empty_row}>尚未选择会话</p>}
           {session_view && <SessionShellSetting key={session_view.session.session_id} view={session_view} />}
-          {session_view?.usage.context && (
+          {context_usage && (
             <div className={styles.context_usage}>
-              <ContextRing basis_points={session_view.usage.context.usage_basis_points} />
+              <ContextRing basis_points={context_usage.usage_basis_points} />
               <div>
                 <strong>上下文窗口</strong>
-                <span>{formatTokens(session_view.usage.context.used_tokens)} / {formatTokens(session_view.usage.context.window_tokens)}</span>
+                <span>{formatTokens(context_usage.used_tokens)} / {formatTokens(context_usage.window_tokens)}</span>
               </div>
-              <b>{(session_view.usage.context.usage_basis_points / 100).toFixed(1)}%</b>
+              <b>{(context_usage.usage_basis_points / 100).toFixed(1)}%</b>
             </div>
           )}
           {session_view?.usage.previous_turn && (

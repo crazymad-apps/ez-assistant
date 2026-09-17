@@ -7,6 +7,7 @@ use std::sync::{
 
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{ChildTaskId, InputId, SessionId};
+use tokio::sync::Notify;
 
 use crate::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
@@ -40,12 +41,35 @@ pub(super) struct FaultInjectingStore {
     shutdown_called: AtomicBool,
     unavailable_session: Mutex<Option<SessionId>>,
     pending_title_on_recovery: AtomicBool,
+    fail_next_skill_state_load: AtomicBool,
+    block_next_model_config_load: AtomicBool,
+    model_config_load_entered: Notify,
+    release_model_config_load: Notify,
     conversation_loads: AtomicUsize,
     session_loads: Mutex<Vec<SessionId>>,
     full_loads: AtomicUsize,
 }
 
 impl FaultInjectingStore {
+    pub(super) fn healthy() -> Self {
+        Self {
+            inner: VolatileRuntimeStore::default(),
+            panic_next_settlement: AtomicBool::new(false),
+            fail_settlement: false,
+            hang_shutdown: false,
+            shutdown_called: AtomicBool::new(false),
+            unavailable_session: Mutex::new(None),
+            pending_title_on_recovery: AtomicBool::new(false),
+            fail_next_skill_state_load: AtomicBool::new(false),
+            block_next_model_config_load: AtomicBool::new(false),
+            model_config_load_entered: Notify::new(),
+            release_model_config_load: Notify::new(),
+            conversation_loads: AtomicUsize::new(0),
+            session_loads: Mutex::new(Vec::new()),
+            full_loads: AtomicUsize::new(0),
+        }
+    }
+
     pub(super) fn panic_once_on_settlement() -> Self {
         Self {
             inner: VolatileRuntimeStore::default(),
@@ -55,6 +79,10 @@ impl FaultInjectingStore {
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
             pending_title_on_recovery: AtomicBool::new(false),
+            fail_next_skill_state_load: AtomicBool::new(false),
+            block_next_model_config_load: AtomicBool::new(false),
+            model_config_load_entered: Notify::new(),
+            release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
@@ -70,6 +98,10 @@ impl FaultInjectingStore {
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
             pending_title_on_recovery: AtomicBool::new(false),
+            fail_next_skill_state_load: AtomicBool::new(false),
+            block_next_model_config_load: AtomicBool::new(false),
+            model_config_load_entered: Notify::new(),
+            release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
@@ -85,6 +117,10 @@ impl FaultInjectingStore {
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
             pending_title_on_recovery: AtomicBool::new(false),
+            fail_next_skill_state_load: AtomicBool::new(false),
+            block_next_model_config_load: AtomicBool::new(false),
+            model_config_load_entered: Notify::new(),
+            release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
@@ -94,6 +130,35 @@ impl FaultInjectingStore {
     pub(super) fn pending_title_on_recovery(&self) {
         self.pending_title_on_recovery
             .store(true, Ordering::Release);
+    }
+
+    pub(super) fn fail_next_skill_state_load(&self) {
+        self.fail_next_skill_state_load
+            .store(true, Ordering::Release);
+    }
+
+    pub(super) fn block_next_model_config_load(&self) {
+        self.block_next_model_config_load
+            .store(true, Ordering::Release);
+    }
+
+    pub(super) async fn wait_for_model_config_load(&self) {
+        self.model_config_load_entered.notified().await;
+    }
+
+    pub(super) fn release_model_config_load(&self) {
+        self.release_model_config_load.notify_one();
+    }
+
+    pub(super) fn force_terminal_run_with_queued_input(
+        &self,
+        run_id: &assistant_protocol::RunId,
+        status: assistant_protocol::RunStatus,
+        finished_at_ms: i64,
+    ) {
+        self.inner
+            .force_terminal_run_with_queued_input(run_id, status, finished_at_ms)
+            .expect("force terminal queued input fixture");
     }
 
     pub(super) fn loaded_session_ids(&self) -> Vec<SessionId> {
@@ -129,6 +194,12 @@ impl RuntimeStore for FaultInjectingStore {
     fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()> {
         self.inner.put_provider(provider)
     }
+    fn replace_provider_model_catalog(
+        &self,
+        replacement: crate::ProviderModelCatalogReplacement,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.replace_provider_model_catalog(replacement)
+    }
     fn remove_provider(
         &self,
         id: assistant_protocol::ProviderInstanceId,
@@ -154,7 +225,16 @@ impl RuntimeStore for FaultInjectingStore {
         &self,
         selection: assistant_protocol::ModelSelection,
     ) -> StoreFuture<'_, Option<assistant_protocol::ModelFixedConfig>> {
-        self.inner.get_model_fixed_config(selection)
+        Box::pin(async move {
+            if self
+                .block_next_model_config_load
+                .swap(false, Ordering::AcqRel)
+            {
+                self.model_config_load_entered.notify_one();
+                self.release_model_config_load.notified().await;
+            }
+            self.inner.get_model_fixed_config(selection).await
+        })
     }
     fn list_model_fixed_configs(
         &self,
@@ -289,6 +369,15 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn list_skill_name_states(&self) -> StoreFuture<'_, Vec<SkillNameState>> {
+        if self
+            .fail_next_skill_state_load
+            .swap(false, Ordering::AcqRel)
+        {
+            return Box::pin(std::future::ready(Err(StoreError::new(
+                StoreErrorKind::Unavailable,
+                "injected skill state load failure",
+            ))));
+        }
         self.inner.list_skill_name_states()
     }
 
@@ -519,6 +608,13 @@ impl RuntimeStore for FaultInjectingStore {
             ))));
         }
         self.inner.settle_run(settlement)
+    }
+
+    fn reconcile_terminal_run_input(
+        &self,
+        reconciliation: crate::StoredTerminalRunInputReconciliation,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.reconcile_terminal_run_input(reconciliation)
     }
 
     fn commit_run_continuation(

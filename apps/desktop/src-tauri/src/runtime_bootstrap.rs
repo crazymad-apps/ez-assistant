@@ -1194,11 +1194,19 @@ mod tests {
     async fn reachable_diagnostic_host_is_reused_without_launch_or_health_readiness_timeout() {
         use std::io::Read as _;
         for (version, minimum, accepted) in [
-            ("0.25.3", Some("0.25.3"), true),
-            ("0.25.4", Some("0.25.3"), true),
-            ("0.25.1", Some("0.25.1"), false),
-            ("0.25.4", Some("0.25.4"), false),
-            ("0.25.1", None, false),
+            (
+                assistant_protocol::SOFTWARE_VERSION,
+                Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
+                true,
+            ),
+            (
+                "0.26.1",
+                Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
+                true,
+            ),
+            ("0.25.3", Some("0.25.3"), false),
+            ("0.26.1", Some("0.26.1"), false),
+            ("0.25.3", None, false),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = format!("http://{}", listener.local_addr().unwrap());

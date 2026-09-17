@@ -59,8 +59,8 @@ const COMMAND_MATCH_OPTIONS: readonly SelectionOption<PermissionCommandMatch>[] 
   { value: "prefix", label: "命令前缀" },
 ];
 const PROCESS_MODE_OPTIONS: readonly SelectionOption<PermissionProcessModeDefinition>[] = [
-  { value: "managed", label: "受管进程" },
-  { value: "detached", label: "后台进程" },
+  { value: "managed", label: "工具托管", description: "返回前收敛可管理的进程树" },
+  { value: "detached", label: "完成后交接", description: "仅主 Shell 退出且输出 EOF 后交接；超时或取消仍清理" },
 ];
 
 type RuleForm = {

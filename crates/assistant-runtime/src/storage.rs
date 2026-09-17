@@ -37,8 +37,8 @@ pub use execution::{
     StoredInputState, StoredMcpSelection, StoredQueueItem, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult,
     StoredSessionCommand, StoredSessionCommandResult, StoredSessionCommandState,
-    ToolExecutionStart, UserMessageCommit, validate_input_message,
-    validate_input_message_with_channel_source,
+    StoredTerminalRunInputReconciliation, ToolExecutionStart, UserMessageCommit,
+    validate_input_message, validate_input_message_with_channel_source,
 };
 pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
@@ -66,4 +66,7 @@ pub use workspace::{
     StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
 };
 
-pub use model_management::StoredProvider;
+pub use model_management::{
+    ProviderModelCatalogReplacement, StoredModelCatalog, StoredProvider,
+    stored_model_catalog_is_valid,
+};

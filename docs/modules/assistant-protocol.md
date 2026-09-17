@@ -113,6 +113,8 @@
 - `TokenUsageSnapshot` 只投影一次完整模型请求最终确认的 input、output、Provider total 和
   可选 cached input；`RuntimeEvent::UsageUpdated` 携带所属 Session、Run 和 step。事件允许
   丢失，客户端重建时从已持久化 Assistant Message usage 恢复最近一次模型请求用量。
+- `SessionUsageSnapshot.context` 表达 Runtime 上下文预检的同口径占用，不等同于最近请求的
+  `input_tokens`；活动 Run 的实时 usage 仍通过既有 `UsageUpdated` 合并，不新增协议字段。
 - 模型调用观察新增 attempt 开始、建流前失败、重试等待和建流成功事件；失败只携带
   `ModelFailureKind`、attempt 和重试决定，不携带 Provider 原始消息。最终 Run 使用
   `ModelExecutionFailed` 稳定错误码和安全摘要，现有客户端仍可按普通 Run 失败处理。
@@ -355,3 +357,31 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
   M4 正式 Client 消费独立 `/node` 导出（共享包自身 tsc 生成的 ESM 与声明）；根 TS 导出仍供 Desktop 使用。包构建不得引用 Client 私有文件。随包分发仍归 M6。
 - HTTP 每次发送 x-ez-client-version 与 x-ez-min-compatible-version；Desktop／Web PTY Open
   新增可选 client_compatibility，缺失按兼容错误拒绝。智能终端 Device Gateway 不增加字段。
+
+## v0.26.0 M0 模型目录快照协议
+
+- `ListProviderModels` 的结果由临时在线数组改为 `ProviderModelCatalogSnapshot`：包含 Provider 身份、
+  最后成功模型列表、可空刷新时间、连接是否在刷新后变化，以及稳定诊断。空列表且无时间、无诊断
+  表示从未刷新；`stored_snapshot_invalid` 只表示本地持久快照无法安全恢复，不携带原始 JSON。
+- `RefreshProviderModels` 是独立显式命令，成功结果与 list 使用同一 DTO；协议不暴露分页、原始响应、
+  凭据、SQLite 列或内部错误链。`DiscoveredModel.configuration` 仍是 Runtime 读取时按当前模板计算的
+  展示摘要，不作为目录 JSON 的持久事实。
+- 软件版本为 `0.26.0`。由于既有 `ListProviderModels` 响应形状发生破坏性变化，应用协议最低兼容版本
+  取满足当前变化的最小值 `0.26.0`；共享兼容向量明确拒绝 v0.25.3 Client 与 v0.26.0 Host 的双向混连。
+
+## v0.26.0 M3 Live step 与工具输入安全投影
+
+- `StepCommitted` 继续以 `ConversationOwner + step + generation` 表达可靠正文已经接管某一步；它不
+  携带 Run ID。消费方必须按 owner、generation 和唯一非终态 Run/child 关联，不能按当前 UI 容器猜测。
+- `ToolInputProjection` 是审批、实时事件、Run 快照和工具详情共用的唯一输入投影，包含类型化
+  `ToolInputSnapshot` 以及 `redacted`、`truncated` 标记。文件多路径使用 `Files` 变体；协议不传原始
+  arguments、凭据或未经清洗的 MCP annotations。
+- 本次只扩展内存事件与读取 DTO，不改变 Conversation、Run、Input 或数据库 schema。应用协议最低
+  兼容版本已在 M0 因更早的破坏性变化取 `0.26.0`，数据库最低 Host 仍为 `0.25.3`，不因 M3 机械提升。
+
+## v0.26.0 M6 标题失败诊断增量
+
+- `SessionTitleGenerationFinished.error` 是可选 `RuntimeErrorInfo`；成功和取消为空，失败由 Runtime
+  提供稳定错误码和脱敏消息。旧载荷缺少字段时必须读取为 `None`。
+- 该增量不携带 Provider 原始响应、prompt 或 credential，不进入 Session/Run 持久化；应用协议
+  minimum 已因 M0 的破坏性目录响应固定为 `0.26.0`，不因这一可选字段再次机械提高。

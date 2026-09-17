@@ -58,10 +58,16 @@ export function workspaceForDraftKey(key: NewSessionDraftKey): WorkspaceId | nul
  */
 export class NewSessionDraftStore {
   readonly drafts = observable.map<NewSessionDraftKey, NewSessionDraft>(undefined, { deep: false });
+  default_approval_mode: ApprovalMode = "ask";
+  default_model_selection: ModelSelection | null = null;
 
   constructor() {
     makeObservable(this, {
       drafts: observable,
+      default_approval_mode: observable,
+      default_model_selection: observable,
+      applyDefaults: action,
+      discardUnavailableDefaultModel: action,
       open: action,
       updateText: action,
       updateAttachments: action,
@@ -83,10 +89,27 @@ export class NewSessionDraftStore {
     });
   }
 
+  applyDefaults(approval_mode: ApprovalMode, model_selection: ModelSelection | null): void {
+    this.default_approval_mode = approval_mode;
+    this.default_model_selection = cloneModelSelection(model_selection);
+  }
+
+  discardUnavailableDefaultModel(selection: ModelSelection): void {
+    if (!sameModelSelection(this.default_model_selection, selection)) return;
+    this.default_model_selection = null;
+    for (const [key, draft] of this.drafts) {
+      if (!isDraftMeaningful(draft)
+        && draft.materialization_attempt === null
+        && sameModelSelection(draft.model_selection, selection)) {
+        this.drafts.set(key, { ...draft, model_selection: null, reasoning_effort: null });
+      }
+    }
+  }
+
   open(key: NewSessionDraftKey): NewSessionDraft {
     const existing = this.drafts.get(key);
     if (existing) return existing;
-    const created = createDraft(key);
+    const created = createDraft(key, this.default_approval_mode, this.default_model_selection);
     this.drafts.set(key, created);
     return created;
   }
@@ -219,25 +242,33 @@ export function isDraftMeaningful(draft: NewSessionDraft): boolean {
   );
 }
 
-export function isDraftCustomized(draft: NewSessionDraft): boolean {
+export function isDraftCustomized(
+  draft: NewSessionDraft,
+  default_approval_mode: ApprovalMode = "ask",
+  default_model_selection: ModelSelection | null = null,
+): boolean {
   return isDraftMeaningful(draft)
-    || draft.model_selection !== null
+    || !sameModelSelection(draft.model_selection, default_model_selection)
     || draft.reasoning_effort !== null
     || draft.variant !== "build"
-    || draft.approval_mode !== "ask";
+    || draft.approval_mode !== default_approval_mode;
 }
 
-function createDraft(key: NewSessionDraftKey): NewSessionDraft {
+function createDraft(
+  key: NewSessionDraftKey,
+  approval_mode: ApprovalMode,
+  model_selection: ModelSelection | null,
+): NewSessionDraft {
   return {
     key,
     workspace_id: workspaceForDraftKey(key),
     text: "",
     attachments: [],
     quotes: [],
-    model_selection: null,
+    model_selection: cloneModelSelection(model_selection),
     reasoning_effort: null,
     variant: "build",
-    approval_mode: "ask",
+    approval_mode,
     goal_armed: false,
     selected_skill_name: null,
     selected_mcp: null,
@@ -245,4 +276,16 @@ function createDraft(key: NewSessionDraftKey): NewSessionDraft {
     skill_status: "idle",
     materialization_attempt: null,
   };
+}
+
+function sameModelSelection(left: ModelSelection | null, right: ModelSelection | null): boolean {
+  return left === null
+    ? right === null
+    : right !== null
+      && left.provider_instance_id === right.provider_instance_id
+      && left.model_id === right.model_id;
+}
+
+function cloneModelSelection(selection: ModelSelection | null): ModelSelection | null {
+  return selection ? { ...selection } : null;
 }

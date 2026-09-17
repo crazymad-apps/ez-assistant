@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "用法：$0 [运行目录]"
-  echo "优先级：入参 > EZ_ASSISTANT_RUNTIME_HOME > ~/.ez-assistant"
+  echo "优先级：入参 > EZ_ASSISTANT_RUNTIME_HOME > <项目根目录>/.runtime-test"
   exit 0
 fi
 if (( $# > 1 )) || [[ $# == 1 && -z "$1" ]]; then
@@ -11,10 +11,12 @@ if (( $# > 1 )) || [[ $# == 1 && -z "$1" ]]; then
   exit 2
 fi
 
-runtime_home="${1:-${EZ_ASSISTANT_RUNTIME_HOME:-$HOME/.ez-assistant}}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd -- "$script_dir/../.." && pwd)"
+runtime_home="${1:-${EZ_ASSISTANT_RUNTIME_HOME:-$project_root/.runtime-test}}"
 export EZ_ASSISTANT_RUNTIME_HOME
 EZ_ASSISTANT_RUNTIME_HOME="$(node -e 'console.log(require("node:path").resolve(process.argv[1]))' -- "$runtime_home")"
-cd "$(dirname "$0")"
+cd "$script_dir"
 echo "Runtime Home: $EZ_ASSISTANT_RUNTIME_HOME"
 
 # 先完成 Web 嵌入构建，失败时保留正在运行的 Host。
@@ -42,8 +44,15 @@ async function stop() {
   }
   if (!alive()) return;
   const command = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim();
-  const expected = `ez-assistant-runtime serve --runtime-home ${home}`;
-  if (command !== expected && !command.endsWith(`/${expected}`)) {
+  // `launch` 生成 detached serve 进程，手动前台启动则没有该参数。仅接受这两种
+  // 完整命令形态，继续拒绝同名进程、额外参数或指向其他 Runtime Home 的 PID。
+  const expectedCommands = [
+    `ez-assistant-runtime serve --runtime-home ${home}`,
+    `ez-assistant-runtime serve --detached --runtime-home ${home}`,
+  ];
+  const matchesTarget = expectedCommands.some(expected =>
+    command === expected || command.endsWith(`/${expected}`));
+  if (!matchesTarget) {
     throw new Error("登记的 PID 与目标 Runtime Home 不匹配，未停止任何进程。请检查目标目录的运行实例。");
   }
   console.log(`正在停止 Host (${pid})…`);

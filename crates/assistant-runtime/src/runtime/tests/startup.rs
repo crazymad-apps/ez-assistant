@@ -4,6 +4,175 @@ use super::store::FaultInjectingStore;
 use super::*;
 
 #[tokio::test]
+async fn skill_state_preparation_failure_atomically_commits_the_failed_input() {
+    let store = Arc::new(FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    runtime
+        .session_for_test(&session.session_id)
+        .await
+        .lock_state()
+        .expect("state")
+        .queue_paused_by_user = true;
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "skill state must not lose this input".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("accepted input");
+    store.fail_next_skill_state_load();
+    runtime
+        .resume_session(assistant_protocol::ResumeSessionRequest {
+            session_id: session.session_id.clone(),
+        })
+        .await
+        .expect("resume queue");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session_id, &accepted.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    let conversation = runtime
+        .conversation_snapshot(&session.session_id)
+        .await
+        .expect("failed input conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session_id,
+            })
+            .await
+            .expect("session")
+            .session
+            .queued_input_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn session_view_repairs_only_its_terminal_queued_input_once() {
+    let store = Arc::new(FaultInjectingStore::healthy());
+    let first = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let session = first
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    first
+        .session_for_test(&session.session_id)
+        .await
+        .lock_state()
+        .expect("state")
+        .queue_paused_by_user = true;
+    let source = first
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "recover only this input".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("source input");
+    let unrelated = first
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "stay queued".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("unrelated input");
+    drop(first);
+    store.force_terminal_run_with_queued_input(
+        &source.run.run_id,
+        assistant_protocol::RunStatus::Failed,
+        3_000,
+    );
+
+    let restarted = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    for _ in 0..2 {
+        let view = restarted
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: session.session_id.clone(),
+            })
+            .await
+            .expect("prepared session view")
+            .snapshot
+            .value;
+        assert_eq!(view.queue.items.len(), 1);
+    }
+    let persisted = store.load_session_state(&session.session_id).await.unwrap();
+    let source_input = persisted
+        .state
+        .inputs
+        .iter()
+        .find(|input| input.input_id == source.input_id)
+        .expect("source input");
+    assert_eq!(source_input.state, crate::StoredInputState::Committed);
+    assert!(source_input.queued_message.is_none());
+    let unrelated_input = persisted
+        .state
+        .inputs
+        .iter()
+        .find(|input| input.input_id == unrelated.input_id)
+        .expect("unrelated input");
+    assert_eq!(unrelated_input.state, crate::StoredInputState::Queued);
+    assert!(unrelated_input.queued_message.is_some());
+    let conversation = store
+        .load_conversation(&session.session_id)
+        .await
+        .expect("reconciled conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    assert!(matches!(
+        &conversation.messages[0],
+        ConversationMessage::User(message)
+            if message.parts.iter().any(|part| matches!(
+                part,
+                UserPart::Text(text) if text.text == "recover only this input"
+            ))
+    ));
+}
+
+#[tokio::test]
 async fn unavailable_session_skips_settlement_and_cannot_resume_after_restart() {
     // 此 Store 拒绝全部结算；若启动仍尝试结算隔离会话，open 会直接失败。
     let store = Arc::new(FaultInjectingStore::fail_settlement());

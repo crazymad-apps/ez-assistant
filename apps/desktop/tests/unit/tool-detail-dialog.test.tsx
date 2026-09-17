@@ -18,6 +18,26 @@ afterEach(() => {
 });
 
 describe("ToolDetailDialog", () => {
+  it("describes detached shell mode as a conditional completed handoff", () => {
+    render(<ToolDetailDialog detail={detailView({
+      tool_name: "shell",
+      input: {
+        value: {
+          type: "shell",
+          command: "launch-service",
+          working_directory: "/workspace",
+          timeout_ms: 30_000,
+          process_mode: "detached",
+        },
+        redacted: false,
+        truncated: false,
+      },
+    })} error={null} is_loading={false} on_close={vi.fn()} />);
+
+    expect(screen.getByText("完成后交接（detached；交接前超时或取消仍会清理）")).toBeVisible();
+    expect(screen.queryByText("后台进程")).not.toBeInTheDocument();
+  });
+
   it("renders an auxiliary model ID containing provider path separators", () => {
     render(<ToolDetailDialog detail={detailView({
       tool_name: "inspect_images",
@@ -35,7 +55,7 @@ describe("ToolDetailDialog", () => {
     const arguments_json = JSON.stringify({ script: "完整参数".repeat(2000) });
     render(<ToolDetailDialog detail={detailView({
       tool_name: "call_mcp_tool", request_json: null,
-      input: { type: "mcp", identity: { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" }, arguments_json },
+      input: { value: { type: "mcp", identity: { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" }, arguments_json }, redacted: false, truncated: false },
     })} error={null} is_loading={false} on_close={vi.fn()} />);
     expect(screen.getByRole("heading", { name: "Blender (blender) / execute_code" })).toBeVisible();
     expect(screen.getByText(arguments_json)).toHaveTextContent(arguments_json);
@@ -113,7 +133,7 @@ describe("ToolDetailDialog", () => {
         tool_name: "read_image",
         owner,
         message_id: "message-image",
-        input: { type: "file", operation: "read_image", path: "/workspace/reference.png" },
+        input: { value: { type: "file", operation: "read_image", path: "/workspace/reference.png" }, redacted: false, truncated: false },
         files: [{
           resource_ref_id: "tool-image-call-0",
           origin: "session_tool_image",
@@ -150,7 +170,7 @@ describe("ToolDetailDialog", () => {
         tool_name: "read_image",
         owner: { type: "main_session", session_id: "session-image" },
         message_id: "message-image",
-        input: { type: "file", operation: "read_image", path: "/workspace/missing.png" },
+        input: { value: { type: "file", operation: "read_image", path: "/workspace/missing.png" }, redacted: false, truncated: false },
         files: [{
           resource_ref_id: "tool-image-call-0",
           origin: "session_tool_image",
@@ -175,7 +195,7 @@ function detailView(overrides: Partial<ToolDetailView>): ToolDetailView {
   return {
     tool_name: "recall_memory",
     status: "completed",
-    input: { type: "unavailable" },
+    input: { value: { type: "unavailable" }, redacted: false, truncated: false },
     request_json: null,
     result_summary: null,
     result_json: null,

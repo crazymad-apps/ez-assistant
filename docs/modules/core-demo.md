@@ -87,7 +87,8 @@ Builder、Session、Journal、真实工具和 Provider 行为必须留给后续�
   Drop 清理收敛；重复或过期决策返回冲突，不产生第二次工具执行或第二个终态。
 - 审计不保存文件内容或 Shell 输出，只保存 resolved 事实、策略、决策、执行状态、错误分类与
   exit code；实际文件结果和 Shell stdout/stderr 由权威 Journal/Run 投影展示。
-- detached 调用是显式生命周期交接：Run 取消、Session 结束和页面关闭都不会停止已交接进程，
+- detached 调用只有在主 Shell 退出且 stdout/stderr 于 deadline 内 EOF 后才完成显式生命周期交接；
+  交接前超时或取消仍清理进程树。Run 取消、Session 结束和页面关闭都不会停止已交接进程，
   验证者必须另行显式终止。所有真实工具测试和人工验证只使用专用临时 workdir。
 
 ## M6 Memory 与会话冻结

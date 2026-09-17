@@ -94,15 +94,14 @@ impl super::ConfigRegistry {
         Ok(prepared)
     }
 
-    /// 网络仅消费已捕获连接；固定配置存在时普通执行不访问目录，且绝不混入在线字段。
-    /// 无固定记录才在线确认身份；无显式引用的执行捕获当前默认。
+    /// 固定配置优先；无固定记录时只使用 Provider 的最后成功目录快照与内置模板。
+    /// 无显式引用的执行捕获当前默认。普通准备路径绝不访问模型目录网络。
     /// 返回前核验连接／固定值和跟随默认关系，最终接纳仍需调用 ensure_current。
     pub(crate) async fn prepare_model(
         &self,
         snapshot: &super::ConfigSnapshot,
         requested: Option<&ModelSelection>,
         store: &dyn crate::RuntimeStore,
-        factory: &dyn crate::ModelServiceFactory,
     ) -> RuntimeResult<PreparedModel> {
         let active = snapshot
             .active()
@@ -120,23 +119,6 @@ impl super::ConfigRegistry {
                 .ok_or_else(|| invalid("所选服务商已删除，请重新选择模型。"))?;
             (selection, provider)
         };
-        let fetch = || async {
-            let models = factory
-                .discover_models(crate::ModelDiscoveryRequest {
-                    format: provider.connection.discovery_format,
-                    models_path: &provider.connection.models_path,
-                    endpoint: &provider.connection.endpoint,
-                    api_key: provider.api_key.expose(),
-                    connect_timeout: active.transport().connect_timeout(),
-                    request_timeout: active.transport().request_timeout(),
-                })
-                .await
-                .map_err(|_| invalid("获取在线模型列表失败，请重试或编辑已有固定配置。"))?;
-            models
-                .into_iter()
-                .find(|model| model.model_id == selection.model_id)
-                .ok_or_else(|| invalid("本次在线列表中没有所选模型，请重新选择。"))
-        };
         let parameters = match store
             .get_model_fixed_config(selection.clone())
             .await
@@ -144,11 +126,22 @@ impl super::ConfigRegistry {
         {
             Some(fixed) => fixed.parameters,
             None => {
-                let model = fetch().await?;
+                let model = provider
+                    .model_catalog
+                    .as_ref()
+                    .and_then(|catalog| {
+                        catalog
+                            .models
+                            .iter()
+                            .find(|model| model.model_id == selection.model_id)
+                    })
+                    .ok_or_else(|| {
+                        invalid("本地模型目录中没有所选模型，请显式刷新目录或保存固定配置。")
+                    })?;
                 super::model_templates::configuration_detail(
                     &provider.connection,
                     selection.clone(),
-                    model.metadata,
+                    model.metadata.clone(),
                 )
                 .parameters
             }

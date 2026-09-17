@@ -82,13 +82,30 @@ fn provider_and_fixed_configuration_commands_round_trip() {
         ),
         (
             "list_provider_models",
-            RuntimeCommand::ListProviderModels(request),
-            RuntimeCommandResult::ListProviderModels(vec![DiscoveredModel {
-                configuration: None,
-                model_id: selection.model_id.clone(),
-                display_name: None,
-                metadata: parameters.clone(),
-            }]),
+            RuntimeCommand::ListProviderModels(request.clone()),
+            RuntimeCommandResult::ListProviderModels(ProviderModelCatalogSnapshot {
+                provider_instance_id: provider_instance_id.clone(),
+                models: vec![DiscoveredModel {
+                    configuration: None,
+                    model_id: selection.model_id.clone(),
+                    display_name: None,
+                    metadata: parameters.clone(),
+                }],
+                refreshed_at_ms: Some(123),
+                connection_changed: false,
+                diagnostic: None,
+            }),
+        ),
+        (
+            "refresh_provider_models",
+            RuntimeCommand::RefreshProviderModels(request),
+            RuntimeCommandResult::RefreshProviderModels(ProviderModelCatalogSnapshot {
+                provider_instance_id: provider_instance_id.clone(),
+                models: Vec::new(),
+                refreshed_at_ms: None,
+                connection_changed: false,
+                diagnostic: Some(ModelCatalogDiagnosticCode::StoredSnapshotInvalid),
+            }),
         ),
         (
             "get_model_settings",

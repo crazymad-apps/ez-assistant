@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ChildTaskViewSnapshot,
   RuntimeEvent,
   RuntimeEventEnvelope,
   SessionViewSnapshot,
@@ -160,6 +161,7 @@ describe("LiveExecutionStore", () => {
       step: 1,
       call_id: "call-1",
       tool_name: "read_file",
+      input: toolInput(),
     }));
     store.buffer(envelope(4, {
       type: "reasoning_delta",
@@ -257,6 +259,7 @@ describe("LiveExecutionStore", () => {
       run_id: "run-image",
       call_id: "call-read-image",
       tool_name: "read_image",
+      input: toolInput(),
       step: 1,
     }));
 
@@ -276,6 +279,7 @@ describe("LiveExecutionStore", () => {
       run_id: "run-image",
       call_id: "call-next",
       tool_name: "read_file",
+      input: toolInput(),
       step: 2,
     }));
 
@@ -293,6 +297,7 @@ describe("LiveExecutionStore", () => {
             tools: [{
               call_id: "call-read-image",
               tool_name: "read_image",
+              input: toolInput(),
               status: "proposed",
               stdout: "",
               stderr: "",
@@ -310,6 +315,7 @@ describe("LiveExecutionStore", () => {
             tools: [{
               call_id: "call-next",
               tool_name: "read_file",
+              input: toolInput(),
               status: "proposed",
               stdout: "",
               stderr: "",
@@ -342,6 +348,7 @@ describe("LiveExecutionStore", () => {
       step: 1,
       call_id: "call-1",
       tool_name: "read_file",
+      input: toolInput(),
     }));
     store.buffer(envelope(3, {
       type: "tool_proposed",
@@ -350,6 +357,7 @@ describe("LiveExecutionStore", () => {
       step: 1,
       call_id: "call-2",
       tool_name: "search_content",
+      input: toolInput(),
     }));
     store.buffer(envelope(4, {
       type: "step_started",
@@ -365,8 +373,8 @@ describe("LiveExecutionStore", () => {
       type: "tool_group",
       group_id: "live-tools:call-1",
       tools: [
-        { call_id: "call-1", tool_name: "read_file", status: "proposed", stdout: "", stderr: "" },
-        { call_id: "call-2", tool_name: "search_content", status: "proposed", stdout: "", stderr: "" },
+        { call_id: "call-1", tool_name: "read_file", input: toolInput(), status: "proposed", stdout: "", stderr: "" },
+        { call_id: "call-2", tool_name: "search_content", input: toolInput(), status: "proposed", stdout: "", stderr: "" },
       ],
     }]);
     expect(run?.steps[1]?.segments).toEqual([]);
@@ -393,6 +401,7 @@ describe("LiveExecutionStore", () => {
       step: 1,
       call_id: "call-1",
       tool_name: "read_file",
+      input: toolInput(),
     }));
     store.buffer(envelope(3, {
       type: "step_started",
@@ -424,6 +433,7 @@ describe("LiveExecutionStore", () => {
           step: 1,
           call_id: "call-1",
           tool_name: "read_file",
+          input: toolInput(),
           status: "completed",
           stdout: "done",
           stderr: "",
@@ -436,7 +446,7 @@ describe("LiveExecutionStore", () => {
           step: 1,
           segments: [{
             type: "tool_group",
-            tools: [{ call_id: "call-1", tool_name: "read_file", status: "completed", summary: null }],
+            tools: [{ call_id: "call-1", tool_name: "read_file", status: "completed", summary: null, input: toolInput() }],
           }],
         }],
       },
@@ -642,8 +652,177 @@ describe("LiveExecutionStore", () => {
     stale_callback?.(0);
     expect(store.runForSession("session-1")).toBeNull();
   });
+
+  it("seals a committed main step and rejects every late event for that step", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.reconcileSession(activeSessionView(7));
+
+    store.buffer(envelope(1, {
+      type: "text_delta", session_id: "session-1", run_id: "run-1", step: 1,
+      part_id: "text-1", delta: "可靠提交前",
+    }));
+    store.buffer(envelope(2, {
+      type: "step_committed",
+      owner: { type: "main_session", session_id: "session-1" },
+      step: 1,
+      generation: 7,
+    }));
+    store.buffer(envelope(3, {
+      type: "text_delta", session_id: "session-1", run_id: "run-1", step: 1,
+      part_id: "text-1", delta: "迟到内容",
+    }));
+    store.buffer(envelope(4, {
+      type: "tool_proposed", session_id: "session-1", run_id: "run-1", step: 1,
+      call_id: "late-tool", tool_name: "read_file", input: toolInput(),
+    }));
+    const callback = frame as FrameRequestCallback | null;
+    callback?.(0);
+
+    expect(store.runForSession("session-1")?.steps).toEqual([]);
+  });
+
+  it("invalidates a main live tail when StepCommitted generation cannot match", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.reconcileSession(activeSessionView(3));
+    store.buffer(envelope(1, {
+      type: "step_committed",
+      owner: { type: "main_session", session_id: "session-1" },
+      step: 1,
+      generation: 2,
+    }));
+
+    expect(store.runForSession("session-1")).toBeNull();
+  });
+
+  it("rejects late step events after a run becomes terminal", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.buffer(envelope(1, {
+      type: "run_finished",
+      session_id: "session-1",
+      run_id: "run-1",
+      status: "completed",
+      error: null,
+    }));
+    store.buffer(envelope(2, {
+      type: "text_delta",
+      session_id: "session-1",
+      run_id: "run-1",
+      step: 1,
+      part_id: "late-text",
+      delta: "迟到内容",
+    }));
+    const callback = frame as FrameRequestCallback | null;
+    callback?.(0);
+
+    expect(store.runForSession("session-1")?.status).toBe("completed");
+    expect(store.runForSession("session-1")?.steps).toEqual([]);
+  });
+
+  it("seals child steps independently from the parent run", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.reconcileChildTask({
+      task: { task: {
+        child_task_id: "child-1", session_id: "session-1", parent_run_id: "run-1",
+        parent_tool_call_id: "delegate-1", title: "child", status: "running", variant: "build",
+        cancel_requested: false, final_text: "", error: null, created_at_ms: 1,
+        started_at_ms: 1, finished_at_ms: null,
+      } },
+      conversation: {
+        owner: { type: "child_task", session_id: "session-1", child_task_id: "child-1" },
+        generation: 5,
+        items: [],
+      },
+    } as unknown as ChildTaskViewSnapshot);
+    store.buffer(envelope(1, {
+      type: "child_task_event", session_id: "session-1", parent_run_id: "run-1",
+      child_task_id: "child-1", event: { type: "text_delta", step: 1, part_id: "part-1", delta: "before" },
+    }));
+    store.buffer(envelope(2, {
+      type: "step_committed",
+      owner: { type: "child_task", session_id: "session-1", child_task_id: "child-1" },
+      step: 1,
+      generation: 5,
+    }));
+    store.buffer(envelope(3, {
+      type: "child_task_event", session_id: "session-1", parent_run_id: "run-1",
+      child_task_id: "child-1", event: { type: "text_delta", step: 1, part_id: "part-1", delta: "late" },
+    }));
+    const callback = frame as FrameRequestCallback | null;
+    callback?.(0);
+
+    expect(store.runForChildTask("child-1")?.steps).toEqual([]);
+  });
+
+  it("drops pending and live tails synchronously when a stream gap is observed", () => {
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    store.buffer(envelope(1, {
+      type: "text_delta", session_id: "session-1", run_id: "run-1", step: 2,
+      part_id: "part-2", delta: "gap-left",
+    }));
+
+    store.invalidateForGap();
+    const stale_callback = frame as FrameRequestCallback | null;
+    stale_callback?.(0);
+
+    expect(store.runs.size).toBe(0);
+    expect(store.child_runs.size).toBe(0);
+  });
 });
 
 function envelope(sequence: number, event: RuntimeEvent): RuntimeEventEnvelope {
   return { sequence, emitted_at_ms: sequence, event };
+}
+
+function toolInput() {
+  return { value: { type: "unavailable" as const }, redacted: false, truncated: false };
+}
+
+function activeSessionView(generation: number): SessionViewSnapshot {
+  return {
+    session: { session_id: "session-1" },
+    active_run: {
+      run_id: "run-1",
+      session_id: "session-1",
+      status: "running",
+      active_step: 1,
+      reasoning: "",
+      text: "",
+      tools: [],
+    },
+    child_tasks: [],
+    conversation: {
+      owner: { type: "main_session", session_id: "session-1" },
+      generation,
+      items: [],
+    },
+  } as unknown as SessionViewSnapshot;
 }

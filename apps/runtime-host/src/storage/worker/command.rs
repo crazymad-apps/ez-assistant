@@ -24,8 +24,9 @@ use assistant_runtime::{
     StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
     StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
-    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval, WorkspaceUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -46,6 +47,10 @@ pub(super) enum Command {
     },
     PutProvider {
         provider: assistant_runtime::StoredProvider,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ReplaceProviderModelCatalog {
+        replacement: assistant_runtime::ProviderModelCatalogReplacement,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     RemoveProvider {
@@ -298,6 +303,10 @@ pub(super) enum Command {
     SettleRun {
         settlement: Box<StoredRunSettlement>,
         reply: oneshot::Sender<Result<StoredRunSettlementResult, StoreError>>,
+    },
+    ReconcileTerminalRunInput {
+        reconciliation: Box<StoredTerminalRunInputReconciliation>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
     StopGoal {
         stop: GoalStop,

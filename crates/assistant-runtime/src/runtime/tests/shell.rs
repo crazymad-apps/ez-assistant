@@ -436,6 +436,65 @@ impl RunToolFactory for ShellFactory {
 }
 
 #[tokio::test]
+async fn shell_preparation_failure_atomically_commits_the_failed_input() {
+    let runtime = runtime_with_run_tool_factory(empty_model(), Arc::new(ShellFactory::default()));
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    {
+        let controller = runtime
+            .session(&session.session_id)
+            .await
+            .expect("controller");
+        let mut state = controller.lock_state().expect("state");
+        state.agent_shell_kind = Some(ShellKind::GitBash);
+        state.agent_shell_environment = None;
+    }
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "shell failure must preserve this input".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("accepted input");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session_id, &accepted.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    assert_eq!(
+        runtime
+            .conversation_snapshot(&session.session_id)
+            .await
+            .expect("failed input conversation")
+            .messages
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session_id,
+            })
+            .await
+            .expect("session")
+            .session
+            .queued_input_count,
+        0
+    );
+}
+
+#[tokio::test]
 async fn new_sessions_freeze_current_default_and_missing_target_does_not_fall_back() {
     let runtime = runtime_with_run_tool_factory(empty_model(), Arc::new(ShellFactory::default()));
     let settings = runtime.get_agent_shell_settings().await.unwrap();

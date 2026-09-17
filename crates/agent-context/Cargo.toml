@@ -12,9 +12,9 @@ agent-model = { path = "../agent-model" }
 agent-types = { path = "../agent-types" }
 futures-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tokio.workspace = true

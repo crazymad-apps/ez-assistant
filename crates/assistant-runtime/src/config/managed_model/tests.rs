@@ -19,6 +19,8 @@ fn provider(kind: ProviderType, preference: ProviderProtocolPreference) -> Store
             discovery_format: ModelDiscoveryFormat::OpenAi,
         },
         api_key: SecretValue::new("private-test-key".into()),
+        model_catalog: None,
+        model_catalog_diagnostic: None,
     }
 }
 fn selection() -> ModelSelection {

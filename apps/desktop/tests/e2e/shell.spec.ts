@@ -23,7 +23,8 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
     headers: { ...compatibilityHeaders(), Authorization: `Bearer ${runtime_bootstrap.access_token}` },
   });
   expect(retired_demo.status).toBe(404);
-  await page.addInitScript(({ serialized_bootstrap, workspace_directory }) => {
+  const compatibility_headers = compatibilityHeaders();
+  await page.addInitScript(({ serialized_bootstrap, workspace_directory, compatibility_headers }) => {
     let callback_id = 0;
     Object.defineProperty(globalThis, "isTauri", { value: true });
     Object.defineProperty(globalThis, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
@@ -63,7 +64,12 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
             return Promise.resolve({
               left_sidebar_open: true,
               right_sidebar_open: true,
+              left_sidebar_width: 286,
+              right_sidebar_width: 380,
               expanded_workspace_ids: null,
+              close_behavior: "hide_to_tray",
+              default_approval_mode: "ask",
+              last_model_selection: null,
             });
           }
           if (command === "save_desktop_preferences") {
@@ -86,7 +92,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
             body.append("manifest", JSON.stringify(request.manifest));
             const response = await fetch(`${runtime.base_url}/session-materializations`, {
               method: "POST",
-              headers: { ...compatibilityHeaders(), Authorization: `Bearer ${runtime.access_token}` },
+              headers: { ...compatibility_headers, Authorization: `Bearer ${runtime.access_token}` },
               body,
             });
             const payload = await response.json() as { readonly error?: { readonly message?: string } };
@@ -99,7 +105,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
         },
       },
     });
-  }, { serialized_bootstrap: bootstrap, workspace_directory: new_workspace });
+  }, { serialized_bootstrap: bootstrap, workspace_directory: new_workspace, compatibility_headers });
 
   await page.goto("/");
   await expect(page).toHaveTitle("EZ Assistant");
@@ -182,7 +188,12 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   const source_composer = page.getByRole("textbox", { name: "输入消息" });
   await selectMcpFixture(page);
   await source_composer.fill("SOURCE_CASE");
+  const materialization_response = page.waitForResponse((response) =>
+    response.url().endsWith("/session-materializations") && response.request().method() === "POST"
+  );
   await source_composer.press("Enter");
+  const materialized = await materialization_response;
+  expect(materialized.ok(), await materialized.text()).toBe(true);
   await expect(source_composer).toHaveValue("");
   await expect(page.getByTitle("SOURCE_CASE")).toBeVisible();
   await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
@@ -418,7 +429,7 @@ async function expectProviderConnectionForm(page: Page): Promise<void> {
   const provider = settings.getByRole("button", { name: "服务商类型" });
   await provider.click();
   const provider_options = page.getByRole("listbox", { name: "服务商类型" });
-  await expect(provider_options.getByRole("option")).toHaveCount(7);
+  await expect(provider_options.getByRole("option")).toHaveCount(8);
   await expect(provider_options.getByRole("option", { name: "Kimi / Moonshot" })).toBeVisible();
   const trigger_width = await provider.evaluate((element) => element.getBoundingClientRect().width);
   const popup_width = await provider_options.evaluate((element) => element.getBoundingClientRect().width);

@@ -7,7 +7,7 @@ use agent_sdk::Agent;
 use agent_tools::ToolError;
 use agent_types::{ConversationMessage, ConversationSnapshot, ToolCallId};
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, ChildTaskEvent, ChildTaskId, ChildTaskSnapshot, ChildTaskStatus,
+    AgentVariant, ChildTaskEvent, ChildTaskId, ChildTaskSnapshot, ChildTaskStatus,
     RuntimeErrorCode, RuntimeErrorInfo, RuntimeEvent,
 };
 use futures_util::StreamExt;
@@ -46,7 +46,6 @@ pub(crate) struct ParentDelegationController {
     session: Arc<SessionController>,
     parent_run_id: assistant_protocol::RunId,
     variant: AgentVariant,
-    approval_mode: ApprovalMode,
     child_agent: Arc<Agent>,
     child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     store: Arc<dyn RuntimeStore>,
@@ -69,7 +68,6 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) session: Arc<SessionController>,
     pub(crate) parent_run_id: assistant_protocol::RunId,
     pub(crate) variant: AgentVariant,
-    pub(crate) approval_mode: ApprovalMode,
     pub(crate) child_agent: Arc<Agent>,
     pub(crate) child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     pub(crate) store: Arc<dyn RuntimeStore>,
@@ -116,7 +114,6 @@ impl ParentDelegationController {
             session: resources.session,
             parent_run_id: resources.parent_run_id,
             variant: resources.variant,
-            approval_mode: resources.approval_mode,
             child_agent: resources.child_agent,
             child_compactor: resources.child_compactor,
             store: resources.store,
@@ -330,8 +327,8 @@ impl ParentDelegationController {
             RuntimeToolAuthorizer::new(
                 RunAuthorizationScope {
                     variant: self.variant,
-                    approval_mode: self.approval_mode,
                 },
+                self.session.clone(),
                 self.session.permission_scopes(),
                 self.permission_coordinator.clone(),
                 self.infrastructure_policies.clone(),
@@ -342,7 +339,6 @@ impl ParentDelegationController {
                     run_id: self.parent_run_id.clone(),
                     child_task_id: Some(child_task_id.clone()),
                     variant: self.variant,
-                    approval_mode: self.approval_mode,
                     workspace_id: self.session.environment().workspace_id.clone(),
                     cancellation: child_token.clone(),
                     events: self.events.clone(),
@@ -399,9 +395,10 @@ impl ParentDelegationController {
             let event_session_id = stored.session_id.clone();
             let event_parent_run_id = stored.parent_run_id.clone();
             let event_child_task_id = stored.child_task_id.clone();
+            let event_mcp_registry = self.mcp_registry.clone();
             let event_drain = tokio::spawn(async move {
                 while let Some(event) = events.next().await {
-                    if let Some(event) = super::events::project(event) {
+                    if let Some(event) = super::events::project(event, &event_mcp_registry) {
                         let _ = event_sender.send(RuntimeEvent::ChildTaskEvent {
                             session_id: event_session_id.clone(),
                             parent_run_id: event_parent_run_id.clone(),

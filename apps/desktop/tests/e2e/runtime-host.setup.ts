@@ -68,6 +68,9 @@ server_names = []
       connection: { display_name: "离线测试服务商", provider_type: "local", endpoint: `${provider.endpoint}/v1`, protocol_preference: "chat_completions", models_path: "/v1/models", discovery_format: "openai" },
       credential: { mode: "replace", value: "e2e-placeholder-not-a-real-secret" },
     }) as { provider_instance_id: string };
+    await runtimeCommand(discovery, "refresh_provider_models", {
+      provider_instance_id: provider_summary.provider_instance_id,
+    });
     for (const model_id of ["offline-model", "alternate-offline-model"]) {
       await runtimeCommand(discovery, "save_model_fixed_config", {
         selection: { provider_instance_id: provider_summary.provider_instance_id, model_id },

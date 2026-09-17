@@ -127,7 +127,7 @@
   color: var(--ez-text-secondary);
   background: transparent;
 
-  &:hover:not(:disabled) { color: var(--ez-text); background: var(--ez-surface-muted); }
+  &:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--ez-text); background: var(--ez-surface-muted); }
 }
 
 .hosting_trigger {

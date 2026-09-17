@@ -342,20 +342,19 @@ fn specification(
         }
         (
             ProviderType::Deepseek,
-            "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp",
+            "deepseek-flash"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-flash-vision-exp"
+            | "deepseek-v4-pro",
         ) => {
-            // 官方集成示例提供明确整数；作为可编辑运行预填，不冒充实测硬上限。
-            let document = if model == "deepseek-v4-flash-vision-exp" {
-                spec.context_window_tokens = known(1_048_576);
-                // 中文规格表明确三型号共用 384K；沿用官方 Pi 示例的运行预算整数。
-                spec.max_output_tokens = known(384_000);
-                spec.image_input = Supported;
-                "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+            // 2026-09-10 起 deepseek-flash 指向 V4.1 Flash；两个旧 Flash 名称只是临时兼容别名，
+            // 均路由到同一原生多模态模型。官方规格表给出 1M 上下文和 384K 最大输出。
+            spec.context_window_tokens = known(1_000_000);
+            spec.max_output_tokens = known(384_000);
+            spec.image_input = if model == "deepseek-v4-pro" {
+                Unsupported
             } else {
-                spec.context_window_tokens = known(1_000_000);
-                spec.max_output_tokens = known(384_000);
-                spec.image_input = Unsupported;
-                "https://api-docs.deepseek.com/quick_start/agent_integrations/pi_mono/"
+                Supported
             };
             spec.tool_calls = Supported;
             spec.reasoning = Supported;
@@ -369,7 +368,10 @@ fn specification(
                 .into(),
             );
             spec.default_reasoning_effort = Some(High);
-            (document, "2026-09-09")
+            (
+                "https://api-docs.deepseek.com/quick_start/pricing/",
+                "2026-09-17",
+            )
         }
         (ProviderType::Zhipu, "glm-5.3" | "glm-5.3-flash") => {
             spec.context_window_tokens = known(1_000_000);
@@ -413,4 +415,49 @@ fn specification(
         spec.tool_image_projection = ModelToolImageProjection::FollowUpUserMessage;
     }
     (spec, Some(document), Some(checked_on))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_flash_and_legacy_aliases_share_the_v4_1_multimodal_template() {
+        for model in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ] {
+            let (parameters, document, checked_on) = specification(ProviderType::Deepseek, model);
+            assert_eq!(parameters.context_window_tokens, known(1_000_000));
+            assert_eq!(parameters.max_output_tokens, known(384_000));
+            assert_eq!(parameters.streaming, ModelFeatureSupport::Supported);
+            assert_eq!(parameters.image_input, ModelFeatureSupport::Supported);
+            assert_eq!(parameters.tool_calls, ModelFeatureSupport::Supported);
+            assert_eq!(parameters.tool_choice.auto, ModelFeatureSupport::Supported);
+            assert_eq!(
+                document,
+                Some("https://api-docs.deepseek.com/quick_start/pricing/")
+            );
+            assert_eq!(checked_on, Some("2026-09-17"));
+        }
+    }
+
+    #[test]
+    fn gpt_6_astra_template_matches_the_current_official_specification() {
+        let (parameters, document, _) = specification(ProviderType::Openai, "gpt-6-astra");
+        assert_eq!(parameters.context_window_tokens, known(1_050_000));
+        assert_eq!(parameters.max_output_tokens, known(128_000));
+        assert_eq!(parameters.reasoning_mode, ModelReasoningMode::Always);
+        assert_eq!(
+            parameters.default_reasoning_effort,
+            Some(ReasoningEffortKey::Medium)
+        );
+        assert_eq!(parameters.image_input, ModelFeatureSupport::Supported);
+        assert_eq!(parameters.tool_calls, ModelFeatureSupport::Supported);
+        assert_eq!(
+            document,
+            Some("https://developers.openai.com/api/docs/models/gpt-6-astra")
+        );
+    }
 }

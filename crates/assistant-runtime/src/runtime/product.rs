@@ -38,6 +38,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use super::AssistantRuntime;
+use super::tool_input_projection::{project_json, project_tool_input};
 use crate::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
     ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding,
@@ -275,7 +276,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<GetSessionViewResult> {
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
-            let session = self.session(&request.session_id).await?;
+            let session = self.prepared_session(&request.session_id).await?;
             session
                 .ensure_conversation_loaded(self.store.as_ref())
                 .await?;
@@ -339,7 +340,11 @@ impl AssistantRuntime {
             let (composer_capabilities, context_window) = self
                 .composer_capabilities(summary.model_selection.as_ref())
                 .await?;
-            let usage = project_usage(&stored_usage, context_window);
+            let usage = project_usage(
+                &stored_usage,
+                context_window,
+                agent_context::context_token_usage(&conversation_snapshot).total_tokens(),
+            );
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let workspace = self.session_workspace_snapshot(&session)?;
             let (work_plan, goal, active_skills, agent_shell_kind) = {
@@ -1341,12 +1346,7 @@ impl AssistantRuntime {
         let snapshot = self.config_registry.snapshot()?;
         let prepared = match self
             .config_registry
-            .prepare_model(
-                &snapshot,
-                model_selection,
-                self.store.as_ref(),
-                self.model_factory.as_ref(),
-            )
+            .prepare_model(&snapshot, model_selection, self.store.as_ref())
             .await
         {
             Ok(prepared) => prepared,
@@ -2041,9 +2041,16 @@ fn project_tool_detail(
     });
     let summary = result.map(tool_result_summary);
     let mcp_identity = project_mcp_identity(call.name.as_str(), &call.arguments, mcp_identities);
-    let input = project_tool_input(call.name.as_str(), &call.arguments, mcp_identity.as_ref());
-    let files = project_tool_files(&call.id, &input, result, workspace_resources_available)?;
-    let (request_json, request_truncated) = formatted_json(&call.arguments);
+    let mut input = project_tool_input(call.name.as_str(), &call.arguments, mcp_identity.as_ref());
+    let files = project_tool_files(
+        &call.id,
+        &input.value,
+        result,
+        workspace_resources_available,
+    )?;
+    let (request_json, request_redacted, request_truncated) = project_json(&call.arguments);
+    input.redacted |= request_redacted;
+    input.truncated |= request_truncated;
     let (result_json, result_truncated) =
         result
             .and_then(tool_result_json)
@@ -2051,6 +2058,7 @@ fn project_tool_detail(
                 let (formatted, truncated) = formatted_json(&value);
                 (Some(formatted), truncated)
             });
+    let output_truncated = input.truncated || result_truncated;
     Ok(ToolDetailSnapshot {
         owner,
         message_id: message_id.clone(),
@@ -2069,7 +2077,7 @@ fn project_tool_detail(
         stderr: None,
         error: None,
         files,
-        output_truncated: request_truncated || result_truncated,
+        output_truncated,
         historical_fields_missing: result.is_none(),
     })
 }
@@ -2098,7 +2106,7 @@ fn project_conversation_file_references(
             let input = project_tool_input(call.name.as_str(), &call.arguments, None);
             let files = project_tool_files(
                 &call.id,
-                &input,
+                &input.value,
                 results.get(call.id.as_str()).copied(),
                 true,
             )?;
@@ -2239,74 +2247,6 @@ fn escape_inline_code(value: &str) -> String {
     value.replace('`', "\\`")
 }
 
-fn project_tool_input(
-    name: &str,
-    arguments: &serde_json::Value,
-    mcp_identity: Option<&McpToolIdentity>,
-) -> ToolInputSnapshot {
-    if let Some(identity) = mcp_identity {
-        return ToolInputSnapshot::Mcp {
-            identity: identity.clone(),
-            arguments_json: arguments
-                .get("arguments")
-                .filter(|value| value.is_object())
-                .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
-        };
-    }
-    if name == "inspect_images" {
-        return ToolInputSnapshot::ImageInspection {
-            image_paths: arguments
-                .get("image_paths")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect(),
-            goal: string_field(arguments, "goal"),
-            background: arguments
-                .get("background")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        };
-    }
-    if name == "delegate_task" {
-        return ToolInputSnapshot::Delegation {
-            title: arguments
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            task_summary: arguments
-                .get("task")
-                .or_else(|| arguments.get("task_summary"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        };
-    }
-    if name.contains("shell") {
-        return ToolInputSnapshot::Shell {
-            command: string_field(arguments, "command"),
-            working_directory: string_field(arguments, "working_directory"),
-            timeout_ms: arguments
-                .get("timeout_ms")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default(),
-            process_mode: string_field(arguments, "process_mode"),
-        };
-    }
-    if let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) {
-        return ToolInputSnapshot::File {
-            operation: name.to_owned(),
-            path: path.to_owned(),
-        };
-    }
-    ToolInputSnapshot::General {
-        summary: truncate_chars(&arguments.to_string(), TOOL_SUMMARY_CHARS),
-    }
-}
-
 fn project_mcp_identity(
     tool_name: &str,
     arguments: &serde_json::Value,
@@ -2351,6 +2291,7 @@ fn project_image_inspection_detail(
 fn project_usage(
     stored: &crate::StoredSessionUsage,
     context_window: Option<u64>,
+    projected_context_tokens: Option<u64>,
 ) -> SessionUsageSnapshot {
     let previous = stored.latest.as_ref();
     let accumulated = (stored.request_count > 0).then_some(UsageTotals {
@@ -2365,19 +2306,21 @@ fn project_usage(
         && stored.cached_request_count == stored.request_count)
         .then(|| ratio_basis_points(stored.cached_input_tokens, stored.input_tokens))
         .flatten();
-    let context = previous.zip(context_window).map(|(usage, window_tokens)| {
-        let used_tokens = usage.input_tokens;
-        let basis_points = used_tokens
-            .saturating_mul(10_000)
-            .checked_div(window_tokens.max(1))
-            .unwrap_or_default()
-            .min(10_000);
-        assistant_protocol::ContextUsageSnapshot {
-            used_tokens,
-            window_tokens,
-            usage_basis_points: u16::try_from(basis_points).unwrap_or(10_000),
-        }
-    });
+    let context =
+        projected_context_tokens
+            .zip(context_window)
+            .map(|(used_tokens, window_tokens)| {
+                let basis_points = used_tokens
+                    .saturating_mul(10_000)
+                    .checked_div(window_tokens.max(1))
+                    .unwrap_or_default()
+                    .min(10_000);
+                assistant_protocol::ContextUsageSnapshot {
+                    used_tokens,
+                    window_tokens,
+                    usage_basis_points: u16::try_from(basis_points).unwrap_or(10_000),
+                }
+            });
     SessionUsageSnapshot {
         accumulated,
         previous_turn: previous.map(usage_totals),
@@ -2682,14 +2625,6 @@ fn truncate_chars(value: &str, max: usize) -> String {
     } else {
         truncated
     }
-}
-
-fn string_field(value: &serde_json::Value, field: &str) -> String {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn protocol_message_id(value: &str) -> RuntimeResult<MessageId> {

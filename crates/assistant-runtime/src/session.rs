@@ -607,6 +607,11 @@ impl SessionController {
         Ok(self.lock_state()?.model_selection.clone())
     }
 
+    /// 每次工具授权都通过这个短锁读取 Session 当前模式；Run 中的副本只作接纳时审计。
+    pub(crate) fn current_approval_mode(&self) -> RuntimeResult<ApprovalMode> {
+        Ok(self.lock_state()?.approval_mode)
+    }
+
     pub(crate) fn current_system_prompt(&self) -> RuntimeResult<SystemPromptSnapshot> {
         Ok(self.system_prompt.clone())
     }

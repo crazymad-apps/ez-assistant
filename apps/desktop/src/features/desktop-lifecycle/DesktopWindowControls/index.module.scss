@@ -39,17 +39,14 @@
 }
 
 .restore_icon {
-  position: relative;
-  width: 10px;
-  height: 10px;
-  border: 1px solid currentColor;
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1;
 
-  &::before {
-    position: absolute;
-    width: 8px;
-    height: 8px;
-    border: 1px solid currentColor;
-    content: "";
-    inset: -4px auto auto 2px;
-  }
+  > * { vector-effect: non-scaling-stroke; }
 }

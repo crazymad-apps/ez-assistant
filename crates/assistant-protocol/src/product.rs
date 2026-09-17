@@ -411,8 +411,17 @@ pub struct ToolEventSnapshot {
     pub mcp_identity: Option<crate::McpToolIdentity>,
     pub status: ToolActivityStatus,
     pub summary: Option<String>,
-    /// 经过脱敏和结构化的输入；实时事件不携带，以快照为准。
-    pub input: ToolInputSnapshot,
+    /// 经过 Runtime 脱敏、限流和结构化的输入。
+    pub input: ToolInputProjection,
+}
+
+/// Runtime 唯一安全边界生成的工具输入投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ToolInputProjection {
+    pub value: ToolInputSnapshot,
+    pub redacted: bool,
+    pub truncated: bool,
 }
 
 /// 工具详情中经过脱敏和结构化的输入。
@@ -430,6 +439,10 @@ pub enum ToolInputSnapshot {
     File {
         operation: String,
         path: String,
+    },
+    Files {
+        operation: String,
+        paths: Vec<String>,
     },
     Shell {
         command: String,
@@ -551,8 +564,8 @@ pub struct ToolDetailSnapshot {
     #[ts(optional)]
     pub mcp_identity: Option<crate::McpToolIdentity>,
     pub status: ToolActivityStatus,
-    pub input: ToolInputSnapshot,
-    /// 有界、格式化后的完整请求 JSON；用于详情代码块，不替代结构化输入投影。
+    pub input: ToolInputProjection,
+    /// 经过同一安全边界脱敏和限流的请求 JSON；用于详情代码块，不替代结构化输入投影。
     pub request_json: Option<String>,
     pub result_summary: Option<String>,
     /// 有界、格式化后的完整结果 JSON；纯文本结果保持为空。

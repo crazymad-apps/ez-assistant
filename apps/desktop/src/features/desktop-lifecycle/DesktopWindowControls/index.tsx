@@ -35,7 +35,7 @@ export function DesktopWindowControls() {
           onClick={() => void toggleMaximizeDesktopWindow().then(setMaximized)}
           type="button"
         >
-          <span className={maximized ? styles.restore_icon : styles.maximize_icon} aria-hidden="true" />
+          {maximized ? <RestoreWindowGlyph /> : <span className={styles.maximize_icon} aria-hidden="true" />}
         </button>
       </Tooltip>
       <Tooltip content="关闭">
@@ -50,4 +50,17 @@ export function DesktopWindowControls() {
       </Tooltip>
     </div>
   );
+}
+
+/** 标题栏还原态只绘制后窗外露边缘，避免完整后框透过前窗形成第三层内线。 */
+function RestoreWindowGlyph() {
+  return <svg
+    aria-hidden="true"
+    className={styles.restore_icon}
+    data-window-glyph="restore"
+    viewBox="0 0 12 12"
+  >
+    <path d="M3.5 2.5V1.5H10.5V8.5H9.5" />
+    <rect height="7" width="7" x="1.5" y="3.5" />
+  </svg>;
 }

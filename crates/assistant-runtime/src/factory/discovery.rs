@@ -1,4 +1,4 @@
-//! Host 在线发现契约与内部参数值；在线结果仅供当前视图或执行准备使用，不参与持久化。
+//! Host 在线发现契约与内部参数值；只有 Runtime 显式刷新入口会把标准化结果交给 Store 持久化。
 
 use std::{error::Error, fmt, future::Future, pin::Pin, time::Duration};
 

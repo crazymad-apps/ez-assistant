@@ -158,7 +158,8 @@ pub use product::{
     SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionUsageSnapshot,
     SessionViewSnapshot, SessionWorkspaceSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
     ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    ToolInputProjection, ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot,
+    WorkPlanSnapshot,
 };
 pub use resource::{
     HostFileEntry, HostFileRequest, ListHostFilesRequest, ListHostFilesResult,
@@ -193,11 +194,12 @@ pub use user_terminal::{
 
 pub use model_management::{
     CreateProviderRequest, DiscoveredModel, GetModelConfigurationRequest, GetModelSettingsRequest,
-    ListFixedModelConfigsRequest, ListProvidersRequest, ModelConfigOrigin,
-    ModelConfigurationDetail, ModelConfigurationSource, ModelConfigurationSummary,
-    ModelDiscoveryFormat, ModelFeatureSupport, ModelFixedConfig, ModelParameters,
-    ModelReasoningMode, ModelSelection, ModelSettings, ModelTokenLimit, ModelToolChoiceSupport,
-    ModelToolImageProjection, ProviderConnection, ProviderCredentialChange,
-    ProviderProtocolPreference, ProviderRequest, ProviderSessionUsage, ProviderSummary,
-    ProviderType, ProviderUsage, SaveModelFixedConfigRequest, UpdateProviderRequest,
+    ListFixedModelConfigsRequest, ListProvidersRequest, ModelCatalogDiagnosticCode,
+    ModelConfigOrigin, ModelConfigurationDetail, ModelConfigurationSource,
+    ModelConfigurationSummary, ModelDiscoveryFormat, ModelFeatureSupport, ModelFixedConfig,
+    ModelParameters, ModelReasoningMode, ModelSelection, ModelSettings, ModelTokenLimit,
+    ModelToolChoiceSupport, ModelToolImageProjection, ProviderConnection, ProviderCredentialChange,
+    ProviderModelCatalogSnapshot, ProviderProtocolPreference, ProviderRequest,
+    ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
+    SaveModelFixedConfigRequest, UpdateProviderRequest,
 };

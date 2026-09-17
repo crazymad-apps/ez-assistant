@@ -36,11 +36,15 @@
 
 - Core、Harness 和未来 Runtime 不得在本 crate 外重复窗口比例、历史切分或 replacement
   校验逻辑。
-- usage 缺失时返回明确判断结果，不在业务代码中回退到裸算或隐藏 TokenEstimator。
+- usage 缺失时返回明确判断结果，不在业务代码中回退到整段历史裸算或隐藏 Tokenizer。
   独立输入限制同样不代表可精确预估首次请求或新增文本、图片、工具结果；这类实际 Token 校验仍由
   Provider 执行。禁止为本地预检静默截断内容；窗口判断不是新的 Token 计数服务。
-- 窗口判断在最新 Provider `total_tokens` 上额外计入当前 Conversation 中 ProviderState payload 的
-  保守字节预算；该预算用于避免本地不透明续传包绕过窗口限制，不把 payload 当 reasoning 正文。
+- 窗口判断以最新 Provider `total_tokens` 为权威基数，只对该响应之后、尚未得到 Provider usage 的
+  User/Tool 文本做显式轻量增量估算；ASCII 按 4 字符/token、非 ASCII 按 1 字符/token，并计入固定
+  消息/Part 开销。ProviderState 已包含在产生它的响应 `total_tokens` 中，不得再按密文字节数重复计费。
+  `ContextTokenUsage` 分开保存 `completed_tokens` 终态和 `pending_tokens` 临时估算，合计值供 Runtime
+  与 Evaluator 共用；新完整响应替换基数并清除已计量的临时增量，即使真实用量比旧估算低也接受。
+  Evaluator 不联网；图片等本地无法可靠计量的内容由既有 Provider Overflow 兜底。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。
 - `RollingSummarySameModel` 只调用一次 `CompactionInput` 中的当前 ModelService；
   请求原样保留正常 Agent 的完整冻结 System Prompt，并由 Strategy 内部在

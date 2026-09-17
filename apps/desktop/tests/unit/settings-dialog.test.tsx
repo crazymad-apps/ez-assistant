@@ -246,12 +246,21 @@ describe("SettingsDialog model management", () => {
     const store = settingsStore();
     vi.mocked(nativeCore.isTauri).mockReturnValue(true);
     store.settings.page = "runtime";
+    store.settings.agent_shell_settings = {
+      default_agent_shell: "posix_sh",
+      catalog: [{ kind: "posix_sh", available: true, reason: null }],
+    };
+    vi.spyOn(store.settings, "loadAgentShellSettings").mockResolvedValue();
     renderDialog(store);
     const navigation = screen.getByRole("navigation", { name: "设置页面" });
     expect(within(navigation).getByRole("button", { name: "Runtime" })).toHaveAttribute("aria-current", "page");
     expect(within(navigation).queryByRole("button", { name: "Host 访问" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "当前连接" })).toHaveTextContent("这台电脑");
     expect(screen.queryByRole("button", { name: "停止本机 Runtime" })).not.toBeInTheDocument();
+    const shell_setting = screen.getByRole("region", { name: "默认 Agent Shell" });
+    expect(within(shell_setting).getByRole("button", { name: "默认 Agent Shell" })).toHaveTextContent("/bin/sh");
+    expect(within(shell_setting).queryByText("当前平台使用系统默认 Shell")).not.toBeInTheDocument();
+    expect(shell_setting.children).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: /^状态与诊断/ }));
     const diagnostic_heading = screen.getByRole("heading", { name: "诊断信息" });
     expect(diagnostic_heading.parentElement).toHaveTextContent(

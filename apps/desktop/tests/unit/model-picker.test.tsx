@@ -9,9 +9,13 @@ import type { ModelSelection } from "@ez-assistant/protocol";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-function Picker(props: Readonly<{ select: (selection: ModelSelection | null) => Promise<boolean> }>) {
+function Picker(props: Readonly<{
+  disabled_reason?: string;
+  select: (selection: ModelSelection | null) => Promise<boolean>;
+}>) {
   const [open, setOpen] = useState(false);
   return <ModelPicker providers={[modelProvider]} selection={modelSelection} title="选择模型" label="fixture"
+    disabled_reason={props.disabled_reason}
     open={open} onOpenChange={setOpen} onSelect={props.select} trigger_class_name="" follow_default />;
 }
 function show(select: (selection: ModelSelection | null) => Promise<boolean>) {
@@ -22,6 +26,26 @@ function show(select: (selection: ModelSelection | null) => Promise<boolean>) {
 }
 
 describe("model picker interaction ownership", () => {
+  it("exposes one trigger-level freeze reason without opening provider rows", async () => {
+    const store = new RootStore();
+    const reason = "存在活动运行或排队输入时不能切换模型";
+    render(<RootStoreProvider store={store}>
+      <Picker disabled_reason={reason} select={vi.fn().mockResolvedValue(true)} />
+    </RootStoreProvider>);
+    const trigger = screen.getByRole("button", { name: "选择模型" });
+
+    expect(trigger).toHaveAttribute("aria-disabled", "true");
+    fireEvent.pointerEnter(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(reason);
+    fireEvent.pointerLeave(trigger);
+    fireEvent.focus(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(reason);
+    expect(trigger).toHaveAttribute("aria-describedby");
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: new RegExp(reason) })).not.toBeInTheDocument();
+  });
+
   it("serializes follow-default selection and does not close a reopened menu on late success", async () => {
     let finish!: (ok: boolean) => void;
     const select = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));

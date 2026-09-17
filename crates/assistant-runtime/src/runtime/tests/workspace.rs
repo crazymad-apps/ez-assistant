@@ -483,6 +483,22 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
         failed.error.expect("structured failure").code,
         RuntimeErrorCode::WorkspaceUnavailable
     );
+    let conversation = runtime
+        .conversation_snapshot(&session.session_id)
+        .await
+        .expect("failed input conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session_id,
+            })
+            .await
+            .expect("session")
+            .session
+            .queued_input_count,
+        0
+    );
 }
 
 struct ObservingRunToolFactory {

@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { ApprovalMode, ModelSelection } from "@ez-assistant/protocol";
 import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 
 export type DesktopPreferences = {
@@ -8,12 +9,14 @@ export type DesktopPreferences = {
   readonly right_sidebar_width: number;
   readonly expanded_workspace_ids: readonly string[] | null;
   readonly close_behavior: DesktopCloseBehavior;
+  readonly default_approval_mode: ApprovalMode;
+  readonly last_model_selection: ModelSelection | null;
   readonly resource_workspace?: ResourceWorkspaceSnapshot | null;
 };
 
 export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 
-const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray" };
+const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray", default_approval_mode: "ask", last_model_selection: null };
 const WEB_KEY = "ez-assistant:view";
 
 export function viewingSnapshot(value: ResourceWorkspaceSnapshot | null | undefined, native: boolean, local = native): ResourceWorkspaceSnapshot | null {
@@ -43,7 +46,16 @@ export async function loadDesktopPreferences(namespace?: string): Promise<Deskto
 export async function saveDesktopPreferences(preferences: DesktopPreferences, namespace?: string): Promise<void> {
   if (isTauri()) { await invoke("save_desktop_preferences", {preferences, namespace: namespace ?? null}); return; }
   // 同步写入 localStorage，pagehide 时无需等待一个异步任务；同源浏览器存储天然按 Host 隔离。
-  const text = JSON.stringify({...preferences, resource_workspace:viewingSnapshot(preferences.resource_workspace,false)});
+  // 普通 Web 不消费或保存 Desktop 设备默认，继续固定 Ask 并跟随 Runtime 全局模型默认。
+  const text = JSON.stringify({
+    left_sidebar_open: preferences.left_sidebar_open,
+    right_sidebar_open: preferences.right_sidebar_open,
+    left_sidebar_width: preferences.left_sidebar_width,
+    right_sidebar_width: preferences.right_sidebar_width,
+    expanded_workspace_ids: preferences.expanded_workspace_ids,
+    close_behavior: preferences.close_behavior,
+    resource_workspace: viewingSnapshot(preferences.resource_workspace, false),
+  });
   if (text.length > 4 * 1024 * 1024) throw new Error("视图记录过大，本次未保存。");
   localStorage.setItem(WEB_KEY, text);
 }

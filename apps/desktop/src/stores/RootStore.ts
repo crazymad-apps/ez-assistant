@@ -121,6 +121,7 @@ export class RootStore {
   #title_notice_timer: number | null = null;
   #runtime_state_disposer: IReactionDisposer;
   #resource_scope_disposer: IReactionDisposer;
+  #provider_defaults_disposer: IReactionDisposer;
 
   constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean }> = {}) {
     this.#runtime = new RuntimeLifecycleCoordinator({
@@ -134,18 +135,26 @@ export class RootStore {
       },
       refresh_device_gateway: () => this.device_gateway.scheduleRefresh(),
       mark_device_gateway_stale: () => this.device_gateway.markStale(),
-      on_title_generation_finished: (session_id, trigger, outcome) => {
+      on_title_generation_finished: (session_id, trigger, outcome, error) => {
         if (trigger !== "manual") return;
         if (this.#title_notice_timer !== null) {
           window.clearTimeout(this.#title_notice_timer);
           this.#title_notice_timer = null;
         }
+        let notice: typeof this.session_notice = null;
+        if (outcome === "succeeded") {
+          notice = { session_id, tone: "success", message: "标题已更新。" };
+        } else if (outcome === "failed") {
+          let message = "标题生成失败。";
+          if (error?.code === "timeout") {
+            message = "标题生成超时，请重试。";
+          } else if (error?.code === "model_execution_failed") {
+            message = "标题模型调用失败，请重试。";
+          }
+          notice = { session_id, tone: "warning", message, action: "retry_title" };
+        }
         runInAction(() => {
-          this.session_notice = outcome === "succeeded"
-            ? { session_id, tone: "success", message: "标题已更新。" }
-            : outcome === "failed"
-              ? { session_id, tone: "warning", message: "标题生成失败。", action: "retry_title" }
-              : null;
+          this.session_notice = notice;
         });
         if (outcome === "succeeded") {
           this.#title_notice_timer = window.setTimeout(() => {
@@ -230,6 +239,10 @@ export class RootStore {
       runtime: this.#runtime,
       state: this,
     });
+    this.#provider_defaults_disposer = reaction(
+      () => this.projection.application?.providers.map((provider) => provider.provider_instance_id).join("\n") ?? null,
+      () => this.#discardUnavailableDefaultModel(),
+    );
     makeObservable(this, {
       pending_session_action: observable,
       pending_workspace_action: observable,
@@ -284,8 +297,10 @@ export class RootStore {
       submitSessionCommand: action,
       exportSession: action,
       setSessionModel: action,
+      setNewSessionDraftModel: action,
       setSessionVariant: action,
       setSessionApprovalMode: action,
+      setNewSessionDraftApprovalMode: action,
       setSessionReasoningEffort: action,
       renameSession: action,
       setSessionPinned: action,
@@ -350,6 +365,10 @@ export class RootStore {
       runInAction(() => {
         this.navigation.applyPreferences(preferences);
         this.desktop_lifecycle.applyPreferences(preferences);
+        this.new_session_drafts.applyDefaults(
+          this.files.desktop ? preferences.default_approval_mode : "ask",
+          this.files.desktop ? preferences.last_model_selection : null,
+        );
       });
       this.#pending_snapshot = this.target_options.restore_resources === false ? null : viewingSnapshot(preferences.resource_workspace, this.files.desktop, this.files.native_host);
       const scope = this.navigation.selected_session_id || this.navigation.selected_draft_key
@@ -377,6 +396,7 @@ export class RootStore {
     } finally {
       this.#pending_snapshot = null;
       this.#preferences_ready = !this.#disposed;
+      this.#discardUnavailableDefaultModel();
     }
   }
 
@@ -880,7 +900,25 @@ export class RootStore {
   }
 
   async setSessionModel(session_id: SessionId, model_selection: ModelSelection | null): Promise<boolean> {
-    return this.#session_management.setSessionModel(session_id, model_selection);
+    const succeeded = await this.#session_management.setSessionModel(session_id, model_selection);
+    if (succeeded && this.files.desktop) {
+      runInAction(() => this.new_session_drafts.applyDefaults(
+        this.new_session_drafts.default_approval_mode,
+        model_selection,
+      ));
+      this.#schedulePreferencesSave();
+    }
+    return succeeded;
+  }
+
+  setNewSessionDraftModel(key: NewSessionDraftKey, model_selection: ModelSelection | null): void {
+    this.new_session_drafts.updateModel(key, model_selection);
+    if (!this.files.desktop) return;
+    this.new_session_drafts.applyDefaults(
+      this.new_session_drafts.default_approval_mode,
+      model_selection,
+    );
+    this.#schedulePreferencesSave();
   }
 
   async setSessionVariant(session_id: SessionId, variant: AgentVariant): Promise<boolean> {
@@ -888,7 +926,25 @@ export class RootStore {
   }
 
   async setSessionApprovalMode(session_id: SessionId, approval_mode: ApprovalMode): Promise<boolean> {
-    return this.#session_management.setSessionApprovalMode(session_id, approval_mode);
+    const succeeded = await this.#session_management.setSessionApprovalMode(session_id, approval_mode);
+    if (succeeded && this.files.desktop) {
+      runInAction(() => this.new_session_drafts.applyDefaults(
+        approval_mode,
+        this.new_session_drafts.default_model_selection,
+      ));
+      this.#schedulePreferencesSave();
+    }
+    return succeeded;
+  }
+
+  setNewSessionDraftApprovalMode(key: NewSessionDraftKey, approval_mode: ApprovalMode): void {
+    this.new_session_drafts.updateApprovalMode(key, approval_mode);
+    if (!this.files.desktop) return;
+    this.new_session_drafts.applyDefaults(
+      approval_mode,
+      this.new_session_drafts.default_model_selection,
+    );
+    this.#schedulePreferencesSave();
   }
 
   async renameSession(session_id: SessionId, title: string): Promise<boolean> {
@@ -1184,6 +1240,7 @@ export class RootStore {
     this.settings.mcp.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
+    this.#provider_defaults_disposer();
     for (const draft of this.new_session_drafts.clear()) {
       void releaseDraftSelections(draft, this.files);
     }
@@ -1218,6 +1275,12 @@ export class RootStore {
         right_sidebar_width: this.navigation.right_sidebar_width,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
         close_behavior: this.desktop_lifecycle.close_behavior,
+        default_approval_mode: this.files.desktop
+          ? this.new_session_drafts.default_approval_mode
+          : "ask" as const,
+        last_model_selection: this.files.desktop
+          ? this.new_session_drafts.default_model_selection
+          : null,
         resource_workspace: viewingSnapshot(this.resource_workspace.captureSnapshot(), this.files.desktop, this.files.native_host),
       };
       if (!this.files.desktop) {
@@ -1237,6 +1300,20 @@ export class RootStore {
       runInAction(() => { this.interaction_error = `桌面状态保存失败：${displayError(failure)}`; });
       throw failure;
     }
+  }
+
+  #discardUnavailableDefaultModel(): void {
+    if (!this.files.desktop || !this.#preferences_ready) return;
+    const application = this.projection.application;
+    const selection = this.new_session_drafts.default_model_selection;
+    if (!application || !selection || application.providers.some(
+      (provider) => provider.provider_instance_id === selection.provider_instance_id,
+    )) return;
+    runInAction(() => {
+      this.new_session_drafts.discardUnavailableDefaultModel(selection);
+      this.interaction_error = "上次使用的模型所属服务商已删除，已改用默认模型。";
+    });
+    this.#schedulePreferencesSave();
   }
 
   async #loadNewSessionDraftSkills(key: NewSessionDraftKey): Promise<void> {

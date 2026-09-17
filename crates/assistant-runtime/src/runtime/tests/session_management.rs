@@ -121,6 +121,80 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
 }
 
 #[tokio::test]
+async fn manual_title_failure_publishes_a_safe_model_diagnostic() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("answer", "answer"))),
+            ModelScript::FailEstablishment(agent_model::ModelError::Provider {
+                message: "sanitized fixture rejection".to_owned(),
+                status: Some(400),
+            }),
+        ],
+    ));
+    let runtime = runtime(model);
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "需要一个可重命名的会话".to_owned(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("input");
+    wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
+
+    let mut events = runtime.subscribe_events();
+    runtime
+        .generate_session_title(GenerateSessionTitleRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("manual title accepted");
+    let (outcome, error) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let RuntimeEvent::SessionTitleGenerationFinished {
+                session_id: event_session_id,
+                outcome,
+                error,
+                ..
+            } = events.recv().await.expect("title event")
+                && event_session_id == session_id
+            {
+                break (outcome, error);
+            }
+        }
+    })
+    .await
+    .expect("title failure event");
+    assert_eq!(
+        outcome,
+        assistant_protocol::SessionTitleGenerationFinishedOutcome::Failed
+    );
+    let error = error.expect("safe title error");
+    assert_eq!(
+        error.code,
+        assistant_protocol::RuntimeErrorCode::ModelExecutionFailed
+    );
+    assert_eq!(
+        error.message,
+        "model execution failed (kind=provider_rejected)"
+    );
+}
+
+#[tokio::test]
 async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),

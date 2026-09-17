@@ -205,9 +205,11 @@ Runtime Host 进程
   上传原子提交和启动恢复。上传只允许 active Session，同一 Session 相同 Blob Hash（同名同内容）返回首次事实。
 - M3 在 Input 持久化前把有序 Attachment ID 整批解析为原始名称与稳定路径，
   并作为独立 `UserPart::FileReferences` 进入 queued JSON 和 Conversation JSONL。
-- Core 在完整 Model Step 结束后报告的 token usage 由 Runtime 投影为只读实时事件；Runtime
-  不重新估算 Provider total，也不为 Demo 增加独立持久字段。事件断线恢复继续以规范
+- Core 在完整 Model Step 后报告的 token usage 由 Runtime 投影为只读实时事件；完整 step 的可靠事实
+  仍随 Assistant Message 持久化，未完成 step 的中间 usage 不进入产品投影。事件断线恢复继续以规范
   Assistant Message 中已持久化的 usage 为准。
+- SessionView 的上下文占用与自动压缩复用 `agent-context` 同一投影：最新 Provider `total_tokens`
+  加尚未计量的 User/Tool 文本增量，不再使用 `input_tokens` 或 ProviderState 密文字节形成第二套口径。
   重复 ID、跨 Session 引用和 unavailable Attachment 在入库前拒绝；输入幂等命中早于附件重新解析。
 - Runtime 为每个 Run 装配模型 attempt observer，并投影脱敏的 attempt/retry 事件。模型失败
   结算区分建流前与建流后，记录稳定分类、实际 attempt/retry 数和是否已有可见输出；Provider
@@ -661,6 +663,15 @@ refresh 沿用已约定机制：插入一条 `user` role 消息，不触发 Run�
 审批 Registry 仅属当前进程，退出后直接丢弃，不恢复轮内执行。旧 Run 查询可返回中断元信息，
 不以正文可恢复为前提；异常正文仍不得进入执行。恢复不得改写冻结系统提示词和工作空间环境。
 
+## v0.26.0 M6 模型模板与标题旁路补充
+
+- OpenAI-compatible 在线目录只有身份字段时，执行参数继续由精确服务商类型与完整模型 ID 模板补齐；
+  模板只填 `Unknown`，不能扩展目录或覆盖固定配置。DeepSeek 原厂的 `deepseek-flash` 与两个临时
+  Flash 兼容别名共享 V4.1 Flash 多模态规格，GPT-6 Astra 保持官方精确规格。
+- 标题旁路有独立 120 秒总时限，不占用 Session 主 Run；模型、协议、总超时和 Store 提交失败必须
+  映射为安全分类并随完成事件返回，不能再把所有失败静默折叠。失败保留当前标题；模型取消使用
+  `cancelled`，成功才提交生成标题。
+
 ## v0.25.1 M0 在线发现契约（部分实现）
 
 - `ModelServiceFactory::discover_models` 是现有宿主替换边界的异步能力；纯推理工厂默认返回
@@ -713,3 +724,53 @@ refresh 沿用已约定机制：插入一条 `user` role 消息，不触发 Run�
 - manual 草稿与首次保存不查在线目录；完整固定记录直接用于选择及执行，在线失败不阻塞它。
 - 删除 manual 与重置 online 共用单记录删除能力，保留引用和历史；重置／删除文案依据持久化来源。
 - 在线目录返回参数摘要（模板参与、是否待补全），由 Runtime 的现有模板及参数校验计算，不修改原始 metadata、不落库；UI 与固定记录合并后用 Tag 展示。
+
+## v0.26.0 M0 Provider 目录后端基线
+
+- `StoredProvider` 是连接、凭据与最后成功 `StoredModelCatalog` 的唯一 owner；目录没有独立 ID、revision、
+  TTL 或后台任务。`RuntimeStore::replace_provider_model_catalog` 以捕获的完整连接与凭据为 CAS 前置条件，
+  只在完整发现和校验成功后整体替换模型、刷新时间与连接变化标记。
+- `list_provider_models` 只读 Provider 内存快照，不调用 `ModelServiceFactory`。显式
+  `refresh_provider_models` 使用固定 5 秒连接、20 秒整次发现预算，在配置门禁外联网，提交前复核
+  Provider `Arc` currentness；网络、解析、存储或并发冲突都保留旧目录。
+- 落库前再次限制最多 10,000 个模型、编码后最多 8 MiB，并拒绝空白／过长／控制字符模型 ID、重复
+  ID 与非法显示名；模板派生的 `configuration` 在持久化前清除，读取投影时重新计算。
+- Provider 类型、endpoint、models_path、发现格式或凭据变化会保留目录并标记
+  `connection_changed`；显示名与推理协议偏好变化不标记。M0 只建立 list/refresh 后端，既有模型详情、
+  首次固定和无固定执行准备中的隐式发现将在 M1 统一切到本地目录，不能提前宣称关键路径已经断网。
+
+## v0.26.0 M2 Run/Input 原子收敛
+
+- `StoredRunSettlement` 在来源 Input 仍为 `queued` 时必须携带其完整原始 `UserMessage`；Store 在同一
+  业务结算中先把该消息作为批次首项提交、将 Input 置为 `committed` 并清空 queued payload，再终结
+  Run。来源 Input 已 committed 的重试沿用原结算，不重复追加用户消息。
+- Runtime 只有在 Store 成功后才按相同顺序更新 Journal、Input 和 Run 内存投影；结算失败将 Session
+  标记为 faulted，并保留 Store 中原 `accepted + queued` 事实供后续恢复，不能连续补写或继续消费队列。
+- `StoredTerminalRunInputReconciliation` 只修复终态 Run 精确关联的 queued Input：追加原用户消息并
+  提交 Input，不改变 Run 终态、不执行模型或工具。Run、Input、Session、message 任一身份不一致均
+  返回冲突；已提交状态重复进入是幂等 no-op。
+- `SessionLoader::load` 保持无修复的纯历史读取；`prepare` 是单 Session 的唯一恢复入口，依次处理
+  Store staged 状态、非终态 Run 中断结算和终态 Run/Input 定向修复，再重新加载并安装权威状态。
+  会话组合视图及删除、归档、清空、换模、历史重入、手动压缩等 idle-sensitive mutation 先走
+  `prepare`；应用级会话列表、标题搜索和单独 Run 元数据查询仍保持只读，不触发批量正文恢复。
+
+## v0.26.0 M3 Live step 与工具输入安全投影
+
+- Runtime 在可靠 Conversation 提交完成的同一有序事件位置发布 `StepCommitted`。Desktop 仅把它
+  作为 live tail 封口信号；可靠消息仍是正文权威，SSE gap 后必须重新读取快照。
+- `runtime::tool_input_projection` 是审批、父/子工具事件、Run 工具活动和历史详情的唯一参数投影器。
+  它先按文件、Shell、委派、图片和 MCP 等工具生成类型化摘要，再对通用 JSON/MCP 递归清洗；敏感键
+  脱敏，深度最多 6、集合最多 50 项、字符串最多 2,000 字符、完整投影最多 16 KiB。
+- 关键文件路径或 Shell 命令发生截断时不创建可批准请求，避免用户基于不完整参数授权。历史详情的
+  request JSON 同样从安全投影生成；工具输出保持既有独立边界。本次没有数据库迁移或持久化回填。
+
+## v0.26.0 M4 Session 审批模式实时授权
+
+- Run 接纳时保存的 `approval_mode` 只作为审计基线，不再是活动授权策略。`RuntimeToolAuthorizer`
+  持有所属 `SessionController`，每个新工具调用在完成显式权限匹配后读取 Session 当前模式；parent
+  和 delegated child 使用同一个 Session 状态。变体、工作空间、Shell 与工具集合仍按原边界冻结。
+- 权限判定顺序保持显式 Deny、Ask、Allow 优先于默认模式；切换模式不追溯释放 pending approval，
+  也不撤销已经授权或执行的调用。Resolver 接收本次判定的有效模式，只用于新建审批快照和审计。
+- `set_session_approval_mode` 在 Session mutation gate 内先提交 Store，再更新内存 state、发布事件并
+  返回成功；state 更新失败时不发布成功事实，并尝试把 Session 标记为 faulted。没有新增协议字段、
+  数据库列、迁移或恢复时的模式回填。

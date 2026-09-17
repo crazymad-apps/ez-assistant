@@ -32,8 +32,9 @@ const result = (revision: string) => ({ type: "get_application_snapshot", payloa
 const owners: RuntimeLifecycleCoordinator[] = [];
 function create() {
   const connection = new ConnectionStore(), projection = new RuntimeProjectionStore(), navigation = new NavigationStore();
-  const coordinator = new RuntimeLifecycleCoordinator({ connection, projection, navigation, live_execution: new LiveExecutionStore(), report_interaction_error: vi.fn(), refresh_device_gateway: vi.fn(), mark_device_gateway_stale: vi.fn(), on_title_generation_finished: vi.fn() });
-  owners.push(coordinator); return { coordinator, connection, projection, navigation };
+  const live_execution = new LiveExecutionStore();
+  const coordinator = new RuntimeLifecycleCoordinator({ connection, projection, navigation, live_execution, report_interaction_error: vi.fn(), refresh_device_gateway: vi.fn(), mark_device_gateway_stale: vi.fn(), on_title_generation_finished: vi.fn() });
+  owners.push(coordinator); return { coordinator, connection, projection, navigation, live_execution };
 }
 beforeEach(() => { vi.clearAllMocks(); transport.command.mockImplementation(async (address: string) => result(address)); transport.refresh.mockImplementation(async (value: RuntimeBootstrap) => value); });
 afterEach(() => { owners.splice(0).forEach((owner) => owner.dispose()); vi.restoreAllMocks(); });
@@ -47,6 +48,17 @@ describe("selected Runtime lifecycle", () => {
     callbacks.onEvent({ sequence: 1, emitted_at_ms: 1, event: { type: "mcp_registry_changed" } });
     await vi.waitFor(() => expect(transport.command.mock.calls.length).toBeGreaterThan(before));
     expect(transport.command.mock.calls.at(-1)![1].type).toBe("get_application_snapshot");
+  });
+
+  it("invalidates live tails synchronously before requesting gap recovery snapshots", async () => {
+    const { coordinator, live_execution } = create();
+    await coordinator.connect(bootstrap("http://a"));
+    const invalidate = vi.spyOn(live_execution, "invalidateForGap");
+    const callbacks = transport.events.mock.calls.at(-1)![1];
+
+    callbacks.onGap();
+
+    expect(invalidate).toHaveBeenCalledOnce();
   });
 
   it("retains an older selected session through reconnect without fetching every summary page", async () => {

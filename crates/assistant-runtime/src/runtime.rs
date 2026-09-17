@@ -28,6 +28,7 @@ mod skills;
 mod tasks;
 mod title;
 mod tool_assembly;
+pub(crate) mod tool_input_projection;
 mod work_plan;
 mod workspace;
 
@@ -397,12 +398,7 @@ impl AssistantRuntime {
         let prepared_model = match model_selection.as_ref() {
             Some(selection) => Some(
                 self.config_registry
-                    .prepare_model(
-                        &config_snapshot,
-                        Some(selection),
-                        self.store.as_ref(),
-                        self.model_factory.as_ref(),
-                    )
+                    .prepare_model(&config_snapshot, Some(selection), self.store.as_ref())
                     .await?,
             ),
             None => None,
@@ -662,7 +658,7 @@ impl AssistantRuntime {
 
     /// 请求取消一个活动 Run；终态 Run 重复取消会原样返回当前快照。
     pub async fn cancel_run(&self, request: CancelRunRequest) -> RuntimeResult<CancelRunResult> {
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
@@ -746,7 +742,7 @@ impl AssistantRuntime {
         &self,
         request: assistant_protocol::InterruptRunRequest,
     ) -> RuntimeResult<assistant_protocol::InterruptRunResult> {
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let revision = {
             let _mutation = session.mutation().await;
             let mut state = session.lock_state()?;
@@ -790,6 +786,13 @@ impl AssistantRuntime {
 
     async fn session(&self, session_id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
         self.session_loader.load(session_id).await
+    }
+
+    async fn prepared_session(
+        &self,
+        session_id: &SessionId,
+    ) -> RuntimeResult<Arc<SessionController>> {
+        self.session_loader.prepare(session_id).await
     }
 
     fn publish(&self, event: RuntimeEvent) {

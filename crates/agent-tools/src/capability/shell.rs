@@ -35,7 +35,7 @@ pub enum ShellProcessMode {
     /// 工具返回前清理仍可管理的进程树。
     #[default]
     Managed,
-    /// 主 Shell 退出且输出管道收敛后，允许后代脱离工具生命周期。
+    /// 主 Shell 退出且 stdout/stderr 在 deadline 内 EOF 后才交接后代；交接前超时或取消仍清理进程树。
     Detached,
 }
 

@@ -108,7 +108,8 @@ pub struct ShellInput {
     pub workdir: Option<String>,
     /// 执行超时（毫秒）。
     pub timeout_ms: Option<NonZeroU64>,
-    /// 进程树生命周期；省略时使用 managed。
+    /// 进程树生命周期；managed 在返回前收敛可管理进程树；detached 仅在主 Shell 退出且 stdout/stderr
+    /// 于 deadline 内 EOF 后交接，交接前超时或取消仍清理进程树。省略时使用 managed。
     pub process_mode: Option<ShellProcessMode>,
 }
 
@@ -160,9 +161,11 @@ impl Tool for ShellExecTool {
         format!(
             "Execute a complete shell command and return stdout and stderr separately, retaining \
              at most {} bytes in total. stdin is closed. process_mode defaults to managed; use \
-             detached only for fire-and-forget commands whose stdio is redirected. Detached \
-             processes are not stopped by later run cancellation or session reset. Use the \
-             dedicated file tools for file operations.",
+             detached only when the main shell can exit and both stdout and stderr can reach EOF \
+             before the deadline. A detached handoff happens only after those conditions are met; \
+             timeout or cancellation before handoff still cleans the process tree. After a \
+             successful handoff, later run cancellation or session reset does not stop descendants, \
+             but handoff does not prove service health. Use the dedicated file tools for file operations.",
             self.config.max_output_bytes
         )
     }
@@ -384,6 +387,22 @@ mod tests {
         assert_eq!(
             definition.input_schema["properties"]["process_mode"]["default"],
             "managed"
+        );
+        let process_mode_description =
+            definition.input_schema["properties"]["process_mode"]["description"]
+                .as_str()
+                .expect("process mode description");
+        assert!(process_mode_description.contains("stdout/stderr"));
+        assert!(process_mode_description.contains("超时或取消仍清理进程树"));
+        assert!(
+            definition
+                .description
+                .contains("only after those conditions are met")
+        );
+        assert!(
+            definition
+                .description
+                .contains("does not prove service health")
         );
 
         let batch = Dispatcher::resolve_batch(

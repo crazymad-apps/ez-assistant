@@ -68,6 +68,7 @@ pub enum ChildTaskEvent {
         step: u32,
         call_id: ToolCallId,
         tool_name: String,
+        input: crate::ToolInputProjection,
     },
     ToolStarted {
         step: u32,
@@ -137,6 +138,9 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         trigger: crate::SessionTitleGenerationTriggerSnapshot,
         outcome: SessionTitleGenerationFinishedOutcome,
+        /// 失败时由 Runtime 分类并脱敏的诊断；旧事件或成功/取消终态为空。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<RuntimeErrorInfo>,
     },
     /// Session 输入队列已经变化；revision 用于拒绝基于旧顺序的 mutation。
     QueueChanged {
@@ -316,8 +320,10 @@ pub enum RuntimeEvent {
         step: u32,
         /// 工具调用的不透明标识。
         call_id: ToolCallId,
-        /// 模型可见工具名；不携带原始参数。
+        /// 模型可见工具名。
         tool_name: String,
+        /// 经过 Runtime 脱敏、限流和结构化的输入。
+        input: crate::ToolInputProjection,
     },
     /// 工具调用已通过授权并开始执行。
     ToolStarted {
@@ -415,6 +421,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn title_finished_event_defaults_the_additive_error_field() {
+        let value = json!({
+            "type": "session_title_generation_finished",
+            "session_id": "session-1",
+            "trigger": "manual",
+            "outcome": "failed"
+        });
+        assert!(matches!(
+            serde_json::from_value::<RuntimeEvent>(value).expect("legacy title event"),
+            RuntimeEvent::SessionTitleGenerationFinished { error: None, .. }
+        ));
+    }
+
     fn session_id() -> SessionId {
         SessionId::new("session-1").expect("session id")
     }
@@ -467,6 +487,13 @@ mod tests {
             approval_mode: crate::ApprovalMode::Ask,
             subject: crate::ToolApprovalSubject::General {
                 tool_name: "echo_text".to_owned(),
+            },
+            input: crate::ToolInputProjection {
+                value: crate::ToolInputSnapshot::General {
+                    summary: "{}".to_owned(),
+                },
+                redacted: false,
+                truncated: false,
             },
             available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
             exact_rule_preview: crate::ToolApprovalSubject::General {
@@ -749,6 +776,13 @@ mod tests {
                     step: 1,
                     call_id: ToolCallId::new("call-1").expect("call id"),
                     tool_name: "echo_text".to_owned(),
+                    input: crate::ToolInputProjection {
+                        value: crate::ToolInputSnapshot::General {
+                            summary: "{}".to_owned(),
+                        },
+                        redacted: false,
+                        truncated: false,
+                    },
                 },
                 "tool_proposed",
             ),

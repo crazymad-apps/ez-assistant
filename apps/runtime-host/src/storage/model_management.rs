@@ -1,11 +1,14 @@
-//! 服务商、全局选择与用户固定参数的 SQLite 业务操作。在线目录从不进入此模块。
-use super::{StorageEngine, StorageResult, internal_error, invalid_data};
+//! 服务商、最后成功目录、全局选择与用户固定参数的 SQLite 业务操作。
+use super::{StorageEngine, StorageResult, conflict, internal_error, invalid_data};
 use assistant_protocol::{
-    ModelFixedConfig, ModelParameters, ModelSelection, ModelSettings, ModelTokenLimit,
-    ProviderConnection, ProviderInstanceId, ProviderSessionUsage, ProviderUsage, SecretValue,
-    SessionId,
+    DiscoveredModel, ModelCatalogDiagnosticCode, ModelFixedConfig, ModelParameters, ModelSelection,
+    ModelSettings, ModelTokenLimit, ProviderConnection, ProviderInstanceId, ProviderSessionUsage,
+    ProviderUsage, SecretValue, SessionId,
 };
-use assistant_runtime::StoredProvider;
+use assistant_runtime::{
+    ProviderModelCatalogReplacement, StoredModelCatalog, StoredProvider,
+    stored_model_catalog_is_valid,
+};
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -18,10 +21,47 @@ const FIXED_COLUMNS: &str = "provider_instance_id, model_id, context_window_toke
 
 impl StorageEngine {
     pub(super) fn load_providers(&self) -> StorageResult<Vec<StoredProvider>> {
-        let mut statement = sql(self.connection.prepare("SELECT provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format FROM providers ORDER BY provider_instance_id"))?;
+        let mut statement = sql(self.connection.prepare("SELECT provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format, model_catalog_json, model_catalog_refreshed_at_ms, model_catalog_connection_changed FROM providers ORDER BY provider_instance_id"))?;
         let mut rows = sql(statement.query([]))?;
         let mut result = Vec::new();
         while let Some(row) = sql(rows.next())? {
+            let catalog_json: Option<String> = sql(row.get(8))?;
+            let refreshed_at_ms: Option<i64> = sql(row.get(9))?;
+            let connection_changed = sql(row.get::<_, i64>(10))? != 0;
+            let (model_catalog, model_catalog_diagnostic) = match (catalog_json, refreshed_at_ms) {
+                (None, None) if !connection_changed => (None, None),
+                (Some(raw), Some(refreshed_at_ms)) => {
+                    match serde_json::from_str::<Vec<DiscoveredModel>>(&raw) {
+                        Ok(models)
+                            if raw.len() <= 8 * 1024 * 1024
+                                && refreshed_at_ms >= 0
+                                && stored_model_catalog_is_valid(&models) =>
+                        {
+                            (
+                                Some(StoredModelCatalog {
+                                    models,
+                                    refreshed_at_ms,
+                                    connection_changed,
+                                }),
+                                None,
+                            )
+                        }
+                        Err(_) => (
+                            None,
+                            Some(ModelCatalogDiagnosticCode::StoredSnapshotInvalid),
+                        ),
+                        Ok(_) => (
+                            None,
+                            Some(ModelCatalogDiagnosticCode::StoredSnapshotInvalid),
+                        ),
+                    }
+                }
+                _ => {
+                    return Err(invalid_data(
+                        "stored provider model catalog is inconsistent",
+                    ));
+                }
+            };
             result.push(StoredProvider {
                 provider_instance_id: identifier(sql(row.get(0))?)?,
                 connection: ProviderConnection {
@@ -33,13 +73,50 @@ impl StorageEngine {
                     discovery_format: enum_read(sql(row.get(7))?)?,
                 },
                 api_key: SecretValue::new(sql(row.get(4))?),
+                model_catalog,
+                model_catalog_diagnostic,
             });
         }
         Ok(result)
     }
     pub(super) fn put_provider(&self, provider: StoredProvider) -> StorageResult<()> {
         let connection = provider.connection;
-        sql(self.connection.execute("INSERT INTO providers(provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(provider_instance_id) DO UPDATE SET display_name=excluded.display_name, provider_type=excluded.provider_type, endpoint=excluded.endpoint, api_key=excluded.api_key, protocol_preference=excluded.protocol_preference, models_path=excluded.models_path, discovery_format=excluded.discovery_format", params![provider.provider_instance_id.as_str(), connection.display_name, enum_write(&connection.provider_type)?, connection.endpoint, provider.api_key.expose(), enum_write(&connection.protocol_preference)?, connection.models_path, enum_write(&connection.discovery_format)?]))?;
+        sql(self.connection.execute("INSERT INTO providers(provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(provider_instance_id) DO UPDATE SET model_catalog_connection_changed=CASE WHEN providers.model_catalog_json IS NOT NULL AND (providers.provider_type!=excluded.provider_type OR providers.endpoint!=excluded.endpoint OR providers.api_key!=excluded.api_key OR providers.models_path!=excluded.models_path OR providers.discovery_format!=excluded.discovery_format) THEN 1 ELSE providers.model_catalog_connection_changed END, display_name=excluded.display_name, provider_type=excluded.provider_type, endpoint=excluded.endpoint, api_key=excluded.api_key, protocol_preference=excluded.protocol_preference, models_path=excluded.models_path, discovery_format=excluded.discovery_format", params![provider.provider_instance_id.as_str(), connection.display_name, enum_write(&connection.provider_type)?, connection.endpoint, provider.api_key.expose(), enum_write(&connection.protocol_preference)?, connection.models_path, enum_write(&connection.discovery_format)?]))?;
+        Ok(())
+    }
+    /// 网络结果只在持久连接仍等于捕获值时落库；失败不会清空旧目录。
+    pub(super) fn replace_provider_model_catalog(
+        &self,
+        replacement: ProviderModelCatalogReplacement,
+    ) -> StorageResult<()> {
+        let raw = serde_json::to_string(&replacement.catalog.models)
+            .map_err(|error| internal_error("provider model catalog encoding failed", error))?;
+        if raw.len() > 8 * 1024 * 1024
+            || replacement.catalog.refreshed_at_ms < 0
+            || !stored_model_catalog_is_valid(&replacement.catalog.models)
+        {
+            return Err(invalid_data("provider model catalog is out of range"));
+        }
+        let expected = replacement.expected_connection;
+        let rows = sql(self.connection.execute(
+            "UPDATE providers SET model_catalog_json=?1, model_catalog_refreshed_at_ms=?2, model_catalog_connection_changed=?3 WHERE provider_instance_id=?4 AND display_name=?5 AND provider_type=?6 AND endpoint=?7 AND api_key=?8 AND protocol_preference=?9 AND models_path=?10 AND discovery_format=?11",
+            params![
+                raw,
+                replacement.catalog.refreshed_at_ms,
+                i64::from(replacement.catalog.connection_changed),
+                replacement.provider_instance_id.as_str(),
+                expected.display_name,
+                enum_write(&expected.provider_type)?,
+                expected.endpoint,
+                replacement.expected_api_key.expose(),
+                enum_write(&expected.protocol_preference)?,
+                expected.models_path,
+                enum_write(&expected.discovery_format)?,
+            ],
+        ))?;
+        if rows != 1 {
+            return Err(conflict("provider changed during model catalog refresh"));
+        }
         Ok(())
     }
     /// 统计与删除共用 Immediate 事务，响应准确反映本次删除；模型引用和历史保留。

@@ -1,8 +1,9 @@
 //! 基于 Provider usage 的上下文窗口判断。
 
 use agent_model::ModelService;
-use agent_types::{AssistantPart, ConversationMessage, ConversationSnapshot};
+use agent_types::{ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 /// 唯一的上下文窗口判断入口。
@@ -46,17 +47,7 @@ impl ContextWindowEvaluator {
             return Err(ContextWindowError::InvalidInputLimit);
         }
 
-        let latest_assistant = snapshot
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                ConversationMessage::Assistant(message) => Some(message),
-                _ => None,
-            });
-        let usage = latest_assistant.and_then(|message| message.usage.as_ref());
-
-        let Some(usage) = usage else {
+        let Some(used_tokens) = context_token_usage(snapshot).total_tokens() else {
             return Ok(ContextWindowEvaluation {
                 used_tokens: None,
                 context_window_tokens,
@@ -66,11 +57,6 @@ impl ContextWindowEvaluator {
             });
         };
 
-        // Opaque payload 会在下一次同路由请求中原样重放，Provider usage 无法表达其序列化成本。
-        // 采用 1 byte = 1 token 的保守上界，避免把不可解释状态当作零成本。
-        let used_tokens = usage
-            .total_tokens
-            .saturating_add(provider_state_payload_budget(snapshot));
         let used_ratio = used_tokens as f64 / context_window_tokens as f64;
         // 输入上限保留为模型参数，不将其另行解释为自动压缩阈值。
         let decision = if used_ratio >= self.compaction_threshold_ratio {
@@ -91,7 +77,7 @@ impl ContextWindowEvaluator {
 /// 一次窗口判断的可观察结果。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContextWindowEvaluation {
-    /// 最近完整 Assistant Result 报告的总 token，加上不透明状态的保守重放预算；usage 不可用时为空。
+    /// 最近完整 Assistant Result 报告的总 token，加上此后尚未被 Provider 计量的文本增量；usage 不可用时为空。
     pub used_tokens: Option<u64>,
     /// 当前模型服务显式配置的上下文窗口。
     pub context_window_tokens: u64,
@@ -104,20 +90,127 @@ pub struct ContextWindowEvaluation {
     pub decision: ContextWindowDecision,
 }
 
-fn provider_state_payload_budget(snapshot: &ConversationSnapshot) -> u64 {
-    snapshot
+/// 上下文占用的终态与临时态；从当前规范快照派生，不保存第二份可变账本。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextTokenUsage {
+    /// 最近完整响应报告的实际总量；缺失时不借用更早 step 的用量。
+    pub completed_tokens: Option<u64>,
+    /// 该响应之后尚未被 Provider 计量的新增内容估算量。
+    pub pending_tokens: u64,
+}
+
+impl ContextTokenUsage {
+    /// 合并展示和窗口判断口径；终态未知时不把局部估算冒充完整占用。
+    pub fn total_tokens(self) -> Option<u64> {
+        self.completed_tokens
+            .map(|completed| completed.saturating_add(self.pending_tokens))
+    }
+}
+
+/// 分别投影已完成响应的终态用量和后续新增内容的临时用量。
+///
+/// 已完成响应以 Provider 报告的 `total_tokens` 为权威；只对该响应之后新追加、尚未经过
+/// Provider 计量的 User/Tool 文本做轻量增量估算。ProviderState 已包含在产生它的响应用量中，
+/// 不按密文字节数重复计费。
+pub fn context_token_usage(snapshot: &ConversationSnapshot) -> ContextTokenUsage {
+    let latest = snapshot
         .messages
         .iter()
-        .filter_map(|message| match message {
-            ConversationMessage::Assistant(message) => Some(&message.parts),
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| match message {
+            ConversationMessage::Assistant(message) => Some((index, message)),
             _ => None,
-        })
-        .flatten()
-        .filter_map(|part| match part {
-            AssistantPart::ProviderState(state) => u64::try_from(state.payload().len()).ok(),
-            _ => None,
-        })
-        .fold(0_u64, u64::saturating_add)
+        });
+    let completed_tokens =
+        latest.and_then(|(_, message)| message.usage.as_ref().map(|usage| usage.total_tokens));
+    // 新的完整响应到达后，边界前移：旧临时态由真实 usage 替换，不再叠加。
+    let pending_start = latest.map_or(0, |(index, _)| index + 1);
+    let pending_tokens = snapshot.messages[pending_start..]
+        .iter()
+        .map(estimate_unreported_message_tokens)
+        .fold(0_u64, u64::saturating_add);
+    ContextTokenUsage {
+        completed_tokens,
+        pending_tokens,
+    }
+}
+
+fn estimate_unreported_message_tokens(message: &ConversationMessage) -> u64 {
+    const MESSAGE_OVERHEAD: u64 = 4;
+    const PART_OVERHEAD: u64 = 2;
+    match message {
+        ConversationMessage::System(message) => {
+            MESSAGE_OVERHEAD.saturating_add(estimate_text_tokens(&message.text))
+        }
+        ConversationMessage::ContextSummary(message) => {
+            MESSAGE_OVERHEAD.saturating_add(estimate_text_tokens(&message.text))
+        }
+        ConversationMessage::User(message) => {
+            message.parts.iter().fold(MESSAGE_OVERHEAD, |total, part| {
+                let content = match part {
+                    UserPart::Text(part) | UserPart::Injected(part) => {
+                        estimate_text_tokens(&part.text)
+                    }
+                    UserPart::InternalContext(part) => estimate_text_tokens(&part.text),
+                    UserPart::QuotedText(part) => estimate_text_tokens(&part.exact),
+                    UserPart::FileReferences(part) => part.files.iter().fold(0_u64, |sum, file| {
+                        sum.saturating_add(estimate_text_tokens(&file.original_name))
+                            .saturating_add(estimate_text_tokens(&file.readable_path))
+                    }),
+                };
+                total.saturating_add(PART_OVERHEAD).saturating_add(content)
+            })
+        }
+        ConversationMessage::Tool(message) => {
+            message
+                .result
+                .content
+                .as_parts()
+                .iter()
+                .fold(MESSAGE_OVERHEAD, |total, part| {
+                    let content = match part {
+                        ToolResultPart::Text { text } => estimate_text_tokens(text),
+                        ToolResultPart::Json { value } => estimate_json_tokens(value),
+                        ToolResultPart::Image { image } => {
+                            estimate_text_tokens(image.relative_path())
+                                .saturating_add(estimate_text_tokens(image.media_type()))
+                        }
+                    };
+                    total.saturating_add(PART_OVERHEAD).saturating_add(content)
+                })
+        }
+        // latest_index 指向最后一条 Assistant；正常快照不会进入此分支。
+        ConversationMessage::Assistant(_) => 0,
+    }
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    let (ascii, non_ascii) = text.chars().fold((0_u64, 0_u64), |(ascii, non_ascii), ch| {
+        if ch.is_ascii() {
+            (ascii.saturating_add(1), non_ascii)
+        } else {
+            (ascii, non_ascii.saturating_add(1))
+        }
+    });
+    ascii.div_ceil(4).saturating_add(non_ascii)
+}
+
+fn estimate_json_tokens(value: &Value) -> u64 {
+    match value {
+        Value::Null => 1,
+        Value::Bool(_) | Value::Number(_) => estimate_text_tokens(&value.to_string()),
+        Value::String(value) => estimate_text_tokens(value),
+        Value::Array(values) => values
+            .iter()
+            .map(estimate_json_tokens)
+            .fold(2_u64, u64::saturating_add),
+        Value::Object(values) => values.iter().fold(2_u64, |total, (key, value)| {
+            total
+                .saturating_add(estimate_text_tokens(key))
+                .saturating_add(estimate_json_tokens(value))
+        }),
+    }
 }
 
 /// 窗口判断结论。
@@ -156,7 +249,7 @@ mod tests {
         AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
         MessageId, ModelIdentity, OpaqueProviderState, ProtocolId, ProviderId, TokenUsage,
         ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent,
-        ToolResultStatus, UserMessage,
+        ToolResultStatus, UserMessage, UserPart,
     };
 
     use super::*;
@@ -253,6 +346,18 @@ mod tests {
             transcript_visibility: Default::default(),
             id: MessageId::new(id).expect("valid message id"),
             parts: vec![],
+        })
+    }
+
+    fn user_text(id: &str, text: &str) -> ConversationMessage {
+        ConversationMessage::User(UserMessage {
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
+            id: MessageId::new(id).expect("valid message id"),
+            parts: vec![UserPart::Text(agent_types::TextPart {
+                id: agent_types::PartId::new(format!("{id}_text")).expect("valid part id"),
+                text: text.to_owned(),
+            })],
         })
     }
 
@@ -376,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_state_bytes_add_a_conservative_replay_budget() {
+    fn opaque_state_bytes_are_not_counted_twice() {
         let evaluator = ContextWindowEvaluator::new(0.8).expect("valid evaluator");
         let snapshot =
             ConversationSnapshot::new(vec![user("user_1"), assistant_with_provider_state(70, 10)]);
@@ -384,11 +489,64 @@ mod tests {
         let evaluation = evaluator
             .evaluate(&snapshot, &model(100))
             .expect("evaluation");
-        assert_eq!(evaluation.used_tokens, Some(80));
+        assert_eq!(evaluation.used_tokens, Some(70));
+        assert_eq!(evaluation.decision, ContextWindowDecision::Ready);
+    }
+
+    #[test]
+    fn unreported_user_text_is_added_to_the_latest_provider_total() {
+        let evaluator = ContextWindowEvaluator::new(0.8).expect("valid evaluator");
+        let snapshot = ConversationSnapshot::new(vec![
+            assistant("assistant_1", Some(70)),
+            user_text("user_2", "abcdefghijklmnopqrst"),
+        ]);
+
+        let evaluation = evaluator
+            .evaluate(&snapshot, &model(100))
+            .expect("evaluation");
+        assert_eq!(evaluation.used_tokens, Some(81));
         assert_eq!(
             evaluation.decision,
             ContextWindowDecision::CompactionRequired
         );
+    }
+
+    #[test]
+    fn completed_step_replaces_pending_estimate_even_when_actual_usage_is_lower() {
+        let mut snapshot =
+            ConversationSnapshot::new(vec![assistant_tool_call("assistant_1", 70), tool_result()]);
+        let pending = context_token_usage(&snapshot);
+        assert_eq!(pending.completed_tokens, Some(70));
+        assert_eq!(pending.pending_tokens, 7);
+        assert_eq!(pending.total_tokens(), Some(77));
+
+        snapshot.messages.push(assistant("assistant_2", Some(72)));
+        assert_eq!(
+            context_token_usage(&snapshot),
+            ContextTokenUsage {
+                completed_tokens: Some(72),
+                pending_tokens: 0,
+            }
+        );
+        snapshot.messages.push(user_text("user_3", "abcdefgh"));
+        let pending = context_token_usage(&snapshot);
+        assert_eq!(pending.completed_tokens, Some(72));
+        assert_eq!(pending.pending_tokens, 8);
+        assert_eq!(pending.total_tokens(), Some(80));
+    }
+
+    #[test]
+    fn missing_completed_usage_keeps_pending_separate_without_reusing_old_base() {
+        let snapshot = ConversationSnapshot::new(vec![
+            assistant("assistant_1", Some(90)),
+            user_text("user_2", "previous pending"),
+            assistant("assistant_2", None),
+            user_text("user_3", "abcdefgh"),
+        ]);
+        let usage = context_token_usage(&snapshot);
+        assert_eq!(usage.completed_tokens, None);
+        assert_eq!(usage.pending_tokens, 8);
+        assert_eq!(usage.total_tokens(), None);
     }
 
     #[test]

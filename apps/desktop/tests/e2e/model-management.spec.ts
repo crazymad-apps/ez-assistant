@@ -36,12 +36,12 @@ test("Web uses provider model settings, persists edits, and resets to current on
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await dialog.getByRole("button", { name: "重置配置", exact: true }).click();
   await page.getByRole("dialog", { name: "重置固定配置？", exact: true }).getByRole("button", { name: "重置配置", exact: true }).click();
-  await expect(dialog.getByText("来源：在线参数／模板预填", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("固定配置已重置");
   await expect(context).toHaveValue("");
   await expect(dialog.getByRole("button", { name: "重置配置", exact: true })).toBeDisabled();
   await dialog.getByRole("button", { name: "返回", exact: true }).click();
-  await expect(dialog.getByRole("button", { name: "配置模型 offline-model", exact: true })).toContainText("已固定");
-  await expect(dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true })).not.toContainText("已固定");
+  await expect(dialog.getByRole("button", { name: "配置模型 offline-model", exact: true })).toContainText("已自定义");
+  await expect(dialog.getByRole("button", { name: "配置模型 alternate-offline-model", exact: true })).not.toContainText("已自定义");
   await dialog.getByRole("button", { name: "返回", exact: true }).click();
   await dialog.getByRole("button", { name: "默认模型", exact: true }).click();
   await page.getByRole("menuitem", { name: /离线测试服务商/ }).click();

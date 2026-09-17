@@ -299,6 +299,7 @@ pub struct NewStoredInput {
     /// 与 Input、首次 Run 同事务写入的单 Server 手选事实。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_selection: Option<StoredMcpSelection>,
+    /// Input 与首次 Run 接受时的审计基线，不是活动工具授权策略。
     pub approval_mode: ApprovalMode,
     pub message: UserMessage,
     /// 仅首次 start_goal 提供；Store 必须与 Input/Run 在同一事务中创建。
@@ -461,6 +462,8 @@ pub struct StoredRunSettlement {
     pub status: RunStatus,
     pub cancel_requested: bool,
     pub error: Option<RuntimeErrorInfo>,
+    /// 来源 Input 仍为 queued 时必须携带的原始 UserMessage；Store 将它放在本批首位并原子提交 Input。
+    pub queued_user_message: Option<UserMessage>,
     pub messages: Vec<ConversationMessage>,
     /// 本批最终 AssistantMessage 的可靠 step；旧调用方或无消息结算时为空。
     pub message_step: Option<u32>,
@@ -468,6 +471,17 @@ pub struct StoredRunSettlement {
     /// 源 Run 结算时，同事务可靠接受到 Controller 的可见代理报告。
     pub proxy_report: Option<Box<NewStoredInput>>,
     pub finished_at_ms: i64,
+}
+
+/// 只修复“终态 Run + 自身 queued Input”的历史残留，不改变 Run 终态或执行任何副作用。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredTerminalRunInputReconciliation {
+    pub operation_id: String,
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub input_id: InputId,
+    pub user_message: UserMessage,
+    pub recovered_at_ms: i64,
 }
 
 /// 活动 Run 在启动下一次 AgentExecution 前可靠提交的消息与可选 Goal 变化。
@@ -525,6 +539,7 @@ pub struct StoredRun {
     pub attempt: u32,
     pub status: RunStatus,
     pub agent_variant: AgentVariant,
+    /// Run 接受时的审计基线；恢复后活动工具授权仍读取 Session 当前模式。
     pub approval_mode: ApprovalMode,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub cancel_requested: bool,

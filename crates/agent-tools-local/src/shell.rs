@@ -203,7 +203,8 @@ impl LocalShell {
                 match output_completion {
                     OutputCompletion::Complete(output) => {
                         // Detached 使用不带 kill-on-drop 的包装；只在父进程退出且两个输出
-                        // 管道 EOF 后 drop，明确把仍存活的后代交给操作系统继续管理。
+                        // 管道于 deadline 内 EOF 后 drop，明确把仍存活的后代交给操作系统。
+                        // 在此边界前，timeout/cancellation 分支仍负责清理并等待进程组。
                         drop(child);
                         Ok(ShellOutcome {
                             exit_code: status.code(),

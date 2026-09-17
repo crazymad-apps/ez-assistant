@@ -52,7 +52,6 @@ impl AssistantRuntime {
                 &configuration,
                 model_selection.as_ref(),
                 self.store.as_ref(),
-                self.model_factory.as_ref(),
             )
             .await?;
         let _binding = self.model_binding_gate.read().await;

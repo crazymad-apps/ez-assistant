@@ -8,9 +8,14 @@ use assistant_protocol::{
 
 use crate::{
     RecoveredRuntime, RuntimeError, RuntimeResult, StoredAttachment, StoredChildTask,
-    StoredInputState, StoredRunSettlement, StoredWorkspace, goal::GoalControl,
-    session::SessionController, work_plan::WorkPlan,
+    StoredInputState, StoredRunSettlement, StoredTerminalRunInputReconciliation, StoredWorkspace,
+    goal::GoalControl, session::SessionController, work_plan::WorkPlan,
 };
+
+pub(super) enum PreparedRunRecovery {
+    Settlement(Box<StoredRunSettlement>),
+    TerminalInput(StoredTerminalRunInputReconciliation),
+}
 
 pub(super) struct RecoveredRegistries {
     pub devices: BTreeMap<DeviceId, crate::PairedDevice>,
@@ -23,7 +28,7 @@ pub(super) struct RecoveredRegistries {
 pub(super) fn prepare_interrupted_run_settlements(
     recovered: &RecoveredRuntime,
     finished_at_ms: i64,
-) -> RuntimeResult<Vec<StoredRunSettlement>> {
+) -> RuntimeResult<Vec<PreparedRunRecovery>> {
     let sessions = recovered
         .sessions
         .iter()
@@ -34,14 +39,19 @@ pub(super) fn prepare_interrupted_run_settlements(
         .iter()
         .map(|input| (input.input_id.clone(), input))
         .collect::<BTreeMap<_, _>>();
-    let mut settlements = Vec::new();
+    let mut recoveries = Vec::new();
     for run in &recovered.runs {
         let Some(input) = inputs.get(&run.input_id).copied() else {
             continue;
         };
-        let recoverable = matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+        if input.session_id != run.session_id {
+            return Err(invalid_recovery());
+        }
+        let interrupted = matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
             || run.status == RunStatus::Accepted && input.state == StoredInputState::Committed;
-        if !recoverable {
+        let reconcile_terminal_input =
+            run.status.is_terminal() && input.state == StoredInputState::Queued;
+        if !interrupted && !reconcile_terminal_input {
             continue;
         }
         let source = sessions
@@ -53,25 +63,54 @@ pub(super) fn prepare_interrupted_run_settlements(
         if source.conversation_state == crate::StoredConversationState::Unavailable {
             continue;
         }
-        settlements.push(StoredRunSettlement {
-            operation_id: crate::id::generate("recovery-settlement").map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
-                    component: "recovery settlement operation id",
-                }
-            })?,
-            run_id: run.run_id.clone(),
-            session_id: run.session_id.clone(),
-            status: RunStatus::Interrupted,
-            cancel_requested: run.cancel_requested,
-            error: None,
-            messages: Vec::new(),
-            message_step: None,
-            goal_effect: None,
-            proxy_report: None,
-            finished_at_ms,
-        });
+        let queued_user_message = if input.state == StoredInputState::Queued {
+            let message = input.queued_message.clone().ok_or_else(invalid_recovery)?;
+            if message.id != input.user_message_id {
+                return Err(invalid_recovery());
+            }
+            Some(message)
+        } else {
+            if input.queued_message.is_some() {
+                return Err(invalid_recovery());
+            }
+            None
+        };
+        let operation_id = crate::id::generate("recovery-settlement").map_err(|_| {
+            RuntimeError::InternalStateUnavailable {
+                component: "recovery settlement operation id",
+            }
+        })?;
+        if reconcile_terminal_input {
+            recoveries.push(PreparedRunRecovery::TerminalInput(
+                StoredTerminalRunInputReconciliation {
+                    operation_id,
+                    run_id: run.run_id.clone(),
+                    session_id: run.session_id.clone(),
+                    input_id: input.input_id.clone(),
+                    user_message: queued_user_message.expect("queued input message validated"),
+                    recovered_at_ms: finished_at_ms,
+                },
+            ));
+        } else {
+            recoveries.push(PreparedRunRecovery::Settlement(Box::new(
+                StoredRunSettlement {
+                    operation_id,
+                    run_id: run.run_id.clone(),
+                    session_id: run.session_id.clone(),
+                    status: RunStatus::Interrupted,
+                    cancel_requested: run.cancel_requested,
+                    error: None,
+                    queued_user_message,
+                    messages: Vec::new(),
+                    message_step: None,
+                    goal_effect: None,
+                    proxy_report: None,
+                    finished_at_ms,
+                },
+            )));
+        }
     }
-    Ok(settlements)
+    Ok(recoveries)
 }
 
 pub(super) fn recover_registries(

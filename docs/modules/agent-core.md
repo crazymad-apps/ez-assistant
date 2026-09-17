@@ -16,9 +16,11 @@
 - 模型 Provider trait 和流式响应抽象。
 - 单次 `AgentExecution` 的上下文组装、工具结果回填和事件输出。
 - 每个 Model Step 建立请求前通过共享 Context Window Evaluator 执行上下文预检；
-  判断只使用最近完整 Provider Result 的 `total_tokens` 和当前模型
+  判断使用最近完整 Provider Result 的 `total_tokens`、此后尚未计量的 User/Tool 文本增量和当前模型
   `context_window_tokens`。达到原有窗口压缩阈值或 Provider 报告 Context Overflow 时，以
   可靠终态交回 Runtime。
+- 终态 usage 与未计量增量由共享 Context Window Evaluator 分开投影；新 step 完成后替换终态基数并
+  清除已被计量的增量。窗口预检不额外请求 Provider 计数接口。
 - 与执行逻辑直接相关的 token、轮次和工具调用限制。
 - 规范对话、Provider Codec、Safety/Recorder/Authorizer 等稳定能力接口。
 
@@ -48,6 +50,8 @@ Context Window Evaluator、历史布局和 replacement 校验归
   返回 DuplicateToolCallId 失败终态，不创建 pending、不授权、不执行工具、不自动重试或改写 ID。
   不查询压缩前的产品历史。
 - 规范对话记录与 UI/诊断事件分离；Provider 特有字段由 Codec 往返保真。
+- Provider 流内的 usage 先在当前 step 聚合；只有 `TurnFinished` 后才发布一次最终 Agent usage 事件。
+  随后 Overflow/失败的未完成 step 不得把中间 usage 暴露为已完成事实，可靠持久化仍以完整消息为准。
 - Recorder 以 pending/completed 两阶段 tool exchange 表达副作用前写入与结果批次原子完成；
   `complete_tool_exchange` 只有在可靠提交成功后才能请求通用的上下文改变 continuation，规范快照不得
   暴露 pending exchange。

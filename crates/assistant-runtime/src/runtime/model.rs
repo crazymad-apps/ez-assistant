@@ -14,7 +14,7 @@ use agent_tools::{
     InspectImagesRequest,
 };
 use agent_types::ToolChoice;
-use assistant_protocol::{AgentVariant, ApprovalMode};
+use assistant_protocol::AgentVariant;
 
 use super::AssistantRuntime;
 use super::channel::SpeakTool;
@@ -432,7 +432,6 @@ pub(super) struct RunAuthorizationInput {
     pub(super) permission_coordinator: Arc<PermissionCoordinator>,
     pub(super) approval_registry: Arc<ApprovalRegistry>,
     pub(super) variant: AgentVariant,
-    pub(super) approval_mode: ApprovalMode,
     pub(super) run_id: assistant_protocol::RunId,
     pub(super) cancellation: tokio_util::sync::CancellationToken,
     pub(super) events: ObservationCoordinator,
@@ -526,12 +525,7 @@ pub(super) async fn compile_run_agent(
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let selection = session.model_selection()?;
     let prepared = registry
-        .prepare_model(
-            snapshot,
-            selection.as_ref(),
-            resources.store.as_ref(),
-            resources.model_factory,
-        )
+        .prepare_model(snapshot, selection.as_ref(), resources.store.as_ref())
         .await?;
     let model_config = &prepared.model;
     let mut compiled = compile_resolved_model_service(
@@ -546,12 +540,7 @@ pub(super) async fn compile_run_agent(
         if !compiled.capabilities.image_input && compiled.capabilities.tool_calls {
             if let Some(selection) = &auxiliary_selection {
                 let prepared_auxiliary = registry
-                    .prepare_model(
-                        snapshot,
-                        Some(selection),
-                        resources.store.as_ref(),
-                        resources.model_factory,
-                    )
+                    .prepare_model(snapshot, Some(selection), resources.store.as_ref())
                     .await?;
                 let mut auxiliary = compile_resolved_model_service(
                     snapshot,
@@ -771,8 +760,8 @@ pub(super) async fn compile_run_agent(
         RuntimeToolAuthorizer::new(
             RunAuthorizationScope {
                 variant: authorization.variant,
-                approval_mode: authorization.approval_mode,
             },
+            session.clone(),
             permission_scopes.clone(),
             authorization.permission_coordinator.clone(),
             infrastructure_policies.clone(),
@@ -783,7 +772,6 @@ pub(super) async fn compile_run_agent(
                 run_id,
                 child_task_id: None,
                 variant: authorization.variant,
-                approval_mode: authorization.approval_mode,
                 workspace_id: session.environment().workspace_id.clone(),
                 cancellation: authorization.cancellation.clone(),
                 events: authorization.events.clone(),
@@ -963,7 +951,6 @@ pub(super) async fn compile_run_agent(
                 session: session.clone(),
                 parent_run_id: authorization.run_id,
                 variant: authorization.variant,
-                approval_mode: authorization.approval_mode,
                 child_agent,
                 child_compactor,
                 store: resources.store,

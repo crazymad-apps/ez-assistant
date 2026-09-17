@@ -547,6 +547,7 @@ async fn settle_run_inner(
             status: settlement.status,
             cancel_requested,
             error: settlement.error.clone(),
+            queued_user_message: None,
             messages: messages.clone(),
             message_step: final_step,
             goal_effect,

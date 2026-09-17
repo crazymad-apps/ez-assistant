@@ -22,7 +22,7 @@ export type ModelPickerProps = Readonly<{
   initial_category?: string | null;
 }>;
 
-/** 只保留正在展开的服务商本次在线结果；跨用途共用相同的二级选择路径。 */
+/** 只保留正在展开服务商的本地目录快照；跨用途共用相同的二级选择路径。 */
 export function ModelPicker(props: ModelPickerProps) {
   const settings = useRootStore().settings;
   const [result, setResult] = useState<Readonly<{
@@ -43,7 +43,7 @@ export function ModelPicker(props: ModelPickerProps) {
         const models = await settings.listProviderModels(provider_id, current.signal);
         if (!current.signal.aborted) setResult((value) => value ? { ...value, models, loading: false } : value);
       } catch (failure: unknown) {
-        if (!current.signal.aborted) setResult((value) => value ? { ...value, loading: false, error: failure instanceof Error ? failure.message : "获取模型失败。" } : value);
+        if (!current.signal.aborted) setResult((value) => value ? { ...value, loading: false, error: failure instanceof Error ? failure.message : "读取模型列表失败。" } : value);
       }
     })();
     try {
@@ -70,29 +70,27 @@ export function ModelPicker(props: ModelPickerProps) {
     return {
       id, label: provider.connection.display_name, value_label: "",
       hide_title: true,
-      disabled_reason: props.disabled_reason,
       selected: props.selection?.provider_instance_id === id ? props.selection.model_id : "",
       options: [...models.values()],
       on_open: () => { void load(id); },
       on_select: (model_id) => props.onSelect({ provider_instance_id: id, model_id }),
       content: current && (current.loading || current.fixed_loading || current.error || current.fixed_error || models.size === 0) ? <>
-        {current?.loading && <p role="status">正在获取在线模型…</p>}
         {current?.fixed_loading && <p role="status">正在读取已保存模型…</p>}
         {current?.fixed_error && <p role="alert">{current.fixed_error}<Button type="button" onClick={() => void load(id)}>重试读取</Button></p>}
         {current?.error && <p role="alert">{current.error}<Button type="button" onClick={() => void load(id)}>重试</Button></p>}
-        {current && !current.loading && !current.fixed_loading && !current.error && !current.fixed_error && models.size === 0 && <p>本次列表没有匹配的模型。</p>}
+        {current && !current.loading && !current.fixed_loading && !current.error && !current.fixed_error && models.size === 0 && <p>暂无可用模型，请到模型管理页刷新在线模型。</p>}
       </> : null,
     };
   });
   categories.push(...props.additional_categories ?? []);
   return <SettingsCascadePopover aria_label={props.title} open={props.open} on_open_change={props.onOpenChange}
     clear_action={props.clearable && props.selection ? { label: `清除${props.title}`, on_clear: () => props.onSelect(null) } : undefined}
-    disabled={props.disabled} initial_category={props.initial_category ?? null} categories={categories}
+    disabled={props.disabled} disabled_reason={props.disabled_reason}
+    initial_category={props.initial_category ?? null} categories={categories}
     trigger_class_name={props.trigger_class_name} trigger_content={props.label}
     primary_actions={props.follow_default ? [{
       label: "默认模型",
       selected: props.selection === null,
-      disabled: Boolean(props.disabled_reason),
       on_select: () => props.onSelect(null),
     }] : []}
     primary_content={<>

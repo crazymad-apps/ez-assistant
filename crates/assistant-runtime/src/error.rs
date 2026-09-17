@@ -9,7 +9,8 @@ use assistant_protocol::{
 use thiserror::Error;
 
 use crate::{
-    ModelServiceFactoryError, RunToolFactoryError, SessionEnvironmentFactoryError, StoreError,
+    ModelDiscoveryError, ModelDiscoveryErrorKind, ModelServiceFactoryError, RunToolFactoryError,
+    SessionEnvironmentFactoryError, StoreError,
 };
 
 /// Runtime 操作失败。
@@ -149,6 +150,12 @@ pub enum RuntimeError {
     /// Runtime 无法持久化已通过编译的配置 candidate。
     #[error("runtime configuration could not be persisted")]
     ConfigurationPersistenceFailed,
+    /// 用户显式刷新模型目录失败；只向协议映射稳定分类，不暴露 Provider 正文。
+    #[error("model catalog refresh failed")]
+    ModelDiscoveryFailed {
+        #[source]
+        source: ModelDiscoveryError,
+    },
     /// MCP 配置或候选文档无法完整接受。
     #[error("MCP configuration is invalid")]
     McpConfigInvalid,
@@ -377,6 +384,42 @@ impl RuntimeError {
                 RuntimeErrorCode::Internal,
                 "configuration could not be persisted",
             ),
+            Self::ModelDiscoveryFailed { source } => {
+                let (code, message) = match source.kind() {
+                    ModelDiscoveryErrorKind::Unsupported => (
+                        RuntimeErrorCode::InvalidRequest,
+                        "model catalog refresh is not supported",
+                    ),
+                    ModelDiscoveryErrorKind::InvalidConfiguration => (
+                        RuntimeErrorCode::InvalidRequest,
+                        "model catalog refresh configuration is invalid",
+                    ),
+                    ModelDiscoveryErrorKind::Authentication => (
+                        RuntimeErrorCode::ModelUnavailable,
+                        "model catalog refresh authentication failed",
+                    ),
+                    ModelDiscoveryErrorKind::RateLimited => (
+                        RuntimeErrorCode::ModelUnavailable,
+                        "model catalog refresh was rate limited",
+                    ),
+                    ModelDiscoveryErrorKind::Timeout => {
+                        (RuntimeErrorCode::Timeout, "model catalog refresh timed out")
+                    }
+                    ModelDiscoveryErrorKind::Unavailable => (
+                        RuntimeErrorCode::ModelUnavailable,
+                        "model catalog service is unavailable",
+                    ),
+                    ModelDiscoveryErrorKind::InvalidResponse => (
+                        RuntimeErrorCode::ModelUnavailable,
+                        "model catalog response is invalid",
+                    ),
+                    ModelDiscoveryErrorKind::ResponseTooLarge => (
+                        RuntimeErrorCode::ResourceTooLarge,
+                        "model catalog response exceeds limits",
+                    ),
+                };
+                RuntimeErrorInfo::new(code, message)
+            }
             Self::McpConfigInvalid => RuntimeErrorInfo::new(
                 RuntimeErrorCode::McpConfigInvalid,
                 "MCP configuration is invalid",
@@ -504,5 +547,30 @@ mod tests {
         let info = factory.to_protocol_info();
         assert_eq!(info.code, RuntimeErrorCode::ModelBuildFailed);
         assert!(!info.message.contains("sk-private"));
+    }
+
+    #[test]
+    fn model_catalog_refresh_errors_keep_stable_classification_without_leaking_sources() {
+        use ModelDiscoveryErrorKind::*;
+        for (kind, code) in [
+            (Unsupported, RuntimeErrorCode::InvalidRequest),
+            (InvalidConfiguration, RuntimeErrorCode::InvalidRequest),
+            (Authentication, RuntimeErrorCode::ModelUnavailable),
+            (RateLimited, RuntimeErrorCode::ModelUnavailable),
+            (Timeout, RuntimeErrorCode::Timeout),
+            (Unavailable, RuntimeErrorCode::ModelUnavailable),
+            (InvalidResponse, RuntimeErrorCode::ModelUnavailable),
+            (ResponseTooLarge, RuntimeErrorCode::ResourceTooLarge),
+        ] {
+            let error = RuntimeError::ModelDiscoveryFailed {
+                source: ModelDiscoveryError::with_source(
+                    kind,
+                    std::io::Error::other("private-provider-response"),
+                ),
+            };
+            let info = error.to_protocol_info();
+            assert_eq!(info.code, code, "{kind:?}");
+            assert!(!info.message.contains("private-provider-response"));
+        }
     }
 }

@@ -500,6 +500,8 @@ pub struct ApprovalSnapshot {
     pub approval_mode: ApprovalMode,
     /// 用于客户端展示的已解析调用事实。
     pub subject: ToolApprovalSubject,
+    /// 经过 Runtime 脱敏、限流和结构化的已解析调用参数。
+    pub input: crate::ToolInputProjection,
     /// 服务端按当前作用域计算出的合法决定。
     pub available_decisions: Vec<ApprovalDecision>,
     /// 持久允许将写入的精确匹配语义预览；不支持持久授权的多路径调用仅作展示。
@@ -603,6 +605,8 @@ pub struct ToolActivitySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mcp_identity: Option<crate::McpToolIdentity>,
+    /// 经过 Runtime 脱敏、限流和结构化的输入。
+    pub input: crate::ToolInputProjection,
     /// 当前工具活动状态。
     pub status: ToolActivityStatus,
     /// 截至快照时观察到的标准输出；事件丢失时可能不完整。
@@ -648,7 +652,7 @@ pub struct RunSnapshot {
     /// 本次 Run 继承的 Input Agent 变体。
     #[serde(default)]
     pub variant: AgentVariant,
-    /// 本次 Run 创建时捕获的 Session 审批模式。
+    /// 本次 Run 被接受时捕获的审批模式，仅作为审计基线；工具授权读取 Session 当前模式。
     #[serde(default)]
     pub approval_mode: ApprovalMode,
     /// Run 启动时冻结的实际强度。
@@ -798,6 +802,13 @@ mod tests {
                 call_id: ToolCallId::new("call-1").expect("call id"),
                 tool_name: "echo_text".to_owned(),
                 mcp_identity: None,
+                input: crate::ToolInputProjection {
+                    value: crate::ToolInputSnapshot::General {
+                        summary: "{}".to_owned(),
+                    },
+                    redacted: false,
+                    truncated: false,
+                },
                 status: ToolActivityStatus::Completed,
                 stdout: "hello".to_owned(),
                 stderr: String::new(),
@@ -874,6 +885,16 @@ mod tests {
                 working_directory: "/workspace".to_owned(),
                 timeout_ms: 30_000,
                 process_mode: "managed".to_owned(),
+            },
+            input: crate::ToolInputProjection {
+                value: crate::ToolInputSnapshot::Shell {
+                    command: "git status".to_owned(),
+                    working_directory: "/workspace".to_owned(),
+                    timeout_ms: 30_000,
+                    process_mode: "managed".to_owned(),
+                },
+                redacted: false,
+                truncated: false,
             },
             available_decisions: vec![
                 ApprovalDecision::AllowOnce,

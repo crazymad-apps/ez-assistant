@@ -2,6 +2,18 @@ import { compile, Logger } from "sass";
 import { describe, expect, it } from "vitest";
 
 describe("Desktop control height contract", () => {
+  it("disables native macOS and Windows boundary elasticity without changing Web or Linux", () => {
+    const platform = compile("src/styles/platform.scss", { logger: Logger.silent }).css;
+    expect(platform).toMatch(/:root\[data-platform=macos\] body \*[^}]*:root\[data-platform=windows\][^}]*:root\[data-platform=windows\] body \*\s*\{\s*overscroll-behavior: none/s);
+    expect(platform).not.toMatch(/:root\[data-platform=(?:other|linux)\].*overscroll-behavior/s);
+  });
+
+  it("keeps the default Agent Shell control on one row", () => {
+    const overview = compile("src/features/settings/SettingsDialog/RuntimeOverviewPage/index.module.scss", { logger: Logger.silent }).css;
+    expect(overview).toMatch(/\.shell_setting\s*\{[^}]*display: grid;[^}]*grid-template-columns: max-content minmax\(0, 1fr\);[^}]*align-items: center/s);
+    expect(overview).not.toMatch(/\.shell_setting small/);
+  });
+
   it("keeps input focus free of page-specific shadow rings", () => {
     const paths = Object.keys(import.meta.glob("../../src/**/*.module.scss"));
     const violations: string[] = [];

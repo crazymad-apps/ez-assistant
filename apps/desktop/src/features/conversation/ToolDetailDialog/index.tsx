@@ -6,6 +6,7 @@ import type {
   RecallToolDetailSnapshot,
   ToolDetailSnapshot,
   ToolFileReference,
+  ToolInputProjection,
   ToolInputSnapshot,
   TokenUsageSnapshot,
 } from "@ez-assistant/protocol";
@@ -76,7 +77,8 @@ export function ToolDetailDialog({
   }> | null>(null);
   const owner = detail?.owner;
   const is_read_image = detail?.tool_name === "read_image";
-  const mcp_identity = detail?.mcp_identity ?? (detail?.input.type === "mcp" ? detail.input.identity : null);
+  const mcp_identity = detail?.mcp_identity
+    ?? (detail?.input.value.type === "mcp" ? detail.input.value.identity : null);
 
   useEffect(() => {
     setUnavailableFileRefs(new Set());
@@ -225,8 +227,8 @@ export function ToolDetailDialog({
               />
             ) : <>
               <DetailSection title="请求参数">
-                {detail.input.type !== "image_inspection" && detail.request_json
-                  ? <JsonBlock text={detail.request_json} />
+                {detail.input.value.type !== "image_inspection" && detail.request_json
+                  ? <><JsonBlock text={detail.request_json} /><ProjectionNotices input={detail.input} /></>
                   : <ToolInput input={detail.input} is_live={detail.source === "live"} />}
               </DetailSection>
               {mcp_identity && <p className={styles.notice}>MCP 工具注解由服务自报，未经验证，不能作为安全或只读保证。</p>}
@@ -387,7 +389,7 @@ function ReadImageDetail({
     event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
   ) => void;
 }>) {
-  const source_path = detail.input.type === "file" ? detail.input.path : null;
+  const source_path = detail.input.value.type === "file" ? detail.input.value.path : null;
   const unavailable = file?.state === "unavailable";
   return (
     <div className={styles.image_detail}>
@@ -439,7 +441,21 @@ function DetailSection({ title, children }: Readonly<{ title: string; children: 
   return <section className={styles.section}><h3>{title}</h3>{children}</section>;
 }
 
-function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_live: boolean }>) {
+function ToolInput({ input, is_live }: Readonly<{ input: ToolInputProjection; is_live: boolean }>) {
+  return <>
+    <ToolInputValue input={input.value} is_live={is_live} />
+    <ProjectionNotices input={input} />
+  </>;
+}
+
+function ProjectionNotices({ input }: Readonly<{ input: ToolInputProjection }>) {
+  return <>
+    {input.redacted && <p className={styles.notice}>已隐去敏感值。</p>}
+    {input.truncated && <p className={styles.notice}>内容已截断，未显示的部分不能作为审批依据。</p>}
+  </>;
+}
+
+function ToolInputValue({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_live: boolean }>) {
   switch (input.type) {
     case "shell":
       return <>
@@ -447,13 +463,18 @@ function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_l
         <dl className={styles.facts}>
           <div><dt>工作目录</dt><dd>{input.working_directory || "未记录"}</dd></div>
           <div><dt>超时</dt><dd>{input.timeout_ms ? `${input.timeout_ms} ms` : "未设置"}</dd></div>
-          <div><dt>进程模式</dt><dd>{input.process_mode || "默认"}</dd></div>
+          <div><dt>进程模式</dt><dd>{formatShellProcessMode(input.process_mode)}</dd></div>
         </dl>
       </>;
     case "file":
       return <dl className={styles.facts}>
         <div><dt>操作</dt><dd>{input.operation}</dd></div>
         <div><dt>路径</dt><dd>{input.path}</dd></div>
+      </dl>;
+    case "files":
+      return <dl className={styles.facts}>
+        <div><dt>操作</dt><dd>{input.operation}</dd></div>
+        <div><dt>路径</dt><dd>{input.paths.join("、")}</dd></div>
       </dl>;
     case "delegation":
       return <><strong>{input.title}</strong><p>{input.task_summary}</p></>;
@@ -472,6 +493,12 @@ function ToolInput({ input, is_live }: Readonly<{ input: ToolInputSnapshot; is_l
         {is_live ? "执行期间暂未提供结构化输入。" : "较早记录没有可安全恢复的输入事实。"}
       </p>;
   }
+}
+
+function formatShellProcessMode(mode: string | null): string {
+  if (mode === "managed") return "工具托管（managed）";
+  if (mode === "detached") return "完成后交接（detached；交接前超时或取消仍会清理）";
+  return mode || "默认（managed）";
 }
 
 function formatUsage(usage: TokenUsageSnapshot | null): string {

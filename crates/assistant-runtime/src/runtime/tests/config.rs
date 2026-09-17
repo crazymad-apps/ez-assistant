@@ -1,3 +1,4 @@
+use super::store::FaultInjectingStore;
 use super::*;
 
 #[tokio::test]
@@ -269,8 +270,21 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
             .expect("session after rejected input")
             .session
             .queued_input_count,
-        1
+        0
     );
+    assert!(runtime
+        .conversation_snapshot(&second.session.session_id)
+        .await
+        .unwrap()
+        .messages
+        .iter()
+        .any(|message| matches!(
+            message,
+            ConversationMessage::User(message)
+                if message.parts.iter().any(
+                    |part| matches!(part, UserPart::Text(text) if text.text == "must not use stale key")
+                )
+        )));
     assert_eq!(factory.api_keys(), ["old-key", "new-key"]);
 
     runtime
@@ -288,6 +302,74 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
             .await
             .status,
         assistant_protocol::RunStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn model_currentness_conflict_atomically_commits_the_failed_input() {
+    let store = Arc::new(FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    store.block_next_model_config_load();
+    let accepted = runtime
+        .submit_input(test_input(
+            &session.session_id,
+            "configuration changed while preparing",
+        ))
+        .await
+        .expect("accepted input");
+    tokio::time::timeout(Duration::from_secs(1), store.wait_for_model_config_load())
+        .await
+        .expect("model preparation entered store");
+    runtime
+        .update_provider(assistant_protocol::UpdateProviderRequest {
+            provider_instance_id: test_model_selection("fixture").provider_instance_id,
+            connection: model_fixture::provider("unused").connection,
+            credential: assistant_protocol::ProviderCredentialChange::Replace(
+                assistant_protocol::SecretValue::new("changed-during-preparation".into()),
+            ),
+        })
+        .await
+        .expect("change provider while preparation is suspended");
+    store.release_model_config_load();
+    assert_eq!(
+        wait_for_terminal(&runtime, &session.session_id, &accepted.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    let conversation = runtime
+        .conversation_snapshot(&session.session_id)
+        .await
+        .expect("failed input conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    assert!(matches!(
+        &conversation.messages[0],
+        ConversationMessage::User(message)
+            if message.parts.iter().any(|part| matches!(
+                part,
+                UserPart::Text(text) if text.text == "configuration changed while preparing"
+            ))
+    ));
+    assert_eq!(
+        runtime
+            .get_session(GetSessionRequest {
+                session_id: session.session_id,
+            })
+            .await
+            .expect("session")
+            .session
+            .queued_input_count,
+        0
     );
 }
 
@@ -419,14 +501,18 @@ async fn deleting_an_idle_session_provider_preserves_history_and_requires_resele
             .status,
         assistant_protocol::RunStatus::Failed
     );
-    assert!(
-        runtime
-            .conversation_snapshot(&session.session_id)
-            .await
-            .unwrap()
-            .messages
-            .is_empty()
-    );
+    let conversation = runtime
+        .conversation_snapshot(&session.session_id)
+        .await
+        .unwrap();
+    assert_eq!(conversation.messages.len(), 1);
+    assert!(matches!(
+        &conversation.messages[0],
+        ConversationMessage::User(message)
+            if message.parts.iter().any(
+                |part| matches!(part, UserPart::Text(text) if text.text == "cannot execute")
+            )
+    ));
     let retained = runtime
         .get_session(GetSessionRequest {
             session_id: session.session_id.clone(),
@@ -434,14 +520,7 @@ async fn deleting_an_idle_session_provider_preserves_history_and_requires_resele
         .await
         .unwrap()
         .session;
-    assert_eq!(retained.queued_input_count, 1);
-    runtime
-        .cancel_queued_input(assistant_protocol::CancelQueuedInputRequest {
-            session_id: session.session_id.clone(),
-            input_id: failed.input_id,
-        })
-        .await
-        .unwrap();
+    assert_eq!(retained.queued_input_count, 0);
     let replacement = runtime
         .create_provider(assistant_protocol::CreateProviderRequest {
             connection: model_fixture::provider("unused").connection,
@@ -457,7 +536,7 @@ async fn deleting_an_idle_session_provider_preserves_history_and_requires_resele
     };
     runtime
         .save_model_fixed_config(assistant_protocol::SaveModelFixedConfigRequest {
-            origin: assistant_protocol::ModelConfigOrigin::Online,
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
             selection: selection.clone(),
             parameters: model_fixture::parameters(),
         })

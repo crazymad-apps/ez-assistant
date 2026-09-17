@@ -362,10 +362,8 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(
-        health["min_compatible_host_version"],
-        assistant_protocol::MIN_COMPATIBLE_VERSION
-    );
+    // 数据库最低 Host 与应用协议 minimum 独立；增量目录列不要求机械提升到软件版本。
+    assert_eq!(health["min_compatible_host_version"], "0.25.3");
     let configuration = fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
     assert!(configuration.contains("[host_access]"));
@@ -406,7 +404,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 3);
+    assert_eq!(count("schema_migrations"), 4);
     assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
@@ -463,7 +461,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         database
@@ -553,8 +551,8 @@ fn provider_usage_counts_unloaded_archived_sessions_and_deletion_preserves_refer
     let database = home.path().join("data/runtime.sqlite3");
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection.execute_batch("PRAGMA foreign_keys=ON;
-        INSERT INTO providers VALUES ('usage-one','同名','local','http://127.0.0.1:9/v1','fixture-secret','chat_completions','/v1/models','openai');
-        INSERT INTO providers VALUES ('usage-two','同名','local','http://127.0.0.1:9/v1','fixture-secret','chat_completions','/v1/models','openai');
+        INSERT INTO providers(provider_instance_id,display_name,provider_type,endpoint,api_key,protocol_preference,models_path,discovery_format) VALUES ('usage-one','同名','local','http://127.0.0.1:9/v1','fixture-secret','chat_completions','/v1/models','openai');
+        INSERT INTO providers(provider_instance_id,display_name,provider_type,endpoint,api_key,protocol_preference,models_path,discovery_format) VALUES ('usage-two','同名','local','http://127.0.0.1:9/v1','fixture-secret','chat_completions','/v1/models','openai');
         UPDATE model_settings SET default_provider_instance_id='usage-one',default_model_id='same/model',vision_provider_instance_id='usage-one',vision_model_id='same/model';
         INSERT INTO model_fixed_configs(provider_instance_id,model_id,context_window_tokens,max_output_tokens,max_input_tokens,mode_limits_json,capabilities_json,updated_at_ms,origin) VALUES ('usage-one','same/model',8192,4096,NULL,'{}','{}',1,'online');
         INSERT INTO model_fixed_configs(provider_instance_id,model_id,context_window_tokens,max_output_tokens,max_input_tokens,mode_limits_json,capabilities_json,updated_at_ms,origin) VALUES ('usage-two','same/model',8192,4096,NULL,'{}','{}',1,'online');").unwrap();

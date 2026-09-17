@@ -3,6 +3,8 @@ import type {
   ApprovalDecision,
   ApprovalSnapshot,
   ToolApprovalSubject,
+  ToolInputProjection,
+  ToolInputSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { useRootStore } from "../../../stores/RootStoreContext";
@@ -35,7 +37,10 @@ export const ApprovalWorkspace = observer(function ApprovalWorkspace(props: Read
       <div className={styles.approval_body}>
         <section>
           <h4>请求内容</h4>
-          <ApprovalSubject subject={subject} />
+          <ApprovalInput input={props.approval.input} />
+          {subject.type === "mcp" && subject.untrusted_annotations_json && (
+            <details><summary>服务自报的工具注解（未经验证）</summary><pre>{subject.untrusted_annotations_json}</pre></details>
+          )}
         </section>
         {allow_options.length > 0 && (
           <fieldset>
@@ -63,28 +68,37 @@ export function isAllowDecision(decision: ApprovalDecision): boolean {
   return decision !== "deny";
 }
 
-function ApprovalSubject({ subject }: Readonly<{ subject: ToolApprovalSubject }>) {
-  if (subject.type === "shell") {
-    return <><code className={styles.command_line}><Icon name="terminal" size={15} />{subject.command}</code><p>{subject.working_directory}</p></>;
+function ApprovalInput({ input }: Readonly<{ input: ToolInputProjection }>) {
+  return <div>
+    <ApprovalInputValue input={input.value} />
+    {input.redacted && <p>已隐去敏感值。</p>}
+    {input.truncated && <p>内容已截断。</p>}
+  </div>;
+}
+
+function ApprovalInputValue({ input }: Readonly<{ input: ToolInputSnapshot }>) {
+  switch (input.type) {
+    case "shell":
+      return <><code className={styles.command_line}><Icon name="terminal" size={15} />{input.command}</code><p>{input.working_directory}</p></>;
+    case "file":
+      return <p>{input.operation} · <code>{input.path}</code></p>;
+    case "files":
+      return <div><p>{input.operation} · {input.paths.length} 个文件</p>{input.paths.map((path) => <p key={path}><code>{path}</code></p>)}</div>;
+    case "delegation":
+      return <p>{input.title} · {input.task_summary}</p>;
+    case "mcp":
+      return <div className={styles.mcp_approval}>
+        <p>{input.identity.server_display_name} ({input.identity.server_key}) / <code>{input.identity.tool_name}</code></p>
+        <pre>{input.arguments_json}</pre>
+        <p>工具注解由 MCP 服务提供，不能作为安全或只读保证。外部工具可能产生副作用，请核对参数后授权。</p>
+      </div>;
+    case "image_inspection":
+      return <p>{input.goal} · {input.image_paths.join("、")}</p>;
+    case "general":
+      return <pre>{input.summary}</pre>;
+    case "unavailable":
+      return <p>参数不可用，无法安全展示。</p>;
   }
-  if (subject.type === "file") {
-    return <p>{subject.operation} · <code>{subject.path}</code></p>;
-  }
-  if (subject.type === "files") {
-    return <div><p>{subject.operation} · {subject.paths.length} 个文件</p>{subject.paths.map((path) => <p key={path}><code>{path}</code></p>)}</div>;
-  }
-  if (subject.type === "delegation") {
-    return <p>{subject.title} · {subject.task_summary}</p>;
-  }
-  if (subject.type === "mcp") {
-    return <div className={styles.mcp_approval}>
-      <p>{subject.identity.server_display_name} ({subject.identity.server_key}) / <code>{subject.identity.tool_name}</code></p>
-      <pre>{subject.arguments_json}</pre>
-      {subject.untrusted_annotations_json && <details><summary>服务自报的工具注解（未经验证）</summary><pre>{subject.untrusted_annotations_json}</pre></details>}
-      <p>工具注解由 MCP 服务提供，不能作为安全或只读保证。外部工具可能产生副作用，请核对参数后授权。</p>
-    </div>;
-  }
-  return <p>{subject.tool_name}</p>;
 }
 
 function approvalQuestion(subject: ToolApprovalSubject): string {

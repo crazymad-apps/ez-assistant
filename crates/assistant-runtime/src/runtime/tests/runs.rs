@@ -342,7 +342,9 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
     );
     assert!(observed.iter().any(|event| matches!(
         event,
-        RuntimeEvent::ToolProposed { tool_name, .. } if tool_name == "echo_tool"
+        RuntimeEvent::ToolProposed { tool_name, input, .. }
+            if tool_name == "echo_tool"
+                && matches!(&input.value, assistant_protocol::ToolInputSnapshot::General { .. })
     )));
     assert!(observed.iter().any(|event| matches!(
         event,

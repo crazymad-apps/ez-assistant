@@ -1144,6 +1144,7 @@ pub enum RuntimeCommand {
     DeleteProvider(crate::ProviderRequest),
     GetProviderUsage(crate::ProviderRequest),
     ListProviderModels(crate::ProviderRequest),
+    RefreshProviderModels(crate::ProviderRequest),
     GetModelSettings(crate::GetModelSettingsRequest),
     GetAgentShellSettings {},
     SetDefaultAgentShell {
@@ -1326,7 +1327,8 @@ pub enum RuntimeCommandResult {
     UpdateProvider(crate::ProviderSummary),
     DeleteProvider(crate::ProviderUsage),
     GetProviderUsage(crate::ProviderUsage),
-    ListProviderModels(Vec<crate::DiscoveredModel>),
+    ListProviderModels(crate::ProviderModelCatalogSnapshot),
+    RefreshProviderModels(crate::ProviderModelCatalogSnapshot),
     GetModelSettings(crate::ModelSettings),
     GetAgentShellSettings(crate::AgentShellSettings),
     SetDefaultAgentShell(crate::AgentShellSettings),
@@ -1603,6 +1605,13 @@ mod tests {
             approval_mode: ApprovalMode::Ask,
             subject: crate::ToolApprovalSubject::General {
                 tool_name: "echo_text".to_owned(),
+            },
+            input: crate::ToolInputProjection {
+                value: crate::ToolInputSnapshot::General {
+                    summary: "{}".to_owned(),
+                },
+                redacted: false,
+                truncated: false,
             },
             available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
             exact_rule_preview: crate::ToolApprovalSubject::General {

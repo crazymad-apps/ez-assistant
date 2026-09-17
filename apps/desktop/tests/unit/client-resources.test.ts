@@ -166,6 +166,10 @@ it("closes a pending browser chooser on disposal and resolves Host references wi
 });
 
 it("persists Web view descriptions without terminal, browser, local-file handles or file contents", async () => {
+  localStorage.setItem("ez-assistant:view", JSON.stringify({
+    default_approval_mode: "auto",
+    last_model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
+  }));
   const snapshot = {
     current_scope_key: "session:a",
     groups: [
@@ -208,15 +212,22 @@ it("persists Web view descriptions without terminal, browser, local-file handles
     ],
   };
   const preferences = await loadDesktopPreferences();
+  expect(preferences.default_approval_mode).toBe("ask");
+  expect(preferences.last_model_selection).toBeNull();
   await saveDesktopPreferences({
     ...preferences,
+    default_approval_mode: "auto",
+    last_model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
     resource_workspace: snapshot,
   });
   const saved = await loadDesktopPreferences();
   expect(saved.resource_workspace?.groups[0].tabs).toHaveLength(2);
   expect(saved.resource_workspace?.groups[0].active_index).toBe(1);
   expect(viewingSnapshot(snapshot, true)?.groups[0].tabs).toHaveLength(4);
-  expect(localStorage.getItem("ez-assistant:view")).not.toContain("client.txt");
+  const raw = localStorage.getItem("ez-assistant:view")!;
+  expect(raw).not.toContain("client.txt");
+  expect(JSON.parse(raw)).not.toHaveProperty("default_approval_mode");
+  expect(JSON.parse(raw)).not.toHaveProperty("last_model_selection");
   vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
     throw new DOMException("quota", "QuotaExceededError");
   });

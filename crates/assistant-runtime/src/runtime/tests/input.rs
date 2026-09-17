@@ -456,14 +456,18 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
             .status,
         assistant_protocol::RunStatus::Failed
     );
-    assert!(
-        runtime
-            .conversation_snapshot(&session.session.session_id)
-            .await
-            .expect("empty conversation")
-            .messages
-            .is_empty()
-    );
+    let failed_conversation = runtime
+        .conversation_snapshot(&session.session.session_id)
+        .await
+        .expect("failed conversation");
+    assert_eq!(failed_conversation.messages.len(), 1);
+    assert!(matches!(
+        &failed_conversation.messages[0],
+        ConversationMessage::User(message)
+            if message.parts.iter().any(
+                |part| matches!(part, UserPart::Text(text) if text.text == "retry me")
+            )
+    ));
     runtime
         .set_session_approval_mode(SetSessionApprovalModeRequest {
             session_id: session.session.session_id.clone(),

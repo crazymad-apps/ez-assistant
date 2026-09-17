@@ -22,7 +22,8 @@ use agent_tools::{
 };
 use assistant_protocol::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
-    ChildTaskId, RunId, RuntimeEvent, SessionId, ToolApprovalSubject, WorkspaceId,
+    ChildTaskId, RunId, RuntimeEvent, SessionId, ToolApprovalSubject, ToolInputProjection,
+    ToolInputSnapshot, WorkspaceId,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +41,7 @@ use crate::{
     id,
     mcp::McpAuthorizationFacts,
     observation::ObservationCoordinator,
+    runtime::tool_input_projection::project_tool_input,
 };
 
 struct PendingApproval {
@@ -94,9 +96,23 @@ impl ApprovalRegistry {
         .map_err(|_| RuntimeError::InternalStateUnavailable {
             component: "approval id generator",
         })?;
-        let subject = subject(invocation).ok_or(RuntimeError::InternalStateUnavailable {
-            component: "approval subject",
-        })?;
+        let mcp_identity = invocation
+            .facts::<McpAuthorizationFacts>()
+            .map(McpAuthorizationFacts::identity);
+        let input = project_tool_input(
+            invocation.tool_name().as_str(),
+            invocation.resolved_arguments(),
+            mcp_identity.as_ref(),
+        );
+        if approval_input_is_incomplete(&input) {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "approval-critical tool input exceeds the safe display limit",
+            });
+        }
+        let subject =
+            subject(invocation, &input).ok_or(RuntimeError::InternalStateUnavailable {
+                component: "approval subject",
+            })?;
         let exact_rule_preview = exact_rule_subject(&subject);
         let mut available_decisions =
             vec![ApprovalDecision::AllowOnce, ApprovalDecision::AllowSession];
@@ -117,6 +133,7 @@ impl ApprovalRegistry {
             variant: context.variant,
             approval_mode: context.approval_mode,
             subject: subject.clone(),
+            input,
             available_decisions,
             exact_rule_preview,
             status: ApprovalStatus::Pending,
@@ -486,13 +503,23 @@ impl ApprovalRegistry {
     }
 }
 
+fn approval_input_is_incomplete(input: &ToolInputProjection) -> bool {
+    input.truncated
+        && matches!(
+            &input.value,
+            ToolInputSnapshot::File { .. }
+                | ToolInputSnapshot::Files { .. }
+                | ToolInputSnapshot::Shell { .. }
+                | ToolInputSnapshot::Unavailable
+        )
+}
+
 pub(crate) struct RuntimeApprovalResolver {
     pub(crate) registry: Arc<ApprovalRegistry>,
     pub(crate) session_id: SessionId,
     pub(crate) run_id: RunId,
     pub(crate) child_task_id: Option<ChildTaskId>,
     pub(crate) variant: AgentVariant,
-    pub(crate) approval_mode: ApprovalMode,
     pub(crate) workspace_id: Option<WorkspaceId>,
     pub(crate) cancellation: CancellationToken,
     pub(crate) events: ObservationCoordinator,
@@ -526,6 +553,7 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
         &'a self,
         invocation: &'a ResolvedToolInvocation,
         _batch: &'a ResolvedToolBatch,
+        effective_approval_mode: ApprovalMode,
     ) -> ApprovalFuture<'a> {
         Box::pin(async move {
             let (snapshot, receiver) = match self.registry.register(
@@ -534,7 +562,7 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
                     run_id: self.run_id.clone(),
                     child_task_id: self.child_task_id.clone(),
                     variant: self.variant,
-                    approval_mode: self.approval_mode,
+                    approval_mode: effective_approval_mode,
                     workspace_id: self.workspace_id.clone(),
                 },
                 invocation,
@@ -664,7 +692,10 @@ pub(crate) fn rules_for_approval(
         .collect()
 }
 
-fn subject(invocation: &ResolvedToolInvocation) -> Option<ToolApprovalSubject> {
+fn subject(
+    invocation: &ResolvedToolInvocation,
+    input: &ToolInputProjection,
+) -> Option<ToolApprovalSubject> {
     if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
         return Some(ToolApprovalSubject::File {
             tool_name: invocation.tool_name().as_str().to_owned(),
@@ -696,23 +727,31 @@ fn subject(invocation: &ResolvedToolInvocation) -> Option<ToolApprovalSubject> {
             .to_owned(),
         });
     }
-    if let Some(facts) = invocation.facts::<DelegationAuthorizationFacts>() {
+    if invocation.facts::<DelegationAuthorizationFacts>().is_some() {
+        let (title, task_summary) = match &input.value {
+            ToolInputSnapshot::Delegation {
+                title,
+                task_summary,
+            } => (title.clone(), task_summary.clone()),
+            _ => (String::new(), String::new()),
+        };
         return Some(ToolApprovalSubject::Delegation {
             tool_name: DELEGATE_TASK_TOOL_NAME.to_owned(),
-            title: facts.title.clone(),
-            task_summary: facts.task_summary.clone(),
+            title,
+            task_summary,
         });
     }
     if let Some(facts) = invocation.facts::<McpAuthorizationFacts>() {
+        let arguments_json = match &input.value {
+            ToolInputSnapshot::Mcp { arguments_json, .. } => arguments_json.clone(),
+            _ => "{}".to_owned(),
+        };
         return Some(ToolApprovalSubject::Mcp {
             identity: facts.identity(),
-            arguments_json: serde_json::to_string(&facts.invocation.arguments)
-                .unwrap_or_else(|_| "{}".to_owned()),
-            untrusted_annotations_json: facts
-                .invocation
-                .untrusted_annotations
-                .as_ref()
-                .and_then(|annotations| serde_json::to_string(annotations).ok()),
+            arguments_json,
+            untrusted_annotations_json: facts.invocation.untrusted_annotations.as_ref().map(
+                |annotations| crate::runtime::tool_input_projection::project_json(annotations).0,
+            ),
         });
     }
     invocation
@@ -763,5 +802,36 @@ fn parse_file_operation(value: &str) -> RuntimeResult<PermissionFileOperation> {
         _ => Err(RuntimeError::InternalStateUnavailable {
             component: "approval file operation",
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assistant_protocol::{ToolInputProjection, ToolInputSnapshot};
+
+    use super::approval_input_is_incomplete;
+
+    #[test]
+    fn approval_rejects_incomplete_critical_fields_but_allows_bounded_general_summaries() {
+        let shell = ToolInputProjection {
+            value: ToolInputSnapshot::Shell {
+                command: "x".to_owned(),
+                working_directory: "/workspace".to_owned(),
+                timeout_ms: 1,
+                process_mode: "managed".to_owned(),
+            },
+            redacted: false,
+            truncated: true,
+        };
+        assert!(approval_input_is_incomplete(&shell));
+
+        let general = ToolInputProjection {
+            value: ToolInputSnapshot::General {
+                summary: "{}".to_owned(),
+            },
+            redacted: false,
+            truncated: true,
+        };
+        assert!(!approval_input_is_incomplete(&general));
     }
 }

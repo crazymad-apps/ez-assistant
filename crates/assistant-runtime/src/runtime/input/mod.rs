@@ -368,7 +368,6 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     permission_coordinator: context.permission_coordinator.clone(),
                     approval_registry: context.approval_registry.clone(),
                     variant: next.2.variant,
-                    approval_mode: next.2.approval_mode,
                     run_id: next.2.run_id.clone(),
                     cancellation: run_cancellation.clone(),
                     events: context.events.clone(),
@@ -1129,14 +1128,25 @@ async fn fail_before_start(
         fault_driver(session);
         return;
     };
-    let target = session.lock_state().ok().and_then(|state| {
-        state
-            .runs
-            .get(run_id)
-            .and_then(|run| state.inputs.get(run.input_id()))
-            .and_then(|input| input.stored.agent_shell_target)
-            .map(|target| (target, state.agent_shell_kind))
-    });
+    let Some((queued_user_message, target)) = session.lock_state().ok().and_then(|state| {
+        let run = state.runs.get(run_id)?;
+        let input = state.inputs.get(run.input_id())?;
+        let queued_user_message = match input.stored.state {
+            StoredInputState::Queued => Some(input.stored.queued_message.clone()?),
+            StoredInputState::Committed if input.stored.queued_message.is_none() => None,
+            _ => return None,
+        };
+        Some((
+            queued_user_message,
+            input
+                .stored
+                .agent_shell_target
+                .map(|target| (target, state.agent_shell_kind)),
+        ))
+    }) else {
+        fault_driver(session);
+        return;
+    };
     let messages = if let Some((target, previous_shell)) = target {
         use crate::internal_boundary::{
             InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
@@ -1169,6 +1179,7 @@ async fn fail_before_start(
             status: RunStatus::Failed,
             cancel_requested: false,
             error: Some(error.clone()),
+            queued_user_message: queued_user_message.clone(),
             messages: messages.clone(),
             message_step: None,
             goal_effect: None,
@@ -1180,8 +1191,13 @@ async fn fail_before_start(
         fault_driver(session);
         return;
     };
+    let committed_messages = queued_user_message
+        .into_iter()
+        .map(ConversationMessage::User)
+        .chain(messages.iter().cloned())
+        .collect::<Vec<_>>();
     if let Ok(mut state) = session.lock_state() {
-        for message in &messages {
+        for message in &committed_messages {
             let Some(journal) = state.journal.as_mut() else {
                 fault_locked_driver(&mut state);
                 return;
@@ -1195,16 +1211,27 @@ async fn fail_before_start(
         }
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
         if let Some(input_id) = failed_input_id.as_ref()
+            && let Some(input) = state.inputs.get_mut(input_id)
+            && input.stored.state == StoredInputState::Queued
+        {
+            input.stored.state = StoredInputState::Committed;
+            input.stored.queued_message = None;
+        }
+        if let Some(input_id) = failed_input_id.as_ref()
             && let Some(is_user) = state.pop_runnable_input(input_id)
             && is_user
         {
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
         if let Some(run) = state.runs.get_mut(run_id) {
-            run.extend_message_ids(messages.iter().filter_map(|message| match message {
-                ConversationMessage::User(message) => Some(message.id.clone()),
-                _ => None,
-            }));
+            run.extend_message_ids(
+                committed_messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ConversationMessage::User(message) => Some(message.id.clone()),
+                        _ => None,
+                    }),
+            );
             run.fail_before_start(error.clone(), finished_at);
         }
         if state
@@ -1217,7 +1244,7 @@ async fn fail_before_start(
         state.updated_at_ms = finished_at;
         state.is_queue_driver_running = false;
     }
-    if !messages.is_empty()
+    if !committed_messages.is_empty()
         && let Ok(state) = session.lock_state()
     {
         let _ = context.events.send(RuntimeEvent::ConversationCommitted {

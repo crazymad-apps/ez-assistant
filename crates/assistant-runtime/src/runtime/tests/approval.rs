@@ -1,3 +1,4 @@
+use agent_testkit::ToolExecutionGate;
 use assistant_protocol::{
     ApprovalDecision, ApprovalStatus, CancelRunRequest, CreateSessionRequest,
     DecideApprovalRequest, ListPendingApprovalsRequest, RegisterWorkspaceRequest,
@@ -42,6 +43,143 @@ fn final_step(message_id: &str) -> ModelScript {
 }
 
 #[tokio::test]
+async fn ask_to_auto_affects_the_next_tool_call_in_the_same_run_without_releasing_pending() {
+    let (runtime, tool) = approval_runtime([
+        tool_step("assistant-tool-1"),
+        tool_step("assistant-tool-2"),
+        final_step("assistant-final"),
+    ]);
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "use the tool twice".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("submit input")
+        .run;
+    let pending = wait_for_pending_approval(&runtime, &session_id).await;
+
+    set_auto_approval(&runtime, &session_id).await;
+    assert_eq!(
+        runtime
+            .list_pending_approvals(ListPendingApprovalsRequest {
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("pending approval remains")
+            .approvals
+            .len(),
+        1
+    );
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: session_id.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::AllowOnce,
+        })
+        .await
+        .expect("allow already-pending call");
+
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run.run_id)
+            .await
+            .status,
+        RunStatus::Completed
+    );
+    assert_eq!(tool.executed_inputs().len(), 2);
+    assert!(
+        runtime
+            .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
+            .expect("no second approval")
+            .approvals
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn auto_to_ask_affects_the_next_tool_call_in_the_same_run() {
+    let gate = ToolExecutionGate::new();
+    let tool = ScriptedTool::succeed("approval_tool", json!({"approved": true}), OrderLog::new())
+        .with_execution_gate(gate.clone());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("register tool");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            tool_step("assistant-tool-1"),
+            tool_step("assistant-tool-2"),
+            final_step("assistant-final"),
+        ],
+    ));
+    let runtime = runtime_with_tools(model, registry.snapshot());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("create session")
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session_id).await;
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "use the tool twice".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("submit input")
+        .run;
+    gate.wait_for_entered(1).await;
+
+    runtime
+        .set_session_approval_mode(SetSessionApprovalModeRequest {
+            session_id: session_id.clone(),
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+        })
+        .await
+        .expect("switch to ask while first tool is active");
+    gate.release();
+    let pending = wait_for_pending_approval(&runtime, &session_id).await;
+    assert_eq!(tool.executed_inputs().len(), 1);
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: session_id.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::AllowOnce,
+        })
+        .await
+        .expect("allow second tool");
+
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run.run_id)
+            .await
+            .status,
+        RunStatus::Completed
+    );
+    assert_eq!(tool.executed_inputs().len(), 2);
+}
+
+#[tokio::test]
 async fn allow_once_resumes_exactly_one_waiting_call_and_emits_lifecycle_events() {
     let (runtime, tool) =
         approval_runtime([tool_step("assistant-tool"), final_step("assistant-final")]);
@@ -69,6 +207,11 @@ async fn allow_once_resumes_exactly_one_waiting_call_and_emits_lifecycle_events(
         .run;
     let pending = wait_for_pending_approval(&runtime, &session_id).await;
     assert_eq!(pending.status, ApprovalStatus::Pending);
+    assert!(matches!(
+        &pending.input.value,
+        assistant_protocol::ToolInputSnapshot::General { summary }
+            if summary.contains("hello")
+    ));
     assert_eq!(
         pending.available_decisions,
         vec![

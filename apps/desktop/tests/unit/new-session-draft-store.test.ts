@@ -22,6 +22,36 @@ describe("NewSessionDraftStore", () => {
     drafts.updateModel("unbound", null);
     expect(isDraftCustomized(drafts.get("unbound")!)).toBe(false);
   });
+
+  it("copies current device defaults only into drafts created afterwards", () => {
+    const drafts = new NewSessionDraftStore();
+    const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+    drafts.applyDefaults("auto", remembered);
+    const first = drafts.open("unbound");
+    expect(first).toMatchObject({ approval_mode: "auto", model_selection: remembered });
+    expect(isDraftCustomized(first, "auto", remembered)).toBe(false);
+
+    drafts.applyDefaults("ask", null);
+    const second = drafts.open("workspace:workspace-2");
+    expect(second).toMatchObject({ approval_mode: "ask", model_selection: null });
+    expect(drafts.get("unbound")).toMatchObject({ approval_mode: "auto", model_selection: remembered });
+    expect(isDraftCustomized(first, "ask", null)).toBe(true);
+  });
+
+  it("clears an unavailable inherited model only from blank unmaterialized drafts", () => {
+    const drafts = new NewSessionDraftStore();
+    const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+    drafts.applyDefaults("ask", remembered);
+    drafts.open("unbound");
+    drafts.open("workspace:workspace-2");
+    drafts.updateText("workspace:workspace-2", "保留用户草稿");
+
+    drafts.discardUnavailableDefaultModel(remembered);
+
+    expect(drafts.default_model_selection).toBeNull();
+    expect(drafts.get("unbound")?.model_selection).toBeNull();
+    expect(drafts.get("workspace:workspace-2")?.model_selection).toEqual(remembered);
+  });
   it("passes a stable MCP key in first materialization and preserves it on rejection", async () => {
     const store = new RootStore();
     store.connection.markConnected("instance-1", {

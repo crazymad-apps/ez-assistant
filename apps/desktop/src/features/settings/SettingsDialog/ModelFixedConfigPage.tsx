@@ -75,9 +75,9 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(props
     const current = new AbortController(); reference_request.current = current;
     setReference(null); setReferenceError(null); setReferenceLoading(true);
     try {
-      const models = await settings.listProviderModels(props.selection.provider_instance_id, current.signal);
+      const catalog = await settings.refreshProviderModels(props.selection.provider_instance_id, current.signal);
       if (current.signal.aborted) return;
-      const selected = models.find((model) => model.model_id === props.selection.model_id);
+      const selected = catalog.models.find((model) => model.model_id === props.selection.model_id);
       if (!selected) throw new Error("本次在线列表中没有此模型。");
       setReference(selected.metadata);
     } catch (failure: unknown) {

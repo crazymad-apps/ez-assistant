@@ -43,7 +43,7 @@ impl ConfigSnapshot {
     }
 }
 
-/// 数据库模型设置，不保存在线目录或全量固定记录。Provider Arc 身份涵盖连接／固定设置变更。
+/// 数据库模型设置与 Provider（含最后成功目录）的内存投影；不建立第二份目录缓存或加载全量固定记录。
 #[derive(Default)]
 pub(crate) struct ManagedModels {
     pub(crate) providers:

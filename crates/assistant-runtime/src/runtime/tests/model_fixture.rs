@@ -14,6 +14,8 @@ pub(super) fn provider(api_key: &str) -> crate::StoredProvider {
             discovery_format: ModelDiscoveryFormat::OpenAi,
         },
         api_key: SecretValue::new(api_key.into()),
+        model_catalog: None,
+        model_catalog_diagnostic: None,
     }
 }
 

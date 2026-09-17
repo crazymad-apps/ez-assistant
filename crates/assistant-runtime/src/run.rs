@@ -46,6 +46,7 @@ pub(crate) struct RunRecord {
     created_at_ms: Option<i64>,
     status: RunStatus,
     variant: AgentVariant,
+    /// Run 接受时的审计基线；活动工具授权不读取该字段。
     approval_mode: ApprovalMode,
     reasoning_effort: Option<ReasoningEffortKey>,
     shell: Option<crate::FrozenShellEnvironment>,

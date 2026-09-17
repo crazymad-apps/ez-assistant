@@ -167,6 +167,14 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         && !current_turn_has_tool_result
     {
         delegate_task_tool_response(tool_exchange_number(&body))
+    } else if case == "DELEGATE_PROBE_CASE"
+        && has_tool_definition(&body, "delegate_task")
+        && !current_turn_has_tool_result
+    {
+        delegate_tool_response(
+            tool_exchange_number(&body),
+            &[("Child uses current approval", "TOOL_CASE")],
+        )
     } else if case == "GOAL_LONG_CASE" {
         goal_long_response(&body, &body_text)
     } else if case == "GOAL_BLOCK_CASE" {
@@ -194,6 +202,8 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         )
     } else if case == "TOOL_CASE" && !current_turn_has_tool_result {
         directory_list_tool_response(tool_exchange_number(&body))
+    } else if case == "TOOL_TWICE_CASE" && current_turn_tool_result_count(&body) < 2 {
+        directory_list_tool_response(current_turn_tool_result_count(&body) + 1)
     } else if case == "WRITE_CASE" && !current_turn_has_tool_result {
         file_write_tool_response(tool_exchange_number(&body))
     } else if case == "FILE_REFERENCE_CASE" && !current_turn_has_tool_result {
@@ -218,14 +228,17 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
                 .collect(),
         )
     } else {
-        let response_id = if matches!(case, "FILE_REFERENCE_CASE" | "TOOL_CASE" | "WRITE_CASE") {
+        let response_id = if matches!(
+            case,
+            "FILE_REFERENCE_CASE" | "TOOL_CASE" | "TOOL_TWICE_CASE" | "WRITE_CASE"
+        ) {
             format!("text-{case}-{}", tool_exchange_number(&body))
         } else {
             format!("text-{case}")
         };
         let text = if case == "REPLACEMENT_CASE" {
             "replacement answer"
-        } else if matches!(case, "TOOL_CASE" | "WRITE_CASE") {
+        } else if matches!(case, "TOOL_CASE" | "TOOL_TWICE_CASE" | "WRITE_CASE") {
             "tool answer"
         } else if case == "FILE_REFERENCE_CASE" && body_text.contains("attachment-tool-token-91") {
             "file tool verified"
@@ -596,18 +609,23 @@ fn responses_opaque_answer() -> String {
 /// 只观察最近一条 User Message 之后的消息，避免历史 Tool Result 让新的 Run
 /// 被 fake Provider 误判为已经完成当前工具调用。
 fn current_turn_has_tool_result(body: &Value) -> bool {
+    current_turn_tool_result_count(body) > 0
+}
+
+fn current_turn_tool_result_count(body: &Value) -> usize {
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
-        return false;
+        return 0;
     };
     let Some(last_user) = messages
         .iter()
         .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
     else {
-        return false;
+        return 0;
     };
     messages[last_user + 1..]
         .iter()
-        .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .count()
 }
 
 fn tool_exchange_number(body: &Value) -> usize {
@@ -874,11 +892,13 @@ fn latest_case(body: &str) -> &'static str {
         "BLOCK_FOR_RESTART",
         "QUEUED_AFTER_RESTART",
         "TOOL_CASE",
+        "TOOL_TWICE_CASE",
         "WRITE_CASE",
         "CANCEL_CASE",
         "REPLACEMENT_CASE",
         "FILE_REFERENCE_CASE",
         "DELEGATE_CASE",
+        "DELEGATE_PROBE_CASE",
         "DELEGATE_PARALLEL_CASE",
         "DELEGATE_BLOCK_CASE",
         "DELEGATE_IMAGE_CASE",
@@ -1240,6 +1260,10 @@ impl HostProcess {
             let mut client = host.connect();
             for fixture in providers {
                 let provider = client.runtime("create_provider", json!({"connection":fixture["connection"],"credential":{"mode":"replace","value":fixture["api_key"]}}));
+                client.runtime(
+                    "refresh_provider_models",
+                    json!({"provider_instance_id":provider["provider_instance_id"]}),
+                );
                 for model in fixture["models"].as_array().unwrap() {
                     let selection = json!({"provider_instance_id":provider["provider_instance_id"],"model_id":model["model_id"]});
                     client.runtime(

@@ -585,6 +585,7 @@ describe("ConversationView scroll anchoring", () => {
         step: 2,
         call_id: "call-live-1",
         tool_name: "shell",
+        input: unavailableToolInput(),
       },
       {
         type: "tool_proposed",
@@ -593,6 +594,7 @@ describe("ConversationView scroll anchoring", () => {
         step: 2,
         call_id: "call-live-2",
         tool_name: "shell",
+        input: unavailableToolInput(),
       },
       {
         type: "tool_output",
@@ -893,6 +895,7 @@ describe("ConversationView scroll anchoring", () => {
       step: 1,
       call_id: "call-delegate",
       tool_name: "delegate_task",
+      input: unavailableToolInput(),
     }, {
       type: "child_task_event",
       session_id: "session-1",
@@ -1081,6 +1084,10 @@ function emitLive(
     const callback = getFrame();
     callback?.(0);
   });
+}
+
+function unavailableToolInput() {
+  return { value: { type: "unavailable" as const }, redacted: false, truncated: false };
 }
 
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {

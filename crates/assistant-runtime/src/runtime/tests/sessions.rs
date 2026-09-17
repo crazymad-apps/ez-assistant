@@ -879,7 +879,7 @@ async fn list_and_get_are_deterministic_and_unknown_session_is_structured() {
 }
 
 #[tokio::test]
-async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_message() {
+async fn model_factory_failure_atomically_commits_the_user_message_and_input() {
     let runtime = runtime_with_factories(
         Arc::new(FailingModelFactory),
         Arc::new(StaticSystemPromptFactory),
@@ -895,7 +895,7 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
-            message: "must not commit".to_owned(),
+            message: "preserve this input".to_owned(),
             attachment_ids: Vec::new(),
             quotes: Vec::new(),
             skill_name: None,
@@ -910,14 +910,18 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             .status,
         assistant_protocol::RunStatus::Failed
     );
-    assert!(
-        runtime
-            .conversation_snapshot(&session.session.session_id)
-            .await
-            .expect("conversation")
-            .messages
-            .is_empty()
-    );
+    let conversation = runtime
+        .conversation_snapshot(&session.session.session_id)
+        .await
+        .expect("conversation");
+    assert_eq!(conversation.messages.len(), 1);
+    assert!(matches!(
+        &conversation.messages[0],
+        ConversationMessage::User(message)
+            if message.parts.iter().any(
+                |part| matches!(part, UserPart::Text(text) if text.text == "preserve this input")
+            )
+    ));
     assert_eq!(
         runtime
             .get_session(GetSessionRequest {
@@ -927,6 +931,6 @@ async fn model_factory_failure_keeps_the_input_queued_without_appending_a_user_m
             .expect("session")
             .session
             .queued_input_count,
-        1
+        0
     );
 }

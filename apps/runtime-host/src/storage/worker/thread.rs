@@ -39,6 +39,9 @@ pub(super) fn run_worker(
             Command::PutProvider { provider, reply } => {
                 let _ = reply.send(engine.put_provider(provider));
             }
+            Command::ReplaceProviderModelCatalog { replacement, reply } => {
+                let _ = reply.send(engine.replace_provider_model_catalog(replacement));
+            }
             Command::RemoveProvider { id, reply } => {
                 let _ = reply.send(engine.remove_provider(id));
             }
@@ -257,6 +260,12 @@ pub(super) fn run_worker(
             }
             Command::SettleRun { settlement, reply } => {
                 let _ = reply.send(engine.settle_run(*settlement));
+            }
+            Command::ReconcileTerminalRunInput {
+                reconciliation,
+                reply,
+            } => {
+                let _ = reply.send(engine.reconcile_terminal_run_input(*reconciliation));
             }
             Command::StopGoal { stop, reply } => {
                 let _ = reply.send(engine.stop_goal(stop));

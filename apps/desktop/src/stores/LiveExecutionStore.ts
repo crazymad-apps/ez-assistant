@@ -4,6 +4,7 @@ import type {
   ChildTaskSnapshot,
   ChildTaskStatus,
   ChildTaskViewSnapshot,
+  ConversationOwner,
   RunSnapshot,
   RunStatus,
   RuntimeEventEnvelope,
@@ -39,6 +40,10 @@ export class LiveExecutionStore {
   readonly child_tasks = observable.map<ChildTaskId, ChildTaskSnapshot>(undefined, { deep: false });
   #pending: RuntimeEventEnvelope[] = [];
   #animation_frame: number | null = null;
+  #sealed_run_steps = new Map<string, Set<number>>();
+  #sealed_child_steps = new Map<ChildTaskId, Set<number>>();
+  #session_generations = new Map<SessionId, number>();
+  #child_generations = new Map<ChildTaskId, number>();
 
   constructor() {
     makeObservable(this, {
@@ -48,6 +53,7 @@ export class LiveExecutionStore {
       flush: action,
       reconcileSession: action,
       reconcileChildTask: action,
+      invalidateForGap: action,
       clear: action,
     });
   }
@@ -80,6 +86,14 @@ export class LiveExecutionStore {
       this.flush();
     }
     const session_id = view.session.session_id;
+    if (view.conversation.owner?.type === "main_session"
+      && view.conversation.owner.session_id === session_id) {
+      const previous_generation = this.#session_generations.get(session_id);
+      if (previous_generation !== undefined && previous_generation !== view.conversation.generation) {
+        this.#invalidateMainOwner(session_id);
+      }
+      this.#session_generations.set(session_id, view.conversation.generation);
+    }
     const authoritative_child_task_ids = new Set(
       (view.child_tasks ?? []).map((item) => item.task.child_task_id),
     );
@@ -87,11 +101,15 @@ export class LiveExecutionStore {
       if (task.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
         this.child_tasks.delete(child_task_id);
         this.child_runs.delete(child_task_id);
+        this.#sealed_child_steps.delete(child_task_id);
+        this.#child_generations.delete(child_task_id);
       }
     }
     for (const [child_task_id, run] of this.child_runs) {
       if (run.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
         this.child_runs.delete(child_task_id);
+        this.#sealed_child_steps.delete(child_task_id);
+        this.#child_generations.delete(child_task_id);
       }
     }
     const committed_steps = new Map<string, Set<number>>();
@@ -117,6 +135,7 @@ export class LiveExecutionStore {
       if (is_current_session && (!view.active_run || (run.status !== "accepted" && !is_authoritatively_active))
         && !retain_terminal_error) {
         this.runs.delete(key);
+        this.#sealed_run_steps.delete(key);
         continue;
       }
       if (is_current_session && is_authoritatively_active) {
@@ -128,9 +147,14 @@ export class LiveExecutionStore {
       }
     }
     if (view.active_run) {
+      const baseline = committed_steps.get(view.active_run.run_id) ?? new Set<number>();
+      for (let step = 1; step < (view.active_run.active_step ?? 0); step += 1) {
+        baseline.add(step);
+      }
+      this.#sealed_run_steps.set(runKey(session_id, view.active_run.run_id), baseline);
       this.#reconcileRunSnapshot(
         view.active_run,
-        committed_steps.get(view.active_run.run_id) ?? new Set<number>(),
+        baseline,
       );
     }
   }
@@ -155,11 +179,17 @@ export class LiveExecutionStore {
       this.flush();
     }
     const child_task_id = view.task.task.child_task_id;
+    const previous_generation = this.#child_generations.get(child_task_id);
+    if (previous_generation !== undefined && previous_generation !== view.conversation.generation) {
+      this.#invalidateChildOwner(child_task_id);
+    }
+    this.#child_generations.set(child_task_id, view.conversation.generation);
     this.child_tasks.set(child_task_id, view.task.task);
     const status = childRunStatus(view.task.task.status);
     const current = this.child_runs.get(child_task_id);
     if (view.task.task.status === "completed" || view.task.task.status === "failed" || view.task.task.status === "cancelled" || view.task.task.status === "interrupted") {
       this.child_runs.delete(child_task_id);
+      this.#sealed_child_steps.delete(child_task_id);
       return;
     }
     const base = current ?? emptyRun(
@@ -184,6 +214,24 @@ export class LiveExecutionStore {
     this.runs.clear();
     this.child_runs.clear();
     this.child_tasks.clear();
+    this.#sealed_run_steps.clear();
+    this.#sealed_child_steps.clear();
+    this.#session_generations.clear();
+    this.#child_generations.clear();
+  }
+
+  invalidateForGap(): void {
+    if (this.#animation_frame !== null) {
+      cancelAnimationFrame(this.#animation_frame);
+    }
+    this.#animation_frame = null;
+    this.#pending = [];
+    this.runs.clear();
+    this.child_runs.clear();
+    this.#sealed_run_steps.clear();
+    this.#sealed_child_steps.clear();
+    this.#session_generations.clear();
+    this.#child_generations.clear();
   }
 
   dispose(): void {
@@ -194,8 +242,15 @@ export class LiveExecutionStore {
     const event = envelope.event;
     if (event.type === "child_task_event") {
       const child_event = event.event;
+      if ("step" in child_event
+        && this.#sealed_child_steps.get(event.child_task_id)?.has(child_event.step)) {
+        return;
+      }
       const current = this.child_runs.get(event.child_task_id)
         ?? emptyRun(event.session_id, `child:${event.child_task_id}`, envelope.emitted_at_ms);
+      if ("step" in child_event && !isNonterminalRun(current.status)) {
+        return;
+      }
       let next = current;
       switch (child_event.type) {
         case "created":
@@ -225,6 +280,7 @@ export class LiveExecutionStore {
           next = updateStep(current, child_event.step, (segments) => appendTool(segments, {
             call_id: child_event.call_id,
             tool_name: child_event.tool_name,
+            input: child_event.input,
             status: "proposed",
             stdout: "",
             stderr: "",
@@ -253,9 +309,14 @@ export class LiveExecutionStore {
             status: childRunStatus(child_event.status),
             error_message: child_event.error?.message ?? current.error_message,
           };
+          this.#sealed_child_steps.delete(event.child_task_id);
           break;
       }
       this.child_runs.set(event.child_task_id, next);
+      return;
+    }
+    if (event.type === "step_committed") {
+      this.#sealStep(event.owner, event.step, event.generation);
       return;
     }
     if (!("session_id" in event) || !("run_id" in event)) {
@@ -263,6 +324,11 @@ export class LiveExecutionStore {
     }
     const key = runKey(event.session_id, event.run_id);
     const current = this.runs.get(key) ?? emptyRun(event.session_id, event.run_id, envelope.emitted_at_ms);
+    if ("step" in event) {
+      if (!isNonterminalRun(current.status) || this.#sealed_run_steps.get(key)?.has(event.step)) {
+        return;
+      }
+    }
     let next = current;
     switch (event.type) {
       case "run_accepted":
@@ -270,6 +336,7 @@ export class LiveExecutionStore {
           if (existing_key !== key && existing_run.session_id === event.session_id
             && existing_run.error_message !== null) {
             this.runs.delete(existing_key);
+            this.#sealed_run_steps.delete(existing_key);
           }
         }
         next = { ...current, status: "accepted" };
@@ -312,6 +379,7 @@ export class LiveExecutionStore {
           appendTool(segments, {
             call_id: event.call_id,
             tool_name: event.tool_name,
+            input: event.input,
             status: "proposed",
             stdout: "",
             stderr: "",
@@ -338,11 +406,66 @@ export class LiveExecutionStore {
           error_message: event.error?.message ?? null,
           model_failure_kind: event.status === "failed" ? current.model_failure_kind : null,
         };
+        this.#sealed_run_steps.delete(key);
         break;
       default:
         return;
     }
     this.runs.set(key, next);
+  }
+
+  #sealStep(owner: ConversationOwner, step: number, generation: number): void {
+    if (owner.type === "main_session") {
+      if (this.#session_generations.get(owner.session_id) !== generation) {
+        this.#invalidateMainOwner(owner.session_id);
+        return;
+      }
+      const candidates = [...this.runs.entries()].filter(([, run]) =>
+        run.session_id === owner.session_id && isNonterminalRun(run.status));
+      if (candidates.length !== 1) {
+        this.#invalidateMainOwner(owner.session_id);
+        return;
+      }
+      const [key, run] = candidates[0]!;
+      const sealed = this.#sealed_run_steps.get(key) ?? new Set<number>();
+      sealed.add(step);
+      this.#sealed_run_steps.set(key, sealed);
+      this.runs.set(key, { ...run, steps: run.steps.filter((item) => item.step !== step) });
+      return;
+    }
+
+    if (this.#child_generations.get(owner.child_task_id) !== generation) {
+      this.#invalidateChildOwner(owner.child_task_id);
+      return;
+    }
+    const run = this.child_runs.get(owner.child_task_id);
+    if (!run || run.session_id !== owner.session_id || !isNonterminalRun(run.status)) {
+      this.#invalidateChildOwner(owner.child_task_id);
+      return;
+    }
+    const sealed = this.#sealed_child_steps.get(owner.child_task_id) ?? new Set<number>();
+    sealed.add(step);
+    this.#sealed_child_steps.set(owner.child_task_id, sealed);
+    this.child_runs.set(owner.child_task_id, {
+      ...run,
+      steps: run.steps.filter((item) => item.step !== step),
+    });
+  }
+
+  #invalidateMainOwner(session_id: SessionId): void {
+    for (const [key, run] of this.runs) {
+      if (run.session_id === session_id) {
+        this.runs.delete(key);
+        this.#sealed_run_steps.delete(key);
+      }
+    }
+    this.#session_generations.delete(session_id);
+  }
+
+  #invalidateChildOwner(child_task_id: ChildTaskId): void {
+    this.child_runs.delete(child_task_id);
+    this.#sealed_child_steps.delete(child_task_id);
+    this.#child_generations.delete(child_task_id);
   }
 
   #updateChildTask(
@@ -420,6 +543,7 @@ export class LiveExecutionStore {
 function isLiveExecutionEvent(envelope: RuntimeEventEnvelope): boolean {
   return [
     "child_task_event",
+    "step_committed",
     "run_accepted",
     "run_started",
     "run_cancelling",
@@ -446,4 +570,8 @@ function childRunStatus(status: ChildTaskStatus): RunStatus {
     case "cancelled": return "cancelled";
     case "interrupted": return "interrupted";
   }
+}
+
+function isNonterminalRun(status: RunStatus): boolean {
+  return status === "accepted" || status === "running" || status === "cancelling";
 }

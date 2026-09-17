@@ -1,7 +1,7 @@
 //! Runtime 权威工具授权器。
 //!
-//! Run 冻结变体、审批方式和作用域；权限文件本身在每次调用时重新从 Registry
-//! 取得完整快照，因此显式 reload 会影响活动 Run 的后续 Tool Call。
+//! Run 只冻结变体和作用域；审批方式与权限文件都在每次调用时读取当前 Session/Registry，
+//! 因此成功切换模式或显式 reload 会影响活动 Run 的后续 Tool Call。
 
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
@@ -26,6 +26,7 @@ use crate::{
         failure_code as mcp_failure_code,
     },
     runtime::{SpeakAuthorizationFacts, controller::ControllerAuthorizationFacts},
+    session::SessionController,
     skill::LoadSkillAuthorizationFacts,
     work_plan::WorkPlanAuthorizationFacts,
 };
@@ -81,12 +82,13 @@ pub(crate) trait PermissionApprovalResolver: Send + Sync {
         &'a self,
         invocation: &'a ResolvedToolInvocation,
         batch: &'a ResolvedToolBatch,
+        effective_approval_mode: ApprovalMode,
     ) -> ApprovalFuture<'a>;
 }
 
 pub(crate) struct RuntimeToolAuthorizer {
     variant: AgentVariant,
-    approval_mode: ApprovalMode,
+    session: Arc<SessionController>,
     permission_scopes: Vec<PermissionFileScope>,
     permission_coordinator: Arc<PermissionCoordinator>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
@@ -100,12 +102,12 @@ pub(crate) struct RuntimeToolAuthorizer {
 #[derive(Clone)]
 pub(crate) struct RunAuthorizationScope {
     pub(crate) variant: AgentVariant,
-    pub(crate) approval_mode: ApprovalMode,
 }
 
 impl RuntimeToolAuthorizer {
     pub(crate) fn new(
         scope: RunAuthorizationScope,
+        session: Arc<SessionController>,
         permission_scopes: Vec<PermissionFileScope>,
         permission_coordinator: Arc<PermissionCoordinator>,
         infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
@@ -126,7 +128,7 @@ impl RuntimeToolAuthorizer {
         };
         Ok(Self {
             variant: scope.variant,
-            approval_mode: scope.approval_mode,
+            session,
             permission_scopes,
             permission_coordinator,
             infrastructure_policies,
@@ -321,14 +323,18 @@ impl RuntimeToolAuthorizer {
                 return deny("tool call is denied by a permission rule");
             }
             if path_effects.iter().any(|(_, asked, _)| *asked) {
-                return self.resolve_and_recheck(invocation, batch).await;
+                return self.resolve_with_current_mode(invocation, batch).await;
             }
             if path_effects.iter().all(|(_, _, allowed)| *allowed) {
                 return ToolAuthorization::Allow;
             }
-            return match self.approval_mode {
-                ApprovalMode::Ask => self.resolve_and_recheck(invocation, batch).await,
-                ApprovalMode::Auto => ToolAuthorization::Allow,
+            return match self.current_approval_mode() {
+                None => deny("session approval mode is unavailable"),
+                Some(ApprovalMode::Ask) => {
+                    self.resolve_and_recheck(invocation, batch, ApprovalMode::Ask)
+                        .await
+                }
+                Some(ApprovalMode::Auto) => ToolAuthorization::Allow,
             };
         }
 
@@ -358,23 +364,47 @@ impl RuntimeToolAuthorizer {
             return deny("tool call is denied by a permission rule");
         }
         if ask_rule {
-            return self.resolve_and_recheck(invocation, batch).await;
+            return self.resolve_with_current_mode(invocation, batch).await;
         }
         if allow_rule {
             return ToolAuthorization::Allow;
         }
-        match self.approval_mode {
-            ApprovalMode::Ask => self.resolve_and_recheck(invocation, batch).await,
-            ApprovalMode::Auto => ToolAuthorization::Allow,
+        match self.current_approval_mode() {
+            None => deny("session approval mode is unavailable"),
+            Some(ApprovalMode::Ask) => {
+                self.resolve_and_recheck(invocation, batch, ApprovalMode::Ask)
+                    .await
+            }
+            Some(ApprovalMode::Auto) => ToolAuthorization::Allow,
         }
+    }
+
+    fn current_approval_mode(&self) -> Option<ApprovalMode> {
+        self.session.current_approval_mode().ok()
+    }
+
+    async fn resolve_with_current_mode(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        batch: &ResolvedToolBatch,
+    ) -> ToolAuthorization {
+        let Some(approval_mode) = self.current_approval_mode() else {
+            return deny("session approval mode is unavailable");
+        };
+        self.resolve_and_recheck(invocation, batch, approval_mode)
+            .await
     }
 
     async fn resolve_and_recheck(
         &self,
         invocation: &ResolvedToolInvocation,
         batch: &ResolvedToolBatch,
+        effective_approval_mode: ApprovalMode,
     ) -> ToolAuthorization {
-        let resolution = self.approval_resolver.resolve(invocation, batch).await;
+        let resolution = self
+            .approval_resolver
+            .resolve(invocation, batch, effective_approval_mode)
+            .await;
         if resolution.authorization != ToolAuthorization::Allow {
             return resolution.authorization;
         }
@@ -530,13 +560,16 @@ mod tests {
     use std::sync::Arc;
 
     use agent_core::{ToolAuthorization, ToolAuthorizer};
+    use agent_model::SystemPromptSnapshot;
     use agent_tools::{
         Dispatcher, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation,
         ResolvedBatchItemRef, SessionPathResolver, Tool, ToolContext, ToolError, ToolExecuteFuture,
         ToolRegistry, ToolResolution,
     };
     use agent_types::{ToolCall, ToolCallId, ToolName};
-    use assistant_protocol::{AgentVariant, ApprovalId, ApprovalMode, GoalId, RunId};
+    use assistant_protocol::{
+        AgentVariant, ApprovalId, ApprovalMode, GoalId, RunId, SessionId, SessionTitleOrigin,
+    };
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -705,6 +738,7 @@ mod tests {
             &'a self,
             _invocation: &'a ResolvedToolInvocation,
             _batch: &'a ResolvedToolBatch,
+            _effective_approval_mode: ApprovalMode,
         ) -> ApprovalFuture<'a> {
             let resolution = if self.0 == ToolAuthorization::Allow {
                 ApprovalResolution::allowed(
@@ -728,10 +762,33 @@ mod tests {
         approval_resolver: Arc<dyn PermissionApprovalResolver>,
     ) -> RuntimeResult<RuntimeToolAuthorizer> {
         RuntimeToolAuthorizer::new(
-            RunAuthorizationScope {
-                variant,
+            RunAuthorizationScope { variant },
+            Arc::new(SessionController::new(crate::StoredSession {
+                agent_shell_environment: None,
+                agent_shell_kind: None,
+                session_id: SessionId::new("s-test").expect("session id"),
+                title: "test".to_owned(),
+                model_selection: None,
+                reasoning_effort: None,
+                system_prompt: SystemPromptSnapshot::default(),
+                environment: environment.clone(),
+                lifecycle: crate::StoredSessionLifecycle::Active,
+                current_variant: variant,
                 approval_mode,
-            },
+                role: crate::SessionRole::Standard,
+                materialization_key: None,
+                automatic_title_pending: false,
+                proxy: None,
+                pc_output_hosting: None,
+                body_generation: 1,
+                message_count: 0,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                archived_at_ms: None,
+                is_pinned: false,
+                title_origin: SessionTitleOrigin::Generated,
+                conversation_state: crate::StoredConversationState::Available,
+            })),
             permission_scopes,
             permission_coordinator,
             infrastructure_policies,
@@ -934,6 +991,45 @@ mod tests {
             ToolAuthorization::Deny {
                 reason: "scripted rejection".to_owned()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn active_authorizer_reads_the_current_session_approval_mode_per_call() {
+        let root = TempDir::new().expect("tempdir");
+        let environment = environment(&root);
+        let target = root.path().join("outside/readme.md");
+        let permissions = coordinator([
+            (PermissionFileScope::Global, empty_document()),
+            (workspace_scope(), empty_document()),
+            (session_scope(), empty_document()),
+        ])
+        .await;
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Ask,
+            scopes(),
+            permissions,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(ToolAuthorization::Deny {
+                reason: "approval required".to_owned(),
+            })),
+        )
+        .expect("authorizer");
+
+        assert!(matches!(
+            authorize_file_operation(&authorizer, &environment, &target, FileOperation::Read).await,
+            ToolAuthorization::Deny { .. }
+        ));
+        authorizer
+            .session
+            .lock_state()
+            .expect("session state")
+            .approval_mode = ApprovalMode::Auto;
+        assert_eq!(
+            authorize_file_operation(&authorizer, &environment, &target, FileOperation::Read).await,
+            ToolAuthorization::Allow
         );
     }
 

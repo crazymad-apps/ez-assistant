@@ -20,5 +20,6 @@ pub use strategy::{
 };
 pub use validate::{ReplacementValidationError, validate_replacement};
 pub use window::{
-    ContextWindowDecision, ContextWindowError, ContextWindowEvaluation, ContextWindowEvaluator,
+    ContextTokenUsage, ContextWindowDecision, ContextWindowError, ContextWindowEvaluation,
+    ContextWindowEvaluator, context_token_usage,
 };

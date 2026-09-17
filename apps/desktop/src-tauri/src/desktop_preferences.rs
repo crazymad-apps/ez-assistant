@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path, sync::Mutex};
 
+use assistant_protocol::{ApprovalMode, ModelSelection};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager as _};
 use thiserror::Error;
@@ -30,6 +31,12 @@ pub(crate) struct DesktopPreferences {
     expanded_workspace_ids: Option<Vec<String>>,
     #[serde(default)]
     close_behavior: DesktopCloseBehavior,
+    /// 仅作为这个 Desktop/目标的新草稿默认，不是 Runtime 当前 Session 状态。
+    #[serde(default)]
+    default_approval_mode: ApprovalMode,
+    /// 最近一次明确选择的二元模型身份；None 表示继续跟随 Runtime 全局默认。
+    #[serde(default)]
+    last_model_selection: Option<ModelSelection>,
     /// WebView 拥有的轻量恢复索引；原生层只限界并原子保存，不装配 Runtime 业务状态。
     #[serde(default)]
     resource_workspace: Option<serde_json::Value>,
@@ -60,6 +67,8 @@ impl Default for DesktopPreferences {
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             expanded_workspace_ids: None,
             close_behavior: DesktopCloseBehavior::HideToTray,
+            default_approval_mode: ApprovalMode::Ask,
+            last_model_selection: None,
             resource_workspace: None,
         }
     }
@@ -233,6 +242,20 @@ fn validate(
         expanded_workspace_ids.sort();
         expanded_workspace_ids.dedup();
     }
+    if preferences
+        .last_model_selection
+        .as_ref()
+        .is_some_and(|selection| {
+            let provider = selection.provider_instance_id.as_str();
+            provider.trim().is_empty()
+                || provider.len() > 256
+                || selection.model_id.trim().is_empty()
+                || selection.model_id.len() > 256
+                || selection.model_id.chars().any(char::is_control)
+        })
+    {
+        return Err(DesktopPreferencesError::Invalid);
+    }
     Ok(preferences)
 }
 
@@ -255,11 +278,24 @@ mod tests {
         let directory = tempdir().unwrap();
         let local = DesktopPreferences {
             left_sidebar_width: 300,
+            last_model_selection: Some(ModelSelection {
+                provider_instance_id: assistant_protocol::ProviderInstanceId::new("local-provider")
+                    .expect("provider id"),
+                model_id: "local-model".to_owned(),
+            }),
             ..DesktopPreferences::default()
         };
         save_to_directory(directory.path(), local.clone()).unwrap();
         let remote = DesktopPreferences {
             left_sidebar_width: 400,
+            default_approval_mode: ApprovalMode::Auto,
+            last_model_selection: Some(ModelSelection {
+                provider_instance_id: assistant_protocol::ProviderInstanceId::new(
+                    "remote-provider",
+                )
+                .expect("provider id"),
+                model_id: "remote-model".to_owned(),
+            }),
             resource_workspace: Some(
                 serde_json::json!({"current_scope_key":"session:remote","groups":[]}),
             ),
@@ -297,6 +333,12 @@ mod tests {
             right_sidebar_width: 374,
             expanded_workspace_ids: Some(vec!["workspace-b".to_owned(), "workspace-a".to_owned()]),
             close_behavior: DesktopCloseBehavior::QuitDesktop,
+            default_approval_mode: ApprovalMode::Auto,
+            last_model_selection: Some(ModelSelection {
+                provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
+                    .expect("provider id"),
+                model_id: "model-a".to_owned(),
+            }),
             resource_workspace: Some(
                 serde_json::json!({"current_scope_key":"session:a","groups":[]}),
             ),
@@ -309,6 +351,11 @@ mod tests {
         assert_eq!(loaded.left_sidebar_width, 312);
         assert_eq!(loaded.right_sidebar_width, 374);
         assert_eq!(loaded.close_behavior, DesktopCloseBehavior::QuitDesktop);
+        assert_eq!(loaded.default_approval_mode, ApprovalMode::Auto);
+        assert_eq!(
+            loaded.last_model_selection.expect("model").model_id,
+            "model-a"
+        );
         assert_eq!(
             loaded.resource_workspace.unwrap()["current_scope_key"],
             "session:a"
@@ -360,6 +407,8 @@ mod tests {
                 .expect("legacy preferences");
         assert_eq!(legacy.left_sidebar_width, LEFT_SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(legacy.right_sidebar_width, RIGHT_SIDEBAR_DEFAULT_WIDTH);
+        assert_eq!(legacy.default_approval_mode, ApprovalMode::Ask);
+        assert!(legacy.last_model_selection.is_none());
 
         let clamped = validate(DesktopPreferences {
             left_sidebar_width: -10,
@@ -369,5 +418,24 @@ mod tests {
         .expect("clamped preferences");
         assert_eq!(clamped.left_sidebar_width, LEFT_SIDEBAR_MIN_WIDTH);
         assert_eq!(clamped.right_sidebar_width, 9_999);
+    }
+
+    #[test]
+    fn invalid_device_defaults_are_rejected_instead_of_becoming_runtime_state() {
+        assert!(serde_json::from_str::<DesktopPreferences>(
+            r#"{"left_sidebar_open":true,"right_sidebar_open":true,"default_approval_mode":"unknown"}"#,
+        )
+        .is_err());
+        assert!(
+            validate(DesktopPreferences {
+                last_model_selection: Some(ModelSelection {
+                    provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
+                        .expect("provider id"),
+                    model_id: "   ".to_owned(),
+                }),
+                ..DesktopPreferences::default()
+            })
+            .is_err()
+        );
     }
 }

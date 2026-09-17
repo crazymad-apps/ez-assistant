@@ -14,6 +14,7 @@ use assistant_protocol::{
 struct DiscoveryFactory {
     model: Option<Arc<ScriptedModelService>>,
     fetches: AtomicUsize,
+    discovery_timeouts: Mutex<Vec<(Duration, Duration)>>,
     compiled_limits: Mutex<Vec<(u64, Option<u64>)>>,
     offline: AtomicBool,
     complete_metadata: AtomicBool,
@@ -38,10 +39,14 @@ impl ModelServiceFactory for DiscoveryFactory {
     }
     fn discover_models<'a>(
         &'a self,
-        _request: ModelDiscoveryRequest<'a>,
+        request: ModelDiscoveryRequest<'a>,
     ) -> ModelDiscoveryFuture<'a> {
         Box::pin(async move {
             self.fetches.fetch_add(1, Ordering::SeqCst);
+            self.discovery_timeouts
+                .lock()
+                .unwrap()
+                .push((request.connect_timeout, request.request_timeout));
             if self.block.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 self.release.notified().await;
@@ -121,7 +126,7 @@ async fn create(runtime: &AssistantRuntime) -> ModelSelection {
     }
 }
 #[tokio::test]
-async fn first_fixed_save_requires_online_identity_but_existing_edit_and_reset_work_offline() {
+async fn first_fixed_save_requires_local_catalog_identity_and_all_reads_stay_offline() {
     let factory = Arc::new(DiscoveryFactory::default());
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
@@ -139,6 +144,11 @@ async fn first_fixed_save_requires_online_identity_but_existing_edit_and_reset_w
             .await
             .is_err()
     );
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), 0);
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
     let saved = runtime
         .save_model_fixed_config(SaveModelFixedConfigRequest {
             origin: assistant_protocol::ModelConfigOrigin::Online,
@@ -186,9 +196,9 @@ async fn first_fixed_save_requires_online_identity_but_existing_edit_and_reset_w
         runtime
             .get_model_configuration(selection.into())
             .await
-            .is_err()
+            .is_ok()
     );
-    assert_eq!(factory.fetches.load(Ordering::SeqCst), before + 1);
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 #[tokio::test]
 async fn provider_edit_is_not_blocked_by_discovery_and_late_result_is_rejected() {
@@ -198,7 +208,7 @@ async fn provider_edit_is_not_blocked_by_discovery_and_late_result_is_rejected()
     factory.block.store(true, Ordering::SeqCst);
     let request_runtime = runtime.clone();
     let id = selection.provider_instance_id.clone();
-    let pending = tokio::spawn(async move { request_runtime.list_provider_models(id).await });
+    let pending = tokio::spawn(async move { request_runtime.refresh_provider_models(id).await });
     factory.entered.notified().await;
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -217,32 +227,136 @@ async fn provider_edit_is_not_blocked_by_discovery_and_late_result_is_rejected()
         Err(RuntimeError::ConfigurationConflict)
     ));
 }
+
+#[tokio::test]
+async fn catalog_list_is_local_and_explicit_refresh_uses_fixed_budgets() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory.clone());
+    let selection = create(&runtime).await;
+    let empty = runtime
+        .list_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    assert!(empty.models.is_empty());
+    assert_eq!(empty.refreshed_at_ms, None);
+    assert!(!empty.connection_changed);
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), 0);
+
+    let refreshed = runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(refreshed.models.len(), 1);
+    assert!(refreshed.refreshed_at_ms.is_some());
+    assert!(!refreshed.connection_changed);
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.discovery_timeouts.lock().unwrap().as_slice(),
+        [(Duration::from_secs(5), Duration::from_secs(20))]
+    );
+    assert_eq!(
+        runtime
+            .list_provider_models(selection.provider_instance_id)
+            .await
+            .unwrap(),
+        refreshed
+    );
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_refresh_preserves_last_successful_catalog() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory.clone());
+    let selection = create(&runtime).await;
+    let previous = runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    factory.offline.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        runtime
+            .refresh_provider_models(selection.provider_instance_id.clone())
+            .await,
+        Err(RuntimeError::ModelDiscoveryFailed { .. })
+    ));
+    assert_eq!(
+        runtime
+            .list_provider_models(selection.provider_instance_id)
+            .await
+            .unwrap(),
+        previous
+    );
+}
+
+#[tokio::test]
+async fn only_discovery_input_changes_mark_an_existing_catalog_stale() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory);
+    let selection = create(&runtime).await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+
+    let mut display_only = connection();
+    display_only.display_name = "Renamed provider".into();
+    display_only.protocol_preference = ProviderProtocolPreference::Responses;
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: selection.provider_instance_id.clone(),
+            connection: display_only.clone(),
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !runtime
+            .list_provider_models(selection.provider_instance_id.clone())
+            .await
+            .unwrap()
+            .connection_changed
+    );
+
+    display_only.models_path = "/v1/other-models".into();
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: selection.provider_instance_id.clone(),
+            connection: display_only,
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .list_provider_models(selection.provider_instance_id)
+            .await
+            .unwrap()
+            .connection_changed
+    );
+}
 #[tokio::test]
 async fn deletion_during_first_fixed_save_cannot_resurrect_provider_or_fixed_record() {
     let factory = Arc::new(DiscoveryFactory::default());
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
-    factory.block.store(true, Ordering::SeqCst);
-    let request_runtime = runtime.clone();
-    let target = selection.clone();
-    let pending = tokio::spawn(async move {
-        request_runtime
-            .save_model_fixed_config(SaveModelFixedConfigRequest {
-                origin: assistant_protocol::ModelConfigOrigin::Online,
-                selection: target,
-                parameters: parameters(),
-            })
-            .await
-    });
-    factory.entered.notified().await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
     runtime
         .delete_provider(selection.provider_instance_id.clone())
         .await
         .unwrap();
-    factory.release.notify_one();
     assert!(matches!(
-        pending.await.unwrap(),
-        Err(RuntimeError::ConfigurationConflict)
+        runtime
+            .save_model_fixed_config(SaveModelFixedConfigRequest {
+                origin: assistant_protocol::ModelConfigOrigin::Online,
+                selection: selection.clone(),
+                parameters: parameters(),
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
     ));
     assert!(runtime.list_providers().unwrap().is_empty());
     assert!(
@@ -289,15 +403,16 @@ async fn fixed_save_invalidates_an_online_read_that_started_without_a_fixed_reco
     let factory = Arc::new(DiscoveryFactory::default());
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
-    factory.block.store(true, Ordering::SeqCst);
-    let reader_runtime = runtime.clone();
-    let reader_selection = selection.clone();
-    let pending = tokio::spawn(async move {
-        reader_runtime
-            .get_model_configuration(reader_selection.into())
-            .await
-    });
-    factory.entered.notified().await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    let before = factory.fetches.load(Ordering::SeqCst);
+    let online = runtime
+        .get_model_configuration(selection.clone().into())
+        .await
+        .unwrap();
+    assert_eq!(online.source, ModelConfigurationSource::Online);
     runtime
         .save_model_fixed_config(SaveModelFixedConfigRequest {
             origin: assistant_protocol::ModelConfigOrigin::Online,
@@ -306,17 +421,13 @@ async fn fixed_save_invalidates_an_online_read_that_started_without_a_fixed_reco
         })
         .await
         .unwrap();
-    factory.release.notify_one();
-    assert!(matches!(
-        pending.await.unwrap(),
-        Err(RuntimeError::ConfigurationConflict)
-    ));
     let detail = runtime
         .get_model_configuration(selection.into())
         .await
         .unwrap();
     assert_eq!(detail.source, ModelConfigurationSource::Fixed);
     assert_eq!(detail.parameters, parameters());
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 
 #[tokio::test]
@@ -332,6 +443,10 @@ async fn provider_change_rejects_fixed_capabilities_that_the_target_protocol_can
             connection: responses.clone(),
             credential: ProviderCredentialChange::Unchanged,
         })
+        .await
+        .unwrap();
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
         .await
         .unwrap();
     let mut fixed = parameters();
@@ -391,6 +506,10 @@ async fn selections_use_database_references_and_clear_offline_without_changing_o
             .default_model
             .is_none()
     );
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
     runtime
         .save_model_fixed_config(SaveModelFixedConfigRequest {
             origin: assistant_protocol::ModelConfigOrigin::Online,
@@ -474,30 +593,27 @@ async fn late_selection_after_provider_change_never_commits_stale_reference() {
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
     factory.complete_metadata.store(true, Ordering::SeqCst);
-    factory.block.store(true, Ordering::SeqCst);
-    let pending_runtime = runtime.clone();
-    let selected = selection.clone();
-    let pending = tokio::spawn(async move {
-        pending_runtime
-            .set_default_model(assistant_protocol::SetDefaultModelRequest {
-                selection: Some(selected),
-            })
-            .await
-    });
-    factory.entered.notified().await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    let before = factory.fetches.load(Ordering::SeqCst);
+    let mut changed = connection();
+    changed.endpoint = "https://changed.example.test/v1".into();
     runtime
         .update_provider(UpdateProviderRequest {
-            provider_instance_id: selection.provider_instance_id,
-            connection: connection(),
+            provider_instance_id: selection.provider_instance_id.clone(),
+            connection: changed,
             credential: ProviderCredentialChange::Unchanged,
         })
         .await
         .unwrap();
-    factory.release.notify_one();
-    assert!(matches!(
-        pending.await.unwrap(),
-        Err(RuntimeError::ConfigurationConflict)
-    ));
+    runtime
+        .set_default_model(assistant_protocol::SetDefaultModelRequest {
+            selection: Some(selection),
+        })
+        .await
+        .unwrap();
     assert!(
         runtime
             .store
@@ -505,8 +621,9 @@ async fn late_selection_after_provider_change_never_commits_stale_reference() {
             .await
             .unwrap()
             .default_model
-            .is_none()
+            .is_some()
     );
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 
 async fn online_execution_fixture() -> (
@@ -519,6 +636,10 @@ async fn online_execution_fixture() -> (
     factory.complete_metadata.store(true, Ordering::SeqCst);
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
     runtime
         .set_default_model(assistant_protocol::SetDefaultModelRequest {
             selection: Some(selection.clone()),
@@ -552,101 +673,52 @@ fn input_request(session_id: &assistant_protocol::SessionId, message: &str) -> S
 }
 
 #[tokio::test]
-async fn slow_discovery_allows_queueing_and_cancellation_without_starting_cancelled_input() {
+async fn submitting_input_uses_the_local_catalog_without_discovery() {
     let (runtime, factory, _, session_id) = online_execution_fixture().await;
-    factory.block.store(true, Ordering::SeqCst);
-    let first = runtime
-        .submit_input(input_request(&session_id, "cancel this"))
+    let before = factory.fetches.load(Ordering::SeqCst);
+    let submitted = runtime
+        .submit_input(input_request(&session_id, "local catalog execution"))
         .await
         .unwrap();
-    factory.entered.notified().await;
-    let second = tokio::time::timeout(
-        Duration::from_secs(2),
-        runtime.submit_input(input_request(&session_id, "keep this")),
-    )
-    .await
-    .expect("discovery must not block enqueue")
-    .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        runtime.cancel_queued_input(assistant_protocol::CancelQueuedInputRequest {
-            session_id: session_id.clone(),
-            input_id: first.input_id.clone(),
-        }),
-    )
-    .await
-    .expect("discovery must not block cancellation")
-    .unwrap();
-    // 被取消 Input 的目录仍未释放；后继 Input 必须能独立准备和执行。
-    wait_for_terminal(&runtime, &session_id, &second.run.run_id).await;
-    let state = runtime.session_for_test(&session_id).await;
-    assert!(
-        !state
-            .lock_state()
-            .unwrap()
-            .runs
-            .contains_key(&first.run.run_id)
-    );
-    let conversation = runtime.conversation_snapshot(&session_id).await.unwrap();
-    let body = serde_json::to_string(&conversation).unwrap();
-    assert!(!body.contains("cancel this"));
-    assert!(body.contains("keep this"));
+    wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 
 #[tokio::test]
-async fn changing_default_during_preparation_rejects_old_execution_before_message_commit() {
-    let (runtime, factory, _, session_id) = online_execution_fixture().await;
-    factory.block.store(true, Ordering::SeqCst);
-    let input = runtime
-        .submit_input(input_request(&session_id, "uncommitted"))
-        .await
-        .unwrap();
-    factory.entered.notified().await;
+async fn changing_default_after_local_preparation_does_not_refresh_the_catalog() {
+    let (runtime, factory, selection, session_id) = online_execution_fixture().await;
+    let before = factory.fetches.load(Ordering::SeqCst);
     runtime
         .set_default_model(assistant_protocol::SetDefaultModelRequest { selection: None })
         .await
         .unwrap();
-    factory.release.notify_one();
-    let result = wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
-    assert_eq!(result.status, assistant_protocol::RunStatus::Failed);
-    assert_eq!(
-        result.error.unwrap().code,
-        assistant_protocol::RuntimeErrorCode::ConfigurationConflict
-    );
-    assert!(
-        runtime
-            .conversation_snapshot(&session_id)
-            .await
-            .unwrap()
-            .messages
-            .is_empty()
-    );
+    runtime
+        .set_session_model(assistant_protocol::SetSessionModelRequest {
+            session_id,
+            model_selection: Some(selection),
+        })
+        .await
+        .unwrap();
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 
 #[tokio::test]
-async fn runtime_shutdown_cancels_discovery_that_has_not_returned() {
+async fn runtime_shutdown_after_local_preparation_does_not_discover() {
     let (runtime, factory, _, session_id) = online_execution_fixture().await;
-    factory.block.store(true, Ordering::SeqCst);
-    runtime
+    let before = factory.fetches.load(Ordering::SeqCst);
+    let submitted = runtime
         .submit_input(input_request(&session_id, "pending"))
         .await
         .unwrap();
-    factory.entered.notified().await;
+    wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
     tokio::time::timeout(
         Duration::from_secs(2),
         runtime.shutdown(ShutdownRuntimeRequest::default()),
     )
     .await
-    .expect("shutdown must cancel discovery")
+    .expect("shutdown must complete")
     .unwrap();
-    assert!(
-        runtime
-            .conversation_snapshot(&session_id)
-            .await
-            .unwrap()
-            .messages
-            .is_empty()
-    );
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), before);
 }
 
 #[tokio::test]
@@ -722,6 +794,10 @@ async fn title_compaction_and_goal_reuse_session_parameters_without_discovery() 
     factory.complete_metadata.store(true, Ordering::SeqCst);
     let runtime = fixture(factory.clone());
     let selection = create(&runtime).await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
     runtime
         .set_default_model(assistant_protocol::SetDefaultModelRequest {
             selection: Some(selection.clone()),

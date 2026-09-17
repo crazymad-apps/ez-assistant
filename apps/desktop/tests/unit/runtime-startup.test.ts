@@ -4,7 +4,7 @@ import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap"
 import { startupMessage } from "../../src/runtime-client/startupStatus";
 const bootstrap: RuntimeBootstrap = {
   base_url: "http://127.0.0.1:9000", access_token: "fixture", instance_id: "one", started_runtime: false,
-  capabilities: { min_compatible_version: "0.25.3", runtime_version: "0.25.3", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] },
+  capabilities: { min_compatible_version: "0.26.0", runtime_version: "0.26.0", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] },
 };
 const health = (status: string, error: string | null = null) => new Response(JSON.stringify({ status, stage: "database_migration", error, database_version: null, target_version: "0.25.1" }));
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -70,13 +70,13 @@ describe("event connection compatibility", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(Response.json(bootstrap.capabilities))
       .mockResolvedValueOnce(new Response(""))
-      .mockResolvedValueOnce(Response.json({ ...bootstrap.capabilities, runtime_version: "0.25.4", min_compatible_version: "0.25.4" }));
+      .mockResolvedValueOnce(Response.json({ ...bootstrap.capabilities, runtime_version: "0.26.1", min_compatible_version: "0.26.1" }));
     vi.stubGlobal("fetch", fetcher);
     const client = new RuntimeClient(bootstrap);
     await (await client.connectEvents(listener, new AbortController().signal)).closed;
     await expect(client.connectEvents(listener, new AbortController().signal)).rejects.toMatchObject({ code: "client_too_old" });
     expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(["/capabilities", "/events", "/capabilities"]);
-    expect(fetcher.mock.calls.every(([, init]) => init.headers.get("x-ez-client-version") === "0.25.3" && init.headers.get("x-ez-min-compatible-version") === "0.25.3")).toBe(true);
+    expect(fetcher.mock.calls.every(([, init]) => init.headers.get("x-ez-client-version") === "0.26.0" && init.headers.get("x-ez-min-compatible-version") === "0.26.0")).toBe(true);
     client.dispose();
   });
   it("preserves a compatibility failure between capabilities and SSE admission", async () => {

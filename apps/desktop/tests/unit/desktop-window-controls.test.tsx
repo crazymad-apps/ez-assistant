@@ -24,7 +24,11 @@ describe("desktop window controls", () => {
     fireEvent.click(await screen.findByRole("button", { name: "最小化窗口" }));
     expect(bridge.minimizeDesktopWindow).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "最大化窗口" }));
-    await screen.findByRole("button", { name: "还原窗口" });
+    const restore = await screen.findByRole("button", { name: "还原窗口" });
+    const glyph = restore.querySelector('[data-window-glyph="restore"]');
+    expect(glyph).toBeInstanceOf(SVGSVGElement);
+    expect(glyph?.querySelectorAll("path, rect")).toHaveLength(2);
+    expect(glyph?.querySelector("path")).toHaveAttribute("d", "M3.5 2.5V1.5H10.5V8.5H9.5");
     expect(bridge.toggleMaximizeDesktopWindow).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
     expect(bridge.requestDesktopClose).toHaveBeenCalledOnce();
@@ -35,6 +39,14 @@ describe("desktop window controls", () => {
     render(<DesktopWindowControls />);
     await waitFor(() => expect(bridge.getDesktopPlatform).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: "关闭窗口" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the shared custom controls available on Linux", async () => {
+    vi.mocked(bridge.getDesktopPlatform).mockResolvedValue("linux");
+    render(<DesktopWindowControls />);
+    expect(await screen.findByRole("button", { name: "最大化窗口" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "最小化窗口" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "关闭窗口" })).toBeVisible();
   });
 
   it("releases the native window listener when leaving the page", async () => {

@@ -1204,7 +1204,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
         .value;
     assert_eq!(detail.mcp_identity, Some(approved_identity));
     assert!(matches!(
-        detail.input,
+        detail.input.value,
         assistant_protocol::ToolInputSnapshot::Mcp { .. }
     ));
 
@@ -1912,7 +1912,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         })
     });
     assert!(matches!(
-        tool_event.map(|event| &event.input),
+        tool_event.map(|event| &event.input.value),
         Some(assistant_protocol::ToolInputSnapshot::File { path, .. }) if path == "report.txt"
     ));
 
@@ -1956,7 +1956,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         assistant_protocol::ToolActivityStatus::Completed
     );
     assert!(matches!(
-        detail.input,
+        detail.input.value,
         assistant_protocol::ToolInputSnapshot::File { path, .. } if path == "report.txt"
     ));
     assert_eq!(detail.result_summary.as_deref(), Some("{\"saved\":true}"));

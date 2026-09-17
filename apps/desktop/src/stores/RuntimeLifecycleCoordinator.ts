@@ -7,6 +7,7 @@ import type {
   GetSessionViewResult,
   RuntimeEvent,
   RuntimeEventEnvelope,
+  RuntimeErrorInfo,
   SessionId,
 } from "@ez-assistant/protocol";
 import {
@@ -36,6 +37,7 @@ type RuntimeLifecycleDependencies = Readonly<{
     session_id: SessionId,
     trigger: "automatic" | "manual",
     outcome: "succeeded" | "failed" | "cancelled",
+    error: RuntimeErrorInfo | null | undefined,
   ) => void;
 }>;
 
@@ -404,6 +406,7 @@ export class RuntimeLifecycleCoordinator {
         event.session_id,
         event.trigger,
         event.outcome,
+        event.error,
       );
     }
     if (event.type === "session_deleted") {
@@ -457,6 +460,7 @@ export class RuntimeLifecycleCoordinator {
   }
 
   #handleStreamGap(): void {
+    this.dependencies.live_execution.invalidateForGap();
     this.dependencies.projection.markStale();
     this.dependencies.mark_device_gateway_stale();
     this.dependencies.refresh_device_gateway();

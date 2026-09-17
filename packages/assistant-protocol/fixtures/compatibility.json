@@ -36,6 +36,30 @@
     "error": null
   },
   {
+    "name": "v0.25.3-client-rejected-by-v0.26.0-host",
+    "client": {
+      "version": "0.25.3",
+      "min_compatible_version": "0.25.3"
+    },
+    "host": {
+      "version": "0.26.0",
+      "min_compatible_version": "0.26.0"
+    },
+    "error": "client_too_old"
+  },
+  {
+    "name": "v0.26.0-client-rejects-v0.25.3-host",
+    "client": {
+      "version": "0.26.0",
+      "min_compatible_version": "0.26.0"
+    },
+    "host": {
+      "version": "0.25.3",
+      "min_compatible_version": "0.25.3"
+    },
+    "error": "host_too_old"
+  },
+  {
     "name": "client-too-old",
     "client": {
       "version": "0.25.1",

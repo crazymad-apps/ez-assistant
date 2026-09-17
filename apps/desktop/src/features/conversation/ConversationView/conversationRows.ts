@@ -116,6 +116,8 @@ export function toolInputLabel(input: ToolInputSnapshot): string | null {
       const segments = input.path.split("/").filter(Boolean);
       return segments.at(-1) ?? input.path;
     }
+    case "files":
+      return input.paths.length === 1 ? input.paths[0] ?? null : `${input.paths.length} 个路径`;
     case "shell":
       return input.command;
     case "mcp":

@@ -35,7 +35,7 @@ fn apply(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn validate(connection: &Connection) -> Result<()> {
+pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_25_1::validate(connection)?;
     connection.prepare("SELECT agent_shell_kind FROM sessions LIMIT 0")?;
     connection.prepare("SELECT agent_shell_environment_json FROM sessions LIMIT 0")?;

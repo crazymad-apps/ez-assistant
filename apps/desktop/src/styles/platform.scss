@@ -2,6 +2,18 @@
   -webkit-font-smoothing: antialiased;
 }
 
+// 原生 WebView 会在滚动容器到达边界后继续传递滚动；WKWebView 表现为橡皮筋回弹，
+// WebView2 表现为越界拖动/弹动。原生 macOS/Windows 都禁止边界越界，正常滚轮、
+// 触控板惯性滚动和容器自身滚动保持不变；普通 Web 不套用 Desktop 平台规则。
+:root[data-platform="macos"],
+:root[data-platform="macos"] body,
+:root[data-platform="macos"] body *,
+:root[data-platform="windows"],
+:root[data-platform="windows"] body,
+:root[data-platform="windows"] body * {
+  overscroll-behavior: none;
+}
+
 :root[data-platform="macos"] [data-app-title-bar] {
   padding-left: 78px;
 }

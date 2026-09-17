@@ -125,6 +125,11 @@
   只与输入区互斥；Approval Restore 和 Queue 可以同时出现，不能为了压缩高度互相替换。
 - 底栏常驻视觉项固定为添加、执行设置、上下文用量、模型设置、发送/停止。执行 variant 与 approval、
   model 与 reasoning effort 各自独立，只能以分类级联组织，不得在客户端构造排列组合状态。
+- 上下文用量以 SessionView 的 Runtime 预检投影为基线；仅当 live Run 与当前权威 active run 身份一致时，
+  用最近已完成模型 step 的 Provider `total_tokens` 推进旧占用，但不得回退快照已包含的 Tool Result
+  增量。终态残留或其他 Run 不得污染当前环形图。
+- 自动压缩状态必须区分“达到本地阈值”和“Provider 报告上下文不足”；该原因复用既有 trigger，
+  Desktop 不自行推断，也不为展示新增业务状态。
 - Runtime Goal 的 Running/Paused、budget、pause reason 和 held Queue 都以 SessionView 为准；Goal
   完成、空 item WorkPlan 和全完成 WorkPlan 均由 Runtime 自动清除，Desktop 只响应快照移除对应 UI，
   不自行判断完成。对旧版本已经投影的空 item WorkPlan，Desktop 仅隐藏 Todo UI 作为兼容兜底。
@@ -362,7 +367,7 @@ MarkdownContent 的有序列表保留原生编号，依据起始值与直接列�
 
 模型行用紧凑 Tag 展示创建来源和参数状态，来源取固定记录 origin，模板／待补全状态取 Runtime 的目录摘要。手动新增复用第三级参数编辑页；manual 删除模型、online 重置配置。选择器分别加载本次在线列表与固定记录，目录慢或失败时已保存模型仍可选择，关闭后丢弃本次视图结果。
 
-开发便捷脚本 `apps/desktop/start.sh` 与 `host-restart.sh` 接受一个位置参数指定 Runtime Home；优先级为入参 > `EZ_ASSISTANT_RUNTIME_HOME` > `~/.ez-assistant`。相对路径按调用位置解析，运行命令前切换到 desktop 目录。重启脚本先执行 `npm run build:host`，构建失败保留现有进程；后续 Cargo 启动也继承 `EZ_ASSISTANT_WEB_DIST`，避免重新生成不含 Web 的开发 Host。构建成功后只读取目标目录发现文件，核对进程命令和目录后发送 SIGINT，最多等待 30 秒；核对失败或超时不启动新 Host，不全局 pkill。
+开发便捷脚本 `apps/desktop/start.sh` 与 `host-restart.sh` 接受一个位置参数指定 Runtime Home；优先级为入参 > `EZ_ASSISTANT_RUNTIME_HOME` > 项目根目录 `.runtime-test`。相对入参按调用位置解析，默认测试目录按脚本位置锚定项目根目录，运行命令前切换到 desktop 目录。该目录已被 Git 忽略；直接执行 `npm run tauri -- dev` 的默认值仍由 `run-tauri.mjs` 独立管理。重启脚本先执行 `npm run build:host`，构建失败保留现有进程；后续 Cargo 启动也继承 `EZ_ASSISTANT_WEB_DIST`，避免重新生成不含 Web 的开发 Host。构建成功后只读取目标目录发现文件，严格接受同一 Runtime Home 的前台 `serve` 或 `launch` 生成的 `serve --detached` 两种完整命令形态，再发送 SIGINT 并最多等待 30 秒；核对失败或超时不启动新 Host，不全局 pkill。
 
 ## v0.25.2 M2 软件版本与共享协议消费
 
@@ -389,3 +394,44 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 ## v0.25.2 桌面启动与服务器自启边界
 
 2026-09-10 用户明确：Desktop 与 Client 的自启逻辑不同，Client 主要面向服务器。Desktop 保留自己的桌面启动逻辑，本版不新增开机／登录自启功能，也不接入 Client 的 systemd 用户服务、linger 或服务器 unit 管理。两产品共存仍遵守共享 Host 的发现、实例锁、软件兼容和来源保护；不把共用 Host 推导为共用自启策略。
+
+## v0.26.0 M3 Live step 与工具输入展示
+
+- `LiveExecutionStore` 以 owner generation、唯一非终态 Run/child 和 step seal 消费 `StepCommitted`；
+  已封口或已终态的 step 拒绝迟到 delta/tool 事件。主会话与子任务独立封口，快照的 `active_step`
+  提供已提交基线，step 始终按编号稳定排序。
+- generation、owner 或唯一性无法匹配时立即丢弃对应 live tail 并请求权威刷新；SSE gap 在异步读取前
+  同步清空 pending/live/seal/generation，仅保留可由后续快照核对的稳定子任务列表。
+- 审批、实时工具卡和历史详情只渲染协议提供的 `ToolInputProjection`，并展示脱敏／截断状态；前端
+  不解析原始 arguments、不猜测敏感字段，也不展示“读取本地目录/缓存”等内部数据来源文案。
+
+## v0.26.0 M4 每目标新会话默认
+
+- 原生 Desktop 偏好按本机或远端目标 namespace 保存 `default_approval_mode` 和
+  `last_model_selection`；旧文件回退 Ask/无模型，Rust 边界拒绝空白、控制字符或超长标识。普通 Web
+  不读取也不写入这两项设备偏好，继续使用 Ask 和 Runtime 全局模型默认。
+- 新草稿创建时复制当前设备默认，后续默认变化不追溯改写已有草稿。草稿选择会立即更新默认；已有
+  Session 只有在 Runtime 模式/模型 mutation 成功后才更新。`null` 模型表示清除设备覆盖并继续由
+  Runtime 解释“默认模型”，偏好落盘失败不回滚当前内存选择但必须显示错误。
+- Provider 删除时清除最近模型覆盖，并只清理由该默认继承且仍为空、未开始物化的草稿；有用户内容
+  的草稿和已有 Session 不改写。Provider 仍存在时不会因目录暂缺模型 ID 清除选择。Composer 的
+  customized 基线同时比较当前默认审批与模型，避免默认值本身被误判为用户额外定制。
+
+## v0.26.0 M5 冻结入口、窗口 glyph 与 Shell 文案
+
+- `SettingsCascadePopover.disabled_reason` 表示整个触发入口冻结：触发器保持可聚焦并使用
+  `aria-disabled`，唯一 Tooltip 同时服务指针、键盘和 `aria-describedby`；冻结时不得打开菜单或执行
+  清除动作。业务分类不再重复携带同一个整体冻结原因。
+- Windows/Linux 自定义窗口控件的还原 glyph 是组件私有 inline SVG：前窗完整、后窗只绘制外露边缘。
+  它不进入通用 Icon 集，不改变 42px 热区、Tooltip、无障碍名称、原生状态事件或窗口命令。
+- Desktop 对 Shell `managed` 使用“工具托管”，对 `detached` 使用“完成后交接”；相关说明必须明确
+  交接前 stdout/stderr 未 EOF、超时或取消仍会清理进程树，不能把 detached 表述为无条件后台存活、
+  Session 托管、服务健康或可恢复能力。
+
+## v0.26.0 M6 候选补充收口
+
+- 根级 `overscroll-behavior: none` 同时适用于原生 macOS 与 Windows Desktop，阻止 WKWebView 和
+  WebView2 的边界回弹/越界弹动；普通 Web 与 Linux 不匹配该规则，业务滚动容器不得用 wheel
+  `preventDefault` 代替。
+- 手动标题完成事件可以携带可选安全错误。Desktop 只按稳定错误码区分超时、模型失败和其他失败，
+  不显示 Provider 原文；成功仍短暂提示，失败仍保留重试动作。

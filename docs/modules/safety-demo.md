@@ -40,9 +40,10 @@ scripted Provider、Agent Core、`agent-tools-local`、内存 Session/Run/Journa
 - credential、完整文件内容和完整 Shell 输出不得进入日志或审计。
 - Shell 以当前用户权限运行，可能绕过文件名单；工作目录和逻辑路径不得描述为系统
   沙盒。
-- Shell 审批、活动和结果必须展示 `managed` / `detached`；`detached` 成功仅表示启动
-  命令完成交接，不表示服务健康。Run 取消、Session reset 或 Demo 退出不会停止已经
-  交接的进程，页面必须固定提示该风险。
+- Shell 审批、活动和结果必须展示 `managed` / `detached`；只有主 Shell 退出且两条输出
+  管道在 deadline 内 EOF，`detached` 才算成功交接，交接前超时或取消仍清理进程树。成功
+  交接不表示服务健康；后续 Run 取消、Session reset 或 Demo 退出不会停止已经交接的进程，
+  页面必须固定提示该风险。
 
 ## Run、模式与审批
 

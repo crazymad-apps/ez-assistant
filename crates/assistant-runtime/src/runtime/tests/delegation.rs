@@ -1179,6 +1179,94 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
 }
 
 #[tokio::test]
+async fn child_tool_reads_the_parent_sessions_new_approval_mode() {
+    let parent_delegate = delegate_batch_message(&["child-uses-current-mode".to_owned()]);
+    let child_tool_call = AssistantMessage {
+        id: MessageId::new("child-current-mode-tool").expect("message id"),
+        model: ModelIdentity::new(
+            ProviderId::new("fixture").expect("provider id"),
+            "fixture-model",
+        ),
+        parts: vec![AssistantPart::ToolCall(ToolCall {
+            id: ToolCallId::new("child-current-mode-call").expect("tool call id"),
+            name: ToolName::new("child_probe").expect("tool name"),
+            arguments: json!({"value": "probe"}),
+        })],
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    };
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&parent_delegate)),
+            ModelScript::Events(message_events(&child_tool_call)),
+            ModelScript::Events(message_events(&assistant_text(
+                "child-current-mode-final",
+                "child completed",
+            ))),
+            ModelScript::Events(message_events(&assistant_text(
+                "parent-current-mode-final",
+                "parent completed",
+            ))),
+        ],
+    ));
+    let probe = ScriptedTool::succeed("child_probe", json!({"ok": true}), OrderLog::new());
+    let mut tools = ToolRegistry::new();
+    tools.register(probe.clone()).expect("register probe");
+    let runtime = runtime_with_tools(model, tools.snapshot());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    let run = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: "delegate after changing approval mode".to_owned(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("run accepted")
+        .run;
+    let parent_approval = wait_for_pending_approval(&runtime, &session_id).await;
+    assert!(parent_approval.child_task_id.is_none());
+
+    set_auto_approval(&runtime, &session_id).await;
+    runtime
+        .decide_approval(assistant_protocol::DecideApprovalRequest {
+            session_id: session_id.clone(),
+            approval_id: parent_approval.approval_id,
+            decision: assistant_protocol::ApprovalDecision::AllowOnce,
+        })
+        .await
+        .expect("allow the already-pending delegation");
+
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    assert_eq!(probe.executed_inputs().len(), 1);
+    assert!(
+        runtime
+            .list_pending_approvals(ListPendingApprovalsRequest { session_id })
+            .await
+            .expect("child used automatic approval")
+            .approvals
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn denying_delegate_approval_does_not_create_a_child_task() {
     let parent_delegate = delegate_batch_message(&["must-not-start".to_owned()]);
     let parent_final = assistant_text("parent-after-deny", "delegation was denied");

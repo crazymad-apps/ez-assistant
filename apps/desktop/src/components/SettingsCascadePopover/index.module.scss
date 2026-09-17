@@ -1,4 +1,5 @@
 .trigger { display: inline-flex; min-width: 0; align-items: center; justify-content: center; gap: 6px; }
+.trigger[aria-disabled="true"] { cursor: default; opacity: 0.5; }
 .trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trigger_wrapper { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
 .clear_space { width: 14px; height: 14px; flex-shrink: 0; }

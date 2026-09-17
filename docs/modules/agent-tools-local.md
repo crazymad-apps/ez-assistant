@@ -76,8 +76,9 @@
 - 同一绝对 deadline 和 cancellation 必须覆盖主 Shell 等待、stdout/stderr 收敛和清理；
   kill/wait 失败不能伪装成已清理。
 - `managed` 在主 Shell 退出后也清理仍可管理的后代；`detached` 只有主 Shell 已退出且
-  两条输出管道 EOF 后才交接，在此之前超时/取消仍清理整组。Adapter 不提供后台句柄、
-  健康检查、自动停止或恢复。
+  两条输出管道在同一 deadline 内 EOF 后才交接。在交接完成前，输出未 EOF 导致的超时或
+  cancellation 仍会清理并等待整个可管理进程组；成功交接后才不再由本次工具主动停止后代。
+  Adapter 不提供后台句柄、健康检查、自动停止或恢复。
 - Shell 非零退出是带 exit code 的正常完成结果，不等同于 Adapter 执行失败。
 - 子进程环境采用 allow/deny/override 组合并经 `env_clear` 后显式注入；默认过滤通用
   `_API_KEY`、`_TOKEN`、`_SECRET` 后缀，完整继承必须显式选择；不内置具体 Provider

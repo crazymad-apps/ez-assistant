@@ -176,10 +176,11 @@ describe("ComposerDock", () => {
 
   it("shows MCP identity, full arguments and untrusted annotations for child approvals", () => {
     const arguments_json = JSON.stringify({ script: "x".repeat(8000) });
+    const identity = { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" };
     renderComposer({ approvals: [{ ...approvalSnapshot(), child_task_id: "child-1", subject: {
-      type: "mcp", identity: { server_key: "blender", server_display_name: "Blender", tool_name: "execute_code" },
+      type: "mcp", identity,
       arguments_json, untrusted_annotations_json: '{"readOnlyHint":true}',
-    } }] });
+    }, input: { value: { type: "mcp", identity, arguments_json }, redacted: false, truncated: false } }] });
     expect(screen.getByText(/Blender \(blender\)/)).toBeVisible();
     expect(screen.getByText("子任务 · 由子智能体请求")).toBeVisible();
     expect(screen.getByText(arguments_json)).toHaveTextContent(arguments_json);
@@ -452,6 +453,25 @@ describe("ComposerDock", () => {
     expect(cancel).toHaveBeenCalledWith("session-1", "compact-1");
   });
 
+  it.each([
+    ["threshold_reached", "上下文达到阈值，正在自动压缩"],
+    ["provider_overflow", "模型报告上下文不足，正在自动压缩"],
+  ] as const)("shows the automatic compaction reason (%s)", (reason, label) => {
+    renderComposer({
+      session: {
+        active_compaction: {
+          compaction_id: "compact-1",
+          trigger: { type: "automatic", run_id: "run-1", reason },
+          source_generation: 1,
+          started_at_ms: 2,
+          cancellable: true,
+        },
+      },
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent(label);
+  });
+
   it("submits with Enter, preserves Shift+Enter and opens shared slash pickers", async () => {
     const user = userEvent.setup();
     const store = renderComposer();
@@ -655,6 +675,7 @@ describe("ComposerDock", () => {
       approvals: [{
         ...approvalSnapshot(),
         subject,
+        input: { value: { type: "files", operation: subject.operation, paths: subject.paths }, redacted: false, truncated: false },
         exact_rule_preview: subject,
       }],
     });
@@ -1431,6 +1452,17 @@ function approvalSnapshot(): ApprovalSnapshot {
     variant: "build",
     approval_mode: "ask",
     subject,
+    input: {
+      value: {
+        type: "shell",
+        command: subject.command,
+        working_directory: subject.working_directory,
+        timeout_ms: subject.timeout_ms,
+        process_mode: subject.process_mode,
+      },
+      redacted: false,
+      truncated: false,
+    },
     available_decisions: ["allow_once", "allow_session", "allow_workspace", "deny"],
     exact_rule_preview: subject,
     status: "pending",

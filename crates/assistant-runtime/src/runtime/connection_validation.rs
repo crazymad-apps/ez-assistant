@@ -60,12 +60,7 @@ impl AssistantRuntime {
         let selection = request.selection;
         let prepared = self
             .config_registry
-            .prepare_model(
-                &snapshot,
-                Some(&selection),
-                self.store.as_ref(),
-                self.model_factory.as_ref(),
-            )
+            .prepare_model(&snapshot, Some(&selection), self.store.as_ref())
             .await?;
         let compiled = match super::model::compile_resolved_model_service(
             &snapshot,

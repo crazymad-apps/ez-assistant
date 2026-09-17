@@ -8,6 +8,7 @@ import type {
   ToolCallId,
   ToolEventSnapshot,
   ToolInputSnapshot,
+  ToolInputProjection,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
@@ -153,7 +154,7 @@ function LiveToolGroup(props: Readonly<{
     const tool_child_tasks = props.child_tasks.filter((item) => item.task.parent_tool_call_id === tool.call_id);
     return (
       <Fragment key={tool.call_id}>
-        <ToolRow identity={tool.mcp_identity} name={tool.tool_name} on_click={() => props.on_tool_click(tool)} status={tool.status} summary={toolSummary(tool)} />
+        <ToolRow identity={tool.mcp_identity} input={tool.input} name={tool.tool_name} on_click={() => props.on_tool_click(tool)} status={tool.status} summary={toolSummary(tool)} />
         {props.on_child_open && <ChildTaskTree embedded items={tool_child_tasks} on_open={props.on_child_open} />}
       </Fragment>
     );
@@ -164,19 +165,22 @@ function ToolRow(props: Readonly<{
   name: string;
   status: ToolActivityStatus;
   summary?: string | null;
-  input?: ToolInputSnapshot;
+  input?: ToolInputProjection;
   identity?: McpToolIdentity;
   on_click?: () => void;
 }>) {
   const visible_summary = visibleToolSummary(props.summary);
-  const input_label = props.input ? toolInputLabel(props.input) : null;
-  const skill_name = props.name === "load_skill" ? loadSkillName(props.input) : null;
-  const identity = props.identity ?? (props.input?.type === "mcp" ? props.input.identity : null);
+  const input = props.input?.value;
+  const input_label = input ? toolInputLabel(input) : null;
+  const skill_name = props.name === "load_skill" ? loadSkillName(input) : null;
+  const identity = props.identity ?? (input?.type === "mcp" ? input.identity : null);
   const label = identity ? `${identity.server_display_name} (${identity.server_key}) / ${identity.tool_name}` : humanizeToolName(props.name);
   const content = <>
     <strong data-status={props.status}>{label}{skill_name ? ` · ${skill_name}` : ""}</strong>
     <span className={styles.tool_status} data-status={props.status}>{toolStatusLabel(props.status)}</span>
     {input_label && !identity && !skill_name && props.name !== "load_skill" && <span className={styles.tool_input}>{input_label}</span>}
+    {props.input?.redacted && <span className={styles.tool_summary}>· 已隐去敏感值</span>}
+    {props.input?.truncated && <span className={styles.tool_summary}>· 内容已截断</span>}
     {visible_summary && <span className={styles.tool_summary}>· {visible_summary}</span>}
   </>;
   return props.on_click

@@ -6,7 +6,12 @@ use assistant_protocol::{
     ChildTaskEvent, PartId, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolOutputChannel,
 };
 
-pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
+use crate::runtime::tool_input_projection::project_tool_input;
+
+pub(super) fn project(
+    event: AgentEvent,
+    mcp_registry: &crate::mcp::McpRegistry,
+) -> Option<ChildTaskEvent> {
     match event {
         AgentEvent::TextDelta { step, id, delta } => Some(ChildTaskEvent::TextDelta {
             step,
@@ -27,11 +32,34 @@ pub(super) fn project(event: AgentEvent) -> Option<ChildTaskEvent> {
                 cached_input_tokens: usage.cached_input_tokens,
             },
         }),
-        AgentEvent::ToolProposed { step, call } => Some(ChildTaskEvent::ToolProposed {
-            step,
-            call_id: ToolCallId::new(call.id.as_str()).ok()?,
-            tool_name: call.name.as_str().to_owned(),
-        }),
+        AgentEvent::ToolProposed { step, call } => {
+            let mcp_identity = if call.name.as_str() == "call_mcp_tool" {
+                call.arguments
+                    .get("server")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|server| assistant_protocol::McpServerKey::new(server).ok())
+                    .zip(
+                        call.arguments
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                    .and_then(|(server_key, tool)| {
+                        mcp_registry.tool_identity(&server_key, tool).ok().flatten()
+                    })
+            } else {
+                None
+            };
+            Some(ChildTaskEvent::ToolProposed {
+                step,
+                call_id: ToolCallId::new(call.id.as_str()).ok()?,
+                tool_name: call.name.as_str().to_owned(),
+                input: project_tool_input(
+                    call.name.as_str(),
+                    &call.arguments,
+                    mcp_identity.as_ref(),
+                ),
+            })
+        }
         AgentEvent::ToolStarted { step, call_id } => Some(ChildTaskEvent::ToolStarted {
             step,
             call_id: ToolCallId::new(call_id.as_str()).ok()?,

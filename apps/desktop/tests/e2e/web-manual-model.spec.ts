@@ -46,6 +46,7 @@ test("manual model origin survives online changes and controls deletion and tags
     await dialog.getByRole("button", { name: "接口协议", exact: true }).click();
     await page.getByRole("option", { name: "Chat Completions", exact: true }).click();
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
     const online = dialog.getByRole("button", { name: "配置模型 deepseek-v4-pro", exact: true });
     await expect(online).toContainText("模板预填");
     await expect(online).not.toContainText("待补全");
@@ -79,6 +80,7 @@ test("manual model origin survives online changes and controls deletion and tags
     await expect(dialog.getByRole("button", { name: "默认模型", exact: true })).toContainText("deepseek-v4-flash");
     fail_list = false; include_manual = true;
     await dialog.getByRole("button", { name: /管理服务商 手动模型验证/ }).click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
     const merged = dialog.getByRole("button", { name: "配置模型 deepseek-v4-flash", exact: true });
     await expect(merged).toContainText("手动添加");
     await expect(dialog.getByRole("button", { name: /(?:配置模型|编辑固定配置) deepseek-v4-flash$/ })).toHaveCount(1);

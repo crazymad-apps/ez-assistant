@@ -25,6 +25,7 @@ export const AgentShellSetting = observer(function AgentShellSetting() {
     <SelectionPopover<ShellKind>
       aria_label="默认 Agent Shell"
       trigger_variant="field"
+      trigger_class_name={styles.shell_selector}
       open={open}
       on_open_change={setOpen}
       disabled={!snapshot || settings.shell_loading || settings.pending_action !== null || unix}
@@ -38,6 +39,5 @@ export const AgentShellSetting = observer(function AgentShellSetting() {
       }))}
       on_select={(shell) => { void settings.setDefaultAgentShell(shell); }}
     />
-    <small>{unix ? "当前平台使用系统默认 Shell" : "新会话创建时使用的 Shell；修改不影响已有会话。"}</small>
   </section>;
 });

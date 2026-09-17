@@ -2,6 +2,7 @@ import { Fragment, type ReactNode, useEffect, useId, useLayoutEffect, useRef, us
 import { Button } from "../Button";
 import { Icon } from "../Icon";
 import { AnchoredOverlay } from "../AnchoredOverlay";
+import { Tooltip } from "../Tooltip";
 import styles from "./index.module.scss";
 
 export type SettingsCascadeOption = Readonly<{
@@ -28,6 +29,7 @@ type SettingsCascadePopoverProps = Readonly<{
   aria_label: string;
   categories: readonly SettingsCascadeCategory[];
   disabled?: boolean;
+  disabled_reason?: string;
   clear_action?: Readonly<{ label: string; on_clear: () => Promise<boolean> }>;
   initial_category: string | null;
   on_open_change: (open: boolean) => void;
@@ -65,6 +67,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const secondary_category = props.categories.find((candidate) => candidate.id === secondary_category_id);
+  const trigger_disabled = props.disabled || Boolean(props.disabled_reason);
 
   useEffect(() => {
     if (!props.open) return undefined;
@@ -88,6 +91,10 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     });
     return () => cancelAnimationFrame(focus_frame);
   }, [props.initial_category, props.open]);
+
+  useEffect(() => {
+    if (trigger_disabled && props.open) props.on_open_change(false);
+  }, [props.on_open_change, props.open, trigger_disabled]);
 
   useLayoutEffect(() => {
     if (!props.open || !secondary_category) return undefined;
@@ -246,28 +253,34 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     void selectAction(() => secondary_category.on_select(option.value));
   }
 
-  return (
-    <>
-      <span className={styles.trigger_wrapper}>
-      <button
+  const trigger = <button
         aria-controls={props.open ? menu_id : undefined}
+        aria-disabled={trigger_disabled || undefined}
         aria-expanded={props.open}
         aria-haspopup="menu"
         aria-label={props.aria_label}
         className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(" ")}
-        disabled={props.disabled}
-        onClick={() => props.on_open_change(!props.open)}
+        disabled={props.disabled && !props.disabled_reason}
+        onClick={() => { if (!trigger_disabled) props.on_open_change(!props.open); }}
         onKeyDown={(event) => {
+          if (trigger_disabled) return;
           if (props.open && event.key === "Escape") { event.preventDefault(); closeAndRestoreFocus(); }
         }}
         ref={trigger_ref}
         type="button"
       >
         <span>{props.trigger_content}</span>
-        {clear_action ? <span className={styles.clear_space} /> : <Icon name="chevron-down" size={14} />}
-      </button>
-      {clear_action && <button type="button" className={styles.clear_trigger}
-        aria-label={clear_action.label} title={clear_action.label} disabled={props.disabled || selecting}
+        {clear_action && !trigger_disabled
+          ? <span className={styles.clear_space} />
+          : <Icon name="chevron-down" size={14} />}
+      </button>;
+
+  return (
+    <>
+      <span className={styles.trigger_wrapper}>
+      {props.disabled_reason ? <Tooltip content={props.disabled_reason}>{trigger}</Tooltip> : trigger}
+      {clear_action && !props.disabled_reason && <button type="button" className={styles.clear_trigger}
+        aria-label={clear_action.label} title={clear_action.label} disabled={trigger_disabled || selecting}
         onClick={() => { void selectAction(async () => {
           const cleared = await clear_action.on_clear();
           if (cleared && mounted.current) trigger_ref.current?.focus();

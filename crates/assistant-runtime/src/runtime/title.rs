@@ -12,8 +12,8 @@ use agent_types::{
     UserPart,
 };
 use assistant_protocol::{
-    GenerateSessionTitleRequest, GenerateSessionTitleResult, RuntimeEvent,
-    SessionTitleGenerationFinishedOutcome, SessionTitleGenerationSnapshot,
+    GenerateSessionTitleRequest, GenerateSessionTitleResult, RuntimeErrorCode, RuntimeErrorInfo,
+    RuntimeEvent, SessionTitleGenerationFinishedOutcome, SessionTitleGenerationSnapshot,
     SessionTitleGenerationTriggerSnapshot,
 };
 use serde_json::json;
@@ -28,7 +28,7 @@ use crate::{
     session::{ActiveSessionTitleGeneration, SessionController},
 };
 
-const TITLE_TIMEOUT: Duration = Duration::from_secs(20);
+const TITLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_TITLE_CONTEXT_BYTES: usize = 12 * 1024;
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_OUTPUT_TOKENS: u32 = 1_024;
@@ -273,15 +273,40 @@ async fn execute_title_generation(
         prepared.request,
         ModelCallContext::new(prepared.cancellation.clone()),
     );
-    let response = match timeout(TITLE_TIMEOUT, call).await {
-        Ok(result) => result.ok(),
+    let (response, call_outcome) = match timeout(TITLE_TIMEOUT, call).await {
+        Ok(Ok(response)) => (Some(response), TitleCallOutcome::Completed),
+        Ok(Err(agent_model::ModelError::Cancelled)) => (None, TitleCallOutcome::Cancelled),
+        Ok(Err(source)) => (
+            None,
+            TitleCallOutcome::Failed(
+                RuntimeError::ModelExecutionFailed { source }.to_protocol_info(),
+            ),
+        ),
         Err(_) => {
             prepared.cancellation.cancel();
-            None
+            (
+                None,
+                TitleCallOutcome::Failed(RuntimeErrorInfo::new(
+                    RuntimeErrorCode::Timeout,
+                    "title generation timed out",
+                )),
+            )
         }
     };
     let usage = response.as_ref().and_then(|message| message.usage.clone());
     let candidate = response.as_ref().and_then(title_from_tool_call);
+    let call_outcome = if response.is_some() && candidate.is_none() {
+        TitleCallOutcome::Failed(
+            RuntimeError::ModelExecutionFailed {
+                source: agent_model::ModelError::Protocol(
+                    "title response did not call the required output tool".to_owned(),
+                ),
+            }
+            .to_protocol_info(),
+        )
+    } else {
+        call_outcome
+    };
     let _mutation = session.mutation().await;
     let is_current = session
         .lock_state()
@@ -309,7 +334,7 @@ async fn execute_title_generation(
             completed_at_ms: super::now_ms().unwrap_or(prepared.snapshot.started_at_ms),
         })
         .await;
-    let outcome = match committed {
+    let (outcome, error) = match committed {
         Ok(result) => {
             if let Ok(mut state) = session.lock_state() {
                 state.active_title_generation = None;
@@ -321,16 +346,35 @@ async fn execute_title_generation(
                 let _ = context.events.send(RuntimeEvent::SessionChanged {
                     session_id: session.id().clone(),
                 });
-                SessionTitleGenerationFinishedOutcome::Succeeded
+                (SessionTitleGenerationFinishedOutcome::Succeeded, None)
             } else {
-                SessionTitleGenerationFinishedOutcome::Failed
+                match call_outcome {
+                    TitleCallOutcome::Cancelled => {
+                        (SessionTitleGenerationFinishedOutcome::Cancelled, None)
+                    }
+                    TitleCallOutcome::Failed(error) => {
+                        (SessionTitleGenerationFinishedOutcome::Failed, Some(error))
+                    }
+                    TitleCallOutcome::Completed => (
+                        SessionTitleGenerationFinishedOutcome::Failed,
+                        Some(RuntimeErrorInfo::new(
+                            RuntimeErrorCode::InvalidRequest,
+                            "generated title was not applied",
+                        )),
+                    ),
+                }
             }
         }
-        Err(_) => {
+        Err(source) => {
             if let Ok(mut state) = session.lock_state() {
                 state.active_title_generation = None;
             }
-            SessionTitleGenerationFinishedOutcome::Failed
+            (
+                SessionTitleGenerationFinishedOutcome::Failed,
+                Some(
+                    RuntimeError::from_store("commit title generation", source).to_protocol_info(),
+                ),
+            )
         }
     };
     let _ = context
@@ -339,7 +383,14 @@ async fn execute_title_generation(
             session_id: session.id().clone(),
             trigger: prepared.trigger,
             outcome,
+            error,
         });
+}
+
+enum TitleCallOutcome {
+    Completed,
+    Failed(RuntimeErrorInfo),
+    Cancelled,
 }
 
 fn title_request(

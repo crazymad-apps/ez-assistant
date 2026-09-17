@@ -1,7 +1,8 @@
 //! staged append 的持久业务意图及其 SQLite 提交效果。
 
+use agent_types::UserMessage;
 use assistant_protocol::{
-    ChildTaskId, ChildTaskStatus, RunId, RunStatus, RuntimeErrorInfo, SessionId,
+    ChildTaskId, ChildTaskStatus, InputId, RunId, RunStatus, RuntimeErrorInfo, SessionId,
 };
 use assistant_runtime::{NewStoredInput, StoredGoalSettlementEffect, StoredSkillActivation};
 use rusqlite::{Transaction, params};
@@ -44,9 +45,16 @@ pub(super) enum AppendPurpose {
         cancel_requested: bool,
         error: Option<RuntimeErrorInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued_user_message: Option<UserMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         goal_effect: Option<Box<StoredGoalSettlementEffect>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proxy_report: Option<Box<NewStoredInput>>,
+    },
+    /// 终态 Run 不变，只提交它自己遗留的 queued Input。
+    TerminalRunInputReconciliation {
+        input_id: InputId,
+        user_message: UserMessage,
     },
     /// 子任务初始 User Message 已写入，切换到 running。
     ChildStart,
@@ -146,6 +154,10 @@ pub(super) fn apply_purpose(
             AppendPurpose::RunSettlement { .. },
             ConversationStorageTarget::Session { session_id, run_id },
         ) => apply_run_settlement(transaction, run_id, session_id, purpose, created_at_ms),
+        (
+            AppendPurpose::TerminalRunInputReconciliation { .. },
+            ConversationStorageTarget::Session { session_id, run_id },
+        ) => apply_terminal_run_input_reconciliation(transaction, run_id, session_id, purpose),
         (
             AppendPurpose::RunContinuation { .. },
             ConversationStorageTarget::Session { session_id, run_id },
@@ -355,12 +367,19 @@ pub(super) fn apply_run_settlement(
         status,
         cancel_requested,
         error,
+        queued_user_message,
         goal_effect,
         proxy_report,
     } = purpose
     else {
         return Err(invalid_data("run settlement purpose is invalid"));
     };
+    commit_settlement_input(
+        transaction,
+        run_id,
+        session_id,
+        queued_user_message.as_ref(),
+    )?;
     let updated = transaction
         .execute(
             "UPDATE runs
@@ -399,6 +418,159 @@ pub(super) fn apply_run_settlement(
         .map_err(|source| internal_error("session activity time could not be updated", source))?;
     if session_updated != 1 {
         return Err(conflict("run session does not exist"));
+    }
+    Ok(())
+}
+
+fn commit_settlement_input(
+    transaction: &Transaction<'_>,
+    run_id: &RunId,
+    session_id: &SessionId,
+    queued_user_message: Option<&UserMessage>,
+) -> StorageResult<()> {
+    let (input_id, input_session_id, user_message_id, state, queued_message_json): (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = transaction
+        .query_row(
+            "SELECT inputs.input_id, inputs.session_id, inputs.user_message_id,
+                    inputs.state, inputs.queued_message_json
+             FROM runs JOIN inputs ON inputs.input_id = runs.input_id
+             WHERE runs.run_id = ?1 AND runs.session_id = ?2",
+            params![run_id.as_str(), session_id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|source| internal_error("run input could not be queried", source))?;
+    if input_session_id != session_id.as_str() {
+        return Err(conflict("run input belongs to a different session"));
+    }
+    match state.as_str() {
+        "committed" => {
+            if queued_user_message.is_some() || queued_message_json.is_some() {
+                return Err(conflict("committed run input settlement is inconsistent"));
+            }
+        }
+        "queued" => {
+            let message = queued_user_message
+                .ok_or_else(|| conflict("queued run input requires its original user message"))?;
+            if message.id.as_str() != user_message_id {
+                return Err(conflict("queued run input message identity does not match"));
+            }
+            let stored = queued_message_json
+                .as_deref()
+                .ok_or_else(|| conflict("queued run input has no stored user message"))?;
+            let stored: UserMessage = serde_json::from_str(stored).map_err(|source| {
+                invalid_data_with_source("queued run input message is invalid", source)
+            })?;
+            if stored != *message {
+                return Err(conflict("queued run input message does not match"));
+            }
+            let updated = transaction
+                .execute(
+                    "UPDATE inputs SET state = 'committed', queued_message_json = NULL
+                     WHERE input_id = ?1 AND session_id = ?2 AND user_message_id = ?3
+                       AND state = 'queued'",
+                    params![input_id, session_id.as_str(), user_message_id],
+                )
+                .map_err(|source| {
+                    internal_error("queued run input could not be committed", source)
+                })?;
+            if updated != 1 {
+                return Err(conflict("queued run input changed during settlement"));
+            }
+        }
+        _ => return Err(invalid_data("run input state is invalid")),
+    }
+    Ok(())
+}
+
+pub(super) fn apply_terminal_run_input_reconciliation(
+    transaction: &Transaction<'_>,
+    run_id: &RunId,
+    session_id: &SessionId,
+    purpose: &AppendPurpose,
+) -> StorageResult<()> {
+    let AppendPurpose::TerminalRunInputReconciliation {
+        input_id,
+        user_message,
+    } = purpose
+    else {
+        return Err(invalid_data(
+            "terminal run input reconciliation purpose is invalid",
+        ));
+    };
+    let (run_input_id, status): (String, String) = transaction
+        .query_row(
+            "SELECT input_id, status FROM runs WHERE run_id = ?1 AND session_id = ?2",
+            params![run_id.as_str(), session_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|source| internal_error("terminal run could not be queried", source))?;
+    if run_input_id != input_id.as_str()
+        || !matches!(
+            status.as_str(),
+            "completed" | "failed" | "cancelled" | "interrupted"
+        )
+    {
+        return Err(conflict(
+            "terminal run input reconciliation does not match the run",
+        ));
+    }
+    let (input_session_id, user_message_id, state, queued_message_json): (
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = transaction
+        .query_row(
+            "SELECT session_id, user_message_id, state, queued_message_json
+             FROM inputs WHERE input_id = ?1",
+            [input_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|source| internal_error("terminal run input could not be queried", source))?;
+    if input_session_id != session_id.as_str()
+        || state != "queued"
+        || user_message.id.as_str() != user_message_id
+    {
+        return Err(conflict(
+            "terminal run queued input reconciliation is inconsistent",
+        ));
+    }
+    let stored = queued_message_json
+        .as_deref()
+        .ok_or_else(|| conflict("terminal run queued input has no stored message"))?;
+    let stored: UserMessage = serde_json::from_str(stored).map_err(|source| {
+        invalid_data_with_source("terminal run queued input message is invalid", source)
+    })?;
+    if stored != *user_message {
+        return Err(conflict("terminal run queued input message does not match"));
+    }
+    let updated = transaction
+        .execute(
+            "UPDATE inputs SET state = 'committed', queued_message_json = NULL
+             WHERE input_id = ?1 AND session_id = ?2 AND user_message_id = ?3
+               AND state = 'queued'",
+            params![input_id.as_str(), session_id.as_str(), user_message_id],
+        )
+        .map_err(|source| {
+            internal_error("terminal run queued input could not be committed", source)
+        })?;
+    if updated != 1 {
+        return Err(conflict(
+            "terminal run queued input changed during reconciliation",
+        ));
     }
     Ok(())
 }

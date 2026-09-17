@@ -7,7 +7,7 @@ for (const desktop of [true, false]) {
     let status = "starting", health_reads = 0, business_reads = 0;
     await page.route(`${fixture.base_url}/health`, async (route) => {
       health_reads++;
-      await route.fulfill({ json: { status, stage: "database_migration", error: status === "unavailable" ? "migration_failed" : null, database_version: null, target_version: "0.25.1" }, headers: { "Access-Control-Allow-Origin": "http://localhost:1420", "Access-Control-Allow-Credentials": "true" } });
+      await route.fulfill({ json: { status, stage: "database_migration", error: status === "unavailable" ? "migration_failed" : null, database_version: null, target_version: "0.25.1" }, headers: { "Access-Control-Allow-Origin": "http://localhost:1421", "Access-Control-Allow-Credentials": "true" } });
     });
     page.on("request", (request) => {
       if (request.method() !== "OPTIONS" && request.url().startsWith(fixture.base_url) && /\/(commands|events|session-materializations)(?:\?|$)/.test(request.url())) business_reads++;
@@ -23,7 +23,16 @@ for (const desktop of [true, false]) {
             if (command === "bootstrap_runtime" || command === "refresh_runtime_connection") return bootstrap;
             if (command === "connect_runtime_target") return { bootstrap, warning: null };
             if (command === "begin_runtime_connection") return "startup-binding";
-            if (command === "load_desktop_preferences") return { left_sidebar_open: true, right_sidebar_open: true, expanded_workspace_ids: null };
+            if (command === "load_desktop_preferences") return {
+              left_sidebar_open: true,
+              right_sidebar_open: true,
+              left_sidebar_width: 286,
+              right_sidebar_width: 380,
+              expanded_workspace_ids: null,
+              close_behavior: "hide_to_tray",
+              default_approval_mode: "ask",
+              last_model_selection: null,
+            };
             if (command === "desktop_platform") return "unsupported";
             return null;
           },

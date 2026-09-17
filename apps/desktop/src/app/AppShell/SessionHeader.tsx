@@ -247,6 +247,8 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 onSelect={() => {
                   if (isDraftCustomized(
                     new_session_draft,
+                    store.new_session_drafts.default_approval_mode,
+                    store.new_session_drafts.default_model_selection,
                   )) {
                     setClearOpen(true);
                   } else {

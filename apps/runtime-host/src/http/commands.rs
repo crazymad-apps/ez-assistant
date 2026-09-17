@@ -321,6 +321,14 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::RefreshProviderModels(request) => (
+            RuntimeCommandResult::RefreshProviderModels(
+                runtime
+                    .refresh_provider_models(request.provider_instance_id)
+                    .await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetModelSettings(_) => (
             RuntimeCommandResult::GetModelSettings(runtime.get_model_settings()?),
             false,

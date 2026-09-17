@@ -552,6 +552,79 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
 }
 
 #[tokio::test]
+async fn prestart_settlement_failure_faults_the_session_without_partial_commit() {
+    let store = Arc::new(FaultInjectingStore::fail_settlement());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session;
+    runtime
+        .config_registry
+        .replace_document_for_test("invalid runtime configuration");
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session.session_id.clone(),
+            message: "must remain recoverable".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("accepted input");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if runtime
+                .session_for_test(&session.session_id)
+                .await
+                .lock_state()
+                .expect("state")
+                .is_faulted
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session faulted after settlement failure");
+    let persisted = store.load_session_state(&session.session_id).await.unwrap();
+    let input = persisted
+        .state
+        .inputs
+        .iter()
+        .find(|input| input.input_id == accepted.input_id)
+        .expect("source input");
+    assert_eq!(input.state, crate::StoredInputState::Queued);
+    assert!(input.queued_message.is_some());
+    let run = persisted
+        .state
+        .runs
+        .iter()
+        .find(|run| run.run_id == accepted.run.run_id)
+        .expect("source run");
+    assert_eq!(run.status, assistant_protocol::RunStatus::Accepted);
+    assert!(
+        store
+            .load_conversation(&session.session_id)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn runtime_task_panic_settles_current_run_and_faults_session_without_waking_queue() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());

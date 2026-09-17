@@ -107,13 +107,22 @@ impl SessionLoader {
             .prepare_session_execution(id)
             .await
             .map_err(|e| RuntimeError::from_store("prepare session execution", e))?;
-        for settlement in
+        for recovery in
             super::recovery::prepare_interrupted_run_settlements(&loaded.state, super::now_ms()?)?
         {
-            self.store
-                .settle_run(settlement)
-                .await
-                .map_err(|e| RuntimeError::from_store("settle interrupted session run", e))?;
+            match recovery {
+                super::recovery::PreparedRunRecovery::Settlement(settlement) => {
+                    self.store.settle_run(*settlement).await.map_err(|e| {
+                        RuntimeError::from_store("settle interrupted session run", e)
+                    })?;
+                }
+                super::recovery::PreparedRunRecovery::TerminalInput(reconciliation) => {
+                    self.store
+                        .reconcile_terminal_run_input(reconciliation)
+                        .await
+                        .map_err(|e| RuntimeError::from_store("reconcile terminal run input", e))?;
+                }
+            }
         }
         loaded = self
             .store

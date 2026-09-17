@@ -1,8 +1,8 @@
 //! 人工 SQLite 夹具通过正式迁移入口建库，覆盖真实 worker 使用的读写语义。
 use super::*;
 use assistant_protocol::{
-    ModelDiscoveryFormat, ModelFeatureSupport, ModelReasoningMode, ProviderProtocolPreference,
-    ProviderType,
+    ModelCatalogDiagnosticCode, ModelDiscoveryFormat, ModelFeatureSupport, ModelReasoningMode,
+    ProviderProtocolPreference, ProviderType,
 };
 
 fn provider(id: &str) -> StoredProvider {
@@ -17,6 +17,8 @@ fn provider(id: &str) -> StoredProvider {
             models_path: "/v1/models".into(),
             discovery_format: ModelDiscoveryFormat::OpenAi,
         },
+        model_catalog: None,
+        model_catalog_diagnostic: None,
     }
 }
 fn fixed(id: &str, output: u64) -> ModelFixedConfig {
@@ -39,6 +41,18 @@ fn fixed(id: &str, output: u64) -> ModelFixedConfig {
 }
 fn engine(home: &std::path::Path) -> StorageEngine {
     StorageEngine::open(home).unwrap()
+}
+fn catalog(refreshed_at_ms: i64) -> StoredModelCatalog {
+    StoredModelCatalog {
+        models: vec![DiscoveredModel {
+            configuration: None,
+            model_id: "org/catalog-model".into(),
+            display_name: Some("Catalog model".into()),
+            metadata: ModelParameters::default(),
+        }],
+        refreshed_at_ms,
+        connection_changed: false,
+    }
 }
 fn count(engine: &StorageEngine, table: &str) -> i64 {
     assert!(["providers", "model_settings", "model_fixed_configs"].contains(&table));
@@ -196,4 +210,102 @@ fn invalid_fixed_limits_or_missing_provider_cannot_replace_valid_values() {
         ),
         (1, 1, 1)
     );
+}
+
+#[test]
+fn catalog_roundtrips_updates_mark_only_discovery_changes_and_cas_preserves_old_value() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = engine(home.path());
+    let original = provider("one");
+    engine.put_provider(original.clone()).unwrap();
+    engine
+        .replace_provider_model_catalog(ProviderModelCatalogReplacement {
+            provider_instance_id: original.provider_instance_id.clone(),
+            expected_connection: original.connection.clone(),
+            expected_api_key: original.api_key.clone(),
+            catalog: catalog(100),
+        })
+        .unwrap();
+    let loaded = engine.load_providers().unwrap().remove(0);
+    assert_eq!(loaded.model_catalog, Some(catalog(100)));
+    assert_eq!(loaded.model_catalog_diagnostic, None);
+
+    let mut display_only = loaded.clone();
+    display_only.connection.display_name = "renamed".into();
+    display_only.connection.protocol_preference = ProviderProtocolPreference::Responses;
+    engine.put_provider(display_only.clone()).unwrap();
+    let loaded = engine.load_providers().unwrap().remove(0);
+    assert_eq!(loaded.model_catalog, Some(catalog(100)));
+
+    let stale_expected = loaded.clone();
+    let mut changed = loaded;
+    changed.connection.endpoint = "https://changed.example.test/v1".into();
+    engine.put_provider(changed.clone()).unwrap();
+    let stale = engine.load_providers().unwrap().remove(0);
+    assert!(stale.model_catalog.as_ref().unwrap().connection_changed);
+    assert!(
+        engine
+            .replace_provider_model_catalog(ProviderModelCatalogReplacement {
+                provider_instance_id: stale.provider_instance_id.clone(),
+                expected_connection: stale_expected.connection,
+                expected_api_key: stale_expected.api_key,
+                catalog: catalog(200),
+            })
+            .is_err()
+    );
+    assert_eq!(
+        engine.load_providers().unwrap().remove(0).model_catalog,
+        stale.model_catalog
+    );
+}
+
+#[test]
+fn malformed_catalog_payload_degrades_to_a_provider_diagnostic() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = engine(home.path());
+    let original = provider("one");
+    engine.put_provider(original).unwrap();
+    let model = catalog(100).models.into_iter().next().unwrap();
+    let invalid_catalog = serde_json::to_string(&[model.clone(), model]).unwrap();
+    engine
+        .connection
+        .execute(
+            "UPDATE providers SET model_catalog_json=?1, model_catalog_refreshed_at_ms=100 WHERE provider_instance_id='one'",
+            [invalid_catalog],
+        )
+        .unwrap();
+    let loaded = engine.load_providers().unwrap().remove(0);
+    assert_eq!(loaded.model_catalog, None);
+    assert_eq!(
+        loaded.model_catalog_diagnostic,
+        Some(ModelCatalogDiagnosticCode::StoredSnapshotInvalid)
+    );
+}
+
+#[test]
+fn v0_25_3_provider_upsert_does_not_clear_additive_catalog_columns() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = engine(home.path());
+    let original = provider("one");
+    engine.put_provider(original.clone()).unwrap();
+    engine
+        .replace_provider_model_catalog(ProviderModelCatalogReplacement {
+            provider_instance_id: original.provider_instance_id.clone(),
+            expected_connection: original.connection.clone(),
+            expected_api_key: original.api_key.clone(),
+            catalog: catalog(100),
+        })
+        .unwrap();
+
+    let mut old_host_value = original;
+    old_host_value.connection.display_name = "old host update".into();
+    let connection = old_host_value.connection;
+    engine.connection.execute(
+        "INSERT INTO providers(provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(provider_instance_id) DO UPDATE SET display_name=excluded.display_name, provider_type=excluded.provider_type, endpoint=excluded.endpoint, api_key=excluded.api_key, protocol_preference=excluded.protocol_preference, models_path=excluded.models_path, discovery_format=excluded.discovery_format",
+        params![old_host_value.provider_instance_id.as_str(), connection.display_name, enum_write(&connection.provider_type).unwrap(), connection.endpoint, old_host_value.api_key.expose(), enum_write(&connection.protocol_preference).unwrap(), connection.models_path, enum_write(&connection.discovery_format).unwrap()],
+    ).unwrap();
+
+    let loaded = engine.load_providers().unwrap().remove(0);
+    assert_eq!(loaded.connection.display_name, "old host update");
+    assert_eq!(loaded.model_catalog, Some(catalog(100)));
 }

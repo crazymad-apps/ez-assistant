@@ -6,7 +6,7 @@ use agent_types::ConversationMessage;
 use assistant_protocol::{InputId, RunStatus};
 use assistant_runtime::{
     NewStoredRunAttempt, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, UserMessageCommit,
+    StoredRunSettlement, StoredTerminalRunInputReconciliation, UserMessageCommit,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -158,14 +158,19 @@ impl StorageEngine {
         }
         let goal_effect = settlement.goal_effect.clone();
         let proxy_report = settlement.proxy_report.clone();
+        let mut messages = settlement.messages;
+        if let Some(message) = settlement.queued_user_message.as_ref() {
+            messages.insert(0, ConversationMessage::User(message.clone()));
+        }
         let purpose = AppendPurpose::RunSettlement {
             status: settlement.status,
             cancel_requested: settlement.cancel_requested,
             error: settlement.error,
+            queued_user_message: settlement.queued_user_message,
             goal_effect: settlement.goal_effect.map(Box::new),
             proxy_report: settlement.proxy_report,
         };
-        if settlement.messages.is_empty() {
+        if messages.is_empty() {
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -207,7 +212,7 @@ impl StorageEngine {
                 operation_id,
                 session_id: settlement.session_id,
                 run_id: settlement.run_id,
-                messages: settlement.messages,
+                messages,
                 message_step: settlement.message_step,
                 created_at_ms: settlement.finished_at_ms,
             },
@@ -215,6 +220,99 @@ impl StorageEngine {
         )?;
         self.complete_staged_append(&settlement.operation_id)?;
         self.run_settlement_result(goal_effect.as_ref(), proxy_report.as_deref())
+    }
+
+    pub(super) fn reconcile_terminal_run_input(
+        &mut self,
+        reconciliation: StoredTerminalRunInputReconciliation,
+    ) -> StorageResult<()> {
+        let (run_input_id, status, input_session_id, user_message_id, state, queued_message_json): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = self
+            .connection
+            .query_row(
+                "SELECT runs.input_id, runs.status, inputs.session_id, inputs.user_message_id,
+                        inputs.state, inputs.queued_message_json
+                 FROM runs JOIN inputs ON inputs.input_id = runs.input_id
+                 WHERE runs.run_id = ?1 AND runs.session_id = ?2",
+                params![
+                    reconciliation.run_id.as_str(),
+                    reconciliation.session_id.as_str()
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(|source| internal_error("terminal run input could not be queried", source))?;
+        if run_input_id != reconciliation.input_id.as_str()
+            || input_session_id != reconciliation.session_id.as_str()
+            || !matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            )
+            || user_message_id != reconciliation.user_message.id.as_str()
+        {
+            return Err(conflict(
+                "terminal run input reconciliation is inconsistent",
+            ));
+        }
+        if state == "committed" {
+            if queued_message_json.is_some() {
+                return Err(conflict(
+                    "committed terminal run input still has a queued message",
+                ));
+            }
+            return Ok(());
+        }
+        if state != "queued" {
+            return Err(conflict("terminal run input state is invalid"));
+        }
+        let purpose = AppendPurpose::TerminalRunInputReconciliation {
+            input_id: reconciliation.input_id,
+            user_message: reconciliation.user_message.clone(),
+        };
+        let preflight = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                internal_error("terminal run input reconciliation could not begin", source)
+            })?;
+        super::append_effect::apply_terminal_run_input_reconciliation(
+            &preflight,
+            &reconciliation.run_id,
+            &reconciliation.session_id,
+            &purpose,
+        )?;
+        preflight.rollback().map_err(|source| {
+            internal_error(
+                "terminal run input reconciliation preflight could not roll back",
+                source,
+            )
+        })?;
+        self.stage_append_for(
+            AppendRequest {
+                operation_id: reconciliation.operation_id.clone(),
+                session_id: reconciliation.session_id,
+                run_id: reconciliation.run_id,
+                messages: vec![ConversationMessage::User(reconciliation.user_message)],
+                message_step: None,
+                created_at_ms: reconciliation.recovered_at_ms,
+            },
+            purpose,
+        )?;
+        self.complete_staged_append(&reconciliation.operation_id)
     }
 
     /// 可靠追加活动 Run 的下一 Loop 上下文，并保持 Run 为 running。

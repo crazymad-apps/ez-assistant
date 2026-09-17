@@ -53,8 +53,9 @@ use assistant_runtime::{
     StoredConversationState, StoredGoal, StoredGoalBudget, StoredGoalObjective,
     StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
     StoredMcpSelection, StoredRunSettlement, StoredSession, StoredSessionLifecycle,
-    StoredTodoItemStatus, StoredWorkPlanItem, ToolExecutionStart, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkspaceUpdate,
+    StoredTerminalRunInputReconciliation, StoredTodoItemStatus, StoredWorkPlanItem,
+    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
+    WorkspaceUpdate,
 };
 use assistant_runtime::{SkillActivationOwner, SkillActivationTrigger, StoredSkillActivation};
 use rusqlite::{Connection, params};
@@ -907,6 +908,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
             status: RunStatus::Completed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: vec![assistant_message("m-report-result", "done")],
             message_step: Some(1),
             goal_effect: None,
@@ -1181,6 +1183,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             status: RunStatus::Completed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: vec![assistant_message("assistant-skill-activation", "done")],
             goal_effect: None,
             proxy_report: None,
@@ -2510,6 +2513,7 @@ fn commit_completed_turn(
             status: RunStatus::Completed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: vec![assistant_message(&format!("assistant-{suffix}"), suffix)],
             goal_effect: None,
             proxy_report: None,
@@ -3811,6 +3815,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             status: RunStatus::Cancelled,
             cancel_requested: true,
             error: None,
+            queued_user_message: None,
             messages: Vec::new(),
             goal_effect: None,
             proxy_report: None,
@@ -3866,6 +3871,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             status: RunStatus::Completed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: vec![assistant_message("goal-resume-answer", "done")],
             goal_effect: Some(StoredGoalSettlementEffect::Transition {
                 expected_goal_id: completed_goal.goal_id.clone(),
@@ -5855,6 +5861,7 @@ fn pending_tool_exchange_prevents_run_terminal_settlement() {
             status: assistant_protocol::RunStatus::Failed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: Vec::new(),
             goal_effect: None,
             proxy_report: None,
@@ -6347,6 +6354,7 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
                 status: assistant_protocol::RunStatus::Completed,
                 cancel_requested: false,
                 error: None,
+                queued_user_message: None,
                 goal_effect: None,
                 proxy_report: None,
             },
@@ -6373,7 +6381,206 @@ fn startup_finishes_staged_terminal_message_and_run_status_together() {
 }
 
 #[test]
-fn shell_failure_message_and_terminal_state_recover_together() {
+fn queued_input_settlement_rejects_mismatch_without_partial_write_then_commits_atomically() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-prestart", "r-prestart");
+    let queued = raw_user_message("user-r-prestart", "preserve the original input");
+    engine
+        .connection
+        .execute(
+            "UPDATE inputs SET state = 'queued', queued_message_json = ?1
+             WHERE input_id = 'input-r-prestart'",
+            [serde_json::to_string(&queued).expect("queued message")],
+        )
+        .expect("restore queued input");
+    let mismatched = raw_user_message("user-r-prestart", "different body");
+    let error = engine
+        .settle_run(StoredRunSettlement {
+            operation_id: "settle-prestart-mismatch".to_owned(),
+            run_id: run_id("r-prestart"),
+            session_id: session_id("s-prestart"),
+            status: RunStatus::Failed,
+            cancel_requested: false,
+            error: None,
+            queued_user_message: Some(mismatched),
+            messages: vec![assistant_message("assistant-prestart", "not committed")],
+            message_step: None,
+            goal_effect: None,
+            proxy_report: None,
+            finished_at_ms: 2_000,
+        })
+        .expect_err("mismatched queued message must fail before append");
+    assert_eq!(error.kind(), StoreErrorKind::Conflict);
+    let (input_state, run_status): (String, String) = engine
+        .connection
+        .query_row(
+            "SELECT inputs.state, runs.status
+             FROM runs JOIN inputs ON inputs.input_id = runs.input_id
+             WHERE runs.run_id = 'r-prestart'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("unchanged run input");
+    assert_eq!(
+        (input_state.as_str(), run_status.as_str()),
+        ("queued", "accepted")
+    );
+    assert!(
+        engine
+            .load_conversation(&session_id("s-prestart"))
+            .expect("unchanged conversation")
+            .messages
+            .is_empty()
+    );
+    assert_eq!(engine.staged_append_count().expect("staged count"), 0);
+
+    engine
+        .settle_run(StoredRunSettlement {
+            operation_id: "settle-prestart".to_owned(),
+            run_id: run_id("r-prestart"),
+            session_id: session_id("s-prestart"),
+            status: RunStatus::Failed,
+            cancel_requested: false,
+            error: None,
+            queued_user_message: Some(queued.clone()),
+            messages: vec![assistant_message("assistant-prestart", "visible failure")],
+            message_step: None,
+            goal_effect: None,
+            proxy_report: None,
+            finished_at_ms: 2_001,
+        })
+        .expect("settle queued input atomically");
+    let recovered = engine.load_runtime().expect("load settled runtime");
+    assert_eq!(
+        recovered.inputs[0].state,
+        assistant_runtime::StoredInputState::Committed
+    );
+    assert!(recovered.inputs[0].queued_message.is_none());
+    assert_eq!(recovered.runs[0].status, RunStatus::Failed);
+    assert_eq!(recovered.runs[0].message_ids.len(), 2);
+    assert_eq!(
+        engine
+            .load_conversation(&session_id("s-prestart"))
+            .expect("settled conversation")
+            .messages,
+        [
+            ConversationMessage::User(queued),
+            assistant_message("assistant-prestart", "visible failure"),
+        ]
+    );
+}
+
+#[test]
+fn terminal_run_reconciliation_is_exact_idempotent_and_leaves_unrelated_queue_untouched() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-reconcile", "r-reconcile");
+    let source = raw_user_message("user-r-reconcile", "recover me once");
+    engine
+        .connection
+        .execute(
+            "UPDATE inputs SET state = 'queued', queued_message_json = ?1
+             WHERE input_id = 'input-r-reconcile'",
+            [serde_json::to_string(&source).expect("source message")],
+        )
+        .expect("restore source queued input");
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'failed', finished_at_ms = 2_000
+             WHERE run_id = 'r-reconcile'",
+            [],
+        )
+        .expect("create historical terminal run");
+    let unrelated_input_id = InputId::new("input-unrelated").expect("input id");
+    let unrelated_run_id = run_id("r-unrelated");
+    let unrelated = raw_user_message("user-unrelated", "leave me queued");
+    engine
+        .accept_input(NewStoredInput {
+            agent_shell_target: None,
+            input_id: unrelated_input_id.clone(),
+            run_id: unrelated_run_id,
+            session_id: session_id("s-reconcile"),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(desktop_channel_source()),
+            skill_activation: None,
+            mcp_selection: None,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            message: unrelated.clone(),
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: 2_100,
+        })
+        .expect("accept unrelated queue item");
+
+    let error = engine
+        .reconcile_terminal_run_input(StoredTerminalRunInputReconciliation {
+            operation_id: "reconcile-wrong-input".to_owned(),
+            run_id: run_id("r-reconcile"),
+            session_id: session_id("s-reconcile"),
+            input_id: unrelated_input_id.clone(),
+            user_message: unrelated,
+            recovered_at_ms: 3_000,
+        })
+        .expect_err("an unrelated queued input must not be repaired");
+    assert_eq!(error.kind(), StoreErrorKind::Conflict);
+    assert_eq!(engine.staged_append_count().expect("staged count"), 0);
+
+    let reconciliation = StoredTerminalRunInputReconciliation {
+        operation_id: "reconcile-terminal-input".to_owned(),
+        run_id: run_id("r-reconcile"),
+        session_id: session_id("s-reconcile"),
+        input_id: InputId::new("input-r-reconcile").expect("input id"),
+        user_message: source.clone(),
+        recovered_at_ms: 3_001,
+    };
+    engine
+        .reconcile_terminal_run_input(reconciliation.clone())
+        .expect("reconcile terminal source input");
+    engine
+        .reconcile_terminal_run_input(StoredTerminalRunInputReconciliation {
+            operation_id: "reconcile-terminal-input-again".to_owned(),
+            ..reconciliation
+        })
+        .expect("repeated reconciliation is a no-op");
+    let recovered = engine.load_runtime().expect("load reconciled runtime");
+    let source_input = recovered
+        .inputs
+        .iter()
+        .find(|input| input.input_id.as_str() == "input-r-reconcile")
+        .expect("source input");
+    assert_eq!(
+        source_input.state,
+        assistant_runtime::StoredInputState::Committed
+    );
+    assert!(source_input.queued_message.is_none());
+    let unrelated_input = recovered
+        .inputs
+        .iter()
+        .find(|input| input.input_id == unrelated_input_id)
+        .expect("unrelated input");
+    assert_eq!(
+        unrelated_input.state,
+        assistant_runtime::StoredInputState::Queued
+    );
+    assert_eq!(recovered.runs[0].status, RunStatus::Failed);
+    assert_eq!(
+        engine
+            .load_conversation(&session_id("s-reconcile"))
+            .expect("reconciled conversation")
+            .messages,
+        [ConversationMessage::User(source)]
+    );
+}
+
+#[test]
+fn prestart_failure_user_message_input_and_terminal_state_recover_together() {
     for body_already_written in [false, true] {
         let root = TempDir::new().unwrap();
         let mut engine = open_engine(&root);
@@ -6425,7 +6632,7 @@ fn shell_failure_message_and_terminal_state_recover_together() {
                     operation_id: "shell-failure-settlement".to_owned(),
                     session_id: session_id("shell-failure"),
                     run_id: run_id("shell-failure-run"),
-                    messages: vec![message.clone()],
+                    messages: vec![ConversationMessage::User(queued.clone()), message.clone()],
                     message_step: None,
                     created_at_ms: 3_000,
                 },
@@ -6433,6 +6640,7 @@ fn shell_failure_message_and_terminal_state_recover_together() {
                     status: RunStatus::Failed,
                     cancel_requested: false,
                     error: Some(error.clone()),
+                    queued_user_message: Some(queued.clone()),
                     goal_effect: None,
                     proxy_report: None,
                 },
@@ -6454,29 +6662,29 @@ fn shell_failure_message_and_terminal_state_recover_together() {
                 restored.state.sessions[0].agent_shell_kind,
                 Some(assistant_protocol::ShellKind::Cmd)
             );
-            assert_eq!(restored.state.sessions[0].message_count, 1);
+            assert_eq!(restored.state.sessions[0].message_count, 2);
             assert_eq!(restored.state.runs[0].status, RunStatus::Failed);
             assert_eq!(restored.state.runs[0].error.as_ref(), Some(&error));
             assert!(restored.state.runs[0].shell.is_none());
             assert_eq!(
                 restored.state.runs[0].message_ids,
-                [agent_types::MessageId::new("shell-failed-result").unwrap()]
+                [
+                    agent_types::MessageId::new("user-shell-failure-run").unwrap(),
+                    agent_types::MessageId::new("shell-failed-result").unwrap(),
+                ]
             );
             assert_eq!(
                 restored.state.inputs[0].state,
-                assistant_runtime::StoredInputState::Queued
+                assistant_runtime::StoredInputState::Committed
             );
-            assert_eq!(
-                restored.state.inputs[0].queued_message.as_ref(),
-                Some(&queued)
-            );
+            assert!(restored.state.inputs[0].queued_message.is_none());
             assert_eq!(
                 reopened
                     .load_conversation(&session_id("shell-failure"))
                     .unwrap()
                     .messages
                     .as_slice(),
-                std::slice::from_ref(&message)
+                [ConversationMessage::User(queued.clone()), message.clone()]
             );
             assert_eq!(reopened.staged_append_count().unwrap(), 0);
         }
@@ -7296,6 +7504,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 status: RunStatus::Completed,
                 cancel_requested: false,
                 error: None,
+                queued_user_message: None,
                 messages: vec![assistant_message(assistant, assistant)],
                 goal_effect: None,
                 proxy_report: None,
@@ -8986,6 +9195,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
             status: RunStatus::Completed,
             cancel_requested: false,
             error: None,
+            queued_user_message: None,
             messages: vec![assistant_message("assistant-clear-target", "done")],
             message_step: Some(1),
             goal_effect: None,

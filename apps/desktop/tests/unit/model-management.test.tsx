@@ -14,6 +14,20 @@ function modelStore() {
   store.settings.page = "models";
   store.settings.providers = [modelProvider];
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel()]);
+  vi.spyOn(store.settings, "loadProviderModelCatalog").mockResolvedValue({
+    provider_instance_id: modelProvider.provider_instance_id,
+    models: [discoveredModel()],
+    refreshed_at_ms: 10,
+    connection_changed: false,
+    diagnostic: null,
+  });
+  vi.spyOn(store.settings, "refreshProviderModels").mockResolvedValue({
+    provider_instance_id: modelProvider.provider_instance_id,
+    models: [discoveredModel()],
+    refreshed_at_ms: 11,
+    connection_changed: false,
+    diagnostic: null,
+  });
   vi.spyOn(store.settings, "listFixedModels").mockResolvedValue([]);
   return store;
 }
@@ -29,6 +43,27 @@ async function openModel(store: RootStore) {
 }
 
 describe("provider and fixed model settings", () => {
+  it("reads the persisted catalog on entry and only refreshes after an explicit click", async () => {
+    const store = modelStore();
+    vi.mocked(store.settings.loadProviderModelCatalog).mockResolvedValue({
+      provider_instance_id: modelProvider.provider_instance_id,
+      models: [discoveredModel()],
+      refreshed_at_ms: 10,
+      connection_changed: true,
+      diagnostic: null,
+    });
+    vi.mocked(store.settings.refreshProviderModels).mockRejectedValueOnce(new Error("provider offline"));
+    show(store);
+    fireEvent.click(screen.getByRole("button", { name: /测试服务商 https/ }));
+    expect(await screen.findByRole("button", { name: "配置模型 fixture" })).toBeVisible();
+    expect(screen.getByText(/连接已变更/)).toBeVisible();
+    expect(store.settings.refreshProviderModels).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "刷新在线模型" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("provider offline");
+    expect(screen.getByRole("button", { name: "配置模型 fixture" })).toBeVisible();
+    expect(store.settings.refreshProviderModels).toHaveBeenCalledExactlyOnceWith("provider-1", expect.any(AbortSignal));
+  });
+
   it("requires successful usage statistics before deletion and permits retry and cancellation", async () => {
     const store = modelStore();
     const usage: ProviderUsage = {
@@ -111,14 +146,14 @@ describe("provider and fixed model settings", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith("provider-1", expect.objectContaining({ display_name: "新名称" }), { mode: "unchanged" }));
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
   });
-  it("opens fixed models independently when online discovery fails", async () => {
+  it("opens fixed models independently when the local catalog read fails", async () => {
     const store = modelStore();
-    vi.mocked(store.settings.listProviderModels).mockRejectedValue(new Error("offline"));
+    vi.mocked(store.settings.loadProviderModelCatalog).mockRejectedValue(new Error("local catalog unavailable"));
     vi.mocked(store.settings.listFixedModels).mockResolvedValue([{ origin: "online", selection: modelSelection, parameters: modelParameters(), updated_at_ms: 10 }]);
     vi.spyOn(store.settings, "getModelConfiguration").mockResolvedValue(detail());
     show(store);
     fireEvent.click(screen.getByRole("button", { name: /测试服务商 https/ }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("offline");
+    expect(await screen.findByRole("alert")).toHaveTextContent("local catalog unavailable");
     fireEvent.click(await screen.findByRole("button", { name: "编辑固定配置 fixture" }));
     expect(await screen.findByLabelText("上下文窗口（Token）")).toHaveValue("128000");
     expect(store.settings.listFixedModels).toHaveBeenCalledWith("provider-1", 0, expect.any(AbortSignal));
@@ -181,7 +216,13 @@ describe("provider and fixed model settings", () => {
     vi.spyOn(store.settings, "getModelConfiguration").mockResolvedValue(detail());
     await openModel(store);
     const online = discoveredModel(); online.metadata.context_window_tokens = { state: "known", value: 32000 };
-    vi.mocked(store.settings.listProviderModels).mockResolvedValue([online]);
+    vi.mocked(store.settings.refreshProviderModels).mockResolvedValue({
+      provider_instance_id: modelProvider.provider_instance_id,
+      models: [online],
+      refreshed_at_ms: 12,
+      connection_changed: false,
+      diagnostic: null,
+    });
     fireEvent.change(screen.getByLabelText("上下文窗口（Token）"), { target: { value: "64000" } });
     fireEvent.click(screen.getByRole("button", { name: "刷新在线参考" }));
     const table = await screen.findByRole("table");

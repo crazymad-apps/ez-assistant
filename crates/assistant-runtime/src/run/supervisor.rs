@@ -14,6 +14,7 @@ use assistant_protocol::{
 use futures_util::{FutureExt, StreamExt};
 
 use super::{RunModelDiagnostics, RunRecord, is_active_run};
+use crate::runtime::tool_input_projection::project_tool_input;
 
 /// 同时排空一次 Core execution 的观察事件并等待可靠 completion。
 ///
@@ -137,6 +138,7 @@ fn project_agent_event(
             })?;
             let tool_name = call.name.as_str().to_owned();
             let mcp_identity = project_mcp_identity(&call, mcp_registry);
+            let input = project_tool_input(&tool_name, &call.arguments, mcp_identity.as_ref());
             with_active_record(session, run_id, |record| {
                 record.start_step(step);
                 if !record
@@ -149,6 +151,7 @@ fn project_agent_event(
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),
                         mcp_identity: mcp_identity.clone(),
+                        input: input.clone(),
                         status: ToolActivityStatus::Proposed,
                         stdout: String::new(),
                         stderr: String::new(),
@@ -161,6 +164,7 @@ fn project_agent_event(
                 step,
                 call_id,
                 tool_name,
+                input,
             }))
         }
         AgentEvent::ToolStarted { step, call_id } => {

@@ -1,4 +1,4 @@
-import { modelProvider, modelSelection, modelParameters } from "../support/modelManagement";
+import { discoveredModel, modelProvider, modelSelection, modelParameters } from "../support/modelManagement";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentShellSettings,
@@ -107,6 +107,31 @@ describe("SettingsStore connection validation", () => {
     expect(result?.outcome.status).toBe("failed");
     expect(store.error_message).toBe("API Key 无效或无权访问该模型，请检查凭据。");
     expect(store.notice_message).toBeNull();
+  });
+});
+
+describe("SettingsStore model catalog", () => {
+  it("keeps local listing and explicit refresh as separate commands", async () => {
+    const commands: RuntimeCommand[] = [];
+    const snapshot = {
+      provider_instance_id: "provider-1",
+      models: [discoveredModel()],
+      refreshed_at_ms: 10,
+      connection_changed: false,
+      diagnostic: null,
+    } as const;
+    const client = { command: async (command: RuntimeCommand) => {
+      commands.push(command);
+      return { type: command.type, payload: snapshot };
+    } } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+
+    expect(await store.listProviderModels("provider-1")).toEqual(snapshot.models);
+    expect(await store.refreshProviderModels("provider-1")).toEqual(snapshot);
+    expect(commands).toEqual([
+      { type: "list_provider_models", payload: { provider_instance_id: "provider-1" } },
+      { type: "refresh_provider_models", payload: { provider_instance_id: "provider-1" } },
+    ]);
   });
 });
 

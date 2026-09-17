@@ -12,6 +12,7 @@ mod tests;
 mod v0_25_1;
 mod v0_25_2;
 mod v0_25_3;
+mod v0_26_0;
 
 #[cfg(test)]
 use std::fs;
@@ -111,7 +112,12 @@ pub(super) fn align(
     migrate_with_progress(
         home,
         env!("CARGO_PKG_VERSION"),
-        &[v0_25_1::entry(), v0_25_2::entry(), v0_25_3::entry()],
+        &[
+            v0_25_1::entry(),
+            v0_25_2::entry(),
+            v0_25_3::entry(),
+            v0_26_0::entry(),
+        ],
         progress,
     )
     .map(|_| ())

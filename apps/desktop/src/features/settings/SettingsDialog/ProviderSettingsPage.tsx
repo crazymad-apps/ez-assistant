@@ -3,7 +3,7 @@ import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { DiscoveredModel, ModelFixedConfig, ModelSelection, ProviderSummary, ProviderUsage } from "@ez-assistant/protocol";
+import type { ModelFixedConfig, ModelSelection, ProviderModelCatalogSnapshot, ProviderSummary, ProviderUsage } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { SettingsMessages } from "./SettingsMessages";
@@ -15,8 +15,9 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(props
   provider: ProviderSummary; onBack: () => void; onEdit: () => void; onDelete: () => void; onAddModel: () => void; onModel: (selection: ModelSelection) => void;
 }>) {
   const settings = useRootStore().settings;
-  const [models, setModels] = useState<DiscoveredModel[]>([]);
+  const [catalog, setCatalog] = useState<ProviderModelCatalogSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [fixed, setFixed] = useState<ModelFixedConfig[]>([]);
@@ -33,16 +34,27 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(props
   const fixed_request = useRef<AbortController | null>(null);
   const busy = settings.pending_action !== null;
   const provider_id = props.provider.provider_instance_id;
-  const refresh = useCallback(async () => {
+  const loadCatalog = useCallback(async () => {
     online_request.current?.abort();
     const request = new AbortController(); online_request.current = request;
-    setModels([]); setError(null); setLoading(true);
+    setCatalog(null); setError(null); setLoading(true);
     try {
-      const result = await settings.listProviderModels(provider_id, request.signal);
-      if (!request.signal.aborted) setModels(result);
+      const result = await settings.loadProviderModelCatalog(provider_id, request.signal);
+      if (!request.signal.aborted) setCatalog(result);
     } catch (failure: unknown) {
-      if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : "获取模型失败。");
+      if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : "读取模型列表失败。");
     } finally { if (!request.signal.aborted) setLoading(false); }
+  }, [provider_id, settings]);
+  const refreshCatalog = useCallback(async () => {
+    online_request.current?.abort();
+    const request = new AbortController(); online_request.current = request;
+    setError(null); setRefreshing(true);
+    try {
+      const result = await settings.refreshProviderModels(provider_id, request.signal);
+      if (!request.signal.aborted) setCatalog(result);
+    } catch (failure: unknown) {
+      if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : "刷新在线模型目录失败。");
+    } finally { if (!request.signal.aborted) setRefreshing(false); }
   }, [provider_id, settings]);
   const loadFixed = useCallback(async () => {
     fixed_request.current?.abort();
@@ -56,9 +68,9 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(props
     } finally { if (!request.signal.aborted) setFixedLoading(false); }
   }, [provider_id, settings]);
   useEffect(() => {
-    void refresh(); void loadFixed();
+    void loadCatalog(); void loadFixed();
     return () => { online_request.current?.abort(); fixed_request.current?.abort(); };
-  }, [refresh, loadFixed]);
+  }, [loadCatalog, loadFixed]);
   async function loadUsage() {
     usage_request.current?.abort();
     const request = new AbortController(); usage_request.current = request;
@@ -71,6 +83,7 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(props
     } finally { if (!request.signal.aborted) setUsageLoading(false); }
   }
   function closeDeletion() { usage_request.current?.abort(); setDeleting(false); setUsage(null); }
+  const models = catalog?.models ?? [];
   const fixed_origins = new Map(fixed.map((record) => [record.selection.model_id, record.origin]));
   const online_ids = new Set(models.map((model) => model.model_id));
   const matches = (id: string, name = "") => `${id} ${name}`.toLocaleLowerCase().includes(query.toLocaleLowerCase());
@@ -81,11 +94,14 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(props
   </>}>
     <SettingsMessages />
     <dl className={styles.model_details}><dt>类型</dt><dd>{provider_labels[props.provider.connection.provider_type]}</dd><dt>服务地址</dt><dd>{props.provider.connection.endpoint}</dd><dt>凭据</dt><dd>{props.provider.has_api_key ? "已设置" : "未设置"}</dd></dl>
-    <div className={styles.model_section_heading}><h4>模型</h4><div className={styles.runtime_actions}><Button onClick={props.onAddModel}>添加模型</Button><Button onClick={() => { void refresh(); void loadFixed(); }}>刷新</Button></div></div>
-    <input className={styles.model_search} aria-label="搜索在线模型" placeholder="搜索名称或模型 ID" value={query} onChange={(event) => setQuery(event.target.value)} />
-    {loading && <p role="status">正在获取在线模型…</p>}
-    {error && <p role="alert">{error}<Button onClick={() => void refresh()}>重试</Button></p>}
-    {!loading && !error && visible.length === 0 && <p>本次列表没有匹配的模型。</p>}
+    <div className={styles.model_section_heading}><h4>模型</h4><div className={styles.runtime_actions}><Button onClick={props.onAddModel}>添加模型</Button><Button disabled={refreshing} onClick={() => void refreshCatalog()}>{refreshing ? "正在刷新…" : "刷新在线模型"}</Button></div></div>
+    <input className={styles.model_search} aria-label="搜索模型" placeholder="搜索名称或模型 ID" value={query} onChange={(event) => setQuery(event.target.value)} />
+    {catalog?.diagnostic === "stored_snapshot_invalid" && <p role="alert">模型列表数据异常，请刷新在线模型。</p>}
+    {catalog?.connection_changed && <p role="status">服务商连接已变更；当前显示的是上次成功目录，请刷新确认。</p>}
+    {catalog?.refreshed_at_ms != null && <p>上次成功刷新：{new Date(catalog.refreshed_at_ms).toLocaleString()}</p>}
+    {error && <p role="alert">{error}<Button onClick={() => void refreshCatalog()}>重试刷新</Button></p>}
+    {!loading && catalog?.refreshed_at_ms == null && catalog?.diagnostic == null && <p>暂无模型，可使用固定模型或点击“刷新在线模型”。</p>}
+    {!loading && catalog?.refreshed_at_ms != null && visible.length === 0 && <p>没有匹配的模型。</p>}
     {fixed_loading && <p role="status">正在读取固定状态…</p>}
     {fixed_error && <p role="alert">{fixed_error}<Button onClick={() => void loadFixed()}>重试读取固定状态</Button></p>}
     <div className={styles.model_rows}>

@@ -43,7 +43,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<CompactSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;

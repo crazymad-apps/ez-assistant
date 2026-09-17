@@ -104,6 +104,8 @@ test("model settings apply provider rules, field templates and wire effort mappi
     expect(paths).toHaveLength(0);
     await dialog.getByLabel("API Key", { exact: true }).fill("artificial-functional-key");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "配置模型 qwen3.8-max", exact: true })).toBeVisible();
     const delete_provider = dialog.getByRole("button", { name: "删除服务商", exact: true });
     await expect(delete_provider).toBeEnabled();
     await expect(delete_provider).toHaveAttribute("data-button-variant", "danger");
@@ -176,6 +178,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await expect(dialog.getByLabel("模型列表接口", { exact: true })).toHaveValue("");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
     for (const [model, context, output] of [
       ["qwen3.7-max", "1000000", "131072"], ["qwen3.7-plus", "1000000", "131072"],
       ["qwen3.6-flash", "1000000", "65536"], ["glm-5.2", "1048576", "131072"],
@@ -207,10 +210,11 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await expect(dialog.getByRole("button", { name: "配置模型 qwen3.8-max", exact: true })).toContainText("已自定义");
     await expect(dialog.getByRole("button", { name: "管理固定配置", exact: true })).toHaveCount(0);
     fail_list = true;
-    await dialog.getByRole("button", { name: "刷新", exact: true }).click();
-    const offline = dialog.getByRole("button", { name: "编辑固定配置 qwen3.8-max", exact: true });
-    await expect(offline).toContainText("本次未返回");
-    await offline.click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toBeVisible();
+    const retained = dialog.getByRole("button", { name: "配置模型 qwen3.8-max", exact: true });
+    await expect(retained).toContainText("已自定义");
+    await retained.click();
     await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
     const reasoning_section = dialog.getByRole("button", { name: "思考设置", exact: true });
     const advanced_section = dialog.getByRole("button", { name: "高级能力", exact: true });
@@ -261,6 +265,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await add("DeepSeek", "DeepSeek 模板验证");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
     await expect(dialog.getByRole("heading", { name: "DeepSeek 模板验证", exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
     // 从未进入详情／保存参数：直接选择默认与识图模型，再在真实会话发送。
     const direct_commands: string[] = [];
     page.on("request", request => {
@@ -370,6 +375,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await expect(dialog.getByLabel("模型列表接口", { exact: true })).toHaveValue("");
     await dialog.getByLabel("模型列表接口", { exact: true }).fill("/custom/models");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "配置模型 gpt-4.1", exact: true })).toBeVisible();
     expect(paths).toContain("/custom/models");
     await page.setViewportSize({ width: 390, height: 844 });
@@ -388,7 +394,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await expect(page.getByRole("menuitem", { name: /套餐映射验证/ })).toBeFocused();
     const fetch_count = paths.filter(path => path === "/compatible-mode/v1/models").length;
     await page.getByRole("menuitem", { name: /套餐映射验证/ }).click();
-    await expect.poll(() => paths.filter(path => path === "/compatible-mode/v1/models").length).toBeGreaterThan(fetch_count);
+    expect(paths.filter(path => path === "/compatible-mode/v1/models")).toHaveLength(fetch_count);
     await expect(page.getByRole("menuitemradio", { name: "qwen3.8-max", exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }

@@ -437,7 +437,7 @@ export const ConversationView = observer(function ConversationView() {
         tool_name: tool.tool_name,
         mcp_identity: tool.mcp_identity,
         status: tool.status,
-        input: { type: "unavailable" },
+        input: tool.input,
         request_json: null,
         result_summary: null,
         result_json: null,

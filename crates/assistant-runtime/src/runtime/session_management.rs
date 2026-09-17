@@ -431,7 +431,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<PrepareDeleteSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
@@ -484,7 +484,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<DeleteSessionResult> {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
@@ -555,7 +555,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ClearSessionResult> {
         let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -701,7 +701,7 @@ impl AssistantRuntime {
 
     /// 按输入接收顺序和 attempt 返回指定 Session 的全部 Run。
     pub async fn list_runs(&self, request: ListRunsRequest) -> RuntimeResult<ListRunsResult> {
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -717,7 +717,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ArchiveSessionResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_healthy()?;
@@ -936,12 +936,7 @@ impl AssistantRuntime {
         let prepared = match request.model_selection.as_ref() {
             Some(selection) => Some(
                 self.config_registry
-                    .prepare_model(
-                        &snapshot,
-                        Some(selection),
-                        self.store.as_ref(),
-                        self.model_factory.as_ref(),
-                    )
+                    .prepare_model(&snapshot, Some(selection), self.store.as_ref())
                     .await?,
             ),
             None => None,
@@ -950,7 +945,7 @@ impl AssistantRuntime {
         if let Some(model) = &prepared {
             model.ensure_current(&self.config_registry)?;
         }
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_healthy()?;
         session.ensure_active()?;
@@ -1083,7 +1078,7 @@ impl AssistantRuntime {
         Ok(SetSessionVariantResult { session: summary })
     }
 
-    /// 切换 Session 当前审批模式；只影响之后创建的 Run。
+    /// 切换 Session 当前审批模式；成功边界后的新授权读取立即使用该值。
     pub async fn set_session_approval_mode(
         &self,
         request: SetSessionApprovalModeRequest,
@@ -1103,9 +1098,13 @@ impl AssistantRuntime {
             })
             .await
             .map_err(|source| RuntimeError::from_store("change session approval mode", source))?;
-        {
-            let mut state = session.lock_state()?;
+        if let Err(error) = session.lock_state().map(|mut state| {
             state.approval_mode = request.approval_mode;
+        }) {
+            // Store 已提交而内存未能线性化时不能回复成功。尽力将本实例置为故障，后续由
+            // prepare 从 Store 重新加载权威模式；锁本身若已中毒，mark_faulted 也会安全失败。
+            let _ = session.mark_faulted();
+            return Err(error);
         }
         let summary = session.summary()?;
         self.publish(
@@ -1128,7 +1127,7 @@ impl AssistantRuntime {
                 reason: "message must not be blank",
             });
         }
-        let session = self.session(&request.session_id).await?;
+        let session = self.prepared_session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
@@ -1251,7 +1250,6 @@ impl AssistantRuntime {
                 permission_coordinator: self.permission_coordinator.clone(),
                 approval_registry: self.approval_registry.clone(),
                 variant: request.variant,
-                approval_mode,
                 run_id: run_id.clone(),
                 cancellation: self.root_cancellation.child_token(),
                 events: self.event_sender.clone(),
