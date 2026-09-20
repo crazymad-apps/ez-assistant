@@ -14,6 +14,12 @@ describe("Desktop control height contract", () => {
     expect(overview).not.toMatch(/\.shell_setting small/);
   });
 
+  it("keeps the Composer primary action blue on hover", () => {
+    const composer = compile("src/features/composer/ComposerDock/index.module.scss", { logger: Logger.silent }).css;
+    expect(composer).toMatch(/\.send_button:hover:not\(:disabled\)\s*\{[^}]*color: #fff;[^}]*background: var\(--ez-primary-hover\)/s);
+    expect(composer).not.toMatch(/\.send_button:hover[^{}]*\{[^}]*background: var\(--ez-surface-muted\)/s);
+  });
+
   it("keeps input focus free of page-specific shadow rings", () => {
     const paths = Object.keys(import.meta.glob("../../src/**/*.module.scss"));
     const violations: string[] = [];

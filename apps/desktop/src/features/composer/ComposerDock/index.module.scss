@@ -126,7 +126,11 @@
   border-radius: 7px;
   color: var(--ez-text-secondary);
   background: transparent;
+}
 
+.execution_selector,
+.model_selector,
+.hosting_trigger {
   &:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--ez-text); background: var(--ez-surface-muted); }
 }
 
