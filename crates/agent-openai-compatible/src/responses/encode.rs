@@ -66,7 +66,7 @@ pub(super) fn encode_request_with_images(
             ConversationMessage::ContextSummary(message) => input.push(message_item(
                 ResponsesRole::System,
                 ResponsesContent::InputText {
-                    text: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.text),
+                    text: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.model_visible_text()),
                 },
             )),
             ConversationMessage::User(message) => {

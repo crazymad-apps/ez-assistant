@@ -1,4 +1,4 @@
-use agent_types::{ConversationMessage, ConversationSnapshot, MessageId};
+use agent_types::{ContextUsageAdjustment, ConversationMessage, ConversationSnapshot, MessageId};
 use assistant_protocol::{
     ChildTaskId, ConversationOwner, GoalId, IdempotencyKey, RunId, SessionId, WorkspaceId,
 };
@@ -83,6 +83,42 @@ pub fn execution_context_from_product_history(
     let mut messages = history.messages[..prefix_end].to_vec();
     messages.extend_from_slice(&history.messages[summary_index..]);
     ConversationSnapshot::new(messages)
+}
+
+/// 截断历史后，把不再能解析的摘要 usage 减法收敛为显式不可用。
+///
+/// Fork／改写可以保留 Context Summary 却移除它原先引用的 Assistant；新正文不能继续携带
+/// 指向已不存在消息的近似边界。
+pub fn normalize_context_usage_adjustments(conversation: &mut ConversationSnapshot) {
+    for index in 0..conversation.messages.len() {
+        let retained_assistant_id = match &conversation.messages[index] {
+            ConversationMessage::ContextSummary(summary) => match &summary.usage_adjustment {
+                Some(ContextUsageAdjustment::Subtract {
+                    retained_assistant_id,
+                    ..
+                }) => Some(retained_assistant_id.clone()),
+                None | Some(ContextUsageAdjustment::Unavailable) => None,
+            },
+            _ => None,
+        };
+        let Some(retained_assistant_id) = retained_assistant_id else {
+            continue;
+        };
+        let reference_survives =
+            conversation.messages[index + 1..]
+                .iter()
+                .any(|message| match message {
+                    ConversationMessage::Assistant(assistant) => {
+                        assistant.id == retained_assistant_id && assistant.usage.is_some()
+                    }
+                    _ => false,
+                });
+        if !reference_survives
+            && let ConversationMessage::ContextSummary(summary) = &mut conversation.messages[index]
+        {
+            summary.usage_adjustment = Some(ContextUsageAdjustment::Unavailable);
+        }
+    }
 }
 
 /// 把一次压缩后的执行上下文合并回唯一、完整的产品 Conversation。
@@ -213,7 +249,10 @@ pub struct StoredConversationMessageLocation {
 
 #[cfg(test)]
 mod tests {
-    use agent_types::{ContextSummaryMessage, SystemMessage, UserMessage};
+    use agent_types::{
+        AssistantMessage, ContextSummaryMessage, FinishReason, ModelIdentity, ProviderId,
+        SystemMessage, TokenUsage, UserMessage,
+    };
 
     use super::*;
 
@@ -244,6 +283,24 @@ mod tests {
             model: None,
             usage: None,
             compacted_usage: None,
+            usage_adjustment: None,
+            programmatic_context: None,
+        })
+    }
+
+    fn assistant_with_usage(value: &str) -> ConversationMessage {
+        ConversationMessage::Assistant(AssistantMessage {
+            id: message_id(value),
+            model: ModelIdentity::new(ProviderId::new("test").unwrap(), "model"),
+            parts: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: Some(TokenUsage {
+                input_tokens: 8,
+                output_tokens: 2,
+                total_tokens: 10,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            }),
         })
     }
 
@@ -291,6 +348,39 @@ mod tests {
         assert_eq!(
             execution_context_from_product_history(&second_product),
             second_replacement
+        );
+    }
+
+    #[test]
+    fn truncation_marks_a_dangling_usage_adjustment_unavailable() {
+        let retained = assistant_with_usage("retained");
+        let mut context_summary = summary("summary");
+        let ConversationMessage::ContextSummary(summary) = &mut context_summary else {
+            unreachable!();
+        };
+        summary.usage_adjustment = Some(ContextUsageAdjustment::Subtract {
+            retained_assistant_id: message_id("retained"),
+            subtract_total_tokens: 5,
+        });
+
+        let mut survives = ConversationSnapshot::new(vec![context_summary.clone(), retained]);
+        normalize_context_usage_adjustments(&mut survives);
+        let ConversationMessage::ContextSummary(summary) = &survives.messages[0] else {
+            unreachable!();
+        };
+        assert!(matches!(
+            summary.usage_adjustment,
+            Some(ContextUsageAdjustment::Subtract { .. })
+        ));
+
+        let mut truncated = ConversationSnapshot::new(vec![context_summary]);
+        normalize_context_usage_adjustments(&mut truncated);
+        let ConversationMessage::ContextSummary(summary) = &truncated.messages[0] else {
+            unreachable!();
+        };
+        assert_eq!(
+            summary.usage_adjustment,
+            Some(ContextUsageAdjustment::Unavailable)
         );
     }
 }

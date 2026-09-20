@@ -312,7 +312,7 @@ fn encode_conversation_message(
 /// 把派生上下文摘要编码为带固定说明的 system 消息。
 fn encode_context_summary(message: &ContextSummaryMessage) -> ChatSystemMessage {
     ChatSystemMessage {
-        content: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.text),
+        content: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.model_visible_text()),
     }
 }
 

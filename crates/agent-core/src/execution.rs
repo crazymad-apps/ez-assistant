@@ -13,6 +13,7 @@
 
 use std::{future::Future, num::NonZeroU32, pin::Pin};
 
+use agent_model::ModelRequest;
 use agent_types::AssistantMessage;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,45 @@ pub enum CompactionReason {
 pub enum ContinuationReason {
     /// Recorder 已可靠提交一项会改变下一模型请求上下文的事实。
     ContextChanged,
+}
+
+/// 仅在当前进程内交给 Runtime 的精确下一次模型请求。
+///
+/// 该值不进入事件、SSE 或持久化；`Debug` 只暴露计数，避免记录 prompt、工具定义和
+/// provider options。
+#[derive(Clone, PartialEq)]
+pub struct CompactionHandoff {
+    request: ModelRequest,
+}
+
+impl CompactionHandoff {
+    /// 冻结发生压缩交接时原本会发送给 Provider 的完整请求。
+    pub fn new(request: ModelRequest) -> Self {
+        Self { request }
+    }
+
+    /// 借用精确请求。
+    pub fn request(&self) -> &ModelRequest {
+        &self.request
+    }
+
+    /// 取得精确请求的所有权。
+    pub fn into_request(self) -> ModelRequest {
+        self.request
+    }
+}
+
+impl std::fmt::Debug for CompactionHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompactionHandoff")
+            .field(
+                "conversation_messages",
+                &self.request.conversation.messages.len(),
+            )
+            .field("tool_definitions", &self.request.tools.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// 一次执行的最终结果；与五个终态事件镜像。
@@ -88,6 +128,9 @@ pub enum ExecutionOutcome {
         /// 本段 execution 在交接前已经可靠消费的硬预算。
         #[serde(default)]
         consumption: ExecutionConsumption,
+        /// 当前进程内交给 Runtime 的精确请求；旧序列化结果读取时为空。
+        #[serde(skip)]
+        handoff: Option<CompactionHandoff>,
     },
     /// 当前执行因上下文已可靠改变而结束；Runtime 应在同一业务 Run 中续跑。
     ContinuationRequired {
@@ -519,6 +562,7 @@ mod tests {
                     steps: 1,
                     tool_calls: 0,
                 },
+                handoff: None,
             },
         ];
         for outcome in outcomes {
@@ -542,6 +586,7 @@ mod tests {
                 reason: CompactionReason::ThresholdReached,
                 step: 1,
                 consumption: ExecutionConsumption::default(),
+                handoff: None,
             }
         );
         // 稳定 tag：蛇形命名。
@@ -550,6 +595,37 @@ mod tests {
         })
         .expect("serialize to value");
         assert_eq!(json["type"], "cancelled");
+    }
+
+    #[test]
+    fn compaction_handoff_is_process_local_and_debug_redacts_request_content() {
+        let secret = "do-not-log-this-prompt";
+        let request = ModelRequest {
+            system: SystemPromptSnapshot::new(vec![secret.to_owned()]),
+            conversation: ConversationSnapshot::default(),
+            tools: vec![],
+            tool_choice: agent_types::ToolChoice::Auto,
+            generation: Default::default(),
+            reasoning: None,
+            provider_options: Default::default(),
+        };
+        let outcome = ExecutionOutcome::CompactionRequired {
+            reason: CompactionReason::ThresholdReached,
+            step: 1,
+            consumption: ExecutionConsumption::default(),
+            handoff: Some(CompactionHandoff::new(request)),
+        };
+
+        let json = serde_json::to_string(&outcome).expect("serialize outcome");
+        assert!(!json.contains(secret));
+        let decoded = serde_json::from_str::<ExecutionOutcome>(&json).expect("deserialize outcome");
+        assert!(matches!(
+            decoded,
+            ExecutionOutcome::CompactionRequired { handoff: None, .. }
+        ));
+        let debug = format!("{outcome:?}");
+        assert!(!debug.contains(secret));
+        assert!(debug.contains("conversation_messages"));
     }
 
     #[tokio::test]

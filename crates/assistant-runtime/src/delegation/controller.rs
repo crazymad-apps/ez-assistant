@@ -410,14 +410,21 @@ impl ParentDelegationController {
             });
             let outcome = execution.completion.await;
             let _ = event_drain.await;
-            let (consumption, compaction_reason) = match &outcome {
+            let (consumption, compaction_reason, compaction_request) = match &outcome {
                 agent_core::ExecutionOutcome::CompactionRequired {
                     reason,
                     consumption,
+                    handoff,
                     ..
-                } => (consumption, Some(*reason)),
+                } => (
+                    consumption,
+                    Some(*reason),
+                    handoff
+                        .clone()
+                        .map(agent_core::CompactionHandoff::into_request),
+                ),
                 agent_core::ExecutionOutcome::ContinuationRequired { consumption, .. } => {
-                    (consumption, None)
+                    (consumption, None, None)
                 }
                 _ => break (Some(outcome), None),
             };
@@ -454,6 +461,15 @@ impl ParentDelegationController {
                 };
                 continue;
             };
+            let Some(normal_request) = compaction_request else {
+                break (
+                    None,
+                    Some(RuntimeErrorInfo::new(
+                        RuntimeErrorCode::ContextCompactionFailed,
+                        "child context compaction handoff is missing the exact live request",
+                    )),
+                );
+            };
             if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
                 break (
                     None,
@@ -471,6 +487,7 @@ impl ParentDelegationController {
                 self.child_compactor.as_ref(),
                 task.as_ref(),
                 self.store.as_ref(),
+                normal_request,
                 child_token.clone(),
             )
             .await

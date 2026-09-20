@@ -1,15 +1,18 @@
 //! Runtime 对共享压缩策略的薄编排：生成 replacement、可靠切换正文并继续同一业务执行。
 
+mod memory;
+
 use std::sync::Arc;
 
 use agent_context::{
     CompactionError, CompactionInput, CompressionStrategy, ContextLayout, RollingSummaryPolicy,
-    RollingSummarySameModel, StrategyOutcome,
+    RollingSummarySameModel, StrategyOutcome, validate_replacement, validate_replacement_effect,
 };
-use agent_core::CompactionReason;
-use agent_core::ExecutionBudget;
-use agent_model::{ModelService, SystemPromptSnapshot};
-use agent_types::ConversationSnapshot;
+use agent_core::{CompactionReason, ExecutionBudget, ModelRequestConfig};
+use agent_model::{ModelRequest, ModelService, SystemPromptSnapshot};
+use agent_types::{
+    ConversationMessage, ConversationSnapshot, ToolChoice, TranscriptVisibility, UserMessageOrigin,
+};
 use assistant_protocol::{
     RunId, RuntimeErrorCode, RuntimeEvent, SessionCompactionFinishedOutcome,
     SessionCompactionReasonSnapshot, SessionCompactionSnapshot, SessionCompactionTriggerSnapshot,
@@ -25,14 +28,20 @@ use crate::{
 
 /// 防止 Provider 持续报告 overflow 时形成无界“压缩—重试”循环。
 pub(crate) const MAX_AUTOMATIC_COMPACTIONS: u32 = 2;
-const SUMMARY_OUTPUT_TOKENS: u32 = 1_024;
+const SUMMARY_OUTPUT_TOKENS: u32 = 4_096;
 const MINIMUM_RECENT_USER_TURNS: u32 = 1;
+
+pub(crate) struct AutomaticCompactionInput {
+    pub(crate) reason: CompactionReason,
+    pub(crate) normal_request: ModelRequest,
+}
 
 /// 父、子 Agent 共用的冻结压缩能力；它复用本 Run 的模型服务和 System Prompt。
 pub(crate) struct RuntimeContextCompactor {
     model: Arc<dyn ModelService>,
     system_prompt: SystemPromptSnapshot,
     strategy: RollingSummarySameModel,
+    manual_request: Option<ModelRequestConfig>,
 }
 
 impl RuntimeContextCompactor {
@@ -40,15 +49,16 @@ impl RuntimeContextCompactor {
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
     ) -> Self {
-        Self::new(model, system_prompt)
+        Self::new(model, system_prompt, None)
     }
 
     /// 手动压缩与自动压缩都原样保留最近一个 User Turn。
     pub(crate) fn for_manual(
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
+        request: ModelRequestConfig,
     ) -> Self {
-        Self::new(model, system_prompt)
+        Self::new(model, system_prompt, Some(request))
     }
 
     /// child 与 parent 使用相同的最近一轮规则；单轮自身溢出的压缩留待后续版本完善。
@@ -56,25 +66,34 @@ impl RuntimeContextCompactor {
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
     ) -> Self {
-        Self::new(model, system_prompt)
+        Self::new(model, system_prompt, None)
     }
 
-    fn new(model: Arc<dyn ModelService>, system_prompt: SystemPromptSnapshot) -> Self {
+    fn new(
+        model: Arc<dyn ModelService>,
+        system_prompt: SystemPromptSnapshot,
+        manual_request: Option<ModelRequestConfig>,
+    ) -> Self {
         let policy = RollingSummaryPolicy::new(SUMMARY_OUTPUT_TOKENS, MINIMUM_RECENT_USER_TURNS)
             .expect("static Runtime compaction policy must be valid");
         Self {
             model,
             system_prompt,
             strategy: RollingSummarySameModel::new(policy),
+            manual_request,
         }
     }
 
     pub(crate) async fn compact(
         &self,
         snapshot: ConversationSnapshot,
+        product_history: ConversationSnapshot,
+        normal_request: ModelRequest,
         cancellation: CancellationToken,
     ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
-        let outcome = self.compact_once(snapshot, cancellation).await?;
+        let outcome = self
+            .compact_once(snapshot, product_history, normal_request, cancellation)
+            .await?;
         match outcome {
             StrategyOutcome::Candidate(candidate) => Ok(candidate.replacement),
             StrategyOutcome::NoOp { .. } => Err(RuntimeCompactionError::NoCompressibleHistory),
@@ -84,11 +103,27 @@ impl RuntimeContextCompactor {
     pub(crate) async fn compact_manual(
         &self,
         snapshot: ConversationSnapshot,
+        product_history: ConversationSnapshot,
         cancellation: CancellationToken,
     ) -> Result<ManualCompactionCandidate, RuntimeCompactionError> {
         let source_message_count = u64::try_from(snapshot.messages.len())
             .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
-        let outcome = self.compact_once(snapshot, cancellation).await?;
+        let request = self
+            .manual_request
+            .as_ref()
+            .ok_or(RuntimeCompactionError::MissingManualRequest)?;
+        let normal_request = ModelRequest {
+            system: self.system_prompt.clone(),
+            conversation: snapshot.clone(),
+            tools: vec![],
+            tool_choice: ToolChoice::None,
+            generation: request.generation.clone(),
+            reasoning: request.reasoning.clone(),
+            provider_options: request.provider_options.clone(),
+        };
+        let outcome = self
+            .compact_once(snapshot, product_history, normal_request, cancellation)
+            .await?;
         match outcome {
             StrategyOutcome::NoOp { .. } => Ok(ManualCompactionCandidate::NoOp),
             StrategyOutcome::Candidate(candidate) => {
@@ -111,26 +146,84 @@ impl RuntimeContextCompactor {
     async fn compact_once(
         &self,
         snapshot: ConversationSnapshot,
+        product_history: ConversationSnapshot,
+        normal_request: ModelRequest,
         cancellation: CancellationToken,
     ) -> Result<StrategyOutcome, RuntimeCompactionError> {
-        Ok(self
+        if crate::execution_context_from_product_history(&product_history) != snapshot {
+            return Err(RuntimeCompactionError::ProductHistoryMismatch);
+        }
+        let outcome = self
             .strategy
-            .compact(self.compaction_input(&snapshot)?, cancellation)
-            .await?)
+            .compact(
+                self.compaction_input(&snapshot, normal_request)?,
+                cancellation,
+            )
+            .await?;
+        let StrategyOutcome::Candidate(mut candidate) = outcome else {
+            return Ok(outcome);
+        };
+        let programmatic_context = memory::derive_pinned_memory_context(&product_history)?;
+        let summary = candidate
+            .replacement
+            .messages
+            .iter_mut()
+            .find_map(|message| match message {
+                ConversationMessage::ContextSummary(summary) => Some(summary),
+                _ => None,
+            })
+            .ok_or(RuntimeCompactionError::InvalidConversation)?;
+        summary.programmatic_context = programmatic_context;
+        validate_replacement(&candidate.replacement)?;
+        validate_replacement_effect(&snapshot, &candidate.replacement)?;
+        crate::merge_context_replacement_with_product_history(
+            &product_history,
+            &candidate.replacement,
+        )
+        .map_err(|_| RuntimeCompactionError::ProductHistoryMismatch)?;
+        Ok(StrategyOutcome::Candidate(candidate))
     }
 
     fn compaction_input(
         &self,
         snapshot: &ConversationSnapshot,
+        normal_request: ModelRequest,
     ) -> Result<CompactionInput, RuntimeCompactionError> {
+        validate_live_request(snapshot, &normal_request)?;
         let layout = ContextLayout::build(snapshot)
             .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
         Ok(CompactionInput {
             model: self.model.clone(),
-            system_prompt: self.system_prompt.clone(),
+            normal_request,
             layout,
         })
     }
+}
+
+fn validate_live_request(
+    snapshot: &ConversationSnapshot,
+    request: &ModelRequest,
+) -> Result<(), RuntimeCompactionError> {
+    let mut source_index = 0_usize;
+    for message in &request.conversation.messages {
+        if snapshot.messages.get(source_index) == Some(message) {
+            source_index += 1;
+            continue;
+        }
+        let allowed_request_only = matches!(
+            message,
+            ConversationMessage::User(message)
+                if message.origin == UserMessageOrigin::Runtime
+                    && message.transcript_visibility == TranscriptVisibility::Hidden
+        );
+        if !allowed_request_only {
+            return Err(RuntimeCompactionError::LiveRequestMismatch);
+        }
+    }
+    if source_index != snapshot.messages.len() {
+        return Err(RuntimeCompactionError::LiveRequestMismatch);
+    }
+    Ok(())
 }
 
 pub(crate) enum ManualCompactionCandidate {
@@ -148,6 +241,18 @@ pub(crate) enum RuntimeCompactionError {
     InvalidConversation,
     #[error("conversation has no compressible history")]
     NoCompressibleHistory,
+    #[error("live model request does not contain the authoritative conversation in order")]
+    LiveRequestMismatch,
+    #[error("product history does not project to the authoritative execution context")]
+    ProductHistoryMismatch,
+    #[error("manual compaction request configuration is unavailable")]
+    MissingManualRequest,
+    #[error(transparent)]
+    PinnedMemory(#[from] memory::PinnedMemoryContextError),
+    #[error(transparent)]
+    ReplacementValidation(#[from] agent_context::ReplacementValidationError),
+    #[error(transparent)]
+    ReplacementEffect(#[from] agent_context::ReplacementEffectError),
     #[error(transparent)]
     Strategy(#[from] CompactionError),
     #[error("context replacement could not be persisted")]
@@ -253,11 +358,15 @@ pub(crate) async fn compact_parent_context(
     compactor: &RuntimeContextCompactor,
     session: Arc<SessionController>,
     run_id: &RunId,
-    reason: CompactionReason,
+    input: AutomaticCompactionInput,
     store: &dyn RuntimeStore,
     events: ObservationCoordinator,
     cancellation: CancellationToken,
 ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
+    let AutomaticCompactionInput {
+        reason,
+        normal_request,
+    } = input;
     let (snapshot, source_generation) = {
         let state = session
             .lock_state()
@@ -293,7 +402,19 @@ pub(crate) async fn compact_parent_context(
         },
         None,
     )?;
-    let replacement = match compactor.compact(snapshot.clone(), cancellation).await {
+    let product_history = store
+        .load_conversation(session.id())
+        .await
+        .map_err(|_| RuntimeCompactionError::Persistence)?;
+    let replacement = match compactor
+        .compact(
+            snapshot.clone(),
+            product_history,
+            normal_request,
+            cancellation,
+        )
+        .await
+    {
         Ok(replacement) => replacement,
         Err(error) => {
             let outcome = if error.is_cancelled() {
@@ -379,6 +500,7 @@ pub(crate) async fn compact_child_context(
     compactor: &RuntimeContextCompactor,
     task: &crate::delegation::ChildTaskRecord,
     store: &dyn RuntimeStore,
+    normal_request: ModelRequest,
     cancellation: CancellationToken,
 ) -> Result<(ConversationSnapshot, u64), RuntimeCompactionError> {
     let snapshot = {
@@ -394,7 +516,18 @@ pub(crate) async fn compact_child_context(
         }
         journal.snapshot()
     };
-    let replacement = compactor.compact(snapshot.clone(), cancellation).await?;
+    let product_history = store
+        .load_child_conversation(task.session_id(), task.id())
+        .await
+        .map_err(|_| RuntimeCompactionError::Persistence)?;
+    let replacement = compactor
+        .compact(
+            snapshot.clone(),
+            product_history,
+            normal_request,
+            cancellation,
+        )
+        .await?;
     let _mutation = task.mutation().await;
     {
         let state = task

@@ -122,7 +122,15 @@ impl HarnessContextCoordinator {
             .compact(
                 CompactionInput {
                     model: Arc::clone(&request.spec.model),
-                    system_prompt: request.spec.system_prompt.clone(),
+                    normal_request: agent_model::ModelRequest {
+                        system: request.spec.system_prompt.clone(),
+                        conversation: snapshot.clone(),
+                        tools: request.spec.tools.definitions().to_vec(),
+                        tool_choice: request.spec.model_request.tool_choice.clone(),
+                        generation: request.spec.model_request.generation.clone(),
+                        reasoning: request.spec.model_request.reasoning.clone(),
+                        provider_options: request.spec.model_request.provider_options.clone(),
+                    },
                     layout,
                 },
                 request.cancellation.clone(),
@@ -538,6 +546,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
             ConversationMessage::User(user(latest_user)),
         ])
@@ -581,6 +591,8 @@ mod tests {
                     model: None,
                     usage: None,
                     compacted_usage: None,
+                    usage_adjustment: None,
+                    programmatic_context: None,
                 },
             )]),
         };
@@ -592,15 +604,17 @@ mod tests {
                     model: None,
                     usage: None,
                     compacted_usage: None,
+                    usage_adjustment: None,
+                    programmatic_context: None,
                 },
             )]),
         };
         let records = vec![
-            ConversationRecord::Message(ConversationMessage::User(user("user_1"))),
+            ConversationRecord::Message(Box::new(ConversationMessage::User(user("user_1")))),
             ConversationRecord::Checkpoint(first_checkpoint),
-            ConversationRecord::Message(ConversationMessage::User(user("user_2"))),
+            ConversationRecord::Message(Box::new(ConversationMessage::User(user("user_2")))),
             ConversationRecord::Checkpoint(latest_checkpoint.clone()),
-            ConversationRecord::Message(ConversationMessage::User(user("user_3"))),
+            ConversationRecord::Message(Box::new(ConversationMessage::User(user("user_3")))),
         ];
 
         assert_eq!(

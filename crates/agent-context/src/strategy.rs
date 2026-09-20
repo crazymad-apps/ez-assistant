@@ -2,7 +2,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use agent_model::{ModelError, ModelService, SystemPromptSnapshot};
+use agent_model::{ModelError, ModelRequest, ModelService};
 use agent_types::{ConversationSnapshot, ModelIdentity, TokenUsage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,8 +29,8 @@ pub trait CompressionStrategy: Send + Sync {
 pub struct CompactionInput {
     /// 当前 ExecutionSpec 使用的同一模型服务。
     pub model: Arc<dyn ModelService>,
-    /// 正常模型请求使用的完整冻结 System Prompt；压缩请求必须保持相同前缀。
-    pub system_prompt: SystemPromptSnapshot,
+    /// 未发生压缩时将发送给 Provider 的完整冻结请求。
+    pub normal_request: ModelRequest,
     /// 已完成共享结构校验的历史布局。
     pub layout: ContextLayout,
 }
@@ -86,6 +86,19 @@ pub enum CompactionError {
     InvalidResponse {
         /// 不包含响应正文的脱敏诊断。
         message: String,
+    },
+    /// 正常请求带工具，但当前模型不能显式禁用工具调用。
+    #[error("compaction cannot suppress tools because the model does not support tool_choice none")]
+    UnsupportedToolSuppression,
+    /// replacement 的紧凑 JSON 并未小于权威源快照。
+    #[error(
+        "context compaction was ineffective: replacement is {replacement_bytes} bytes, source is {source_bytes} bytes"
+    )]
+    Ineffective {
+        /// 压缩前权威快照的紧凑 JSON 字节数。
+        source_bytes: usize,
+        /// 候选 replacement 的紧凑 JSON 字节数。
+        replacement_bytes: usize,
     },
     /// 候选 replacement 不满足共享提交前约束。
     #[error(transparent)]
@@ -154,7 +167,17 @@ mod tests {
             model: Arc::new(NoopModel {
                 capabilities: ModelCapabilities::default(),
             }),
-            system_prompt: SystemPromptSnapshot::new(vec!["normal instruction".to_owned()]),
+            normal_request: ModelRequest {
+                system: agent_model::SystemPromptSnapshot::new(vec![
+                    "normal instruction".to_owned(),
+                ]),
+                conversation: ConversationSnapshot::default(),
+                tools: vec![],
+                tool_choice: agent_types::ToolChoice::None,
+                generation: Default::default(),
+                reasoning: None,
+                provider_options: Default::default(),
+            },
             layout: ContextLayout::build(&ConversationSnapshot::default())
                 .expect("empty layout is valid"),
         };

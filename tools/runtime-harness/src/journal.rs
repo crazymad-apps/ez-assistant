@@ -43,7 +43,7 @@ pub(crate) struct HarnessContextCheckpoint {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum ConversationRecord {
-    Message(ConversationMessage),
+    Message(Box<ConversationMessage>),
     Checkpoint(HarnessContextCheckpoint),
 }
 
@@ -114,8 +114,8 @@ impl HarnessJournal {
     pub(crate) fn append_user(&self, message: UserMessage) -> Result<(), JournalError> {
         self.lock()?
             .records
-            .push(ConversationRecord::Message(ConversationMessage::User(
-                message,
+            .push(ConversationRecord::Message(Box::new(
+                ConversationMessage::User(message),
             )));
         Ok(())
     }
@@ -123,8 +123,8 @@ impl HarnessJournal {
     pub(crate) fn append_assistant(&self, message: AssistantMessage) -> Result<(), JournalError> {
         self.lock()?
             .records
-            .push(ConversationRecord::Message(ConversationMessage::Assistant(
-                message,
+            .push(ConversationRecord::Message(Box::new(
+                ConversationMessage::Assistant(message),
             )));
         Ok(())
     }
@@ -242,9 +242,12 @@ impl HarnessJournal {
             state.pending[index].assistant.clone(),
         ));
         completed.extend(results.into_iter().map(ConversationMessage::Tool));
-        state
-            .records
-            .extend(completed.into_iter().map(ConversationRecord::Message));
+        state.records.extend(
+            completed
+                .into_iter()
+                .map(Box::new)
+                .map(ConversationRecord::Message),
+        );
         state.pending.remove(index);
         Ok(())
     }
@@ -273,7 +276,7 @@ pub(crate) fn effective_snapshot_from_records(
         records[suffix_start..]
             .iter()
             .filter_map(|record| match record {
-                ConversationRecord::Message(message) => Some(message.clone()),
+                ConversationRecord::Message(message) => Some(message.as_ref().clone()),
                 ConversationRecord::Checkpoint(_) => None,
             }),
     );
@@ -287,7 +290,7 @@ pub(crate) fn original_messages_from_records(
         records
             .iter()
             .filter_map(|record| match record {
-                ConversationRecord::Message(message) => Some(message.clone()),
+                ConversationRecord::Message(message) => Some(message.as_ref().clone()),
                 ConversationRecord::Checkpoint(_) => None,
             })
             .collect(),

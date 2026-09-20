@@ -27,6 +27,7 @@ pub use conversation::{
     ConversationSearchScope, ConversationWindowRequest, RewriteGoalEffect, RewriteResult,
     StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
     execution_context_from_product_history, merge_context_replacement_with_product_history,
+    normalize_context_usage_adjustments,
 };
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{

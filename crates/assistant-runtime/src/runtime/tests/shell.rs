@@ -994,6 +994,21 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
         .unwrap();
     let requests = model.take_requests();
     assert_eq!(requests.len(), if provider_overflow { 4 } else { 3 });
+    let summary_index = if provider_overflow { 2 } else { 1 };
+    assert!(crate::shell::context_is_current(
+        &requests[summary_index].conversation,
+        &expected
+    ));
+    if provider_overflow {
+        assert_eq!(requests[2].system, requests[1].system);
+        assert_eq!(requests[2].tools, requests[1].tools);
+        assert_eq!(requests[2].reasoning, requests[1].reasoning);
+        assert_eq!(requests[2].provider_options, requests[1].provider_options);
+        assert_eq!(
+            &requests[2].conversation.messages[..requests[1].conversation.messages.len()],
+            requests[1].conversation.messages.as_slice()
+        );
+    }
     let resumed = &requests.last().unwrap().conversation;
     // 必须实际走过 generation 替换；仅模型调用成功无法证明压缩后环境被补回。
     assert!(matches!(

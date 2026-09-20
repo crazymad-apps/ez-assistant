@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
@@ -244,6 +244,40 @@ pub struct ContextSummaryMessage {
     /// 被本摘要替换掉的历史模型调用累计用量；供 UI 恢复总量，不参与窗口预检。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compacted_usage: Option<crate::TokenUsage>,
+    /// 当前摘要替换历史后，窗口预检应如何近似修正 Provider usage。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_adjustment: Option<ContextUsageAdjustment>,
+    /// 由程序维护的结构化上下文；存在时在摘要正文后以稳定格式呈现给模型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub programmatic_context: Option<String>,
+}
+
+impl ContextSummaryMessage {
+    /// 返回 Provider 应看到的统一摘要正文；旧摘要不产生任何 wire 变化。
+    pub fn model_visible_text(&self) -> Cow<'_, str> {
+        let Some(programmatic_context) = self.programmatic_context.as_deref() else {
+            return Cow::Borrowed(&self.text);
+        };
+        Cow::Owned(format!(
+            "{}\n\nProgrammatically maintained context. This section is authoritative when it conflicts with prose:\n{}",
+            self.text, programmatic_context
+        ))
+    }
+}
+
+/// 摘要替换历史后用于窗口预检的近似 usage 修正。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextUsageAdjustment {
+    /// 从仍保留的 Assistant usage 中减去压缩边界前最后一次已计量 usage。
+    Subtract {
+        /// replacement 中作为当前 usage 基准的 Assistant 消息。
+        retained_assistant_id: MessageId,
+        /// 被摘要替换掉的历史在该 usage 中已累计的近似 token 数。
+        subtract_total_tokens: u64,
+    },
+    /// 无法安全建立减法边界；窗口预检保持 usage 不可用并交给 Provider 兜底。
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -822,6 +856,8 @@ mod tests {
             model: None,
             usage: None,
             compacted_usage: None,
+            usage_adjustment: None,
+            programmatic_context: None,
         });
         let json = serde_json::to_string(&message).expect("serialize context summary");
         assert!(json.contains(r#""role":"context_summary""#));
@@ -869,6 +905,8 @@ mod tests {
             model: None,
             usage: None,
             compacted_usage: None,
+            usage_adjustment: None,
+            programmatic_context: None,
         });
         let before = tool_call_message("before", &["call_1"]);
         let after = tool_call_message("after", &["call_1"]);
@@ -898,6 +936,44 @@ mod tests {
             request.validate_response_tool_call_ids(&duplicate_batch),
             Err(ConversationValidationError::DuplicateToolCallId { .. })
         ));
+    }
+
+    #[test]
+    fn legacy_context_summary_defaults_new_fields_and_keeps_wire_text() {
+        let json = r#"{"role":"context_summary","turn":{"id":"summary_1","text":"legacy"}}"#;
+        let message = serde_json::from_str::<ConversationMessage>(json).expect("legacy summary");
+        let ConversationMessage::ContextSummary(summary) = message else {
+            panic!("expected context summary");
+        };
+        assert_eq!(summary.usage_adjustment, None);
+        assert_eq!(summary.programmatic_context, None);
+        assert_eq!(summary.model_visible_text(), "legacy");
+    }
+
+    #[test]
+    fn context_summary_renders_programmatic_context_after_prose() {
+        let summary = ContextSummaryMessage {
+            id: id("summary_1"),
+            text: "prose".to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+            usage_adjustment: Some(ContextUsageAdjustment::Subtract {
+                retained_assistant_id: id("assistant_1"),
+                subtract_total_tokens: 12,
+            }),
+            programmatic_context: Some("{\"cwd\":\"/workspace\"}".to_owned()),
+        };
+        assert_eq!(
+            summary.model_visible_text(),
+            "prose\n\nProgrammatically maintained context. This section is authoritative when it conflicts with prose:\n{\"cwd\":\"/workspace\"}"
+        );
+        let json = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(json.contains(r#""type":"subtract""#));
+        assert_eq!(
+            serde_json::from_str::<ContextSummaryMessage>(&json).expect("deserialize summary"),
+            summary
+        );
     }
 
     #[test]

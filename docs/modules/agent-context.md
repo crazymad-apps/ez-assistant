@@ -45,16 +45,23 @@
   `ContextTokenUsage` 分开保存 `completed_tokens` 终态和 `pending_tokens` 临时估算，合计值供 Runtime
   与 Evaluator 共用；新完整响应替换基数并清除已计量的临时增量，即使真实用量比旧估算低也接受。
   Evaluator 不联网；图片等本地无法可靠计量的内容由既有 Provider Overflow 兜底。
+- Context Summary 可以携带显式 usage adjustment：`subtract` 从摘要后仍保留的 Assistant usage
+  中减去压缩边界前最后一次已计量总量，并补入统一渲染后的摘要轻量估算；若无法建立可靠边界则
+  标记 `unavailable`，不得借用旧 usage。replacement 中没有旧 Assistant usage 时不写 adjustment，
+  首次预检自然保持 usage unavailable；新的完整 Assistant Result 到达后重新成为权威基数。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。
 - `RollingSummarySameModel` 只调用一次 `CompactionInput` 中的当前 ModelService；
-  请求原样保留正常 Agent 的完整冻结 System Prompt，并由 Strategy 内部在
-  `protected prefix + compressible head` 后追加临时摘要指令；调用方不拼接请求
-  conversation，recent tail 不发送给压缩模型。
+  Strategy 克隆 Runtime/Core 交来的完整正常 `ModelRequest`，在其完整 conversation 末尾追加临时摘要
+  指令。System、原 conversation、工具定义及顺序、generation 其余字段、reasoning 和 Provider Options
+  均保持不变，只把 `tool_choice` 改为 `None` 并覆盖摘要输出上限。
 - 临时摘要指令使用 request-only `InternalContext` 计划，只存在于 compression request，不写入原始
   History、Layout、Candidate 或 Checkpoint。
-- compression request 使用空 tools、`ToolChoice::None` 和显式输出上限。
-- 只有 `FinishReason::Stop`、无 ToolCall 且至少包含一段非空 Text 的完整响应才能形成
+- 正常请求含工具时，当前模型必须显式支持 `ToolChoice::None`；否则在模型调用前失败，不能清空工具
+  定义来伪造另一份请求。
+- 无 ToolCall 且至少包含一段非空 Text 的完整响应才能形成
   Candidate；Reasoning 不进入摘要正文，取消、Overflow 和普通模型错误原样受控返回。
+- Candidate 的紧凑 JSON 字节数必须小于压缩前权威快照，否则以 ineffective 错误拒绝提交；该效果
+  校验是共享入口，Runtime 在补入宿主私有的程序化上下文后必须再次调用，不能只依赖策略初次检查。
 - Candidate 固定为 protected System prefix、最新 ContextSummary 和 recent tail；recent tail
   必须原样保留。ContextSummary 的 `compacted_usage` 只累计实际被摘要替换的 head，不能提前
   吸收仍在 recent tail 中的模型调用用量。

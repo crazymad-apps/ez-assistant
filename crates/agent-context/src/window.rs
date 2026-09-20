@@ -1,7 +1,9 @@
 //! 基于 Provider usage 的上下文窗口判断。
 
 use agent_model::ModelService;
-use agent_types::{ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart};
+use agent_types::{
+    ContextUsageAdjustment, ConversationMessage, ConversationSnapshot, ToolResultPart, UserPart,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -122,8 +124,36 @@ pub fn context_token_usage(snapshot: &ConversationSnapshot) -> ContextTokenUsage
             ConversationMessage::Assistant(message) => Some((index, message)),
             _ => None,
         });
-    let completed_tokens =
-        latest.and_then(|(_, message)| message.usage.as_ref().map(|usage| usage.total_tokens));
+    let adjustment =
+        snapshot
+            .messages
+            .iter()
+            .enumerate()
+            .find_map(|(index, message)| match message {
+                ConversationMessage::ContextSummary(message) => {
+                    Some((index, message.usage_adjustment.as_ref(), message))
+                }
+                _ => None,
+            });
+    let completed_tokens = match adjustment {
+        Some((_, Some(ContextUsageAdjustment::Unavailable), _)) => None,
+        Some((
+            summary_index,
+            Some(ContextUsageAdjustment::Subtract {
+                retained_assistant_id,
+                subtract_total_tokens,
+            }),
+            summary,
+        )) => adjusted_completed_tokens(
+            snapshot,
+            latest,
+            summary_index,
+            retained_assistant_id,
+            *subtract_total_tokens,
+            summary,
+        ),
+        _ => latest.and_then(|(_, message)| message.usage.as_ref().map(|usage| usage.total_tokens)),
+    };
     // 新的完整响应到达后，边界前移：旧临时态由真实 usage 替换，不再叠加。
     let pending_start = latest.map_or(0, |(index, _)| index + 1);
     let pending_tokens = snapshot.messages[pending_start..]
@@ -136,15 +166,52 @@ pub fn context_token_usage(snapshot: &ConversationSnapshot) -> ContextTokenUsage
     }
 }
 
+fn adjusted_completed_tokens(
+    snapshot: &ConversationSnapshot,
+    latest: Option<(usize, &agent_types::AssistantMessage)>,
+    summary_index: usize,
+    retained_assistant_id: &agent_types::MessageId,
+    subtract_total_tokens: u64,
+    summary: &agent_types::ContextSummaryMessage,
+) -> Option<u64> {
+    let retained = snapshot.messages[summary_index + 1..]
+        .iter()
+        .enumerate()
+        .find_map(|(offset, message)| match message {
+            ConversationMessage::Assistant(message)
+                if &message.id == retained_assistant_id && message.usage.is_some() =>
+            {
+                Some((summary_index + 1 + offset, message))
+            }
+            _ => None,
+        })?;
+    let (latest_index, latest) = latest?;
+    let latest_usage = latest.usage.as_ref()?;
+    if latest_index < retained.0 {
+        return None;
+    }
+    if latest.id != retained.1.id {
+        return Some(latest_usage.total_tokens);
+    }
+    Some(
+        latest_usage
+            .total_tokens
+            .saturating_sub(subtract_total_tokens)
+            .saturating_add(MESSAGE_OVERHEAD)
+            .saturating_add(estimate_text_tokens(&summary.model_visible_text())),
+    )
+}
+
+const MESSAGE_OVERHEAD: u64 = 4;
+const PART_OVERHEAD: u64 = 2;
+
 fn estimate_unreported_message_tokens(message: &ConversationMessage) -> u64 {
-    const MESSAGE_OVERHEAD: u64 = 4;
-    const PART_OVERHEAD: u64 = 2;
     match message {
         ConversationMessage::System(message) => {
             MESSAGE_OVERHEAD.saturating_add(estimate_text_tokens(&message.text))
         }
         ConversationMessage::ContextSummary(message) => {
-            MESSAGE_OVERHEAD.saturating_add(estimate_text_tokens(&message.text))
+            MESSAGE_OVERHEAD.saturating_add(estimate_text_tokens(&message.model_visible_text()))
         }
         ConversationMessage::User(message) => {
             message.parts.iter().fold(MESSAGE_OVERHEAD, |total, part| {
@@ -246,10 +313,10 @@ mod tests {
         ModelCallContext, ModelCapabilities, ModelError, ModelRequest, ModelStreamFuture,
     };
     use agent_types::{
-        AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
-        MessageId, ModelIdentity, OpaqueProviderState, ProtocolId, ProviderId, TokenUsage,
-        ToolCall, ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent,
-        ToolResultStatus, UserMessage, UserPart,
+        AssistantMessage, AssistantPart, ContextSummaryMessage, ContextUsageAdjustment,
+        ConversationMessage, ConversationSnapshot, FinishReason, MessageId, ModelIdentity,
+        OpaqueProviderState, ProtocolId, ProviderId, TokenUsage, ToolCall, ToolCallId, ToolMessage,
+        ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
     };
 
     use super::*;
@@ -358,6 +425,18 @@ mod tests {
                 id: agent_types::PartId::new(format!("{id}_text")).expect("valid part id"),
                 text: text.to_owned(),
             })],
+        })
+    }
+
+    fn summary(adjustment: ContextUsageAdjustment) -> ConversationMessage {
+        ConversationMessage::ContextSummary(ContextSummaryMessage {
+            id: MessageId::new("summary_1").expect("message id"),
+            text: "abcd".to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+            usage_adjustment: Some(adjustment),
+            programmatic_context: None,
         })
     }
 
@@ -533,6 +612,60 @@ mod tests {
         assert_eq!(pending.completed_tokens, Some(72));
         assert_eq!(pending.pending_tokens, 8);
         assert_eq!(pending.total_tokens(), Some(80));
+    }
+
+    #[test]
+    fn summary_subtraction_uses_retained_usage_plus_rendered_summary_and_pending_tail() {
+        let snapshot = ConversationSnapshot::new(vec![
+            summary(ContextUsageAdjustment::Subtract {
+                retained_assistant_id: MessageId::new("retained").expect("message id"),
+                subtract_total_tokens: 60,
+            }),
+            user("user_1"),
+            assistant("retained", Some(100)),
+            user_text("user_2", "abcdefgh"),
+        ]);
+
+        assert_eq!(
+            context_token_usage(&snapshot),
+            ContextTokenUsage {
+                completed_tokens: Some(45),
+                pending_tokens: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn assistant_after_the_retained_boundary_replaces_the_usage_approximation() {
+        let snapshot = ConversationSnapshot::new(vec![
+            summary(ContextUsageAdjustment::Subtract {
+                retained_assistant_id: MessageId::new("retained").expect("message id"),
+                subtract_total_tokens: 60,
+            }),
+            user("user_1"),
+            assistant("retained", Some(100)),
+            user("user_2"),
+            assistant("latest", Some(50)),
+        ]);
+
+        assert_eq!(
+            context_token_usage(&snapshot),
+            ContextTokenUsage {
+                completed_tokens: Some(50),
+                pending_tokens: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn unavailable_summary_adjustment_fails_safe_without_reusing_retained_usage() {
+        let snapshot = ConversationSnapshot::new(vec![
+            summary(ContextUsageAdjustment::Unavailable),
+            user("user_1"),
+            assistant("retained", Some(100)),
+        ]);
+
+        assert_eq!(context_token_usage(&snapshot).total_tokens(), None);
     }
 
     #[test]

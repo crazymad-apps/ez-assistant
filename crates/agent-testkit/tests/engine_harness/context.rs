@@ -1,5 +1,28 @@
 use super::*;
 
+fn compaction_handoff(
+    outcome: ExecutionOutcome,
+    expected_reason: CompactionReason,
+    expected_step: u32,
+    expected_consumption: ExecutionConsumption,
+) -> ModelRequest {
+    let ExecutionOutcome::CompactionRequired {
+        reason,
+        step,
+        consumption,
+        handoff,
+    } = outcome
+    else {
+        panic!("expected compaction outcome");
+    };
+    assert_eq!(reason, expected_reason);
+    assert_eq!(step, expected_step);
+    assert_eq!(consumption, expected_consumption);
+    handoff
+        .expect("live Core compaction outcome carries an exact request")
+        .into_request()
+}
+
 #[tokio::test]
 async fn model_establishment_failure_converges_to_failed() {
     let log = OrderLog::new();
@@ -140,6 +163,7 @@ async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
         ConversationMessage::Assistant(previous),
     ];
     let (input, _) = make_input(history);
+    let expected_conversation = input.conversation.clone();
     let execution = AgentExecution::start(
         make_spec_with_threshold(
             model.clone(),
@@ -155,14 +179,13 @@ async fn threshold_preflight_hands_off_before_step_started_or_model_call() {
     );
 
     let (outcome, events) = finish(execution).await;
-    assert_eq!(
+    let handoff = compaction_handoff(
         outcome,
-        ExecutionOutcome::CompactionRequired {
-            reason: CompactionReason::ThresholdReached,
-            step: 1,
-            consumption: ExecutionConsumption::default(),
-        }
+        CompactionReason::ThresholdReached,
+        1,
+        ExecutionConsumption::default(),
     );
+    assert_eq!(handoff.conversation, expected_conversation);
     assert_eq!(
         events,
         vec![
@@ -206,16 +229,14 @@ async fn establishment_context_overflow_converges_to_compaction_terminal() {
     );
 
     let (outcome, events) = finish(execution).await;
-    assert_eq!(
+    let handoff = compaction_handoff(
         outcome,
-        ExecutionOutcome::CompactionRequired {
-            reason: CompactionReason::ProviderOverflow,
-            step: 1,
-            consumption: ExecutionConsumption {
-                steps: 1,
-                tool_calls: 0,
-            },
-        }
+        CompactionReason::ProviderOverflow,
+        1,
+        ExecutionConsumption {
+            steps: 1,
+            tool_calls: 0,
+        },
     );
     assert_eq!(
         events,
@@ -233,7 +254,8 @@ async fn establishment_context_overflow_converges_to_compaction_terminal() {
             },
         ]
     );
-    assert_eq!(model.take_requests().len(), 1);
+    let requests = model.take_requests();
+    assert_eq!(requests, vec![handoff]);
     assert!(recorder.deltas().is_empty());
     assert!(log.entries().is_empty());
 }
@@ -291,7 +313,7 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
     let (input, _) = make_input(vec![]);
     let execution = AgentExecution::start(
         make_spec(
-            model,
+            model.clone(),
             ToolSetSnapshot::default(),
             ExecutionBudget::default(),
         ),
@@ -303,17 +325,16 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
     );
 
     let (outcome, events) = finish(execution).await;
-    assert_eq!(
+    let handoff = compaction_handoff(
         outcome,
-        ExecutionOutcome::CompactionRequired {
-            reason: CompactionReason::ProviderOverflow,
-            step: 1,
-            consumption: ExecutionConsumption {
-                steps: 1,
-                tool_calls: 0,
-            },
-        }
+        CompactionReason::ProviderOverflow,
+        1,
+        ExecutionConsumption {
+            steps: 1,
+            tool_calls: 0,
+        },
     );
+    assert_eq!(model.take_requests(), vec![handoff]);
     assert!(events.contains(&AgentEvent::ReasoningDelta {
         step: 1,
         id: part_id("reasoning_overflow"),
@@ -372,7 +393,7 @@ async fn overflow_after_completed_tool_exchange_does_not_replay_side_effects() {
     )]);
     let (input, user_input) = make_input(vec![]);
     let execution = AgentExecution::start(
-        make_spec(model, tools, ExecutionBudget::default()),
+        make_spec(model.clone(), tools, ExecutionBudget::default()),
         input,
         make_context(
             recorder.clone(),
@@ -381,17 +402,17 @@ async fn overflow_after_completed_tool_exchange_does_not_replay_side_effects() {
     );
 
     let (outcome, events) = finish(execution).await;
-    assert_eq!(
+    let handoff = compaction_handoff(
         outcome,
-        ExecutionOutcome::CompactionRequired {
-            reason: CompactionReason::ProviderOverflow,
-            step: 2,
-            consumption: ExecutionConsumption {
-                steps: 2,
-                tool_calls: 1,
-            },
-        }
+        CompactionReason::ProviderOverflow,
+        2,
+        ExecutionConsumption {
+            steps: 2,
+            tool_calls: 1,
+        },
     );
+    let requests = model.take_requests();
+    assert_eq!(requests.last(), Some(&handoff));
     assert_eq!(
         log.entries()
             .iter()

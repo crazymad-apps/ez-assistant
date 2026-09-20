@@ -123,6 +123,7 @@ impl AssistantRuntime {
             end += 1;
         }
         let mut conversation = ConversationSnapshot::new(current.messages[..end].to_vec());
+        crate::normalize_context_usage_adjustments(&mut conversation);
         // Fork 不复制 Run；把切换结果保存为不可变展示上下文，仍由独立 Session 绑定控制执行。
         let projection = self.projection_context(&source, &[]).await?;
         let results = super::product::project_conversation(&conversation, &projection)?;
@@ -1178,7 +1179,8 @@ impl AssistantRuntime {
         let new_message = create_user_message(request.message, files, request.variant)?;
         let mut messages = current.messages[..target_index].to_vec();
         messages.push(ConversationMessage::User(new_message.clone()));
-        let replacement = ConversationSnapshot::new(messages);
+        let mut replacement = ConversationSnapshot::new(messages);
+        crate::normalize_context_usage_adjustments(&mut replacement);
         replacement
             .validate_tool_exchange_pairs()
             .map_err(|_| RuntimeError::InvalidRequest {

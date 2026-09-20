@@ -1013,6 +1013,7 @@ mod tests {
                     reason: CompactionReason::ThresholdReached,
                     step: 1,
                     consumption: agent_core::ExecutionConsumption::default(),
+                    handoff: None,
                 },
             )
             .expect("finish");

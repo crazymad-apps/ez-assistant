@@ -331,6 +331,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
             user("user_1"),
             assistant("assistant_1"),
@@ -436,6 +438,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
             user("user_1"),
             assistant("assistant_1"),
@@ -514,6 +518,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 id: id("summary_2"),
@@ -521,6 +527,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
         ]);
         assert_eq!(
@@ -537,6 +545,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
         ]);
         assert_eq!(

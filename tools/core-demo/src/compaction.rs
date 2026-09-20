@@ -46,7 +46,15 @@ impl CompactionCoordinator {
             .compact(
                 CompactionInput {
                     model,
-                    system_prompt,
+                    normal_request: agent_model::ModelRequest {
+                        system: system_prompt,
+                        conversation: checkpoint.clone(),
+                        tools: vec![],
+                        tool_choice: agent_types::ToolChoice::None,
+                        generation: Default::default(),
+                        reasoning: None,
+                        provider_options: Default::default(),
+                    },
                     layout,
                 },
                 cancellation,

@@ -6,13 +6,13 @@ use agent_model::{
 };
 use agent_testkit::{BodyStep, EventCollector, RecordedResponse, RecordedTransport};
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FileReference,
-    FileReferencesPart, FinishReason, InternalContextPart, MessageId, ModelIdentity,
-    OpaqueProviderState, PartId, ProviderId, QuotedTextPart, QuotedTextSourceOwner,
-    QuotedTextSourceRole, ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolChoice,
-    ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult, ToolResultContent,
-    ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage, UserMessageOrigin,
-    UserPart,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
+    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, InternalContextPart,
+    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProviderId, QuotedTextPart,
+    QuotedTextSourceOwner, QuotedTextSourceRole, ReasoningPart, TextPart, TokenUsage, ToolCall,
+    ToolCallId, ToolChoice, ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult,
+    ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 use serde_json::{Value, json};
 
@@ -244,6 +244,32 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
     assert_eq!(value["input"][4]["content"][0]["text"], "summarize");
     assert!(value["input"][4].get("origin").is_none());
     assert!(value["input"][4].get("transcript_visibility").is_none());
+}
+
+#[test]
+fn context_summary_uses_the_unified_model_visible_renderer() {
+    let request = request(vec![ConversationMessage::ContextSummary(
+        ContextSummaryMessage {
+            id: message_id("summary_1"),
+            text: "prose".to_owned(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+            usage_adjustment: None,
+            programmatic_context: Some("cwd=/workspace".to_owned()),
+        },
+    )]);
+    let encoded = encode_request_with_images(
+        &request,
+        &agent_model::PreparedModelImages::default(),
+        &adapter(),
+        "fixture-model",
+    )
+    .expect("encode");
+    let value = serde_json::to_value(encoded).expect("json");
+    let wire = value.to_string();
+    assert!(wire.contains("Programmatically maintained context"));
+    assert!(wire.contains("cwd=/workspace"));
 }
 
 #[test]

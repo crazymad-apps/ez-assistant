@@ -19,14 +19,16 @@ use agent_tools::{
     ToolOutputChannel as AgentToolOutputChannel, ToolOutputChunk, ToolRegistry, ToolSetSnapshot,
 };
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, FinishReason, MessageId, ModelIdentity,
-    PartId, ProviderId, TextPart, ToolCall, ToolCallId, ToolChoice, ToolName, UserPart,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
+    MessageId, ModelIdentity, PartId, ProviderId, TextPart, ToolCall, ToolCallId, ToolChoice,
+    ToolName, UserPart,
 };
 use assistant_protocol::{
     ApprovalSnapshot, ConnectionValidationFailure, ConnectionValidationFailureKind,
     ConnectionValidationOutcome, GetSessionViewRequest, InterruptRunRequest,
-    ListPendingApprovalsRequest, RunId, SetSessionApprovalModeRequest, SetSessionModelRequest,
-    ShutdownRuntimeRequest, SubmitInputRequest, ValidateModelConnectionRequest,
+    ListPendingApprovalsRequest, RunId, SessionId, SetSessionApprovalModeRequest,
+    SetSessionModelRequest, ShutdownRuntimeRequest, SubmitInputRequest,
+    ValidateModelConnectionRequest,
 };
 use serde_json::json;
 use tokio::sync::{Barrier, Notify, broadcast::error::RecvError};
@@ -786,6 +788,48 @@ fn assistant_text(message_id: &str, text: &str) -> AssistantMessage {
         finish_reason: FinishReason::Stop,
         usage: None,
     }
+}
+
+fn assistant_text_with_usage(message_id: &str, text: &str, total_tokens: u64) -> AssistantMessage {
+    let mut message = assistant_text(message_id, text);
+    message.usage = Some(agent_types::TokenUsage {
+        input_tokens: total_tokens.saturating_sub(10),
+        output_tokens: 10,
+        total_tokens,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+    });
+    message
+}
+
+async fn submit_completed_turn(
+    runtime: &AssistantRuntime,
+    session_id: &SessionId,
+    text: &str,
+) -> RunId {
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: text.to_owned(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("turn accepted");
+    let run_id = accepted.run.run_id.clone();
+    let terminal = wait_for_terminal(runtime, session_id, &run_id).await;
+    assert_eq!(
+        terminal.status,
+        assistant_protocol::RunStatus::Completed,
+        "terminal error: {:?}",
+        terminal.error
+    );
+    run_id
 }
 
 fn assistant_title_tool_call(message_id: &str, call_id: &str, title: &str) -> AssistantMessage {

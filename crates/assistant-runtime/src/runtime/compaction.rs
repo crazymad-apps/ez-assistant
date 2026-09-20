@@ -31,6 +31,7 @@ struct ManualCompactionContext {
     operation_id: assistant_protocol::IdempotencyKey,
     source_generation: u64,
     source: ConversationSnapshot,
+    product_history: ConversationSnapshot,
     cancellation: CancellationToken,
     guard: SessionCompactionGuard,
 }
@@ -126,6 +127,25 @@ impl AssistantRuntime {
                 return Err(error);
             }
         };
+        let product_history = match self.store.load_conversation(&request.session_id).await {
+            Ok(history) => history,
+            Err(source_error) => {
+                let _ = self
+                    .store
+                    .finish_session_compaction(SessionHistoryCompactionFinish {
+                        operation_id: request.operation_id,
+                        session_id: request.session_id,
+                        expected_generation: source_generation,
+                        kind: SessionHistoryCompactionFinishKind::Interrupted,
+                        finished_at_ms: prepared_at_ms,
+                    })
+                    .await;
+                return Err(RuntimeError::from_store(
+                    "load manual compaction product history",
+                    source_error,
+                ));
+            }
+        };
         let cancellation = self.root_cancellation.child_token();
         let guard = match SessionCompactionGuard::begin(
             session.clone(),
@@ -164,6 +184,7 @@ impl AssistantRuntime {
             operation_id: request.operation_id.clone(),
             source_generation,
             source,
+            product_history,
             cancellation,
             guard,
         };
@@ -248,7 +269,11 @@ async fn execute_manual_compaction(
 ) -> RuntimeResult<CompactSessionResult> {
     let candidate = context
         .compactor
-        .compact_manual(context.source.clone(), context.cancellation.clone())
+        .compact_manual(
+            context.source.clone(),
+            context.product_history.clone(),
+            context.cancellation.clone(),
+        )
         .await;
     match candidate {
         Ok(ManualCompactionCandidate::NoOp) => {

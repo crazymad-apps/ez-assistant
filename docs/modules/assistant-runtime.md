@@ -209,7 +209,8 @@ Runtime Host 进程
   仍随 Assistant Message 持久化，未完成 step 的中间 usage 不进入产品投影。事件断线恢复继续以规范
   Assistant Message 中已持久化的 usage 为准。
 - SessionView 的上下文占用与自动压缩复用 `agent-context` 同一投影：最新 Provider `total_tokens`
-  加尚未计量的 User/Tool 文本增量，不再使用 `input_tokens` 或 ProviderState 密文字节形成第二套口径。
+  经 Context Summary 的显式减法 adjustment 修正后，加尚未计量的 User/Tool 文本增量；新完整响应到达
+  后直接替换近似值。不再使用 `input_tokens` 或 ProviderState 密文字节形成第二套口径。
   重复 ID、跨 Session 引用和 unavailable Attachment 在入库前拒绝；输入幂等命中早于附件重新解析。
 - Runtime 为每个 Run 装配模型 attempt observer，并投影脱敏的 attempt/retry 事件。模型失败
   结算区分建流前与建流后，记录稳定分类、实际 attempt/retry 数和是否已有可见输出；Provider
@@ -277,6 +278,17 @@ Runtime Host 进程
 - 父子执行发生自动压缩时，continuation 从 Core 的可靠 CompactionRequired 终态扣减已消费 Step 与
   实际 dispatch 工具数，不得用可丢弃的事件流计算剩余预算。当前父子压缩均只原样保留最近一个
   User Turn；该 Turn 自身溢出时不拆分或生成隐藏锚点，轮内压缩留待后续版本完善。
+- 自动压缩必须消费 CompactionRequired 的进程内精确请求，并核验权威 Journal 快照是其 conversation
+  的有序精确子序列；额外消息只允许 Runtime 创建的隐藏 User request-only context。handoff 缺失或
+  投影不匹配时不得调用摘要模型或提交 replacement。摘要输出上限当前为 4096 token。
+- 自动与手动压缩还必须读取同一正文 generation 的完整产品历史，并确认其最新执行投影等于权威
+  Journal。Runtime 只从完整历史中成功且闭合的 `pin_memory`、`update_pinned_memory`、
+  `unpin_memory` 结果重算冻结 Pinned Memory 的净变化，以严格、确定排序的私有 V1 JSON 写入
+  Context Summary `programmatic_context`；不查询当前 Memory Store，也不解析冻结 System XML。
+  非法成功结果、未知版本、重复/交叉 ID 或共享 Pinned Memory 限额超限都会拒绝整个候选。
+- 手动压缩复用当前 Session 已解析的 generation、reasoning 与 Provider Options，但没有活动 Run
+  的工具快照，因此工具列表为空并固定 `ToolChoice::None`。程序化字段写入后必须重新执行
+  replacement 结构、完整历史原样后缀和严格缩小门禁，通过后才允许 Store 切换 generation。
 - 每个活动 child 拥有派生自父 Run 的取消令牌。父 Run 取消和 Runtime shutdown 级联到全部 child；
   单独取消只影响目标 child。可靠完成与取消竞争时允许已经形成的完整终态获胜，timeout 则稳定结算为
   `failed/timeout`，不能伪装成成功。
@@ -582,6 +594,9 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
   `persisted_message_count` 只表示当前 Journal 边界，两者不能互相覆盖。
 - Conversation 分页、Around Run、Fork、历史重新输入和 Run 归属恢复读取完整产品历史；模型请求与
   后续压缩只读取派生的有效上下文。Desktop 不跨 generation 拼接内存旧页。
+- Fork 或历史重新输入截断 Context Summary 的 `Subtract` 引用时，只保留仍存在且带 usage 的目标；
+  悬空引用在写新正文前收敛为 `Unavailable`。程序化上下文、usage 调整和摘要 usage 均随同一 JSONL
+  generation 自然恢复，不新增数据库 schema、回填任务或第二份状态表。
 
 ## v0.19.0 模型 Skill 激活与同 Run continuation
 

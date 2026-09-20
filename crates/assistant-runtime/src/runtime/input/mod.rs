@@ -30,8 +30,8 @@ use crate::{
     UserMessageCommit,
     config::ConfigRegistry,
     context_compaction::{
-        MAX_AUTOMATIC_COMPACTIONS, compact_parent_context, compaction_reason_label,
-        consume_execution_budget,
+        AutomaticCompactionInput, MAX_AUTOMATIC_COMPACTIONS, compact_parent_context,
+        compaction_reason_label, consume_execution_budget,
     },
     goal::GoalRunBinding,
     observation::ObservationCoordinator,
@@ -715,16 +715,26 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         context.mcp_registry.clone(),
                     )
                     .await;
-                    let (consumption, compaction_reason) = match observed.outcome.as_ref() {
+                    let (consumption, compaction_reason, compaction_request) = match observed
+                        .outcome
+                        .as_ref()
+                    {
                         Some(agent_core::ExecutionOutcome::CompactionRequired {
                             reason,
                             consumption,
+                            handoff,
                             ..
-                        }) => (consumption, Some(*reason)),
+                        }) => (
+                            consumption,
+                            Some(*reason),
+                            handoff
+                                .clone()
+                                .map(agent_core::CompactionHandoff::into_request),
+                        ),
                         Some(agent_core::ExecutionOutcome::ContinuationRequired {
                             consumption,
                             ..
-                        }) => (consumption, None),
+                        }) => (consumption, None, None),
                         Some(agent_core::ExecutionOutcome::Completed { consumption, .. })
                         | Some(agent_core::ExecutionOutcome::Failed { consumption, .. }) => {
                             let consumption = *consumption;
@@ -848,6 +858,15 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         };
                         continue;
                     };
+                    let Some(normal_request) = compaction_request else {
+                        break (
+                            None,
+                            Some(RuntimeErrorInfo::new(
+                                assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
+                                "context compaction handoff is missing the exact live request",
+                            )),
+                        );
+                    };
                     if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
                         break (
                             None,
@@ -865,7 +884,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         compactor.as_ref(),
                         session.clone(),
                         &next.2.run_id,
-                        reason,
+                        AutomaticCompactionInput {
+                            reason,
+                            normal_request,
+                        },
                         context.store.as_ref(),
                         context.events.clone(),
                         cancellation.clone(),

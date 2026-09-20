@@ -62,6 +62,9 @@ Context Window Evaluator、历史布局和 replacement 校验归
   Completed、Failed、Cancelled、CompactionRequired 和 ContinuationRequired，均报告丢弃计数。
 - CompactionRequired 同时携带 Engine 自身统计的已消费 Step 与实际 dispatch 工具数；这些值属于
   continuation 硬预算事实，Runtime 不得从可能丢弃的观察事件反推。
+- Core 在阈值预检前先构造原本将发给 Provider 的精确 `ModelRequest`；阈值触发和 Provider Overflow
+  都通过进程内 `CompactionHandoff` 把同一请求交给 Runtime。该 handoff 不进入 AgentEvent、SSE、
+  serde 或持久化，Debug 只能显示消息数和工具数，不得显示 prompt、工具正文或 Provider Options。
 - Core 不发起上下文压缩请求、不生成 Context Checkpoint，也不在同一个
   `AgentExecution` 内压缩后重试；压缩编排和 continuation 属于上层。v0.3.0 由
   Runtime Harness 临时验证，正式 Runtime 接口留待总体设计。

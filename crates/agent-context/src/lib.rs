@@ -18,7 +18,10 @@ pub use strategy::{
     CompactionCandidate, CompactionError, CompactionFuture, CompactionInput, CompressionStrategy,
     StrategyOutcome, StrategyReport,
 };
-pub use validate::{ReplacementValidationError, validate_replacement};
+pub use validate::{
+    ReplacementEffectError, ReplacementValidationError, validate_replacement,
+    validate_replacement_effect,
+};
 pub use window::{
     ContextTokenUsage, ContextWindowDecision, ContextWindowError, ContextWindowEvaluation,
     ContextWindowEvaluator, context_token_usage,

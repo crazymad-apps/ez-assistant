@@ -505,8 +505,24 @@ impl AssistantRuntime {
             None,
         )?;
         bind_image_preparation(&mut compiled, session.environment());
+        let (reasoning, provider_options) = protocol_request_options(
+            &compiled.provider,
+            compiled.protocol,
+            &compiled.capabilities,
+            session.reasoning_effort()?,
+        )?;
+        let request = agent_core::ModelRequestConfig {
+            tool_choice: ToolChoice::None,
+            generation: prepared.model.generation().clone(),
+            reasoning,
+            provider_options,
+        };
         Ok((
-            RuntimeContextCompactor::for_manual(compiled.model, session.current_system_prompt()?),
+            RuntimeContextCompactor::for_manual(
+                compiled.model,
+                session.current_system_prompt()?,
+                request,
+            ),
             prepared,
         ))
     }

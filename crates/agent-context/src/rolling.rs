@@ -1,20 +1,19 @@
 //! 同模型 Rolling Summary 的配置与策略实现。
 
-use agent_model::{
-    GenerationConfig, ModelCallContext, ModelError, ModelRequest, ProviderOptions,
-    collect_model_turn,
-};
+use agent_model::{ModelCallContext, ModelError, collect_model_turn};
 use agent_types::{
     AssistantMessage, AssistantPart, ContextInsertionPayload, ContextInsertionPlan,
-    ContextSummaryMessage, ConversationMessage, ConversationSnapshot, InternalContextPart,
-    MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    ContextSummaryMessage, ContextUsageAdjustment, ConversationMessage, ConversationSnapshot,
+    InternalContextPart, MessageId, PartId, ToolChoice, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     CompactionCandidate, CompactionError, CompactionFuture, CompactionInput, CompressionStrategy,
-    StrategyOutcome, StrategyReport, validate_replacement,
+    ReplacementEffectError, StrategyOutcome, StrategyReport, validate_replacement,
+    validate_replacement_effect,
 };
 
 /// 策略报告中的稳定名称。
@@ -97,7 +96,7 @@ impl CompressionStrategy for RollingSummarySameModel {
 
             let CompactionInput {
                 model,
-                system_prompt,
+                normal_request,
                 layout,
             } = input;
             let partition = layout.partition(policy.minimum_recent_user_turns());
@@ -116,22 +115,16 @@ impl CompressionStrategy for RollingSummarySameModel {
                 });
             }
 
-            let request = ModelRequest {
-                // 保持正常请求的 system prompt 不变，使 Provider 可以复用前缀缓存。
-                system: system_prompt,
-                conversation: build_compression_conversation(
-                    partition.protected_prefix(),
-                    partition.compressible_head(),
-                ),
-                tools: vec![],
-                tool_choice: ToolChoice::None,
-                generation: GenerationConfig {
-                    max_output_tokens: Some(policy.summary_output_tokens()),
-                    ..GenerationConfig::default()
-                },
-                reasoning: None,
-                provider_options: ProviderOptions::new(),
-            };
+            if !normal_request.tools.is_empty() && !model.capabilities().tool_choice.none {
+                return Err(CompactionError::UnsupportedToolSuppression);
+            }
+            let mut request = normal_request;
+            request
+                .conversation
+                .messages
+                .push(compression_instruction_message());
+            request.tool_choice = ToolChoice::None;
+            request.generation.max_output_tokens = Some(policy.summary_output_tokens());
             let message = collect_model_turn(
                 model.as_ref(),
                 request,
@@ -146,12 +139,15 @@ impl CompressionStrategy for RollingSummarySameModel {
             let summary_text = summary_text(&message)?;
             let replacement = build_replacement(
                 partition.protected_prefix(),
+                partition.compressible_head(),
                 partition.protected_tail(),
                 &message,
                 summary_text,
                 compacted_usage,
             );
             validate_replacement(&replacement)?;
+            validate_replacement_effect(&layout_snapshot(&layout), &replacement)
+                .map_err(map_replacement_effect_error)?;
 
             Ok(StrategyOutcome::Candidate(CompactionCandidate {
                 replacement,
@@ -167,18 +163,19 @@ impl CompressionStrategy for RollingSummarySameModel {
     }
 }
 
-fn build_compression_conversation(
-    protected_prefix: &[ConversationMessage],
-    compressible_head: &[crate::ContextBlock],
-) -> ConversationSnapshot {
-    let mut messages = protected_prefix.to_vec();
-    messages.extend(
-        compressible_head
-            .iter()
-            .flat_map(|block| block.messages().iter().cloned()),
-    );
-    messages.push(compression_instruction_message());
-    ConversationSnapshot::new(messages)
+fn map_replacement_effect_error(error: ReplacementEffectError) -> CompactionError {
+    match error {
+        ReplacementEffectError::Serialization => CompactionError::InvalidResponse {
+            message: "context snapshot could not be serialized for size validation".to_owned(),
+        },
+        ReplacementEffectError::Ineffective {
+            source_bytes,
+            replacement_bytes,
+        } => CompactionError::Ineffective {
+            source_bytes,
+            replacement_bytes,
+        },
+    }
 }
 
 fn compression_instruction_message() -> ConversationMessage {
@@ -244,11 +241,13 @@ fn summary_text(message: &AssistantMessage) -> Result<String, CompactionError> {
 
 fn build_replacement(
     protected_prefix: &[ConversationMessage],
+    compressible_head: &[crate::ContextBlock],
     protected_tail: &[crate::ContextBlock],
     message: &AssistantMessage,
     summary_text: String,
     compacted_usage: Option<agent_types::TokenUsage>,
 ) -> ConversationSnapshot {
+    let usage_adjustment = usage_adjustment(compressible_head, protected_tail);
     let mut messages = protected_prefix.to_vec();
     messages.push(ConversationMessage::ContextSummary(ContextSummaryMessage {
         id: message.id.clone(),
@@ -256,9 +255,74 @@ fn build_replacement(
         model: Some(message.model.clone()),
         usage: message.usage.clone(),
         compacted_usage,
+        usage_adjustment,
+        programmatic_context: None,
     }));
     messages.extend(
         protected_tail
+            .iter()
+            .flat_map(|block| block.messages().iter().cloned()),
+    );
+    ConversationSnapshot::new(messages)
+}
+
+fn usage_adjustment(
+    compressible_head: &[crate::ContextBlock],
+    protected_tail: &[crate::ContextBlock],
+) -> Option<ContextUsageAdjustment> {
+    let retained_assistant = protected_tail
+        .iter()
+        .flat_map(|block| block.messages())
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::Assistant(message) if message.usage.is_some() => Some(message),
+            _ => None,
+        });
+    let Some(retained_assistant) = retained_assistant else {
+        // replacement 中没有旧 Assistant usage 时无需做减法；保持 None 可让首个新响应
+        // 自然成为新的权威基数，同时压缩完成后的首次预检仍因无 Assistant 而 unavailable。
+        return None;
+    };
+
+    let subtract_total_tokens = compressible_head
+        .iter()
+        .flat_map(|block| block.messages())
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::Assistant(message) => {
+                message.usage.as_ref().map(|usage| usage.total_tokens)
+            }
+            _ => None,
+        });
+    if let Some(subtract_total_tokens) = subtract_total_tokens {
+        return Some(ContextUsageAdjustment::Subtract {
+            retained_assistant_id: retained_assistant.id.clone(),
+            subtract_total_tokens,
+        });
+    }
+
+    if let [block] = compressible_head
+        && let [ConversationMessage::ContextSummary(summary)] = block.messages()
+        && let Some(ContextUsageAdjustment::Subtract {
+            retained_assistant_id,
+            subtract_total_tokens,
+        }) = &summary.usage_adjustment
+        && retained_assistant_id == &retained_assistant.id
+    {
+        return Some(ContextUsageAdjustment::Subtract {
+            retained_assistant_id: retained_assistant_id.clone(),
+            subtract_total_tokens: *subtract_total_tokens,
+        });
+    }
+
+    Some(ContextUsageAdjustment::Unavailable)
+}
+
+fn layout_snapshot(layout: &crate::ContextLayout) -> ConversationSnapshot {
+    let mut messages = layout.protected_prefix().to_vec();
+    messages.extend(
+        layout
+            .blocks()
             .iter()
             .flat_map(|block| block.messages().iter().cloned()),
     );
@@ -331,13 +395,14 @@ mod tests {
     };
 
     use agent_model::{
-        ModelCapabilities, ModelEvent, ModelEventStream, ModelService, ModelStreamFuture,
+        ModelCapabilities, ModelEvent, ModelEventStream, ModelRequest, ModelService,
+        ModelStreamFuture, ReasoningConfig, ReasoningEffort, ToolChoiceCapabilities,
     };
     use agent_types::{
         AssistantPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
         ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,
-        ToolCallId, ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus,
-        UserMessage,
+        ToolCallId, ToolDefinition, ToolMessage, ToolName, ToolResult, ToolResultContent,
+        ToolResultStatus, UserMessage,
     };
 
     use super::*;
@@ -364,6 +429,11 @@ mod tests {
 
         fn take_requests(&self) -> Vec<ModelRequest> {
             std::mem::take(&mut self.requests.lock().expect("requests lock"))
+        }
+
+        fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+            self.capabilities = capabilities;
+            self
         }
     }
 
@@ -476,6 +546,36 @@ mod tests {
         assert_eq!(total.cached_input_tokens, None);
     }
 
+    #[test]
+    fn rolling_only_the_previous_summary_inherits_its_subtraction_boundary() {
+        let snapshot = ConversationSnapshot::new(vec![
+            ConversationMessage::ContextSummary(ContextSummaryMessage {
+                id: id("summary_old"),
+                text: "old".to_owned(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
+                usage_adjustment: Some(ContextUsageAdjustment::Subtract {
+                    retained_assistant_id: id("assistant_1"),
+                    subtract_total_tokens: 40,
+                }),
+                programmatic_context: None,
+            }),
+            user("user_1"),
+            assistant("assistant_1", Some(usage(80))),
+        ]);
+        let layout = crate::ContextLayout::build(&snapshot).expect("layout");
+        let partition = layout.partition(1);
+
+        assert_eq!(
+            usage_adjustment(partition.compressible_head(), partition.protected_tail()),
+            Some(ContextUsageAdjustment::Subtract {
+                retained_assistant_id: id("assistant_1"),
+                subtract_total_tokens: 40,
+            })
+        );
+    }
+
     fn message_events(message: &AssistantMessage) -> Vec<ModelEvent> {
         let mut events = vec![ModelEvent::TurnStarted {
             message_id: message.id.clone(),
@@ -538,10 +638,18 @@ mod tests {
     fn input(model: Arc<ScriptedModel>, snapshot: &ConversationSnapshot) -> CompactionInput {
         CompactionInput {
             model,
-            system_prompt: agent_model::SystemPromptSnapshot::new(vec![
-                "normal agent instruction".to_owned(),
-                "stable prefix".to_owned(),
-            ]),
+            normal_request: ModelRequest {
+                system: agent_model::SystemPromptSnapshot::new(vec![
+                    "normal agent instruction".to_owned(),
+                    "stable prefix".to_owned(),
+                ]),
+                conversation: snapshot.clone(),
+                tools: vec![],
+                tool_choice: ToolChoice::None,
+                generation: Default::default(),
+                reasoning: None,
+                provider_options: Default::default(),
+            },
             layout: crate::ContextLayout::build(snapshot).expect("valid layout"),
         }
     }
@@ -619,6 +727,11 @@ mod tests {
                         cached_input_tokens: Some(8),
                         reasoning_tokens: Some(4),
                     }),
+                    usage_adjustment: Some(ContextUsageAdjustment::Subtract {
+                        retained_assistant_id: id("assistant_3"),
+                        subtract_total_tokens: 30,
+                    }),
+                    programmatic_context: None,
                 }),
                 snapshot.messages[5].clone(),
                 snapshot.messages[6].clone(),
@@ -653,7 +766,7 @@ mod tests {
                 "stable prefix".to_owned(),
             ])
         );
-        let mut expected_conversation = snapshot.messages[..5].to_vec();
+        let mut expected_conversation = snapshot.messages.clone();
         expected_conversation.push(compression_instruction_message());
         assert_eq!(request.conversation.messages, expected_conversation);
         assert!(request.tools.is_empty());
@@ -737,6 +850,8 @@ mod tests {
                 model: None,
                 usage: None,
                 compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
             }),
             user("user_1"),
             ConversationMessage::Assistant(old_assistant),
@@ -785,7 +900,7 @@ mod tests {
             .validate_tool_exchange_pairs()
             .expect("tool exchanges remain paired");
         let requests = model.take_requests();
-        let mut expected_conversation = snapshot.messages[..3].to_vec();
+        let mut expected_conversation = snapshot.messages.clone();
         expected_conversation.push(compression_instruction_message());
         assert_eq!(requests[0].conversation.messages, expected_conversation);
     }
@@ -821,9 +936,17 @@ mod tests {
 
     #[tokio::test]
     async fn length_limited_summary_with_text_forms_a_candidate() {
+        let mut old_assistant = assistant("assistant_1", Some(usage(20)));
+        let ConversationMessage::Assistant(message) = &mut old_assistant else {
+            unreachable!("assistant helper always returns an assistant");
+        };
+        let AssistantPart::Text(part) = &mut message.parts[0] else {
+            unreachable!("assistant helper starts with text");
+        };
+        part.text = "old detail ".repeat(200);
         let snapshot = ConversationSnapshot::new(vec![
             user("user_1"),
-            assistant("assistant_1", Some(usage(20))),
+            old_assistant,
             user("user_2"),
             assistant("assistant_2", Some(usage(30))),
         ]);
@@ -846,6 +969,140 @@ mod tests {
                 .await,
             Ok(StrategyOutcome::Candidate(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn summary_that_does_not_reduce_snapshot_size_is_rejected() {
+        let snapshot = ConversationSnapshot::new(vec![
+            user("user_1"),
+            assistant("assistant_1", Some(usage(20))),
+            user("user_2"),
+            assistant("assistant_2", Some(usage(30))),
+        ]);
+        let summary = summary_message(
+            "summary_ineffective",
+            vec![AssistantPart::Text(TextPart {
+                id: part_id("summary_ineffective_text"),
+                text: "summary expansion ".repeat(100),
+            })],
+            FinishReason::Stop,
+        );
+        let model = Arc::new(ScriptedModel::new([Script::Events(message_events(
+            &summary,
+        ))]));
+        let strategy =
+            RollingSummarySameModel::new(RollingSummaryPolicy::new(256, 1).expect("valid policy"));
+
+        let error = strategy
+            .compact(input(model.clone(), &snapshot), CancellationToken::new())
+            .await
+            .expect_err("larger replacement must be rejected");
+        assert!(matches!(
+            error,
+            CompactionError::Ineffective {
+                source_bytes,
+                replacement_bytes,
+            } if replacement_bytes >= source_bytes
+        ));
+        assert_eq!(model.take_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compression_clones_the_normal_request_and_overrides_only_control_fields() {
+        let mut old_assistant = assistant("assistant_1", Some(usage(20)));
+        let ConversationMessage::Assistant(message) = &mut old_assistant else {
+            unreachable!();
+        };
+        let AssistantPart::Text(part) = &mut message.parts[0] else {
+            unreachable!();
+        };
+        part.text = "old detail ".repeat(200);
+        let snapshot = ConversationSnapshot::new(vec![
+            user("user_1"),
+            old_assistant,
+            user("user_2"),
+            assistant("assistant_2", Some(usage(30))),
+        ]);
+        let summary = summary_message(
+            "summary_options",
+            vec![AssistantPart::Text(TextPart {
+                id: part_id("summary_options_text"),
+                text: "short summary".to_owned(),
+            })],
+            FinishReason::Stop,
+        );
+        let capabilities = ModelCapabilities {
+            tool_calls: true,
+            tool_choice: ToolChoiceCapabilities::all(),
+            ..ModelCapabilities::default()
+        };
+        let model = Arc::new(
+            ScriptedModel::new([Script::Events(message_events(&summary))])
+                .with_capabilities(capabilities),
+        );
+        let mut compaction_input = input(model.clone(), &snapshot);
+        compaction_input.normal_request.tools = vec![ToolDefinition {
+            name: ToolName::new("lookup").expect("tool name"),
+            description: "lookup".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        compaction_input.normal_request.tool_choice = ToolChoice::Auto;
+        compaction_input.normal_request.generation.temperature = Some(0.3);
+        compaction_input.normal_request.generation.top_p = Some(0.8);
+        compaction_input.normal_request.generation.max_output_tokens = Some(99);
+        compaction_input.normal_request.generation.stop = vec!["STOP".to_owned()];
+        compaction_input.normal_request.reasoning = Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+        });
+        compaction_input
+            .normal_request
+            .provider_options
+            .insert("test", serde_json::json!({"mode": "strict"}))
+            .expect("provider options");
+        let mut expected = compaction_input.normal_request.clone();
+        expected
+            .conversation
+            .messages
+            .push(compression_instruction_message());
+        expected.tool_choice = ToolChoice::None;
+        expected.generation.max_output_tokens = Some(512);
+
+        let strategy =
+            RollingSummarySameModel::new(RollingSummaryPolicy::new(512, 1).expect("valid policy"));
+        assert!(matches!(
+            strategy
+                .compact(compaction_input, CancellationToken::new())
+                .await,
+            Ok(StrategyOutcome::Candidate(_))
+        ));
+        assert_eq!(model.take_requests(), vec![expected]);
+    }
+
+    #[tokio::test]
+    async fn compression_fails_before_model_call_when_tools_cannot_be_suppressed() {
+        let snapshot = ConversationSnapshot::new(vec![
+            user("user_1"),
+            assistant("assistant_1", Some(usage(20))),
+            user("user_2"),
+            assistant("assistant_2", Some(usage(30))),
+        ]);
+        let model = Arc::new(ScriptedModel::new([]));
+        let mut compaction_input = input(model.clone(), &snapshot);
+        compaction_input.normal_request.tools = vec![ToolDefinition {
+            name: ToolName::new("lookup").expect("tool name"),
+            description: "lookup".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let strategy =
+            RollingSummarySameModel::new(RollingSummaryPolicy::new(64, 1).expect("valid policy"));
+
+        assert_eq!(
+            strategy
+                .compact(compaction_input, CancellationToken::new())
+                .await,
+            Err(CompactionError::UnsupportedToolSuppression)
+        );
+        assert!(model.take_requests().is_empty());
     }
 
     #[tokio::test]

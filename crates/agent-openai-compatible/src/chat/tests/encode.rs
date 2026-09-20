@@ -449,6 +449,8 @@ fn encode_context_summary_uses_a_derived_system_message() {
         model: None,
         usage: None,
         compacted_usage: None,
+        usage_adjustment: None,
+        programmatic_context: Some("cwd=/workspace".to_owned()),
     });
 
     let mut req = request(vec![message]);
@@ -463,7 +465,7 @@ fn encode_context_summary_uses_a_derived_system_message() {
         json["messages"][0],
         json!({
             "role": "system",
-            "content": "base system\n\ndirectory system\n\n[Context summary derived from earlier conversation]\nThe user selected a local-first architecture."
+            "content": "base system\n\ndirectory system\n\n[Context summary derived from earlier conversation]\nThe user selected a local-first architecture.\n\nProgrammatically maintained context. This section is authoritative when it conflicts with prose:\ncwd=/workspace"
         })
     );
 }

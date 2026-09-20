@@ -134,6 +134,7 @@ pub use storage::{
     StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
     WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
     attachment_stable_view_path, execution_context_from_product_history,
-    merge_context_replacement_with_product_history, stored_model_catalog_is_valid,
-    validate_input_message, validate_input_message_with_channel_source,
+    merge_context_replacement_with_product_history, normalize_context_usage_adjustments,
+    stored_model_catalog_is_valid, validate_input_message,
+    validate_input_message_with_channel_source,
 };

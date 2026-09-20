@@ -38,9 +38,9 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentEvent, BudgetKind, CompactionReason, ContinuationReason, ExecutionConsumption,
-    ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome, ExecutionSpec,
-    event::AgentEventSender, guardrail::GuardrailState,
+    AgentEvent, BudgetKind, CompactionHandoff, CompactionReason, ContinuationReason,
+    ExecutionConsumption, ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome,
+    ExecutionSpec, event::AgentEventSender, guardrail::GuardrailState,
 };
 
 mod tool_batch;
@@ -125,10 +125,14 @@ impl Engine {
                 Ok(evaluation) => evaluation,
                 Err(error) => return self.fail(ExecutionError::ContextWindow(error)),
             };
-            if evaluation.decision == ContextWindowDecision::CompactionRequired {
-                return self.compaction_required(CompactionReason::ThresholdReached, next_step);
-            }
             let request = self.build_request();
+            if evaluation.decision == ContextWindowDecision::CompactionRequired {
+                return self.compaction_required(
+                    CompactionReason::ThresholdReached,
+                    next_step,
+                    request,
+                );
+            }
             self.steps += 1;
             self.events
                 .send(AgentEvent::StepStarted { step: next_step });
@@ -213,6 +217,7 @@ impl Engine {
     /// 取消经 `ModelCallContext` 传播给模型服务；本函数不 race，只在终态收敛点
     /// 检查令牌（服务契约保证取消后流以受控终态结束）。
     async fn stream_turn(&mut self, request: ModelRequest) -> TurnEnd {
+        let handoff_request = request.clone();
         let established = self
             .spec
             .model
@@ -221,7 +226,9 @@ impl Engine {
         let stream = match established {
             Ok(stream) => stream,
             // 建立前失败；已取消或 Cancelled 错误归取消收敛。
-            Err(error) => return TurnEnd::Terminal(self.model_failure(error).await),
+            Err(error) => {
+                return TurnEnd::Terminal(self.model_failure(error, handoff_request).await);
+            }
         };
         let mut stream = LifecycleValidator::new(stream);
         let mut latest_usage = None;
@@ -254,7 +261,9 @@ impl Engine {
                     return TurnEnd::Finished(message);
                 }
                 ModelEvent::TurnFailed { error } => {
-                    return TurnEnd::Terminal(self.model_failure(error).await);
+                    return TurnEnd::Terminal(
+                        self.model_failure(error, handoff_request.clone()).await,
+                    );
                 }
                 // TurnStarted、Part Started/Finished、ToolCall* 没有对应的
                 // AgentEvent，只在最终消息与契约校验中体现。
@@ -270,11 +279,19 @@ impl Engine {
     /// 模型失败收敛：执行令牌已取消或错误为 `ModelError::Cancelled` 时归
     /// `ExecutionCancelled`（此时没有已宣告的 Tool Call，收敛无需补记）；
     /// Provider Context Overflow 归压缩交接终态，其余归 `ExecutionFailed{Model}`。
-    async fn model_failure(&mut self, error: ModelError) -> ExecutionOutcome {
+    async fn model_failure(
+        &mut self,
+        error: ModelError,
+        handoff_request: ModelRequest,
+    ) -> ExecutionOutcome {
         if self.cancellation.is_cancelled() || matches!(error, ModelError::Cancelled) {
             self.cancelled()
         } else if matches!(error, ModelError::ContextOverflow { .. }) {
-            self.compaction_required(CompactionReason::ProviderOverflow, self.current_step())
+            self.compaction_required(
+                CompactionReason::ProviderOverflow,
+                self.current_step(),
+                handoff_request,
+            )
         } else {
             self.fail(ExecutionError::Model(error))
         }
@@ -303,7 +320,12 @@ impl Engine {
     }
 
     /// 收敛为上下文压缩交接终态；Core 不发起压缩，也不重试当前 Step。
-    fn compaction_required(&self, reason: CompactionReason, step: u32) -> ExecutionOutcome {
+    fn compaction_required(
+        &self,
+        reason: CompactionReason,
+        step: u32,
+        request: ModelRequest,
+    ) -> ExecutionOutcome {
         let consumption = self.consumption();
         self.events.send(AgentEvent::ExecutionCompactionRequired {
             reason,
@@ -315,6 +337,7 @@ impl Engine {
             reason,
             step,
             consumption,
+            handoff: Some(CompactionHandoff::new(request)),
         }
     }
 

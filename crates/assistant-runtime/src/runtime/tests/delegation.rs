@@ -509,7 +509,8 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
 }
 
 #[tokio::test]
-async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
+async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
+    let child_task = "Continue after a provider overflow with all prior details. ".repeat(80);
     let delegate_call = AssistantMessage {
         id: MessageId::new("parent-delegate-compact").expect("message id"),
         model: ModelIdentity::new(
@@ -521,7 +522,7 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
             name: ToolName::new("delegate_task").expect("tool name"),
             arguments: json!({
                 "title": "Long child task",
-                "task": "Continue after a provider overflow."
+                "task": child_task,
             }),
         })],
         finish_reason: FinishReason::ToolCalls,
@@ -534,13 +535,15 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
             "fixture-model",
         ),
         parts: vec![AssistantPart::ToolCall(ToolCall {
-            id: ToolCallId::new("child-probe-before-compact").expect("call id"),
-            name: ToolName::new("child_probe").expect("tool name"),
-            arguments: json!({"value": "before"}),
+            id: ToolCallId::new("child-load-skill-before-compact").expect("call id"),
+            name: ToolName::new("load_skill").expect("tool name"),
+            arguments: json!({"name": "review"}),
         })],
         finish_reason: FinishReason::ToolCalls,
         usage: None,
     };
+    let child_summary = assistant_text("child-compact-summary", "child history summarized");
+    let child_final = assistant_text("child-after-compact", "child completed");
     let parent_final = assistant_text("parent-after-child-compact", "parent completed");
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
@@ -551,25 +554,19 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
             ModelScript::FailEstablishment(ModelError::ContextOverflow {
                 message: "fixture overflow".to_owned(),
             }),
+            ModelScript::Events(message_events(&child_summary)),
+            ModelScript::Events(message_events(&child_final)),
             ModelScript::Events(message_events(&parent_final)),
         ],
     ));
-    let probe = ScriptedTool::succeed("child_probe", json!({"ok": true}), OrderLog::new());
-    let mut tools = ToolRegistry::new();
-    tools.register(probe).expect("register probe");
     let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
-    let runtime = AssistantRuntime::open(
-        delegation_runtime_config(),
-        Arc::new(MissingConfigSource),
-        Arc::new(StaticModelFactory::new(model.clone())),
-        Arc::new(StaticSystemPromptFactory),
-        static_run_tool_factory(tools.snapshot()),
-        Arc::new(TestChildWorkspaceFactory::default()),
+    let mut runtime = runtime_with_store_and_child_workspaces(
+        model.clone(),
         store.clone(),
-        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
     )
-    .await
-    .expect("runtime");
+    .await;
+    runtime.skill_package_source = Arc::new(super::sessions::StaticSkillPackageSource);
     runtime
         .config_registry
         .replace_document_for_test(TEST_CONFIG);
@@ -606,27 +603,48 @@ async fn child_single_turn_overflow_fails_without_intra_turn_compaction() {
     let child = recovered.child_tasks.first().expect("one child task");
     assert_eq!(
         child.status,
-        assistant_protocol::ChildTaskStatus::Failed,
+        assistant_protocol::ChildTaskStatus::Completed,
         "child error: {:?}",
         child.error
     );
-    assert!(matches!(
-        child.error.as_ref(),
-        Some(error) if error.code == assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
-    ));
-    assert_eq!(child.body_generation, 1);
+    assert!(child.error.is_none());
+    assert_eq!(child.body_generation, 2);
     let child_conversation = store
         .load_child_conversation(&session.session.session_id, &child.child_task_id)
         .await
         .expect("child conversation");
     assert!(
-        !child_conversation
+        child_conversation
             .messages
             .iter()
             .any(|message| matches!(message, ConversationMessage::ContextSummary(_)))
     );
     let requests = model.take_requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 6);
+    let overflow_request = &requests[2];
+    let summary_request = &requests[3];
+    assert!(
+        overflow_request
+            .tools
+            .iter()
+            .any(|definition| definition.name.as_str() == "load_skill")
+    );
+    assert_eq!(summary_request.system, overflow_request.system);
+    assert_eq!(summary_request.tools, overflow_request.tools);
+    assert_eq!(summary_request.reasoning, overflow_request.reasoning);
+    assert_eq!(
+        summary_request.provider_options,
+        overflow_request.provider_options
+    );
+    assert_eq!(summary_request.tool_choice, ToolChoice::None);
+    assert_eq!(
+        &summary_request.conversation.messages[..overflow_request.conversation.messages.len()],
+        overflow_request.conversation.messages.as_slice()
+    );
+    assert_eq!(
+        summary_request.conversation.messages.len(),
+        overflow_request.conversation.messages.len() + 1
+    );
 }
 
 #[tokio::test]

@@ -243,6 +243,317 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 }
 
 #[tokio::test]
+async fn fault_isomorphic_usage_is_subtracted_before_the_next_model_request() {
+    const CONTEXT_WINDOW: u64 = 256_000;
+    const HEAD_USAGE: u64 = 150_000;
+    const RETAINED_USAGE: u64 = 205_421;
+
+    let mut first = assistant_text_with_usage(
+        "fault-old-assistant",
+        &"old answer ".repeat(1_000),
+        HEAD_USAGE,
+    );
+    first.usage.as_mut().unwrap().cached_input_tokens = Some(140_000);
+    let mut tool_call = assistant_tool_call("fault-retained-assistant", "echo_tool");
+    tool_call.usage = Some(agent_types::TokenUsage {
+        input_tokens: RETAINED_USAGE - 421,
+        output_tokens: 421,
+        total_tokens: RETAINED_USAGE,
+        cached_input_tokens: Some(165_000),
+        reasoning_tokens: None,
+    });
+    let mut summary = assistant_text("fault-summary", "old turn summarized");
+    summary.usage = Some(agent_types::TokenUsage {
+        input_tokens: 206_000,
+        output_tokens: 200,
+        total_tokens: 206_200,
+        cached_input_tokens: Some(160_000),
+        reasoning_tokens: None,
+    });
+    let final_message = assistant_text_with_usage(
+        "fault-after-compaction",
+        "continued with new provider usage",
+        42_000,
+    );
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        CONTEXT_WINDOW,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::Events(message_events(&tool_call)),
+            ModelScript::Events(message_events(&summary)),
+            ModelScript::Events(message_events(&final_message)),
+        ],
+    ));
+    let tool = ScriptedTool::succeed("echo_tool", json!({"echo": "done"}), OrderLog::new());
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).unwrap();
+    let runtime = runtime_with_tools(model.clone(), tools.snapshot());
+    let mut parameters = model_fixture::parameters();
+    parameters.context_window_tokens = assistant_protocol::ModelTokenLimit::Known(
+        std::num::NonZeroU64::new(CONTEXT_WINDOW).unwrap(),
+    );
+    model_fixture::save_fixed(&runtime, "fixture", parameters).await;
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap();
+    let session_id = session.session.session_id;
+    set_auto_approval(&runtime, &session_id).await;
+
+    submit_completed_turn(&runtime, &session_id, &"old user context ".repeat(1_000)).await;
+    let mut events = runtime.subscribe_events();
+    let continued = submit_completed_turn(&runtime, &session_id, "use the tool and continue").await;
+    assert_eq!(tool.executed_inputs().len(), 1, "tool must not be replayed");
+
+    let history = runtime.store.load_conversation(&session_id).await.unwrap();
+    let summary_index = history
+        .messages
+        .iter()
+        .position(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+        .expect("one compaction boundary");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+            .count(),
+        1
+    );
+    let ConversationMessage::ContextSummary(stored_summary) = &history.messages[summary_index]
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        stored_summary.usage_adjustment,
+        Some(agent_types::ContextUsageAdjustment::Subtract {
+            retained_assistant_id: MessageId::new("fault-retained-assistant").unwrap(),
+            subtract_total_tokens: HEAD_USAGE,
+        })
+    );
+    assert!(history.messages.iter().any(|message| matches!(
+        message,
+        ConversationMessage::Assistant(assistant)
+            if assistant.id.as_str() == "fault-old-assistant"
+                && assistant.usage.as_ref().map(|usage| usage.total_tokens) == Some(HEAD_USAGE)
+    )));
+    assert!(history.messages.iter().any(|message| matches!(
+        message,
+        ConversationMessage::Tool(tool_message)
+            if tool_message.result.status == agent_types::ToolResultStatus::Success
+    )));
+    let effective = crate::execution_context_from_product_history(&history);
+    let effective_usage = agent_context::context_token_usage(&effective);
+    assert_eq!(effective_usage.completed_tokens, Some(42_000));
+    assert_eq!(effective_usage.pending_tokens, 0);
+
+    let requests = model.take_requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "one summary request and one resumed request"
+    );
+    let normal_tool_request = &requests[1];
+    let summary_request = &requests[2];
+    assert_eq!(summary_request.system, normal_tool_request.system);
+    assert_eq!(summary_request.tools, normal_tool_request.tools);
+    assert_eq!(summary_request.reasoning, normal_tool_request.reasoning);
+    assert_eq!(
+        summary_request.provider_options,
+        normal_tool_request.provider_options
+    );
+    assert_eq!(summary_request.tool_choice, ToolChoice::None);
+    let source_messages = history.messages[..summary_index]
+        .iter()
+        .chain(history.messages[summary_index + 1..].iter())
+        .take_while(|message| {
+            !matches!(
+                message,
+                ConversationMessage::Assistant(assistant)
+                    if assistant.id.as_str() == "fault-after-compaction"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &summary_request.conversation.messages[..source_messages.len()],
+        source_messages.as_slice()
+    );
+    assert_eq!(
+        summary_request.conversation.messages.len(),
+        source_messages.len() + 1
+    );
+    let resumed = requests.last().unwrap();
+    assert!(matches!(
+        resumed.conversation.messages.first(),
+        Some(ConversationMessage::ContextSummary(_))
+    ));
+
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(view.conversation_generation, 2);
+    assert_eq!(
+        runtime
+            .get_run(assistant_protocol::GetRunRequest {
+                session_id: session_id.clone(),
+                run_id: continued,
+            })
+            .await
+            .unwrap()
+            .run
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    let mut compacted = 0;
+    while let Ok(event) = events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::SessionCompactionFinished {
+                outcome: assistant_protocol::SessionCompactionFinishedOutcome::Compacted { .. },
+                ..
+            }
+        ) {
+            compacted += 1;
+        }
+    }
+    assert_eq!(
+        compacted, 1,
+        "old usage must not trigger a second compaction"
+    );
+}
+
+#[tokio::test]
+async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
+    let first = assistant_text_with_usage(
+        "bounded-old-assistant",
+        &"compressible old answer ".repeat(500),
+        1_000,
+    );
+    let mut tool_call = assistant_tool_call("bounded-tool-assistant", "large_result_tool");
+    tool_call.usage = Some(agent_types::TokenUsage {
+        input_tokens: 1_400,
+        output_tokens: 100,
+        total_tokens: 1_500,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+    });
+    let first_summary = assistant_text("bounded-summary-one", &"summary ".repeat(50));
+    let second_summary = assistant_text("bounded-summary-two", "short summary");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::Events(message_events(&tool_call)),
+            ModelScript::Events(message_events(&first_summary)),
+            ModelScript::Events(message_events(&second_summary)),
+        ],
+    ));
+    let tool = ScriptedTool::succeed(
+        "large_result_tool",
+        json!({"payload": "x".repeat(30_000)}),
+        OrderLog::new(),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).unwrap();
+    let runtime = runtime_with_tools(model.clone(), tools.snapshot());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session_id).await;
+    submit_completed_turn(&runtime, &session_id, &"compressible old user ".repeat(500)).await;
+    let mut events = runtime.subscribe_events();
+
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: "produce one large protected tool result".to_owned(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let terminal = wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Failed);
+    let error = terminal.error.expect("bounded compaction failure");
+    assert_eq!(
+        error.code,
+        assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
+    );
+    assert!(error.message.contains("recovery limit reached"));
+    assert_eq!(tool.executed_inputs().len(), 1, "tool must not be replayed");
+    assert_eq!(model.take_requests().len(), 4);
+
+    let history = runtime.store.load_conversation(&session_id).await.unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+            .count(),
+        2,
+        "both successful recovery generations remain in product history"
+    );
+    assert!(history.messages.iter().any(|message| matches!(
+        message,
+        ConversationMessage::Tool(tool_message)
+            if tool_message
+                .result
+                .content
+                .as_single_json()
+                .and_then(|value| value.get("payload"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|payload| payload.len() == 30_000)
+    )));
+    let effective = crate::execution_context_from_product_history(&history);
+    assert_eq!(
+        effective
+            .messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+            .count(),
+        1,
+        "execution context starts at only the latest summary"
+    );
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(view.conversation_generation, 3);
+    let mut completed_compactions = 0;
+    while let Ok(event) = events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::SessionCompactionFinished {
+                outcome: assistant_protocol::SessionCompactionFinishedOutcome::Compacted { .. },
+                ..
+            }
+        ) {
+            completed_compactions += 1;
+        }
+    }
+    assert_eq!(completed_compactions, 2);
+}
+
+#[tokio::test]
 async fn provider_overflow_continuation_advances_the_same_run_step() {
     let first = assistant_text("assistant-before-overflow", "prior answer");
     let summary = assistant_text("summary-after-overflow", "prior turn summarized");

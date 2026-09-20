@@ -44,7 +44,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   该 Tool Call，不伪造规范 `ReasoningPart`；后续回放由 DeepSeek Chat 方言编码器
   补入仅用于 wire 的 reasoning 占位字段。该兼容逻辑不得进入 Core、UI 或
   Journal，也不得应用到不接受 `reasoning_content` 的其他 Chat 方言。
-- Context Summary 编码为带固定派生说明的 system message。
+- Context Summary 通过 `agent-types` 的统一 renderer 编码为带固定派生说明的 system message；存在
+  `programmatic_context` 时必须按稳定格式附在摘要正文后，Chat 与 Responses 不得各自拼装不同文本。
 - User Message 的 `Text`、旧 `Injected`、新 `InternalContext` 和 `FileReferences` 按规范 Part 顺序编码为
   原生 text content parts；File References 使用确定 XML 文本格式并转义 name/path，
   不伪造 Tool Call、Tool Result 或已读取文件的事实。

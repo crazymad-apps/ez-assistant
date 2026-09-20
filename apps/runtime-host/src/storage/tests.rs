@@ -17,12 +17,12 @@ use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry,
 use agent_model::SystemPromptSnapshot;
 use agent_types::InternalContextPart;
 use agent_types::{
-    AssistantMessage, AssistantPart, ContextSummaryMessage, ConversationMessage,
-    ConversationSnapshot, FileReference, FileReferencesPart, FinishReason, MessageId,
-    ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart, TextPart,
-    TokenUsage, ToolCall, ToolCallId, ToolImageReference, ToolMessage, ToolName, ToolResult,
-    ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility, UserMessage,
-    UserMessageOrigin, UserPart,
+    AssistantMessage, AssistantPart, ContextSummaryMessage, ContextUsageAdjustment,
+    ConversationMessage, ConversationSnapshot, FileReference, FileReferencesPart, FinishReason,
+    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, ReasoningPart,
+    TextPart, TokenUsage, ToolCall, ToolCallId, ToolImageReference, ToolMessage, ToolName,
+    ToolResult, ToolResultContent, ToolResultPart, ToolResultStatus, TranscriptVisibility,
+    UserMessage, UserMessageOrigin, UserPart,
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner, DeviceId,
@@ -1312,6 +1312,8 @@ fn context_summary(value: &str, text: &str) -> ConversationMessage {
         model: None,
         usage: None,
         compacted_usage: None,
+        usage_adjustment: None,
+        programmatic_context: None,
     })
 }
 
@@ -7155,7 +7157,22 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
         "context through the second turn",
     )];
     second_replacement_messages.extend_from_slice(&before_second.messages[5..]);
-    let second_replacement = ConversationSnapshot::new(second_replacement_messages);
+    let mut second_replacement = ConversationSnapshot::new(second_replacement_messages);
+    let ConversationMessage::ContextSummary(summary) = &mut second_replacement.messages[0] else {
+        unreachable!("replacement starts with context summary")
+    };
+    summary.compacted_usage = Some(TokenUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+        cached_input_tokens: Some(40),
+        reasoning_tokens: Some(5),
+    });
+    summary.usage_adjustment = Some(ContextUsageAdjustment::Unavailable);
+    summary.programmatic_context = Some(
+        r#"{"kind":"pinned_memory_delta","version":1,"upserts":[],"deleted_ids":["memory-old"]}"#
+            .to_owned(),
+    );
     let second_committed = engine
         .replace_context(ContextReplacement {
             target: ContextReplacementTarget::Run {
@@ -7186,12 +7203,29 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
     let mut reopened = open_engine(&root);
     let recovered = reopened.load_runtime().expect("recover compacted runtime");
     assert_eq!(recovered.sessions[0].message_count, 8);
+    let reopened_history = reopened
+        .load_conversation(&session_id("s-compact-run"))
+        .expect("conversation after restart");
+    assert_eq!(reopened_history, final_history);
+    let reopened_context =
+        assistant_runtime::execution_context_from_product_history(&reopened_history);
+    let ConversationMessage::ContextSummary(reopened_summary) = &reopened_context.messages[0]
+    else {
+        unreachable!("reopened context starts with summary")
+    };
     assert_eq!(
-        reopened
-            .load_conversation(&session_id("s-compact-run"))
-            .expect("conversation after restart"),
-        final_history
+        reopened_summary
+            .compacted_usage
+            .as_ref()
+            .unwrap()
+            .total_tokens,
+        120
     );
+    assert_eq!(
+        reopened_summary.usage_adjustment,
+        Some(ContextUsageAdjustment::Unavailable)
+    );
+    assert!(reopened_summary.programmatic_context.is_some());
     let latest_page = reopened
         .load_conversation_window(ConversationWindowRequest {
             owner: ConversationOwner::MainSession {
