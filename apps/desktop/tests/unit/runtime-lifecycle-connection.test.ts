@@ -11,7 +11,10 @@ const transport = vi.hoisted(() => ({ command: vi.fn(), events: vi.fn(), ready: 
 vi.mock("../../src/native-bridge/runtimeBootstrap", () => ({ bootstrapRuntime: transport.bootstrap }));
 vi.mock("../../src/native-bridge/runtimeConnection", () => ({ refreshRuntimeConnection: transport.refresh }));
 vi.mock("../../src/runtime-client/RuntimeClient", () => ({
-  RuntimeClientError: class extends Error {},
+  RuntimeClientError: class extends Error {
+    readonly code: string;
+    constructor(code: string, message: string) { super(message); this.code = code; }
+  },
   RuntimeClient: class {
     instance_id: string; address: string; capabilities: RuntimeBootstrap["capabilities"];
     constructor(bootstrap: RuntimeBootstrap) { this.instance_id = bootstrap.instance_id; this.address = bootstrap.base_url; this.capabilities = bootstrap.capabilities; }
@@ -111,6 +114,40 @@ describe("selected Runtime lifecycle", () => {
     await vi.waitFor(() => expect(transport.command).toHaveBeenCalled());
     coordinator.dispose(); resolve(result("late-initial")); await connecting;
     expect(projection.application).toBeNull();
+  });
+
+  it("rejects a session response whose reliable conversation belongs to another session", async () => {
+    const { coordinator, connection, navigation, projection } = create();
+    await coordinator.connect(bootstrap("http://a"));
+    navigation.selectSession("session-1", false);
+    transport.command.mockImplementation(async (address: string, command: { type: string }) => {
+      if (command.type === "get_session_view") {
+        return {
+          type: "get_session_view",
+          payload: {
+            snapshot: {
+              observed_sequence: 1,
+              value: {
+                session: { session_id: "session-1" },
+                conversation: {
+                  owner: { type: "main_session", session_id: "session-2" },
+                  generation: 1,
+                  items: [],
+                  previous_cursor: null,
+                  has_more: false,
+                },
+              },
+            },
+          },
+        };
+      }
+      return result(address);
+    });
+
+    await coordinator.loadSession("session-1");
+
+    expect(connection.state).toBe("disconnected");
+    expect(projection.conversation_histories.has("session-1")).toBe(false);
   });
 });
 

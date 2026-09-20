@@ -40,6 +40,9 @@ export class RuntimeProjectionStore {
     { deep: false },
   );
   #application_snapshot_sequence = 0;
+  // 复用 Runtime 已有事件水位，只隔离同一 owner 的并发读取返回顺序，不建立新的协议 revision。
+  #session_snapshot_sequences = new Map<SessionId, number>();
+  #child_snapshot_sequences = new Map<ChildTaskId, number>();
   observed_sequence = 0;
   is_stale = true;
 
@@ -91,16 +94,35 @@ export class RuntimeProjectionStore {
     this.application = { ...application, [key]: [...merged.values()], [offset_key]: next_offset };
   }
 
-  applySessionSnapshot(snapshot: ObservedSnapshot<SessionViewSnapshot>): void {
+  applySessionSnapshot(snapshot: ObservedSnapshot<SessionViewSnapshot>): boolean {
     const session_id = snapshot.value.session.session_id;
+    if (!isMainOwner(snapshot.value.conversation.owner, session_id)) {
+      return false;
+    }
+    const previous_sequence = this.#session_snapshot_sequences.get(session_id);
+    if (previous_sequence !== undefined && snapshot.observed_sequence < previous_sequence) {
+      return false;
+    }
+    this.#session_snapshot_sequences.set(session_id, snapshot.observed_sequence);
     this.session_views.set(session_id, snapshot.value);
     this.#applyLatestConversationPage(session_id, snapshot.value.conversation);
+    return true;
   }
 
-  applyChildTaskSnapshot(snapshot: ObservedSnapshot<ChildTaskViewSnapshot>): void {
+  applyChildTaskSnapshot(snapshot: ObservedSnapshot<ChildTaskViewSnapshot>): boolean {
+    const session_id = snapshot.value.task.task.session_id;
     const child_task_id = snapshot.value.task.task.child_task_id;
+    if (!isChildOwner(snapshot.value.conversation.owner, session_id, child_task_id)) {
+      return false;
+    }
+    const previous_sequence = this.#child_snapshot_sequences.get(child_task_id);
+    if (previous_sequence !== undefined && snapshot.observed_sequence < previous_sequence) {
+      return false;
+    }
+    this.#child_snapshot_sequences.set(child_task_id, snapshot.observed_sequence);
     this.child_task_views.set(child_task_id, snapshot.value);
     this.#applyLatestChildConversationPage(child_task_id, snapshot.value.conversation);
+    return true;
   }
 
   beginLoadingPrevious(session_id: SessionId): boolean {
@@ -219,6 +241,8 @@ export class RuntimeProjectionStore {
   resetForInstance(): void {
     this.application = null;
     this.#application_snapshot_sequence = 0;
+    this.#session_snapshot_sequences.clear();
+    this.#child_snapshot_sequences.clear();
     this.session_views.clear();
     this.conversation_histories.clear();
     this.child_task_views.clear();
@@ -229,18 +253,21 @@ export class RuntimeProjectionStore {
 
   #applyLatestConversationPage(session_id: SessionId, page: ConversationPage): void {
     const current = this.conversation_histories.get(session_id);
-    if (!current) {
-      this.conversation_histories.set(session_id, historyFromPage(page));
-      return;
-    }
-    if (current.generation !== page.generation) {
+    if (!current
+      || current.generation !== page.generation
+      || !isMainOwner(current.owner, session_id)) {
       this.conversation_histories.set(session_id, historyFromPage(page));
       return;
     }
     const first_latest_id = page.items[0] ? conversationItemId(page.items[0]) : null;
     const retained_previous = first_latest_id
       ? current.items.some((item) => conversationItemId(item) === first_latest_id)
-      : current.items.length > 0;
+      : current.items.length === 0;
+    // 最新页与缓存没有连续边界时，服务端页是唯一权威事实；做并集会把失配 owner 或过期页永久留在列表头部。
+    if (!retained_previous) {
+      this.conversation_histories.set(session_id, historyFromPage(page));
+      return;
+    }
     this.conversation_histories.set(session_id, {
       owner: page.owner,
       generation: page.generation,
@@ -254,14 +281,22 @@ export class RuntimeProjectionStore {
 
   #applyLatestChildConversationPage(child_task_id: ChildTaskId, page: ConversationPage): void {
     const current = this.child_conversation_histories.get(child_task_id);
-    if (!current || current.generation !== page.generation) {
+    if (!current
+      || current.generation !== page.generation
+      || current.owner.type !== "child_task"
+      || current.owner.session_id !== page.owner.session_id
+      || current.owner.child_task_id !== child_task_id) {
       this.child_conversation_histories.set(child_task_id, historyFromPage(page));
       return;
     }
     const first_latest_id = page.items[0] ? conversationItemId(page.items[0]) : null;
     const retained_previous = first_latest_id
       ? current.items.some((item) => conversationItemId(item) === first_latest_id)
-      : current.items.length > 0;
+      : current.items.length === 0;
+    if (!retained_previous) {
+      this.child_conversation_histories.set(child_task_id, historyFromPage(page));
+      return;
+    }
     this.child_conversation_histories.set(child_task_id, {
       owner: page.owner,
       generation: page.generation,
@@ -288,6 +323,16 @@ function historyFromPage(page: ConversationPage): ConversationHistoryProjection 
 
 function isMainOwner(owner: ConversationOwner, session_id: SessionId): boolean {
   return owner.type === "main_session" && owner.session_id === session_id;
+}
+
+function isChildOwner(
+  owner: ConversationOwner,
+  session_id: SessionId,
+  child_task_id: ChildTaskId,
+): boolean {
+  return owner.type === "child_task"
+    && owner.session_id === session_id
+    && owner.child_task_id === child_task_id;
 }
 
 export function conversationItemId(item: ConversationItem): string {

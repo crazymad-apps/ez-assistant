@@ -187,6 +187,14 @@ export class RuntimeLifecycleCoordinator {
       ) {
         return;
       }
+      const snapshot = result.payload.snapshot.value;
+      if (
+        snapshot.session.session_id !== session_id
+        || snapshot.conversation.owner.type !== "main_session"
+        || snapshot.conversation.owner.session_id !== session_id
+      ) {
+        throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了归属不匹配的会话快照。");
+      }
       runInAction(() => this.#applySessionResult(result.payload));
       const child_task_id = this.dependencies.navigation.selected_child_task_id;
       if (child_task_id) {
@@ -226,6 +234,16 @@ export class RuntimeLifecycleCoordinator {
         || this.dependencies.navigation.selected_child_task_id !== child_task_id
       ) {
         return;
+      }
+      const snapshot = result.payload.snapshot.value;
+      if (
+        snapshot.task.task.session_id !== session_id
+        || snapshot.task.task.child_task_id !== child_task_id
+        || snapshot.conversation.owner.type !== "child_task"
+        || snapshot.conversation.owner.session_id !== session_id
+        || snapshot.conversation.owner.child_task_id !== child_task_id
+      ) {
+        throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了归属不匹配的子任务快照。");
       }
       runInAction(() => this.#applyChildTaskResult(result.payload));
     } catch (error: unknown) {
@@ -381,13 +399,15 @@ export class RuntimeLifecycleCoordinator {
   }
 
   #applySessionResult(result: GetSessionViewResult): void {
-    this.dependencies.projection.applySessionSnapshot(result.snapshot);
-    this.dependencies.live_execution.reconcileSession(result.snapshot.value);
+    if (this.dependencies.projection.applySessionSnapshot(result.snapshot)) {
+      this.dependencies.live_execution.reconcileSession(result.snapshot.value);
+    }
   }
 
   #applyChildTaskResult(result: GetChildTaskViewResult): void {
-    this.dependencies.projection.applyChildTaskSnapshot(result.snapshot);
-    this.dependencies.live_execution.reconcileChildTask(result.snapshot.value);
+    if (this.dependencies.projection.applyChildTaskSnapshot(result.snapshot)) {
+      this.dependencies.live_execution.reconcileChildTask(result.snapshot.value);
+    }
   }
 
   #applyEvent(envelope: RuntimeEventEnvelope): void {

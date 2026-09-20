@@ -107,6 +107,77 @@ describe("RuntimeProjectionStore", () => {
     expect(history?.items.map(conversationItemId)).toEqual(["new-message"]);
   });
 
+  it("rejects a session snapshot whose conversation belongs to another session", () => {
+    const store = new RuntimeProjectionStore();
+    const mismatched = sessionView({
+      ...page(1, [assistant("foreign-message")], null, false),
+      owner: { type: "main_session", session_id: "session-2" },
+    });
+
+    expect(store.applySessionSnapshot({ observed_sequence: 4, value: mismatched })).toBe(false);
+    expect(store.session_views.has("session-1")).toBe(false);
+    expect(store.conversation_histories.has("session-1")).toBe(false);
+  });
+
+  it("ignores an older session snapshot that finishes after a newer snapshot", () => {
+    const store = new RuntimeProjectionStore();
+    expect(store.applySessionSnapshot({
+      observed_sequence: 8,
+      value: sessionView(page(1, [assistant("newer-message")], null, false)),
+    })).toBe(true);
+
+    expect(store.applySessionSnapshot({
+      observed_sequence: 7,
+      value: sessionView(page(1, [assistant("late-old-message")], null, false)),
+    })).toBe(false);
+    expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual([
+      "newer-message",
+    ]);
+  });
+
+  it("replaces a same-generation latest page when it has no continuous cached boundary", () => {
+    const store = new RuntimeProjectionStore();
+    store.applySessionSnapshot({
+      observed_sequence: 4,
+      value: sessionView(page(1, [assistant("unrelated-cached-message")], null, false)),
+    });
+
+    store.applySessionSnapshot({
+      observed_sequence: 5,
+      value: sessionView(page(1, [assistant("authoritative-message")], "server-cursor", true)),
+    });
+
+    const history = store.conversation_histories.get("session-1");
+    expect(history?.items.map(conversationItemId)).toEqual(["authoritative-message"]);
+    expect(history?.previous_cursor).toBe("server-cursor");
+    expect(history?.has_more).toBe(true);
+  });
+
+  it("retains loaded previous pages when a same-generation latest page overlaps", () => {
+    const store = new RuntimeProjectionStore();
+    store.applySessionSnapshot({
+      observed_sequence: 4,
+      value: sessionView(page(1, [assistant("message-3"), assistant("message-4")], "cursor-2", true)),
+    });
+    expect(store.applyPreviousConversationPage("session-1", {
+      observed_sequence: 5,
+      value: page(1, [assistant("message-1"), assistant("message-2"), assistant("message-3")], null, false),
+    })).toBe(true);
+
+    store.applySessionSnapshot({
+      observed_sequence: 6,
+      value: sessionView(page(1, [assistant("message-3"), assistant("message-4"), assistant("message-5")], "cursor-2", true)),
+    });
+
+    expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual([
+      "message-1",
+      "message-2",
+      "message-3",
+      "message-4",
+      "message-5",
+    ]);
+  });
+
   it("uses the server page as authority after a compacted generation change", () => {
     const store = new RuntimeProjectionStore();
     store.applySessionSnapshot({
