@@ -1,0 +1,66 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  color: #26303c;
+  background: #eff4fa;
+  --ez-font-small: 12px;
+  --ez-font-base: 14px;
+  --ez-font-large: 16px;
+  --ez-canvas: #eff4fa;
+  --ez-card: #ffffff;
+  --ez-ink: #26303c;
+  --ez-ink-soft: #3f4a5f;
+  --ez-text-secondary: #687389;
+  --ez-border: #e3e9f1;
+  --ez-border-strong: #cdd6e2;
+  --ez-primary: #2e81d8;
+  --ez-primary-strong: #1f6fc5;
+  --ez-primary-soft: #edf3fd;
+  --ez-success: #3fa66a;
+  --ez-success-soft: #e9f6ef;
+  --ez-danger: #d64545;
+  --ez-header-height: 48px;
+  --ez-sidebar-width: 200px;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 360px;
+  font-size: var(--ez-font-base);
+}
+button,
+input {
+  font: inherit;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+h1,
+h2,
+h3 {
+  font-size: var(--ez-font-large);
+  font-weight: 600;
+}
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--ez-primary);
+  outline-offset: 3px;
+}
+::selection {
+  color: #fff;
+  background: var(--ez-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

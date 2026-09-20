@@ -1,0 +1,28 @@
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.avatar {
+  flex-shrink: 0;
+  border-radius: 6px;
+  color: var(--ez-primary-strong);
+  background: var(--ez-primary-soft);
+  font-weight: 600;
+}
+.names {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.names strong {
+  color: var(--ez-ink);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.names span {
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  overflow-wrap: anywhere;
+}

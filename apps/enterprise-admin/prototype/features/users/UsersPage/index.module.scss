@@ -1,0 +1,29 @@
+/* 页面占满内容区，卡片内部管理滚动：筛选与卡片头固定，表格体滚动。 */
+.page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+.list_card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.list_card :global(.ant-card-body) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.count { margin-left: 8px; color: var(--ez-text-secondary); font-size: var(--ez-font-small); font-weight: 400; }
+
+/* 筛选行：label 与输入控件同行排列。 */
+.filters {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 16px;
+}
+.search { width: 260px; }
+.filter_label { color: var(--ez-text-secondary); white-space: nowrap; }
+.select { width: 104px; }
+
+.list_body { flex: 1; min-height: 0; }
+
+.disabled_row { color: #8a94a6; background: #fafbfc; }
+.disabled_row strong { color: #687389; }
+
+@media (max-width: 720px) {
+  .search { width: 100%; }
+}

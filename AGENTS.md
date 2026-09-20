@@ -61,7 +61,9 @@
 
 | 改动范围 | 语言规范 | 模块约束 |
 | --- | --- | --- |
+| `apps/enterprise-center/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md)（TypeScript 通用部分） | [`enterprise-center.md`](docs/modules/enterprise-center.md) |
 | `apps/client/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`client.md`](docs/modules/client.md) |
+| `apps/enterprise-admin/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`enterprise-admin.md`](docs/modules/enterprise-admin.md) |
 | `apps/desktop/src/**` | [`前端编程规范.md`](docs/specs/前端编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/desktop/src-tauri/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`desktop.md`](docs/modules/desktop.md) |
 | `apps/runtime-host/**` | [`Rust编程规范.md`](docs/specs/Rust编程规范.md) | [`runtime-host.md`](docs/modules/runtime-host.md) |
@@ -177,7 +179,14 @@ npm run tauri -- build --no-bundle
 ## 六、开发流程与 Git
 
 - 项目以版本为开发主线，遵循“功能设计 → 技术方案与界面交互设计指导（按需）→ 开发计划 → 分里程碑实现与验证 → 版本验收 → 版本归档”主流程；单个事项先归入当前版本，不机械创建独立需求流程。具体遵循 [`开发流程规范.md`](docs/specs/开发流程规范.md)。
+- 简单版本默认一个实现循环，版本功能设计同时承担总体方向，循环验收与版本验收合并，不重复建阶段文档。
+  复杂版本按高内聚、低耦合和独立验收边界判断是否拆成多个实现循环，循环数量不影响发布版本号。
+  多循环版本必须先确认唯一的版本级《总体设计》，
+  各实现循环只能细化而不得偏离该方向基线。每个实现循环独立完成设计、计划、里程碑实现、实现循环验收、
+  提交门禁和阶段归档；后续实现循环不得静默改写已归档边界。所有实现循环完成后仍必须执行跨循环
+  版本验收，只在整体验收通过后对外发布。
 - 每个版本里程碑完成实现与验证后必须停止并向用户汇报；只有获得用户明确确认，才能进入下一里程碑。版本计划确认不等于后续里程碑自动获批。
+- 验证仍按核心风险执行，但验证记录与验证数据不属于流程交付物；不单独创建验证报告，不把命令输出、用例数量、数据库计数或快照堆入流程文档。计划/进度只保留完成结论、用户确认、未完成项及必要风险。数据库操作安全与实际结果汇报要求保持不变。
 - `docs/开发进度.md` 是按当前版本和里程碑组织的本地恢复文件与过程记录，已被 Git 忽略；版本归档时随版本移入归档目录一并提交；共享事实写入功能设计、开发计划、版本台账、归档或重要决策记录。
 - 不主动执行 `git commit` 或 `git push`。用户明确要求提交准备时，只检查改动、暂存指定文件并草拟 commit message。
 - 保留用户已有改动；不要重置、覆盖或顺手清理与当前任务无关的工作树内容。

@@ -1,0 +1,6 @@
+/* 弹窗内排版：标题行与元信息间距。 */
+.title { display: inline-flex; align-items: center; gap: 10px; }
+.meta { margin-bottom: 16px; }
+.role_options { display: flex; gap: 10px; flex-wrap: wrap; }
+.hint { font-size: var(--ez-font-small); color: var(--ez-text-secondary); line-height: 1.8; }
+.alert { margin-bottom: 16px; }

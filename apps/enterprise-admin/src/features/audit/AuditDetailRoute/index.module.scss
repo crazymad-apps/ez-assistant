@@ -1,0 +1,12 @@
+/* 从原型审计页迁出的原有详情布局，独立路由不改变尺寸与滚动所有者。 */
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.detail {
+  max-width: 760px;
+  overflow: auto;
+}

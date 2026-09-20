@@ -1,0 +1,49 @@
+{
+  "name": "@ez-assistant/enterprise-admin",
+  "version": "0.1.0",
+  "private": true,
+  "overrides": {
+    "js-yaml": "4.3.2"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.app.config.ts --host 127.0.0.1 --port 7310 --strictPort",
+    "preview": "vite preview --config vite.app.config.ts --host 127.0.0.1 --port 7310 --strictPort",
+    "genapi": "node genapi.js",
+    "genapi:check": "node genapi.js --check",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build": "npm run genapi:check && npm run typecheck && vite build --config vite.app.config.ts",
+    "test": "vitest run tests/unit",
+    "dev:prototype": "vite --host 127.0.0.1 --port 7310 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "build:prototype": "npm run typecheck && vite build",
+    "preview:prototype": "vite preview --host 127.0.0.1 --port 7310 --strictPort",
+    "lint": "npm run format:check && oxlint src --ignore-pattern src/request/openapi && oxlint prototype tests *.ts *.js",
+    "test:prototype": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "6.3.4",
+    "antd": "6.6.4",
+    "axios": "1.20.0",
+    "dayjs": "1.11.23",
+    "mobx": "6.13.7",
+    "mobx-react-lite": "4.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router": "8.4.0"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "@types/node": "24.0.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "oxlint": "1.78.0",
+    "prettier": "3.9.8",
+    "sass": "1.102.0",
+    "typescript": "6.0.3",
+    "vite": "8.2.1",
+    "vitest": "5.0.1"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "name": "@ez-assistant/enterprise-center",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "node --watch-path=src --watch-path=tsconfig.json --watch-path=.env --watch-path=package.json --watch-preserve-output scripts/dev.mjs --api-only",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
+    "prebuild": "node scripts/clean.mjs",
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "lint": "oxlint src tests scripts",
+    "test": "npm run build && vitest run tests/unit",
+    "test:integration": "npm run build && vitest run tests/integration --maxWorkers=1 --no-file-parallelism --bail=1",
+    "start": "node dist/main.js",
+    "start:api": "node dist/main.js --api-only",
+    "assemble": "node scripts/assemble.mjs",
+    "build:bundle": "npm --prefix ../enterprise-admin run build && npm run build && npm run assemble",
+    "db:check": "node dist/database/cli.js check",
+    "db:upgrade": "node dist/database/cli.js upgrade",
+    "openapi:export": "npm run build && node scripts/openapi.mjs export",
+    "openapi:check": "npm run build && node scripts/openapi.mjs check"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.4",
+    "@nestjs/common": "12.0.3",
+    "@nestjs/core": "12.0.3",
+    "@nestjs/platform-fastify": "12.0.3",
+    "@nestjs/swagger": "12.0.1",
+    "fastify": "5.12.4",
+    "node-pg-migrate": "9.0.0",
+    "pg": "8.23.0",
+    "reflect-metadata": "0.2.2",
+    "typeorm": "1.1.1",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.0",
+    "@types/pg": "8.15.5",
+    "oxlint": "1.78.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}

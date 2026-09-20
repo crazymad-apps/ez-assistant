@@ -1,0 +1,1025 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/info": {
+      "get": {
+        "operationId": "getCenterInfo",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "请求失败，返回脱敏原因码与请求标识",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "查询中心软件与协议兼容信息",
+        "tags": [
+          "center"
+        ]
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "统一登录，返回内存 Token 和关联 LLM key；无 Cookie 操作",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "getCurrentIdentity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "查询本人和中心身份，不重复返回凭据",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "tokenBearer": []
+          }
+        ],
+        "summary": "仅废弃当前 Token 和关联 key；缺失/无效/重复退出均成功；请求体为 {}",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/auth/password": {
+      "post": {
+        "operationId": "changeOwnPassword",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "验证原密码并修改本人密码，撤销本人全部 Token；不是管理重置",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/users": {
+      "get": {
+        "operationId": "listUsers",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          },
+          {
+            "name": "search",
+            "required": false,
+            "in": "query",
+            "description": "账号或显示名称的字面子串，不解释 SQL 通配符",
+            "schema": {
+              "maxLength": 64,
+              "type": "string"
+            }
+          },
+          {
+            "name": "role",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "user",
+                "admin"
+              ]
+            }
+          },
+          {
+            "name": "enabled",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员查询用户，按创建时间/ID 升序分页",
+        "tags": [
+          "users"
+        ]
+      },
+      "post": {
+        "operationId": "createUser",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRecord"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "创建普通用户或管理员，不允许传入超级管理员标记",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/{id}": {
+      "patch": {
+        "description": "带超级管理员标记的用户禁止停用或降权；角色/启用状态实际改变后撤销目标全部 Token。相同值不重复写入或审计。",
+        "operationId": "updateUser",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRecord"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "编辑显示名称、角色或启用状态，至少一项；不允许改账号/超级管理员标记",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/{id}/reset-password": {
+      "post": {
+        "operationId": "resetUserPassword",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；撤销目标全部 Token",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "operationId": "listManagementAudit",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          },
+          {
+            "name": "id",
+            "required": false,
+            "in": "query",
+            "description": "按审计记录 ID 精确查询，供详情路由直接加载",
+            "schema": {
+              "minimum": 1,
+              "maximum": 2147483647,
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "UTC ISO 8601 起始时间（含），须以 Z 结尾",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "UTC ISO 8601 结束时间（不含），须以 Z 结尾",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_user_id",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 2147483647,
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "name": "action",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "pattern": "^[a-z_]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "success",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 无效查询；401 登录失效；403 无管理权限；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员只读审计查询，按时间/ID 倒序分页，不返回秘密",
+        "tags": [
+          "audit"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Enterprise Center API",
+    "description": "企业中心已实现的 HTTP 接口；软件版本不代表 Runtime 版本。",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "tokenBearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http",
+        "description": "ct_ 内存 Token；不接受 cl_ LLM key 或 Cookie；中心重启需重新登录"
+      }
+    },
+    "schemas": {
+      "CenterInfo": {
+        "type": "object",
+        "properties": {
+          "software_version": {
+            "type": "string",
+            "description": "Center 软件版本，与 Runtime 独立发布",
+            "example": "0.1.0"
+          },
+          "protocol_version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "当前企业协议版本",
+            "example": 1
+          },
+          "min_protocol_version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "最低兼容企业协议版本",
+            "example": 1
+          }
+        },
+        "required": [
+          "software_version",
+          "protocol_version",
+          "min_protocol_version"
+        ]
+      },
+      "CenterErrorDetail": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "稳定原因码",
+            "example": "SERVICE_UNAVAILABLE"
+          },
+          "message": {
+            "type": "string",
+            "description": "脱敏错误说明"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "服务端生成的请求关联标识"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ]
+      },
+      "CenterErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/CenterErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "3—64 位 ASCII 账号，trim 后转小写",
+            "maxLength": 128
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "writeOnly": true,
+            "format": "password"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ]
+      },
+      "IdentityUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "admin"
+            ]
+          },
+          "is_super_admin": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "role",
+          "is_super_admin",
+          "enabled"
+        ]
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user": {
+            "$ref": "#/components/schemas/IdentityUser"
+          },
+          "token": {
+            "type": "string",
+            "pattern": "^ct_[a-f0-9]{64}$",
+            "description": "用于 Bearer 身份认证；仅内存保存，退出、撤销或中心重启后失效"
+          },
+          "llm_key": {
+            "type": "string",
+            "pattern": "^cl_[a-f0-9]{64}$",
+            "description": "仅供后续 LLM 代理使用，随本次 token 一起撤销；不用于身份 API"
+          }
+        },
+        "required": [
+          "center_id",
+          "user",
+          "token",
+          "llm_key"
+        ]
+      },
+      "IdentityResponse": {
+        "type": "object",
+        "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user": {
+            "$ref": "#/components/schemas/IdentityUser"
+          }
+        },
+        "required": [
+          "center_id",
+          "user"
+        ]
+      },
+      "PasswordRequest": {
+        "type": "object",
+        "properties": {
+          "old_password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "writeOnly": true,
+            "format": "password"
+          },
+          "new_password": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 128,
+            "pattern": "^(?=[\\s\\S]*[a-zA-Z])(?=[\\s\\S]*[0-9])[\\s\\S]*$",
+            "writeOnly": true,
+            "format": "password",
+            "description": "至少 6 位，包含英文字母和数字；不裁剪空白，最多 512 UTF-8 字节"
+          }
+        },
+        "required": [
+          "old_password",
+          "new_password"
+        ]
+      },
+      "UserRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "admin"
+            ]
+          },
+          "is_super_admin": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "role",
+          "is_super_admin",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "UserPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRecord"
+            }
+          },
+          "total": {
+            "type": "number",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "trim 并转小写后 3—64 位 ASCII 字母/数字及 ._-"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 128,
+            "pattern": "^(?=[\\s\\S]*[a-zA-Z])(?=[\\s\\S]*[0-9])[\\s\\S]*$",
+            "writeOnly": true,
+            "format": "password",
+            "description": "至少 6 位，包含英文字母和数字；最多 512 UTF-8 字节"
+          }
+        },
+        "required": [
+          "username",
+          "display_name",
+          "role",
+          "enabled",
+          "password"
+        ]
+      },
+      "UpdateUserRequest": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "properties": {
+          "new_password": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 128,
+            "pattern": "^(?=[\\s\\S]*[a-zA-Z])(?=[\\s\\S]*[0-9])[\\s\\S]*$",
+            "writeOnly": true,
+            "format": "password",
+            "description": "至少 6 位，包含英文字母和数字；最多 512 UTF-8 字节；不收原密码，目标可为自己或超级管理员"
+          }
+        },
+        "required": [
+          "new_password"
+        ]
+      },
+      "AuditUserFields": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuditDetails": {
+        "type": "object",
+        "properties": {
+          "before": {
+            "$ref": "#/components/schemas/AuditUserFields"
+          },
+          "after": {
+            "$ref": "#/components/schemas/AuditUserFields"
+          }
+        }
+      },
+      "AuditRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor_user_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "nullable": true
+          },
+          "target_user_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "nullable": true
+          },
+          "actor_username": {
+            "type": "string",
+            "nullable": true,
+            "description": "关联操作者的登录用户名；未认证或关联用户不存在时为空"
+          },
+          "target_username": {
+            "type": "string",
+            "nullable": true,
+            "description": "关联目标用户的登录用户名；无目标或关联用户不存在时为空"
+          },
+          "action": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "reason_code": {
+            "type": "string",
+            "nullable": true
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "details": {
+            "$ref": "#/components/schemas/AuditDetails"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_at",
+          "actor_user_id",
+          "target_user_id",
+          "actor_username",
+          "target_username",
+          "action",
+          "success",
+          "reason_code",
+          "request_id",
+          "details"
+        ]
+      },
+      "AuditPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditRecord"
+            }
+          },
+          "total": {
+            "type": "number",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "tokenBearer": []
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+/* 骨架视觉主要来自 theme.ts 中 Layout/Menu/Breadcrumb 的组件 Token；这里只保留排版与少量语义样式。 */
+/* 外壳固定一屏高：Header 与侧栏不随内容滚动，滚动只发生在各列表内部。 */
+.shell { height: 100dvh; overflow: hidden; }
+
+.header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand_icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  color: var(--ez-primary);
+  background: #fff;
+  font-size: var(--ez-font-small);
+  font-weight: 700;
+}
+.brand strong { font-size: 15px; font-weight: 600; white-space: nowrap; }
+
+.header_actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.header_button { color: rgba(255, 255, 255, 0.88); }
+.header_button:hover { color: #fff !important; background: rgba(255, 255, 255, 0.14) !important; }
+.account_button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px 0 5px;
+  border-radius: 999px;
+  color: #fff;
+}
+.account_button:hover { background: rgba(255, 255, 255, 0.14) !important; }
+.preview_select { width: 104px; }
+
+.sider {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ez-border);
+}
+.sider :global(.ant-layout-sider-children) { display: flex; flex-direction: column; }
+.sider :global(.ant-menu) { border-inline-end: none; padding-top: 8px; }
+
+.sidebar_bottom {
+  margin-top: auto;
+  padding: 14px 16px 4px;
+  border-top: 1px solid var(--ez-border);
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  line-height: 1.7;
+}
+.sidebar_bottom button { margin-top: 6px; padding-inline: 0; color: var(--ez-text-secondary); }
+.sidebar_bottom button:hover { color: var(--ez-primary); background: transparent; }
+
+.content { padding: 16px; overflow: hidden; display: flex; flex-direction: column; }
+.breadcrumb { flex-shrink: 0; margin-bottom: 16px; }
+/* 页面区占满剩余高度，由各页面自行管理内部滚动。 */
+.content > section { flex: 1; min-height: 0; }
+
+@media (max-width: 780px) {
+  .brand strong { display: none; }
+  .preview_select { width: 92px; }
+  .sidebar_bottom p { display: none; }
+}

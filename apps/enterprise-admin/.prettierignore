@@ -1,0 +1,12 @@
+/dist/*
+.local
+.output.js
+/node_modules/**
+
+**/*.svg
+**/*.sh
+
+# 独立原型保留评审基线；生成 SDK 和锁文件由各自工具维护。
+/prototype/**
+/src/request/openapi/**
+/package-lock.json
