@@ -49,6 +49,7 @@ use crate::{
 
 const TEST_CONFIG: &str = "schema_version = 1\n";
 
+mod external_model;
 mod model_fixture;
 
 struct MissingConfigSource;

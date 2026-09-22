@@ -1,7 +1,7 @@
 import { observer } from 'mobx-react-lite';
 import { useMatches, useNavigate } from 'react-router';
 import { Menu } from 'antd';
-import { AuditOutlined, TeamOutlined } from '@ant-design/icons';
+import { AuditOutlined, TeamOutlined, ApiOutlined } from '@ant-design/icons';
 import adminStore from '../../../stores/AdminStore';
 import type { RouteHeading } from '../../routes';
 
@@ -17,6 +17,8 @@ export const NavigationMenu = observer(function NavigationMenu() {
       onClick={({ key }) => void navigate(key)}
       items={[
         { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
+        { key: '/models', icon: <ApiOutlined />, label: '模型管理' },
+        { key: '/calls', icon: <ApiOutlined />, label: '调用记录' },
         { key: '/audit', icon: <AuditOutlined />, label: '管理审计' },
       ]}
     />

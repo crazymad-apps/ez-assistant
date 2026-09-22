@@ -24,6 +24,7 @@ mod materialization;
 mod memory;
 mod mode;
 mod model_management;
+mod resource_reference;
 
 pub(crate) mod migrations;
 mod permission;

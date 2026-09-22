@@ -635,6 +635,10 @@ pub struct AuxiliaryUsageSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ChildTaskUsageSnapshot {
+    /// 子任务当前有效上下文；未知窗口或缺少可靠计量时不提供。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context: Option<ContextUsageSnapshot>,
     pub accumulated: Option<UsageTotals>,
 }
 
@@ -1009,6 +1013,29 @@ pub struct RejectApprovalAndStopRunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_context_is_optional_on_the_wire_without_turning_unknown_into_zero() {
+        let old = serde_json::json!({ "accumulated": null });
+        let parsed: ChildTaskUsageSnapshot = serde_json::from_value(old.clone()).unwrap();
+        assert!(parsed.context.is_none());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+        let measured = ChildTaskUsageSnapshot {
+            accumulated: None,
+            context: Some(ContextUsageSnapshot {
+                used_tokens: 123,
+                window_tokens: 8192,
+                usage_basis_points: 150,
+            }),
+        };
+        assert_eq!(
+            serde_json::from_value::<ChildTaskUsageSnapshot>(
+                serde_json::to_value(&measured).unwrap()
+            )
+            .unwrap(),
+            measured
+        );
+    }
 
     #[test]
     fn application_capabilities_default_new_mcp_fields_for_older_snapshots() {

@@ -6,6 +6,9 @@ impl VolatileRuntimeStore {
         task: NewStoredChildTask,
     ) -> StoreFuture<'_, StoredChildTask> {
         Box::pin(async move {
+            if task.context_window_tokens == 0 {
+                return Err(conflict("child context window must be positive"));
+            }
             let mut state = self.lock()?;
             let parent = state
                 .runs
@@ -24,6 +27,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("child task already exists"));
             }
             let stored = StoredChildTask {
+                context_window_tokens: Some(task.context_window_tokens),
                 child_task_id: task.child_task_id.clone(),
                 session_id: task.session_id,
                 parent_run_id: task.parent_run_id,

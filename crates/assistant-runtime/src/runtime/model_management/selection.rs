@@ -31,6 +31,7 @@ impl AssistantRuntime {
         selection: Option<ModelSelection>,
         purpose: SelectionPurpose,
     ) -> RuntimeResult<ModelSettings> {
+        self.ensure_model_editable()?;
         self.ensure_running()?;
         let captured = if let Some(selection) = &selection {
             validate_selection(selection)?;

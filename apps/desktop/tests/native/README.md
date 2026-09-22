@@ -26,3 +26,24 @@ node apps/desktop/scripts/run-cargo.mjs run -p ez-assistant-desktop --example br
 
 测试结束后用 Ctrl+C 停止夹具。此探针不替代发布版的人工窗口验收，也不代表 Windows／Linux
 已通过原生媒体测试。
+
+C03 M3 探针继续使用上述启动命令；媒体关闭验证后，还会打开个人、Alice、Bob 和再次登录的
+Alice 四个页面，在同一 loopback origin 检查 Cookie/localStorage 隔离、本人持久存储恢复及旧
+窗口 ID 的 owner 校验。身份只由 `browser-probe-owner.rs` 的测试夹具提供，实际 Profile 选择
+和窗口管理复用产品代码；不开放页面 invoke，不访问产品 Host 或用户数据。macOS 14+ 的
+持久 Profile 路径适用此用例；旧 macOS 的非持久降级及 Windows/Linux 需各平台另行验证。
+
+# 原生输出跟随回归（C05）
+
+启动 Vite 后，运行独立、非持久 WKWebView 夹具：
+
+```bash
+cd apps/desktop
+npm run dev -- --host 127.0.0.1 --port 1436 --strictPort
+# 仓库根目录另一个终端：
+swift apps/desktop/tests/native/output-follow.swift http://127.0.0.1:1436/tests/native/output-follow.html
+```
+
+夹具直接引用产品 `useOutputFollow`，使用真实 WebKit 布局、ResizeObserver 和 scroll 事件，
+检查增长跟随、上翻锚点、键盘回底、内外层独立意图；成功输出 PASS，30 秒超时失败。
+不加载 Runtime 或用户数据。真实浏览器输入与正式 Host 组合验证见 `web-observation.spec.ts`。

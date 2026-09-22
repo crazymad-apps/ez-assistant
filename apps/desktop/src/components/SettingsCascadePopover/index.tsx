@@ -1,11 +1,12 @@
-import { Fragment, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { Button } from "../Button";
-import { Icon } from "../Icon";
-import { AnchoredOverlay } from "../AnchoredOverlay";
-import { Tooltip } from "../Tooltip";
-import styles from "./index.module.scss";
+import { Fragment, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { Button } from '../Button';
+import { Icon } from '../Icon';
+import { AnchoredOverlay } from '../AnchoredOverlay';
+import { Tooltip } from '../Tooltip';
+import styles from './index.module.scss';
 
 export type SettingsCascadeOption = Readonly<{
+  disabled?: boolean;
   description?: string;
   label: string;
   value: string;
@@ -59,13 +60,19 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   const [selecting, setSelecting] = useState(false);
   const selecting_ref = useRef(false);
   const [selection_error, setSelectionError] = useState<string | null>(null);
-  const [secondary_position, setSecondaryPosition] = useState<SecondaryPosition>({ side: "right", top: -6 });
+  const [secondary_position, setSecondaryPosition] = useState<SecondaryPosition>({ side: 'right', top: -6 });
   const interaction = useRef({ open: props.open, epoch: 0 });
-  if (interaction.current.open !== props.open) interaction.current = { open: props.open, epoch: interaction.current.epoch + 1 };
+  if (interaction.current.open !== props.open)
+    interaction.current = { open: props.open, epoch: interaction.current.epoch + 1 };
   const latest = useRef(props);
   latest.current = props;
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const secondary_category = props.categories.find((candidate) => candidate.id === secondary_category_id);
   const trigger_disabled = props.disabled || Boolean(props.disabled_reason);
 
@@ -81,7 +88,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     const can_open_requested = requested_index >= 0 && !requested_category?.disabled_reason;
     if (can_open_requested) requested_category?.on_open?.();
     setActiveCategoryIndex(initial_index);
-    setSecondaryCategoryId(can_open_requested ? requested_category?.id ?? null : null);
+    setSecondaryCategoryId(can_open_requested ? (requested_category?.id ?? null) : null);
     setActiveOptionIndex(selectedOptionIndex(requested_category));
     const focus_frame = requestAnimationFrame(() => {
       const selector = can_open_requested
@@ -112,7 +119,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
         window.innerWidth,
         window.innerHeight,
       );
-      setSecondaryPosition((current) => positionsEqual(current, next) ? current : next);
+      setSecondaryPosition((current) => (positionsEqual(current, next) ? current : next));
     }
 
     function schedulePositionUpdate() {
@@ -123,17 +130,15 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     // 先完成当前布局测量；再等一级浮层完成锚点定位后复测，避免读取初始的 (0, 0)。
     updatePosition();
     schedulePositionUpdate();
-    window.addEventListener("resize", schedulePositionUpdate);
-    document.addEventListener("scroll", schedulePositionUpdate, true);
-    const resize_observer = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(schedulePositionUpdate);
+    window.addEventListener('resize', schedulePositionUpdate);
+    document.addEventListener('scroll', schedulePositionUpdate, true);
+    const resize_observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedulePositionUpdate);
     resize_observer?.observe(measured_primary);
     resize_observer?.observe(measured_secondary);
     return () => {
       cancelAnimationFrame(position_frame);
-      window.removeEventListener("resize", schedulePositionUpdate);
-      document.removeEventListener("scroll", schedulePositionUpdate, true);
+      window.removeEventListener('resize', schedulePositionUpdate);
+      document.removeEventListener('scroll', schedulePositionUpdate, true);
       resize_observer?.disconnect();
     };
   }, [props.open, secondary_category]);
@@ -177,32 +182,34 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   // 一级动作、分类和页脚共享键盘顺序，slot 不得成为方向键无法到达的孤岛。
   function handlePrimaryMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (event.defaultPrevented) return;
-    if (event.key === "Escape") {
+    if (event.key === 'Escape') {
       event.preventDefault();
       closeAndRestoreFocus();
       return;
     }
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
-      ':is([role="menuitem"], [role="menuitemradio"]):not(:disabled):not([aria-disabled="true"])',
-    ));
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>(
+        ':is([role="menuitem"], [role="menuitemradio"]):not(:disabled):not([aria-disabled="true"])',
+      ),
+    );
     if (!items.length) return;
     event.preventDefault();
     const current = items.findIndex((item) => item === document.activeElement);
-    let next = event.key === "Home" ? 0 : items.length - 1;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      next = (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    let next = event.key === 'Home' ? 0 : items.length - 1;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      next = (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
     }
     items[next]?.focus();
   }
 
   function handlePrimaryKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
-    if (event.key === "Escape") {
+    if (event.key === 'Escape') {
       event.preventDefault();
       closeAndRestoreFocus();
       return;
     }
-    if (event.key === "ArrowRight" || event.key === "Enter") {
+    if (event.key === 'ArrowRight' || event.key === 'Enter') {
       event.preventDefault();
       openCategory(index);
     }
@@ -210,16 +217,16 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
 
   function handleSecondaryKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
     const options = secondary_category?.options ?? [];
-    if (event.key === "Escape" || event.key === "ArrowLeft") {
+    if (event.key === 'Escape' || event.key === 'ArrowLeft') {
       event.preventDefault();
       returnToPrimary();
       return;
     }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
-      let next = event.key === "Home" ? 0 : options.length - 1;
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        const direction = event.key === "ArrowDown" ? 1 : -1;
+      let next = event.key === 'Home' ? 0 : options.length - 1;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const direction = event.key === 'ArrowDown' ? 1 : -1;
         next = (index + direction + options.length) % options.length;
       }
       setActiveOptionIndex(next);
@@ -235,9 +242,11 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     setSelectionError(null);
     try {
       const succeeded = await action();
-      if (mounted.current && succeeded && latest.current.open && interaction.current.epoch === epoch) closeAndRestoreFocus();
+      if (mounted.current && succeeded && latest.current.open && interaction.current.epoch === epoch)
+        closeAndRestoreFocus();
     } catch {
-      if (mounted.current && latest.current.open && interaction.current.epoch === epoch) setSelectionError("未能保存设置，请重试。");
+      if (mounted.current && latest.current.open && interaction.current.epoch === epoch)
+        setSelectionError('未能保存设置，请重试。');
     } finally {
       selecting_ref.current = false;
       if (mounted.current) setSelecting(false);
@@ -246,6 +255,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
 
   function selectOption(option: SettingsCascadeOption) {
     if (!secondary_category || selecting_ref.current) return;
+    if (option.disabled) return;
     if (option.value === secondary_category.selected) {
       closeAndRestoreFocus();
       return;
@@ -253,64 +263,91 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     void selectAction(() => secondary_category.on_select(option.value));
   }
 
-  const trigger = <button
-        aria-controls={props.open ? menu_id : undefined}
-        aria-disabled={trigger_disabled || undefined}
-        aria-expanded={props.open}
-        aria-haspopup="menu"
-        aria-label={props.aria_label}
-        className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(" ")}
-        disabled={props.disabled && !props.disabled_reason}
-        onClick={() => { if (!trigger_disabled) props.on_open_change(!props.open); }}
-        onKeyDown={(event) => {
-          if (trigger_disabled) return;
-          if (props.open && event.key === "Escape") { event.preventDefault(); closeAndRestoreFocus(); }
-        }}
-        ref={trigger_ref}
-        type="button"
-      >
-        <span>{props.trigger_content}</span>
-        {clear_action && !trigger_disabled
-          ? <span className={styles.clear_space} />
-          : <Icon name="chevron-down" size={14} />}
-      </button>;
+  const trigger = (
+    <button
+      aria-controls={props.open ? menu_id : undefined}
+      aria-disabled={trigger_disabled || undefined}
+      aria-expanded={props.open}
+      aria-haspopup="menu"
+      aria-label={props.aria_label}
+      className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(' ')}
+      disabled={props.disabled && !props.disabled_reason}
+      onClick={() => {
+        if (!trigger_disabled) props.on_open_change(!props.open);
+      }}
+      onKeyDown={(event) => {
+        if (trigger_disabled) return;
+        if (props.open && event.key === 'Escape') {
+          event.preventDefault();
+          closeAndRestoreFocus();
+        }
+      }}
+      ref={trigger_ref}
+      type="button"
+    >
+      <span>{props.trigger_content}</span>
+      {clear_action && !trigger_disabled ? (
+        <span className={styles.clear_space} />
+      ) : (
+        <Icon name="chevron-down" size={14} />
+      )}
+    </button>
+  );
 
   return (
     <>
       <span className={styles.trigger_wrapper}>
-      {props.disabled_reason ? <Tooltip content={props.disabled_reason}>{trigger}</Tooltip> : trigger}
-      {clear_action && !props.disabled_reason && <button type="button" className={styles.clear_trigger}
-        aria-label={clear_action.label} title={clear_action.label} disabled={trigger_disabled || selecting}
-        onClick={() => { void selectAction(async () => {
-          const cleared = await clear_action.on_clear();
-          if (cleared && mounted.current) trigger_ref.current?.focus();
-          return cleared;
-        }); }}>
-        <Icon name="chevron-down" size={14} className={styles.clear_arrow} />
-        <Icon name="x" size={14} className={styles.clear_icon} />
-      </button>}
+        {props.disabled_reason ? <Tooltip content={props.disabled_reason}>{trigger}</Tooltip> : trigger}
+        {clear_action && !props.disabled_reason && (
+          <button
+            type="button"
+            className={styles.clear_trigger}
+            aria-label={clear_action.label}
+            title={clear_action.label}
+            disabled={trigger_disabled || selecting}
+            onClick={() => {
+              void selectAction(async () => {
+                const cleared = await clear_action.on_clear();
+                if (cleared && mounted.current) trigger_ref.current?.focus();
+                return cleared;
+              });
+            }}
+          >
+            <Icon name="chevron-down" size={14} className={styles.clear_arrow} />
+            <Icon name="x" size={14} className={styles.clear_icon} />
+          </button>
+        )}
       </span>
-        <AnchoredOverlay
-          aria_label={props.aria_label}
-          class_name={styles.settings_cascade}
-          on_request_close={closeAndRestoreFocus}
-          open={props.open}
-          overlay_ref={overlay_ref}
-          trigger_ref={trigger_ref}
-        >
-          <div className={styles.settings_primary} id={menu_id} role="menu" onKeyDown={handlePrimaryMenuKeyDown}>
-
-            {selection_error && <p role="alert">{selection_error}</p>}
-            {props.primary_content && <div className={styles.primary_actions}>{props.primary_content}</div>}
-            {props.primary_actions?.map((action) => <button key={action.label} type="button"
-              className={styles.settings_category} role={action.selected === undefined ? "menuitem" : "menuitemradio"}
-              aria-checked={action.selected} disabled={selecting || action.disabled}
-              onFocus={() => setActiveCategoryIndex(-1)} onClick={() => void selectAction(action.on_select)}>
-              <span><b>{action.label}</b></span>
+      <AnchoredOverlay
+        aria_label={props.aria_label}
+        class_name={styles.settings_cascade}
+        on_request_close={closeAndRestoreFocus}
+        open={props.open}
+        overlay_ref={overlay_ref}
+        trigger_ref={trigger_ref}
+      >
+        <div className={styles.settings_primary} id={menu_id} role="menu" onKeyDown={handlePrimaryMenuKeyDown}>
+          {selection_error && <p role="alert">{selection_error}</p>}
+          {props.primary_content && <div className={styles.primary_actions}>{props.primary_content}</div>}
+          {props.primary_actions?.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              className={styles.settings_category}
+              role={action.selected === undefined ? 'menuitem' : 'menuitemradio'}
+              aria-checked={action.selected}
+              disabled={selecting || action.disabled}
+              onFocus={() => setActiveCategoryIndex(-1)}
+              onClick={() => void selectAction(action.on_select)}
+            >
+              <span>
+                <b>{action.label}</b>
+              </span>
               {action.selected && <Icon name="check" size={14} className={styles.selected_icon} />}
-            </button>)}
-            {props.categories.map((item, index) => (
-              <Fragment key={item.id}>
+            </button>
+          ))}
+          {props.categories.map((item, index) => (
+            <Fragment key={item.id}>
               {item.separator_before && <div role="separator" className={styles.separator} />}
               <button
                 aria-disabled={Boolean(item.disabled_reason)}
@@ -326,62 +363,85 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
                 title={item.disabled_reason}
                 type="button"
               >
-                <span><b>{item.label}</b><small>{item.disabled_reason ?? item.value_label}</small></span>
+                <span>
+                  <b>{item.label}</b>
+                  <small>{item.disabled_reason ?? item.value_label}</small>
+                </span>
                 <Icon name="chevron-right" size={14} />
               </button>
-              </Fragment>
-            ))}
-            {props.footer_content && <div className={styles.primary_actions}>{props.footer_content}</div>}
-          </div>
-          {secondary_category && (
-            <div
-              aria-label={secondary_category.label}
-              className={styles.settings_secondary}
-              data-side={secondary_position.side}
-              ref={secondary_ref}
-              role="menu"
-              onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); returnToPrimary(); } }}
-              style={{ top: secondary_position.top }}
-            >
-              {(!secondary_category.hide_title || secondary_position.side === "inline") && <header className={styles.secondary_header}>
-                {secondary_position.side === "inline" && <Button aria-label="返回一级" variant="text" onClick={returnToPrimary}><Icon name="chevron-left" size={14} />返回</Button>}
+            </Fragment>
+          ))}
+          {props.footer_content && <div className={styles.primary_actions}>{props.footer_content}</div>}
+        </div>
+        {secondary_category && (
+          <div
+            aria-label={secondary_category.label}
+            className={styles.settings_secondary}
+            data-side={secondary_position.side}
+            ref={secondary_ref}
+            role="menu"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                returnToPrimary();
+              }
+            }}
+            style={{ top: secondary_position.top }}
+          >
+            {(!secondary_category.hide_title || secondary_position.side === 'inline') && (
+              <header className={styles.secondary_header}>
+                {secondary_position.side === 'inline' && (
+                  <Button aria-label="返回一级" variant="text" onClick={returnToPrimary}>
+                    <Icon name="chevron-left" size={14} />
+                    返回
+                  </Button>
+                )}
                 {!secondary_category.hide_title && <strong>{secondary_category.label}</strong>}
-              </header>}
-              {secondary_position.side === "inline" && selection_error && <p role="alert">{selection_error}</p>}
-              {secondary_category.content && <section className={styles.secondary_content}>{secondary_category.content}</section>}
-              <div>
-                {secondary_category.options.map((option, index) => (
-                  <button
-                    aria-checked={option.value === secondary_category.selected}
-                    data-active={active_option_index === index}
-                    data-setting-option-index={index}
-                    disabled={selecting}
-                    key={option.value}
-                    onClick={() => void selectOption(option)}
-                    onFocus={() => setActiveOptionIndex(index)}
-                    onKeyDown={(event) => handleSecondaryKeyDown(event, index)}
-                    role="menuitemradio"
-                    type="button"
-                  >
-                    <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
-                    <i>{option.value === secondary_category.selected && <Icon name="check" size={14} />}</i>
-                  </button>
-                ))}
-              </div>
+              </header>
+            )}
+            {secondary_position.side === 'inline' && selection_error && <p role="alert">{selection_error}</p>}
+            {secondary_category.content && (
+              <section className={styles.secondary_content}>{secondary_category.content}</section>
+            )}
+            <div>
+              {secondary_category.options.map((option, index) => (
+                <button
+                  aria-checked={option.value === secondary_category.selected}
+                  data-active={active_option_index === index}
+                  data-setting-option-index={index}
+                  disabled={selecting || option.disabled}
+                  key={option.value}
+                  onClick={() => void selectOption(option)}
+                  onFocus={() => setActiveOptionIndex(index)}
+                  onKeyDown={(event) => handleSecondaryKeyDown(event, index)}
+                  role="menuitemradio"
+                  type="button"
+                >
+                  <span>
+                    <b>{option.label}</b>
+                    {option.description && <small>{option.description}</small>}
+                  </span>
+                  <i>{option.value === secondary_category.selected && <Icon name="check" size={14} />}</i>
+                </button>
+              ))}
             </div>
-          )}
-        </AnchoredOverlay>
+          </div>
+        )}
+      </AnchoredOverlay>
     </>
   );
 }
 
 function selectedOptionIndex(category: SettingsCascadeCategory | undefined): number {
   if (!category) return 0;
-  return Math.max(0, category.options.findIndex((option) => option.value === category.selected));
+  return Math.max(
+    0,
+    category.options.findIndex((option) => option.value === category.selected),
+  );
 }
 
 type SecondaryPosition = Readonly<{
-  side: "left" | "right" | "inline";
+  side: 'left' | 'right' | 'inline';
   top: number;
 }>;
 
@@ -396,17 +456,11 @@ function calculateSecondaryPosition(
   const room_right = viewport_width - primary.right - gap - viewport_padding;
   const room_left = primary.left - gap - viewport_padding;
   const minimum_width = viewport_width <= 720 ? 180 : 220;
-  if (Math.max(room_left, room_right) < minimum_width) return { side: "inline", top: 0 };
-  const side = secondary.width <= room_right || room_right >= room_left ? "right" : "left";
+  if (Math.max(room_left, room_right) < minimum_width) return { side: 'inline', top: 0 };
+  const side = secondary.width <= room_right || room_right >= room_left ? 'right' : 'left';
   const preferred_viewport_top = primary.top - gap;
-  const maximum_viewport_top = Math.max(
-    viewport_padding,
-    viewport_height - secondary.height - viewport_padding,
-  );
-  const viewport_top = Math.min(
-    Math.max(viewport_padding, preferred_viewport_top),
-    maximum_viewport_top,
-  );
+  const maximum_viewport_top = Math.max(viewport_padding, viewport_height - secondary.height - viewport_padding);
+  const viewport_top = Math.min(Math.max(viewport_padding, preferred_viewport_top), maximum_viewport_top);
   return { side, top: viewport_top - primary.top };
 }
 

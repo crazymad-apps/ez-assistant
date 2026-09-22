@@ -11,7 +11,7 @@ import { currentCompatibility, checkCompatibility } from "@ez-assistant/protocol
 
 const current = currentCompatibility();
 const changePatch = (offset) => { const parts = current.version.split(".").map(Number); parts[2] += offset; return parts.join("."); };
-const previousVersion = changePatch(-1), futureVersion = changePatch(1);
+const previousVersion = "0.25.3", futureVersion = changePatch(1);
 const caps = { runtime_version: current.version, min_compatible_version: current.min_compatible_version, features: ["host_access", "startup_diagnostics"], sse: true };
 const access = { revision: "initial", password_configured: true, configuration: { port: 7240, scheme: "http", remote_enabled: false, server_names: [], tls_certificate: null, tls_private_key: null }, restart_required: false, listener_state: "listening", error: null };
 async function fixture(handler = () => undefined) {

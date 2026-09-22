@@ -421,6 +421,7 @@ mod tests {
 
     fn stored_task(child_task_id: ChildTaskId, status: ChildTaskStatus) -> StoredChildTask {
         StoredChildTask {
+            context_window_tokens: Some(8192),
             child_task_id,
             session_id: SessionId::new("s-registry").expect("session id"),
             parent_run_id: RunId::new("r-registry").expect("run id"),

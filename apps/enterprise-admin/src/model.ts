@@ -32,7 +32,18 @@ export const actionLabels: Record<string, string> = {
   user_password_reset: '管理员重置密码',
   users_read: '查询用户',
   audit_read: '查询审计',
+  llm_recording_settings_changed: '修改调用记录策略',
+  llm_snapshot_viewed: '查看调用快照',
+  model_provider_created: '添加模型服务商',
+  model_provider_updated: '修改模型服务商',
+  model_provider_deleted: '删除模型服务商',
+  model_catalog_refreshed: '刷新模型目录',
+  model_configuration_saved: '保存模型固定配置',
+  model_configuration_reset: '重置模型固定配置',
+  model_default_changed: '更改企业默认模型',
+  model_templates_reloaded: '重新加载模型模板',
 };
+
 export function userView(user: IdentityUser | UserRecord): UserView {
   return {
     id: user.id,
@@ -44,6 +55,7 @@ export function userView(user: IdentityUser | UserRecord): UserView {
     createdAt: 'created_at' in user ? new Date(user.created_at).toLocaleString() : '—',
   };
 }
+
 export function auditView(record: AuditRecord): AuditView {
   // 不猜测失败登录账号，也不把任意 JSON 字段直接展示；只渲染正式契约白名单。
   const changes: string[] = [];
@@ -57,6 +69,17 @@ export function auditView(record: AuditRecord): AuditView {
     ].filter((item) => item !== undefined);
     changes.push(`${key === 'before' ? '变更前' : '变更后'}：${parts.join(' / ')}`);
   }
+  const details = record.details;
+  if (details.provider_instance_id) changes.push(`服务商：${details.provider_instance_id}`);
+  if (details.model_id) changes.push(`模型：${details.model_id}`);
+  if (details.model_count !== undefined) changes.push(`在线模型数：${details.model_count}`);
+  if (details.count !== undefined) changes.push(`模板条目数：${details.count}`);
+  if (details.default_model !== undefined)
+    changes.push(
+      details.default_model
+        ? `默认模型：${details.default_model.model_id}（${details.default_model.provider_instance_id}）`
+        : '已清除默认模型',
+    );
   return {
     id: record.id,
     time: new Date(record.occurred_at).toLocaleString(),

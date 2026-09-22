@@ -203,9 +203,11 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
             "stdio must not replay a call"
         );
     }
-    scan_data(&runtime_home.path().join("data"));
+    scan_data(&runtime_home.path().join("users/_personal/data"));
     let connection = Connection::open_with_flags(
-        runtime_home.path().join("data/runtime.sqlite3"),
+        runtime_home
+            .path()
+            .join("users/_personal/data/runtime.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("read isolated database");

@@ -1,4 +1,4 @@
-//! HTTP 监听唯一的启动状态；Ready 原子发布现有业务服务，初始化期间不构造占位 Runtime。
+//! 单次用户服务装配的启动投影；Ready 原子发布现有服务，初始化期间不构造占位 Runtime。
 
 use crate::{device::DeviceGatewayHandle, speech::SpeechServiceHandle};
 use assistant_protocol::{
@@ -9,14 +9,18 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 pub(crate) struct ReadyServices {
-    pub(super) runtime: Arc<AssistantRuntime>,
-    pub(super) device_gateway: DeviceGatewayHandle,
-    pub(super) speech: SpeechServiceHandle,
+    pub(crate) cancellation: tokio_util::sync::CancellationToken,
+    pub(crate) paths: Arc<crate::user_paths::UserPaths>,
+    pub(crate) runtime: Arc<AssistantRuntime>,
+    pub(crate) models: Option<Arc<crate::resources::model::CenterModelLoader>>,
+    pub(crate) device_gateway: DeviceGatewayHandle,
+    pub(crate) speech: SpeechServiceHandle,
 }
 
 #[derive(Clone)]
 enum StartupState {
     Starting(RuntimeHostHealth),
+    IdentityReady(RuntimeHostHealth),
     Ready(Arc<ReadyServices>, RuntimeHostHealth),
     Unavailable(RuntimeHostHealth),
 }
@@ -26,6 +30,19 @@ enum StartupState {
 pub(crate) struct StartupStateHandle(watch::Sender<StartupState>);
 
 impl StartupStateHandle {
+    pub(crate) fn restart(&self) {
+        self.0.send_replace(StartupState::Starting(health(
+            RuntimeHostHealthStatus::Starting,
+            Some(RuntimeHostStartupStage::DatabaseCheck),
+            None,
+        )));
+    }
+    /// 企业 Host 身份服务已可用；不声称某个用户数据库已打开或升级。
+    pub(crate) fn identity_ready(&self) {
+        let mut current = health(RuntimeHostHealthStatus::Ready, None, None);
+        current.database_version = None;
+        self.0.send_replace(StartupState::IdentityReady(current));
+    }
     pub(crate) fn new() -> Self {
         Self(
             watch::channel(StartupState::Starting(health(
@@ -74,7 +91,10 @@ impl StartupStateHandle {
     }
     pub(crate) fn ready(
         &self,
+        paths: Arc<crate::user_paths::UserPaths>,
+        cancellation: tokio_util::sync::CancellationToken,
         runtime: Arc<AssistantRuntime>,
+        models: Option<Arc<crate::resources::model::CenterModelLoader>>,
         device_gateway: DeviceGatewayHandle,
         speech: SpeechServiceHandle,
     ) {
@@ -86,7 +106,10 @@ impl StartupStateHandle {
                 ready.error = None;
                 *state = StartupState::Ready(
                     Arc::new(ReadyServices {
+                        paths: paths.clone(),
+                        cancellation: cancellation.clone(),
                         runtime: runtime.clone(),
+                        models: models.clone(),
                         device_gateway: device_gateway.clone(),
                         speech: speech.clone(),
                     }),
@@ -98,7 +121,7 @@ impl StartupStateHandle {
             }
         });
     }
-    pub(super) fn services(&self) -> Result<Arc<ReadyServices>, RuntimeError> {
+    pub(crate) fn services(&self) -> Result<Arc<ReadyServices>, RuntimeError> {
         match &*self.0.borrow() {
             StartupState::Ready(services, _) => Ok(services.clone()),
             _ => Err(RuntimeError::StorageUnavailable {
@@ -109,7 +132,9 @@ impl StartupStateHandle {
     }
     pub(crate) fn health(&self) -> RuntimeHostHealth {
         match &*self.0.borrow() {
-            StartupState::Starting(current) | StartupState::Unavailable(current) => current.clone(),
+            StartupState::Starting(current)
+            | StartupState::Unavailable(current)
+            | StartupState::IdentityReady(current) => current.clone(),
             StartupState::Ready(_, current) => current.clone(),
         }
     }

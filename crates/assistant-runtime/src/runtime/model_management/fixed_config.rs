@@ -10,10 +10,9 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let provider = self.provider(&selection.provider_instance_id)?;
         let fixed = self
-            .store
-            .get_model_fixed_config(selection.clone())
-            .await
-            .map_err(|e| RuntimeError::from_store("load fixed model", e))?;
+            .config_registry
+            .fixed_model(selection.clone(), self.store.as_ref())
+            .await?;
         if let Some(fixed) = fixed {
             self.ensure_provider_current(&provider)?;
             return Ok(ModelConfigurationDetail {
@@ -45,6 +44,7 @@ impl AssistantRuntime {
             model.metadata,
         ))
     }
+
     pub async fn list_fixed_model_configs(
         &self,
         request: ListFixedModelConfigsRequest,
@@ -52,21 +52,23 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let provider = self.provider(&request.provider_instance_id)?;
         let records = self
-            .store
-            .list_model_fixed_configs(
+            .config_registry
+            .fixed_models(
                 request.provider_instance_id,
                 request.offset,
                 request.limit.clamp(1, 200),
+                self.store.as_ref(),
             )
-            .await
-            .map_err(|e| RuntimeError::from_store("list fixed models", e))?;
+            .await?;
         self.ensure_provider_current(&provider)?;
         Ok(records)
     }
+
     pub async fn save_model_fixed_config(
         &self,
         request: SaveModelFixedConfigRequest,
     ) -> RuntimeResult<ModelFixedConfig> {
+        self.ensure_model_editable()?;
         validate_selection(&request.selection)?;
         self.ensure_running()?;
         let provider = self.provider(&request.selection.provider_instance_id)?;
@@ -104,7 +106,9 @@ impl AssistantRuntime {
         self.publish_provider_configuration(provider)?;
         Ok(fixed)
     }
+
     pub async fn reset_model_fixed_config(&self, selection: ModelSelection) -> RuntimeResult<()> {
+        self.ensure_model_editable()?;
         validate_selection(&selection)?;
         let _operation = self.operation_gate.read().await;
         let _gate = self.model_binding_gate.write().await;
@@ -116,6 +120,7 @@ impl AssistantRuntime {
             .map_err(|e| RuntimeError::from_store("reset fixed model", e))?;
         self.publish_provider_configuration(provider)
     }
+
     fn publish_provider_configuration(&self, provider: Arc<StoredProvider>) -> RuntimeResult<()> {
         // Arc 身份也代表该实例的固定设置接纳点。无目录／固定记录缓存，无额外 revision 字段；
         // 任一固定记录变更都会使该实例正在准备的请求重试，覆盖“原先无记录期间新增”。

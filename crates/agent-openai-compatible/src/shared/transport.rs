@@ -177,6 +177,10 @@ pub struct TransportResponse {
 /// 错误文本只包含网络层诊断（连接、超时、中断），绝不携带 `Authorization`
 /// 等 header 值、请求正文或响应正文。
 pub enum TransportError {
+    /// 可信传输策略明确拒绝当前请求；仅承载已脱敏的 Config、Auth 或 Provider 错误。
+    /// 宿主负责识别控制语义，Adapter 原样保留规范分类，不携带宿主控制码。
+    #[error("request rejected: {0}")]
+    Rejected(agent_model::ModelError),
     /// 响应头到达之前失败（DNS、TLS、拒绝连接、客户端构建等）。
     #[error("request failed before the response started: {0}")]
     Connect(String),
@@ -322,6 +326,15 @@ pub struct ReqwestTransport {
 }
 
 impl ReqwestTransport {
+    /// 注入宿主限制重定向/自动重试的 HTTP 客户端；仍沿用响应建立与 chunk 空闲超时。
+    /// 客户端不得配置覆盖整个响应流的总 timeout。
+    pub fn with_client(client: reqwest::Client, request_timeout: Duration) -> Self {
+        Self {
+            client,
+            request_timeout,
+        }
+    }
+
     /// 用默认超时配置创建（见 [`TransportTimeouts::default`]）。
     pub fn new() -> Result<Self, TransportError> {
         Self::with_timeouts(TransportTimeouts::default())

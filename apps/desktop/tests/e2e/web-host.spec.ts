@@ -36,7 +36,7 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const anonymous = await request.get(`${host.base_url}/capabilities`);
-  expect(anonymous.status()).toBe(401);
+  expect(anonymous.status()).toBe(200);
   const document = await page.goto(host.base_url);
   expect(document?.headers()["content-security-policy"]).toContain("connect-src 'self'");
   // Blob PDF 继承父页面策略；允许自身预览，仍禁止外站嵌入和 object 插件。
@@ -68,7 +68,9 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   await page.reload();
   await expectLaunch(page);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
-  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("button", { name: "个人用户", exact: true }).click();
+  await page.getByRole("menuitem", { name: "退出登录", exact: true }).click();
+  await page.getByRole("button", { name: "中断所有任务并退出", exact: true }).click();
   await expect(page.getByLabel("Host 登录")).toBeVisible();
   expect((await request.get(`${host.base_url}/commands-typo`)).status()).toBe(404);
   expect(errors).toEqual([]);
@@ -119,9 +121,11 @@ for (const fallback of ["reduced-motion", "webgl-and-storage-unavailable"] as co
     await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
     await page.getByLabel("访问密码", { exact: true }).press("Enter");
     await expect(page.locator("[data-app-title-bar]")).toBeVisible();
-    await expect(page.getByRole("button", { name: "退出登录", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "个人用户", exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.getByRole("button", { name: "退出登录", exact: true }).click();
+    await page.getByRole("button", { name: "个人用户", exact: true }).click();
+    await page.getByRole("menuitem", { name: "退出登录", exact: true }).click();
+    await page.getByRole("button", { name: "中断所有任务并退出", exact: true }).click();
     await expect(page.getByLabel("Host 登录")).toBeVisible();
   });
 }

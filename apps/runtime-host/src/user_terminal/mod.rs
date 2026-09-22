@@ -56,12 +56,14 @@ fn pty_size(size: UserTerminalSize) -> Result<portable_pty::PtySize, TerminalErr
 
 /// 只保存连接的来源关联用于删除时回收，不复制 Session/Workspace 状态。
 pub(crate) struct TerminalOrigin {
+    pub(crate) user: Option<crate::access::enterprise::UserKey>,
     pub(crate) session: Option<SessionId>,
     pub(crate) workspace: Option<WorkspaceId>,
 }
 
 struct Entry {
     origin: TerminalOrigin,
+    domain: CancellationToken,
     login: Option<[u8; 32]>,
     process: Arc<TerminalProcess>,
     cancelled: CancellationToken,
@@ -169,11 +171,12 @@ impl UserTerminals {
         directory: PathBuf,
         terminal: (UserTerminalSize, Option<assistant_protocol::ShellKind>),
         permit: &AccessPermit,
+        domain: CancellationToken,
         events: mpsc::Sender<TerminalEvent>,
     ) -> Result<(String, Arc<TerminalProcess>, CancellationToken), TerminalError> {
         permit.check().map_err(|_| failure("登录已失效。"))?;
-        if self.shutdown.is_cancelled() {
-            return Err(failure("Host 正在关闭。"));
+        if self.shutdown.is_cancelled() || domain.is_cancelled() {
+            return Err(failure("用户终端已停止。"));
         }
         let mut entries = self.entries.lock().await;
         if entries.len() >= 32 {
@@ -194,6 +197,10 @@ impl UserTerminals {
                 .map_err(|_| failure("终端输出连接已关闭。"))
         })
         .await?;
+        if domain.is_cancelled() || permit.check().is_err() {
+            process.close().await?;
+            return Err(failure("用户终端已停止。"));
+        }
         let id = format!(
             "user-terminal-{}-{}",
             std::process::id(),
@@ -204,6 +211,7 @@ impl UserTerminals {
             id.clone(),
             Entry {
                 origin,
+                domain,
                 login: permit.login_id(),
                 process: process.clone(),
                 cancelled: cancelled.clone(),
@@ -220,16 +228,45 @@ impl UserTerminals {
 
     pub(crate) async fn source_removed(
         &self,
+        user: Option<&crate::access::enterprise::UserKey>,
         session: Option<&SessionId>,
         workspace: Option<&WorkspaceId>,
     ) {
         for entry in self.entries.lock().await.values() {
-            if session.is_some_and(|id| entry.origin.session.as_ref() == Some(id))
-                || workspace.is_some_and(|id| entry.origin.workspace.as_ref() == Some(id))
+            if entry.origin.user.as_ref() == user
+                && (session.is_some_and(|id| entry.origin.session.as_ref() == Some(id))
+                    || workspace.is_some_and(|id| entry.origin.workspace.as_ref() == Some(id)))
             {
                 entry.cancelled.cancel();
                 entry.process.cancel();
             }
         }
+    }
+
+    /// 登录已撤销且旧用户域已取消后调用；只等待旧域 PTY，不清理并发新登录的资源。
+    pub(crate) async fn finish_logout(
+        &self,
+        user: Option<&crate::access::enterprise::UserKey>,
+    ) -> Result<(), TerminalError> {
+        let source_gate = self.source_gate.lock().await;
+        let processes: Vec<_> = self
+            .entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| entry.origin.user.as_ref() == user && entry.domain.is_cancelled())
+            .map(|entry| {
+                entry.cancelled.cancel();
+                entry.process.cancel();
+                entry.process.clone()
+            })
+            .collect();
+        drop(source_gate);
+        let results =
+            futures_util::future::join_all(processes.iter().map(|process| process.close())).await;
+        for result in results {
+            result?;
+        }
+        Ok(())
     }
 }

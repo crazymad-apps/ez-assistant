@@ -1,8 +1,8 @@
 import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } from "./compatibility";
-import { startupMessage } from "./startupStatus";
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
+  HostLoginResult, HostPasswordRequest, HostLogoutResult,
   ShellKind,
   DeviceGatewayCommand,
   HostAccessCommand,
@@ -60,6 +60,7 @@ export type RuntimeEventConnection = {
 };
 
 export class RuntimeClient {
+  readonly login_context: string | null;
   readonly instance_id: string;
   readonly capabilities: RuntimeHostCapabilities;
   readonly address: string;
@@ -68,7 +69,8 @@ export class RuntimeClient {
   readonly #access_token: string;
   readonly #abort = new AbortController();
 
-  constructor(bootstrap: RuntimeBootstrap, private readonly on_unauthorized?: () => void) {
+  constructor(bootstrap: RuntimeBootstrap, private readonly on_unauthorized?: (code: string) => void) {
+    this.login_context = bootstrap.login_context ?? null;
     this.#base_url = bootstrap.base_url;
     this.#access_token = bootstrap.access_token;
     this.instance_id = bootstrap.instance_id;
@@ -78,34 +80,29 @@ export class RuntimeClient {
 
   dispose(): void { this.#abort.abort(); }
 
-  /** 仅轮询受认证的 health，不启动/停止进程，也不重试初始化 SQL；连接释放会取消等待。 */
+  /** 一个阻塞请求等待本人 Runtime；取消页面只取消等待，不撤销后台初始化或任务。 */
   async waitUntilReady(receive: (health: RuntimeHostHealth) => void): Promise<void> {
     const incompatible = hostCompatibilityError(this.capabilities);
     if (incompatible) throw new RuntimeClientError("component_mismatch", compatibilityMessage(incompatible.code));
-    if (!this.capabilities.features?.includes("startup_diagnostics")) {
-      throw new RuntimeClientError("component_mismatch", "Host 缺少启动诊断能力，请更新 Host。");
-    }
-    for (;;) {
-      const health = await this.resource("/health", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(10000) }, async (response) => {
-        if (!response.ok) throw new RuntimeClientError("runtime_unavailable", "无法读取 Host 启动状态。");
-        const value = await response.json() as RuntimeHostHealth;
-        if (!value || !["starting", "ready", "unavailable"].includes(value.status)) throw new RuntimeClientError("component_mismatch", "Host 启动状态格式不匹配。");
-        return value;
-      });
-      receive(health);
-      if (health.status === "ready") return;
-      if (health.status === "unavailable") throw new RuntimeClientError("runtime_startup_failed", startupMessage(health));
-      await new Promise<void>((resolve, reject) => {
-        const stop = () => { window.clearTimeout(timer); reject(new DOMException("Connection closed", "AbortError")); };
-        const timer = window.setTimeout(() => { this.#abort.signal.removeEventListener("abort", stop); resolve(); }, 1000);
-        if (this.#abort.signal.aborted) stop();
-        else this.#abort.signal.addEventListener("abort", stop, { once: true });
-      });
-    }
+    await this.resource("/runtime/ensure-ready", { method: "POST" }, async () => undefined);
+    receive({ status: "ready", stage: null, error: null, database_version: null,
+      target_version: this.capabilities.runtime_version, min_compatible_host_version: undefined });
+  }
+
+  session(): Promise<HostLoginResult> {
+    return this.resource("/auth/session", { method: "GET", cache: "no-store" }, (response) => response.json());
+  }
+
+  async changePassword(request: HostPasswordRequest): Promise<void> {
+    await this.resource("/auth/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }, async () => undefined);
+  }
+
+  logout(): Promise<HostLogoutResult | null> {
+    return this.resource("/auth/logout", { method: "POST" }, (response) => response.status === 204 ? Promise.resolve(null) : response.json());
   }
 
   openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void, shell: ShellKind | null = null): TerminalSocket {
-    return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal, shell);
+    return new TerminalSocket(this.#base_url, this.#access_token, source, size, receive, this.#abort.signal, shell, this.login_context);
   }
 
   /** 文件 HTTP 请求复用当前连接的凭据、取消和登录失效处理，不重新发现本机 Host。 */
@@ -147,8 +144,15 @@ export class RuntimeClient {
     Object.entries(compatibilityHeaders()).forEach(([key, value]) => headers.set(key, value));
     const response = await fetch(input, { ...init, headers, credentials: this.#access_token ? "omit" : "same-origin", redirect: "error", signal: init.signal ?? this.#abort.signal });
     if (response.status === 401) {
-      this.on_unauthorized?.();
+      this.on_unauthorized?.("authentication_required");
       throw new RuntimeClientError("authentication_required", "登录已失效，请重新登录。");
+    }
+    if (response.status === 409) {
+      const failure = await decodeCommandFailure(response.clone());
+      if (failure.code === "login_context_changed") {
+        this.on_unauthorized?.(failure.code);
+        throw failure;
+      }
     }
     return response;
   }
@@ -228,6 +232,7 @@ export class RuntimeClient {
   #headers(json: boolean): Headers {
     const headers = new Headers();
     if (this.#access_token) headers.set("Authorization", `Bearer ${this.#access_token}`);
+    if (!this.#access_token && this.login_context) headers.set("x-ez-login-context", this.login_context);
     if (json) {
       headers.set("Content-Type", "application/json");
     }

@@ -26,11 +26,29 @@ fn start_binary(home: &Path, binary: &Path) -> Host {
         .local_addr()
         .unwrap()
         .port();
-    fs::write(
-        home.join("config.toml"),
-        format!("schema_version = 1\ndefault_model = \"\"\n[host_access]\nport = {port}\n"),
-    )
-    .unwrap();
+    if binary == Path::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"))
+        && !home.join("data/runtime.sqlite3").exists()
+    {
+        fs::create_dir_all(home.join("users/_personal")).unwrap();
+        fs::write(
+            home.join("host.toml"),
+            format!("version='0.27.0'\nmode='personal'\n[host_access]\nport={port}\n"),
+        )
+        .unwrap();
+        if !home.join("users/_personal/config.toml").exists() {
+            fs::write(
+                home.join("users/_personal/config.toml"),
+                "schema_version=1\ndefault_model=''\n",
+            )
+            .unwrap();
+        }
+    } else {
+        fs::write(
+            home.join("config.toml"),
+            format!("schema_version=1\n[host_access]\nport={port}\n"),
+        )
+        .unwrap();
+    }
     Host(
         Command::new(binary)
             .args(["serve", "--runtime-home"])
@@ -94,14 +112,17 @@ fn gated(discovery: &Value) {
     let client = http();
     let address = discovery["address"].as_str().unwrap();
     let token = discovery["access_token"].as_str().unwrap();
-    for path in ["/health", "/capabilities"] {
+    for (path, expected) in [
+        ("/health", StatusCode::UNAUTHORIZED),
+        ("/capabilities", StatusCode::OK),
+    ] {
         assert_eq!(
             client
                 .get(format!("{address}{path}"))
                 .send()
                 .unwrap()
                 .status(),
-            StatusCode::UNAUTHORIZED
+            expected
         );
         assert_eq!(
             client
@@ -113,6 +134,16 @@ fn gated(discovery: &Value) {
             StatusCode::OK
         );
     }
+    let public: Value = client
+        .get(format!("{address}/capabilities"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(public["mode"], "personal");
+    assert!(public.get("platform").is_none());
+    assert!(public.get("architecture").is_none());
+    assert!(public.get("rg_on_path").is_none());
     let capabilities: Value = client
         .get(format!("{address}/capabilities"))
         .bearer_auth(token)
@@ -135,42 +166,65 @@ fn gated(discovery: &Value) {
             .unwrap()
             .contains(&json!("startup_diagnostics"))
     );
-    assert_eq!(
-        client
-            .post(format!("{address}/commands"))
-            .bearer_auth(token)
-            .json(&command("get_application_snapshot"))
-            .send()
-            .unwrap()
-            .status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    for path in ["/events", "/user-terminals/socket"] {
-        assert_eq!(
-            client
-                .get(format!("{address}{path}"))
-                .bearer_auth(token)
-                .send()
-                .unwrap()
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+    let health: Value = client
+        .get(format!("{address}/health"))
+        .bearer_auth(token)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let starting = health["status"] == "starting";
+    let command_response = client
+        .post(format!("{address}/commands"))
+        .bearer_auth(token)
+        .json(&command("get_application_snapshot"))
+        .timeout(Duration::from_millis(100))
+        .send();
+    let events_response = client
+        .get(format!("{address}/events"))
+        .bearer_auth(token)
+        .timeout(Duration::from_millis(100))
+        .send();
+    for response in [command_response, events_response] {
+        if starting {
+            assert!(
+                response.unwrap_err().is_timeout(),
+                "business requests await user readiness"
+            );
+        } else {
+            assert_eq!(response.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
+    // Upgrade 在首帧认证后才等待本人 Runtime；普通 GET 本身不是 WebSocket 握手。
+    let malformed_ws = client
+        .get(format!("{address}/user-terminals/socket"))
+        .bearer_auth(token)
+        .send()
+        .unwrap()
+        .status();
+    assert!(matches!(
+        malformed_ws,
+        StatusCode::BAD_REQUEST | StatusCode::UPGRADE_REQUIRED
+    ));
     for path in [
         "/sessions/fixture/attachments",
         "/session-materializations",
         "/host-files/list",
     ] {
-        assert_eq!(
-            client
-                .post(format!("{address}{path}"))
-                .bearer_auth(token)
-                .body("fixture")
-                .send()
-                .unwrap()
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        let response = client
+            .post(format!("{address}{path}"))
+            .bearer_auth(token)
+            .body("fixture")
+            .timeout(Duration::from_millis(100))
+            .send();
+        if starting {
+            assert!(
+                response.unwrap_err().is_timeout(),
+                "resource requests await user readiness"
+            );
+        } else {
+            assert_eq!(response.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 }
 fn stop(discovery: &Value, host: &mut Host) {
@@ -193,7 +247,7 @@ fn stop(discovery: &Value, host: &mut Host) {
 
 /// 必须提供已核验来源的真实旧程序；默认测试不使用模拟程序冒充回退验收。
 #[test]
-#[ignore = "requires verified EZ_ASSISTANT_V0251_HOST and approval for isolated database operations"]
+#[ignore = "requires verified EZ_ASSISTANT_V0251_HOST; isolated legacy upgrade and database compatibility acceptance"]
 fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     let binary = std::env::var_os("EZ_ASSISTANT_V0251_HOST")
         .expect("set the verified released v0.25.1 Host path");
@@ -228,13 +282,25 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     let before = readonly(&database);
     assert_eq!(count(&before, "schema_migrations"), 1);
     assert_eq!(count(&before, "sessions"), 1);
+    let source_counts = before
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|name| {
+            let name = name.unwrap();
+            let rows = count(&before, &name);
+            (name, rows)
+        })
+        .collect::<Vec<_>>();
     drop(before);
 
     let mut current = start(home.path());
     let discovery = wait_health(home.path(), &mut current, "ready");
     stop(&discovery, &mut current);
-    let upgraded = readonly(&database);
-    assert_eq!(count(&upgraded, "schema_migrations"), 2);
+    let personal = home.path().join("users/_personal");
+    let upgraded = readonly(&personal.join("data/runtime.sqlite3"));
+    assert_eq!(count(&upgraded, "schema_migrations"), 5);
     assert_eq!(count(&upgraded, "sessions"), 1);
     assert_eq!(
         upgraded
@@ -244,29 +310,24 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.25.2"
+        "0.27.0"
     );
-    let backup_dir = fs::read_dir(home.path().join("backups/database"))
+    let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
         .next()
         .unwrap()
         .unwrap()
         .path();
-    let backup = readonly(&backup_dir.join("runtime.sqlite3"));
+    let backup = readonly(&backup_dir.join("contents/data/runtime.sqlite3"));
     assert_eq!(
         backup
             .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
         "ok"
     );
-    let evidence: Value =
-        serde_json::from_slice(&fs::read(backup_dir.join("manifest.json")).unwrap()).unwrap();
-    for (table, expected) in evidence["database"]["tables"].as_object().unwrap() {
-        assert_eq!(
-            count(&backup, table),
-            expected["rows"].as_i64().unwrap(),
-            "backup {table}"
-        );
+    assert!(backup_dir.join("manifest.json").is_file());
+    for (table, expected) in source_counts {
+        assert_eq!(count(&backup, &table), expected, "backup {table}");
     }
     assert_eq!(count(&backup, "schema_migrations"), 1);
     assert_eq!(count(&backup, "sessions"), 1);
@@ -284,9 +345,11 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
         }
         result
     }
-    let preserved = files(&home.path().join("data"));
-    let mut old = start_binary(home.path(), binary);
-    let discovery = wait_health(home.path(), &mut old, "unavailable");
+    // Old binaries do not recognize host.toml. Test DB admission directly in the new
+    // personal root; replacing the old executable at the Host root is not supported.
+    let preserved = files(&personal.join("data"));
+    let mut old = start_binary(&personal, binary);
+    let discovery = wait_health(&personal, &mut old, "unavailable");
     let failure: Value = http()
         .get(format!("{}/health", discovery["address"].as_str().unwrap()))
         .bearer_auth(discovery["access_token"].as_str().unwrap())
@@ -297,13 +360,13 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     assert_eq!(failure["error"], "database_newer");
     gated(&discovery);
     stop(&discovery, &mut old);
-    assert_eq!(files(&home.path().join("data")), preserved);
+    assert_eq!(files(&personal.join("data")), preserved);
 }
 #[test]
 fn invalid_database_keeps_authenticated_diagnostics_without_retry_or_recreation() {
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir(home.path().join("data")).unwrap();
-    let path = home.path().join("data/runtime.sqlite3");
+    fs::create_dir_all(home.path().join("users/_personal/data")).unwrap();
+    let path = home.path().join("users/_personal/data/runtime.sqlite3");
     let sentinel = b"intentional invalid SQLite fixture";
     fs::write(&path, sentinel).unwrap();
     let mut host = start(home.path());
@@ -328,12 +391,28 @@ fn locked_simulated_database_publishes_starting_then_ready_on_the_same_instance(
     let mut initial = start(home.path());
     let discovery = wait_health(home.path(), &mut initial, "ready");
     stop(&discovery, &mut initial);
-    let database = rusqlite::Connection::open(home.path().join("data/runtime.sqlite3")).unwrap();
+    let database =
+        rusqlite::Connection::open(home.path().join("users/_personal/data/runtime.sqlite3"))
+            .unwrap();
     database.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserve'); BEGIN EXCLUSIVE").unwrap();
     let mut host = start(home.path());
     let starting = wait_health(home.path(), &mut host, "starting");
     gated(&starting);
+    let request = http()
+        .post(format!(
+            "{}/runtime/ensure-ready",
+            starting["address"].as_str().unwrap()
+        ))
+        .bearer_auth(starting["access_token"].as_str().unwrap());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let waiter = thread::spawn(move || sender.send(request.send().unwrap().status()).unwrap());
+    assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
     database.execute_batch("COMMIT").unwrap();
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    waiter.join().unwrap();
     let ready = wait_health(home.path(), &mut host, "ready");
     assert_eq!(starting["instance_id"], ready["instance_id"]);
     assert_eq!(
@@ -363,10 +442,16 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
     // 数据库最低 Host 与应用协议 minimum 独立；增量目录列不要求机械提升到软件版本。
-    assert_eq!(health["min_compatible_host_version"], "0.25.3");
-    let configuration = fs::read_to_string(home.path().join("config.toml")).unwrap();
+    assert_eq!(health["min_compatible_host_version"], "0.27.0");
+    let configuration =
+        fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
-    assert!(configuration.contains("[host_access]"));
+    assert!(!configuration.contains("[host_access]"));
+    assert!(
+        fs::read_to_string(home.path().join("host.toml"))
+            .unwrap()
+            .contains("[host_access]")
+    );
     let query = |kind: &str| -> Value {
         let response = http()
             .post(format!(
@@ -385,7 +470,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     query("get_model_settings");
     query("get_application_snapshot");
     let database = rusqlite::Connection::open_with_flags(
-        home.path().join("data/runtime.sqlite3"),
+        home.path().join("users/_personal/data/runtime.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -404,7 +489,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 4);
+    assert_eq!(count("schema_migrations"), 5);
     assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
@@ -438,11 +523,11 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     );
     wait_health(home.path(), &mut host, "ready");
     assert_eq!(
-        fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap(),
         configuration
     );
     let database = rusqlite::Connection::open_with_flags(
-        home.path().join("data/runtime.sqlite3"),
+        home.path().join("users/_personal/data/runtime.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -461,7 +546,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
     assert_eq!(
         database
@@ -475,8 +560,8 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
 #[test]
 fn legacy_invalid_model_reference_is_discarded_after_verified_backup() {
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir_all(home.path().join("data")).unwrap();
-    let database_path = home.path().join("data/runtime.sqlite3");
+    fs::create_dir_all(home.path().join("users/_personal/data")).unwrap();
+    let database_path = home.path().join("users/_personal/data/runtime.sqlite3");
     let old = rusqlite::Connection::open(&database_path).unwrap();
     old.execute_batch(include_str!(
         "../src/storage/migrations/tests/legacy_v0_25_0.sql"
@@ -498,7 +583,7 @@ fn legacy_invalid_model_reference_is_discarded_after_verified_backup() {
     )
     .unwrap();
     assert_eq!(upgraded.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='legacy' AND title='history preserved' AND lifecycle='archived' AND body_generation=1 AND message_count=0 AND model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
-    let backup_dir = fs::read_dir(home.path().join("backups/database"))
+    let backup_dir = fs::read_dir(home.path().join("users/_personal/backups/database"))
         .unwrap()
         .next()
         .unwrap()
@@ -548,7 +633,7 @@ fn provider_usage_counts_unloaded_archived_sessions_and_deletion_preserves_refer
     let mut host = start(home.path());
     wait_health(home.path(), &mut host, "ready");
     drop(host);
-    let database = home.path().join("data/runtime.sqlite3");
+    let database = home.path().join("users/_personal/data/runtime.sqlite3");
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection.execute_batch("PRAGMA foreign_keys=ON;
         INSERT INTO providers(provider_instance_id,display_name,provider_type,endpoint,api_key,protocol_preference,models_path,discovery_format) VALUES ('usage-one','同名','local','http://127.0.0.1:9/v1','fixture-secret','chat_completions','/v1/models','openai');

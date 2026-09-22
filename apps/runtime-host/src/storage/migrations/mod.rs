@@ -7,12 +7,14 @@ mod compatibility;
 #[cfg(test)]
 mod compatibility_tests;
 pub(crate) mod config_cleanup;
+pub(crate) mod layout;
 #[cfg(test)]
 mod tests;
 mod v0_25_1;
 mod v0_25_2;
 mod v0_25_3;
 mod v0_26_0;
+mod v0_27_0;
 
 #[cfg(test)]
 use std::fs;
@@ -117,6 +119,7 @@ pub(super) fn align(
             v0_25_2::entry(),
             v0_25_3::entry(),
             v0_26_0::entry(),
+            v0_27_0::entry(),
         ],
         progress,
     )
@@ -158,7 +161,17 @@ fn migrate_with_progress(
     home: &Path,
     target: &str,
     manifest: &[Migration],
+    progress: impl FnMut(super::DatabaseStartupProgress),
+) -> Result<MigrationReport> {
+    migrate_layout_with_progress(home, target, manifest, progress, None)
+}
+
+fn migrate_layout_with_progress(
+    home: &Path,
+    target: &str,
+    manifest: &[Migration],
     mut progress: impl FnMut(super::DatabaseStartupProgress),
+    relocation: Option<&crate::host_layout::paths::Relocation>,
 ) -> Result<MigrationReport> {
     use assistant_protocol::RuntimeHostStartupStage::*;
     let mut current = super::DatabaseStartupProgress {
@@ -239,7 +252,7 @@ fn migrate_with_progress(
         }
         return Ok(report);
     }
-    if existed {
+    if existed && relocation.is_none() {
         // 独立读事务冻结源数据，Backup API 和逐表精确核验都观察同一快照。
         current.stage = DatabaseBackup;
         progress(current.clone());
@@ -256,13 +269,19 @@ fn migrate_with_progress(
     for (index, migration) in manifest.iter().enumerate().skip(completed) {
         current.stage = DatabaseMigration;
         progress(current.clone());
-        apply_version(&mut connection, migration, &versions, manifest, index).map_err(
-            |source| MigrationError::VersionFailed {
-                version: migration.version.into(),
-                backup: report.backup.clone(),
-                source: Box::new(source),
-            },
-        )?;
+        apply_version(
+            &mut connection,
+            migration,
+            &versions,
+            manifest,
+            index,
+            relocation,
+        )
+        .map_err(|source| MigrationError::VersionFailed {
+            version: migration.version.into(),
+            backup: report.backup.clone(),
+            source: Box::new(source),
+        })?;
         report.applied.push(migration.version.into());
         current.database_version = Some(migration.version.into());
         current.min_compatible_host_version =
@@ -378,6 +397,7 @@ fn apply_version(
     versions: &[Version],
     manifest: &[Migration],
     expected: usize,
+    relocation: Option<&crate::host_layout::paths::Relocation>,
 ) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if completed_prefix(&transaction, versions)? != expected {
@@ -391,7 +411,14 @@ fn apply_version(
     compatibility::validate_committed(minimum.as_ref(), manifest, expected)?;
     transaction.execute_batch(LEDGER)?;
     transaction.authorizer(Some(migration_authorizer))?;
-    let outcome = (migration.apply)(&transaction);
+    let outcome = (migration.apply)(&transaction).and_then(|()| {
+        if migration.version == "0.27.0"
+            && let Some(paths) = relocation
+        {
+            v0_27_0::relocate(&transaction, paths)?;
+        }
+        Ok(())
+    });
     transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
     // 显式回滚当前版本，避免把失败版本当作成功；后继入口不会得到执行机会。
     if let Err(error) = outcome {

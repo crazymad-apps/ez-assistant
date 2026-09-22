@@ -63,6 +63,7 @@ pub(super) async fn seed(runtime: &AssistantRuntime, api_key: &str) {
     runtime
         .store
         .save_model_settings(ModelSettings {
+            management: None,
             default_model: Some(test_model_selection("fixture")),
             vision_model: None,
         })

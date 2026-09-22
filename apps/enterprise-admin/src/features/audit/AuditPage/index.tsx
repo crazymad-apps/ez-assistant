@@ -73,6 +73,7 @@ export function AuditPage(props: AuditPageProps) {
       title: '',
       key: 'detail',
       width: 84,
+      fixed: 'right',
       align: 'center',
       render: (_, record) => (
         <Button type="link" size="small" onClick={() => props.onDetail(record)}>

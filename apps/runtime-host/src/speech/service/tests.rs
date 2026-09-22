@@ -654,3 +654,17 @@ timeout_ms = 2000
     provider_server.abort();
     let _ = provider_server.await;
 }
+
+#[test]
+fn per_user_providers_share_the_existing_host_speech_slots() {
+    let slots = SpeechSlots::default();
+    let (_, a) = SpeechService::with_slots(Arc::new(StaticSource(String::new())), &slots);
+    let (_, b) = SpeechService::with_slots(Arc::new(StaticSource(String::new())), &slots);
+    let permits: Vec<_> = (0..MAX_ASR_REQUESTS)
+        .map(|_| a.asr_slots.clone().try_acquire_owned().unwrap())
+        .collect();
+    assert!(b.asr_slots.clone().try_acquire_owned().is_err());
+    assert!(b.tts_slots.clone().try_acquire_owned().is_ok());
+    drop(permits);
+    assert!(b.asr_slots.clone().try_acquire_owned().is_ok());
+}

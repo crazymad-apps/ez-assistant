@@ -1,4 +1,4 @@
-//! Host-owned local management IPC. No Runtime, Store, discovery or background service is started.
+//! Host 本机管理 IPC。读取没有副作用；写入持实例锁并先完成布局升级，不启动业务 Runtime。
 
 use super::{
     AccessError, Credentials, check_revision,
@@ -21,6 +21,12 @@ const MAX_INPUT: u64 = 64 * 1024;
 struct Configure {
     expected_revision: Option<String>,
     configuration: HostAccessConfiguration,
+    #[serde(default)]
+    mode: Option<crate::host_configuration::HostMode>,
+    #[serde(default)]
+    center_url: Option<String>,
+    #[serde(default)]
+    clear_center_binding: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +36,9 @@ struct Password {
 }
 #[derive(Serialize)]
 struct Status {
+    mode: Option<assistant_protocol::HostMode>,
+    center_url: Option<String>,
+    center_id: Option<String>,
     revision: Option<String>,
     password_configured: bool,
     configuration: HostAccessConfiguration,
@@ -65,7 +74,7 @@ pub(crate) async fn run(arguments: AccessArguments) -> Result<(), Box<dyn Error>
                 AccessError::Unauthorized => "host_running",
                 AccessError::PortInUse(_) => "port_in_use",
                 AccessError::Invalid(_) => "invalid_request",
-                AccessError::Unavailable => "configuration_unavailable",
+                AccessError::Unavailable | AccessError::Center(_) => "configuration_unavailable",
             };
             println!(
                 "{}",
@@ -82,11 +91,9 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
         .map_err(|_| AccessError::Invalid("Runtime Home 无效。"))?;
     if arguments.operation == AccessOperation::Read {
         check_home(&home)?;
-        return status(
-            &LocalConfigSource::read_only(home.join("config.toml")),
-            false,
-        )
-        .await;
+        let path = crate::host_layout::read_configuration_path(&home)
+            .map_err(|_| AccessError::Unavailable)?;
+        return status(&LocalConfigSource::read_only(path), false).await;
     }
     // Read and validate the full bounded request before creating Home or acquiring its existing lock.
     let mut bytes = Vec::new();
@@ -115,27 +122,71 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
         EndpointError::AlreadyRunning { .. } => AccessError::Busy,
         _ => AccessError::Unavailable,
     })?;
-    let source = LocalConfigSource::new(home.join("config.toml"));
-    let mut document = load(&source).await?;
-    match request {
+    let original_path =
+        crate::host_layout::read_configuration_path(&home).map_err(|_| AccessError::Unavailable)?;
+    let original = load(&LocalConfigSource::new(original_path)).await?;
+    let expected_revision = match &request {
+        Change::Configure(r) => &r.expected_revision,
+        Change::Password(r) => &r.expected_revision,
+    };
+    check_revision(&original, expected_revision)?;
+    // Reject invalid requests before the layout upgrade changes the configuration revision.
+    let password_hash = match &request {
         Change::Configure(request) => {
-            check_revision(&document, &request.expected_revision)?;
-            if request.configuration.remote_enabled && document.access.password_hash.is_none() {
+            let mut candidate = if home.join(crate::host_configuration::FILE).exists() {
+                original.document.clone()
+            } else {
+                crate::host_configuration::personal_document()
+            };
+            super::config::configure_identity(
+                &mut candidate,
+                request.mode,
+                request.center_url.as_deref(),
+                request.clear_center_binding.unwrap_or(false),
+            )?;
+            if request.configuration.remote_enabled
+                && original.access.password_hash.is_none()
+                && crate::host_configuration::parse(&candidate.to_string())
+                    .map_err(AccessError::Invalid)?
+                    .mode
+                    == crate::host_configuration::HostMode::Personal
+            {
                 return Err(AccessError::Invalid("请先设置密码，再开启非本地访问。"));
             }
             crate::server::tls_configuration(&request.configuration).await?;
             drop(crate::server::bind(request.configuration.port)?);
+            None
+        }
+        Change::Password(request) => Some(
+            Credentials::new()
+                .hash_password(request.password.clone())
+                .await?,
+        ),
+    };
+    let layout_home = home.clone();
+    tokio::task::spawn_blocking(move || crate::host_layout::upgrade(&layout_home))
+        .await
+        .map_err(|_| AccessError::Unavailable)?
+        .map_err(|_| AccessError::Unavailable)?;
+    let source = LocalConfigSource::new(home.join(crate::host_configuration::FILE));
+    let mut document = load(&source).await?;
+    match request {
+        Change::Configure(request) => {
+            super::config::configure_identity(
+                &mut document.document,
+                request.mode,
+                request.center_url.as_deref(),
+                request.clear_center_binding.unwrap_or(false),
+            )?;
             document.access.public = request.configuration;
         }
-        Change::Password(request) => {
-            check_revision(&document, &request.expected_revision)?;
-            document.access.password_hash =
-                Some(Credentials::new().hash_password(request.password).await?);
+        Change::Password(_) => {
+            document.access.password_hash = password_hash;
         }
     }
     let saved = save(&source, document).await?;
     let result = status(
-        &LocalConfigSource::read_only(home.join("config.toml")),
+        &LocalConfigSource::read_only(home.join(crate::host_configuration::FILE)),
         true,
     )
     .await?;
@@ -153,7 +204,11 @@ enum Change {
 async fn status(source: &LocalConfigSource, saved: bool) -> Result<Status, AccessError> {
     let document = load(source).await?;
     validate(&document.access.public)?;
+    let (mode, center_url, center_id) = super::config::identity_fields(&document.document);
     Ok(Status {
+        mode,
+        center_url,
+        center_id,
         revision: document.revision,
         password_configured: document.access.password_hash.is_some(),
         configuration: document.access.public,

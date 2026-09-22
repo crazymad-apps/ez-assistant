@@ -2,7 +2,6 @@ import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { FullConfig } from "@playwright/test";
 
@@ -15,9 +14,11 @@ type Discovery = {
 const STARTUP_TIMEOUT_MS = 10_000;
 
 export default async function setupRuntimeHost(_config: FullConfig): Promise<() => Promise<void>> {
-  const runtime_home = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-runtime-"));
-  const workspace = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-workspace-"));
-  const additional_workspace = await mkdtemp(join(tmpdir(), "ez-assistant-e2e-added-workspace-"));
+  const test_root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? "../../.runtime-test/c03-m4");
+  await mkdir(test_root, { recursive: true });
+  const runtime_home = await mkdtemp(join(test_root, "ez-assistant-e2e-runtime-"));
+  const workspace = await mkdtemp(join(test_root, "ez-assistant-e2e-workspace-"));
+  const additional_workspace = await mkdtemp(join(test_root, "ez-assistant-e2e-added-workspace-"));
   const provider = await startFakeProvider();
   const mcp_secret = "e2e-mcp-secret-must-not-leak-9273";
   const reservation = createServer();
@@ -26,8 +27,7 @@ export default async function setupRuntimeHost(_config: FullConfig): Promise<() 
   if (!reserved_address || typeof reserved_address === "string") throw new Error("test port missing");
   const host_port = reserved_address.port;
   await new Promise<void>((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
-  const user_directory = join(runtime_home, "fixture-user-home");
-  await mkdir(user_directory);
+  const user_directory = await mkdtemp(join(test_root, "ez-assistant-e2e-os-home-"));
   await writeFile(
     join(runtime_home, "config.toml"),
     `schema_version = 1
@@ -113,7 +113,7 @@ server_names = []
   } catch (error) {
     child.kill("SIGTERM");
     await provider.close();
-    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace);
+    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
     throw error;
   }
 
@@ -132,7 +132,7 @@ server_names = []
     }
     await waitForExit(child);
     await provider.close();
-    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace);
+    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
     delete process.env.EZ_ASSISTANT_E2E_BOOTSTRAP;
     delete process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE;
     delete process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME;
@@ -176,7 +176,13 @@ async function startFakeProvider(): Promise<FakeProvider> {
       "cache-control": "no-cache",
     });
     let frames: readonly object[];
-    if (marker === "MCP_CASE") {
+    if (marker === "C05_STREAM") {
+      frames = [
+        ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { reasoning_content: `推理 ${i}\n`.repeat(6) }, finish_reason: null }] })),
+        ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { content: `正文 ${i}\n\n`.repeat(3) }, finish_reason: null }] })),
+        ...textFrames(response_id, "C05 完成"),
+      ];
+    } else if (marker === "MCP_CASE") {
       frames = has_tool_result
         ? textFrames(response_id, JSON.stringify(body.messages?.filter((message) => message.role === "tool").at(-1)).includes("called:first_tool") ? "MCP 调用已回传。" : "MCP 调用已拒绝。")
         : mcpToolCallFrames(response_id);
@@ -224,7 +230,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE"];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "C05_STREAM"];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);

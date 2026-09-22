@@ -38,7 +38,6 @@ impl Fixture {
                 "native-fixture",
                 authority,
                 address.clone(),
-                home.path().into(),
                 "instance-fixture".into(),
             ),
             CancellationToken::new(),
@@ -169,6 +168,33 @@ async fn native_auth_precedes_version_admission_and_all_business_routes_require_
 }
 
 #[tokio::test]
+async fn socket_cookie_requires_origin_even_when_expired() {
+    let f = Fixture::new().await;
+    let cookie = f.ordinary_cookie().await;
+    let name = cookie.split_once('=').unwrap().0;
+    let expired = format!("{name}=expired-cookie");
+    for cookie in [&cookie, &expired] {
+        let rejected = f
+            .request(Method::GET, "/user-terminals/socket")
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        // 不发 Upgrade 头：400 表示通过路由准入后，才由 WS extractor 拒绝普通 HTTP。
+        // 这里不要求版本头或 login_context，它们属于真正 WS 的首帧验证。
+        let accepted = f
+            .request(Method::GET, "/user-terminals/socket")
+            .header("Cookie", cookie)
+            .header("Origin", &f.address)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn pairs_duplicates_invalid_and_both_version_floors_have_safe_errors() {
     let f = Fixture::new().await;
     for (version, minimum, expected) in [
@@ -224,6 +250,20 @@ async fn pairs_duplicates_invalid_and_both_version_floors_have_safe_errors() {
 async fn cookie_declaration_is_only_a_media_fallback_and_explicit_headers_cannot_bypass() {
     let f = Fixture::new().await;
     let cookie = f.ordinary_cookie().await;
+    let token = cookie.split_once('=').unwrap().1;
+    let context = f.state.access.credentials.authenticate(token).unwrap();
+    let context = AccessPermit::new(false, Some(context), CancellationToken::new())
+        .login_context()
+        .unwrap();
+    // GET 媒体回退不能因路由分组而扩展到同一路径的 HEAD。
+    let response = f
+        .request(Method::HEAD, "/sessions/s/attachments/a/preview")
+        .header("Cookie", &cookie)
+        .header("x-ez-login-context", &context)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     for path in [
         "/sessions/s/attachments/a/preview",
         "/sessions/s/attachments/a/download",
@@ -238,6 +278,7 @@ async fn cookie_declaration_is_only_a_media_fallback_and_explicit_headers_cannot
         assert_eq!(
             f.request(Method::GET, path)
                 .header("Cookie", &cookie)
+                .header("x-ez-login-context", &context)
                 .header("Origin", &f.address)
                 .send()
                 .await
@@ -258,6 +299,7 @@ async fn cookie_declaration_is_only_a_media_fallback_and_explicit_headers_cannot
         assert_eq!(
             f.request(Method::GET, path)
                 .header("Cookie", &cookie)
+                .header("x-ez-login-context", &context)
                 .header("Origin", &f.address)
                 .header(CLIENT_VERSION_HEADER, "0.25.1")
                 .header(MIN_COMPATIBLE_VERSION_HEADER, "0.25.1")
@@ -277,6 +319,7 @@ async fn cookie_declaration_is_only_a_media_fallback_and_explicit_headers_cannot
         assert_eq!(
             f.request(method, path)
                 .header("Cookie", &cookie)
+                .header("x-ez-login-context", &context)
                 .header("Origin", &f.address)
                 .send()
                 .await
@@ -288,6 +331,7 @@ async fn cookie_declaration_is_only_a_media_fallback_and_explicit_headers_cannot
     assert_eq!(
         f.request(Method::POST, "/auth/logout")
             .header("Cookie", &cookie)
+            .header("x-ez-login-context", &context)
             .header("Origin", &f.address)
             .send()
             .await

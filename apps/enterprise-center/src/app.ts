@@ -21,6 +21,15 @@ import { UsersController } from './users/controller.js';
 import { UsersService } from './users/service.js';
 import { AuditController } from './audit/controller.js';
 import { AuditService } from './audit/service.js';
+import { ModelsController } from './models/controller.js';
+import { ModelsService } from './models/service.js';
+import { ModelTemplates } from './models/templates.js';
+import { ModelProxy } from './llm/proxy.js';
+import { CallRecords } from './llm/records.js';
+import { SnapshotFiles } from './llm/snapshots.js';
+import { CallManagement } from './llm/management.js';
+import { CallsController } from './llm/controller.js';
+import type { CenterConfig } from './config.js';
 import fastifyStatic from '@fastify/static';
 
 const version = (
@@ -44,11 +53,25 @@ class InfoController {
   @ApiOkResponse({ type: CenterInfo })
   @ApiDefaultResponse({ type: CenterErrorResponse, description: '请求失败，返回脱敏原因码与请求标识' })
   info(): CenterInfo {
-    return { software_version: version, protocol_version: 1, min_protocol_version: 1 };
+    return {
+      software_version: version,
+      protocol_version: 1,
+      min_protocol_version: 1,
+      capabilities: ['managed_models', 'llm_proxy'],
+    };
   }
 }
 
-@Module({ controllers: [InfoController, IdentityController, UsersController, AuditController] })
+@Module({
+  controllers: [
+    InfoController,
+    IdentityController,
+    UsersController,
+    AuditController,
+    ModelsController,
+    CallsController,
+  ],
+})
 class CenterModule {}
 
 class SafeHttpErrors implements ExceptionFilter {
@@ -69,14 +92,19 @@ class SafeHttpErrors implements ExceptionFilter {
 
 /** 只装配 HTTP；存储准入由外层 owner 完成后才调用 listen，避免建半初始化服务。 */
 export async function createHttpApp(
-  identity?: { source: DataSource; origin: string },
+  identity?: { source: DataSource; origin: string } & Pick<
+    CenterConfig,
+    'templatesFile' | 'snapshotRoot' | 'llmConnectTimeout' | 'llmIdleTimeout'
+  >,
   adminRoot?: string,
 ): Promise<NestFastifyApplication> {
   const adapter = new FastifyAdapter({
     logger: false,
     bodyLimit: 16 * 1024,
     requestIdHeader: false,
+
     genReqId: () => randomUUID(),
+
     trustProxy: false,
     requestTimeout: 10000,
     connectionTimeout: 10000,
@@ -84,10 +112,25 @@ export async function createHttpApp(
   });
   // 离线契约导出不初始化 DataSource；无已准入依赖时明确失败，不提供 mock 成功路径。
   const identities = new IdentityService(identity?.source);
+  const templates = new ModelTemplates(identity?.templatesFile);
+  if (identity) await templates.initialize();
+  const models = new ModelsService(identities, identity?.source, templates, identity?.origin);
+  const records = new CallRecords(identity?.source, new SnapshotFiles(identity?.snapshotRoot, adminRoot));
+  const proxy = new ModelProxy(identities, models, records, {
+    origin: identity?.origin,
+    connectTimeout: identity?.llmConnectTimeout,
+    idleTimeout: identity?.llmIdleTimeout,
+  });
   const app = await NestFactory.create<NestFastifyApplication>(
     {
       module: CenterModule,
       providers: [
+        { provide: ModelProxy, useValue: proxy },
+        { provide: CallManagement, useValue: new CallManagement(identities, identity?.source, proxy, models) },
+        {
+          provide: ModelsService,
+          useValue: models,
+        },
         { provide: IdentityService, useValue: identities },
         { provide: UsersService, useValue: new UsersService(identities, identity?.source) },
         { provide: AuditService, useValue: new AuditService(identity?.source) },
@@ -112,6 +155,8 @@ export async function createHttpApp(
     return payload;
   });
   try {
+    if (identity) await records.initialize();
+    proxy.install(adapter.getInstance());
     if (adminRoot) {
       adapter.getInstance().register(fastifyStatic, {
         root: adminRoot,
@@ -121,6 +166,7 @@ export async function createHttpApp(
         dotfiles: 'deny',
         list: false,
         redirect: true,
+
         // 不暴露构建清单、源码、配置或 SPA 兜底；未知页面与 API 继续返回真实 404。
         allowedPath: (path) => path === '/index.html' || path === '/' || /^\/assets\/[a-zA-Z0-9_./-]+$/.test(path),
       });
@@ -136,6 +182,7 @@ export async function createHttpApp(
     await adapter.getInstance().ready();
     return app;
   } catch (error) {
+    await proxy.close();
     await app.close();
     throw error;
   }

@@ -6,6 +6,10 @@ export type ClientOptions = {
 
 export type CenterInfo = {
     /**
+     * 已实现能力；代理就绪后才声明 llm_proxy
+     */
+    capabilities: Array<string>;
+    /**
      * Center 软件版本，与 Runtime 独立发布
      */
     software_version: string;
@@ -121,6 +125,11 @@ export type ResetPasswordRequest = {
     new_password: string;
 };
 
+export type ModelSelection = {
+    provider_instance_id: string;
+    model_id: string;
+};
+
 export type AuditUserFields = {
     display_name?: string;
     role?: 'user' | 'admin';
@@ -128,6 +137,16 @@ export type AuditUserFields = {
 };
 
 export type AuditDetails = {
+    call_id?: string;
+    side?: 'request' | 'response';
+    enabled?: boolean;
+    content_retention_days?: number;
+    index_retention_days?: number;
+    provider_instance_id?: string;
+    model_id?: string;
+    model_count?: number;
+    count?: number;
+    default_model?: ModelSelection | null;
     before?: AuditUserFields;
     after?: AuditUserFields;
 };
@@ -159,6 +178,208 @@ export type AuditPage = {
     offset: number;
 };
 
+export type ProviderConnection = {
+    display_name: string;
+    provider_type: 'openai' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    endpoint: string;
+    protocol_preference: 'auto' | 'responses' | 'chat_completions';
+    models_path: string;
+    discovery_format: 'openai' | 'vllm' | 'moonshot' | 'dashscope_native';
+};
+
+export type ProviderSummary = {
+    provider_instance_id: string;
+    connection: ProviderConnection;
+    has_api_key: boolean;
+};
+
+export type CredentialChange = {
+    mode: 'unchanged' | 'replace' | 'clear';
+};
+
+export type SaveProvider = {
+    connection: ProviderConnection;
+    credential: CredentialChange;
+};
+
+export type ProviderUsage = {
+    fixed_config_count: number;
+    default_model: boolean;
+};
+
+export type ModelConfigurationSummary = {
+    uses_template: boolean;
+    requires_configuration: boolean;
+};
+
+export type TokenLimit = {
+    state: 'unknown' | 'known' | 'invalid';
+    value?: number;
+};
+
+export type ToolChoice = {
+    auto: 'unknown' | 'supported' | 'unsupported';
+    none: 'unknown' | 'supported' | 'unsupported';
+    required: 'unknown' | 'supported' | 'unsupported';
+    named: 'unknown' | 'supported' | 'unsupported';
+};
+
+export type ModelParameters = {
+    context_window_tokens: TokenLimit;
+    max_input_tokens: TokenLimit;
+    max_output_tokens: TokenLimit;
+    reasoning_max_input_tokens: TokenLimit;
+    reasoning_max_output_tokens: TokenLimit;
+    streaming: 'unknown' | 'supported' | 'unsupported';
+    tool_choice: ToolChoice;
+    tool_image_projection: 'unknown' | 'unsupported' | 'native_tool_result' | 'follow_up_user_message';
+    image_input: 'unknown' | 'supported' | 'unsupported';
+    tool_calls: 'unknown' | 'supported' | 'unsupported';
+    reasoning: 'unknown' | 'supported' | 'unsupported';
+    reasoning_mode: 'unknown' | 'unsupported' | 'optional' | 'always';
+    reasoning_efforts: {
+        [key: string]: string;
+    } | null;
+    default_reasoning_effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+};
+
+export type CatalogModel = {
+    configuration?: ModelConfigurationSummary;
+    model_id: string;
+    display_name: string | null;
+    metadata: ModelParameters;
+};
+
+export type CatalogSnapshot = {
+    provider_instance_id: string;
+    models: Array<CatalogModel>;
+    refreshed_at_ms: number | null;
+    connection_changed: boolean;
+};
+
+export type ModelConfiguration = {
+    provider_instance_id: string;
+    model_id: string;
+    origin: 'online' | 'manual';
+    parameters: ModelParameters;
+    source: 'fixed' | 'online' | 'template' | 'unconfigured';
+    field_sources: {
+        [key: string]: string;
+    };
+    updated_at_ms: number | null;
+    template_document: string | null;
+    template_checked_on: string | null;
+    requires_configuration: boolean;
+};
+
+export type FixedConfigurationPage = {
+    items: Array<ModelConfiguration>;
+    total: number;
+    offset: number;
+    limit: number;
+};
+
+export type ModelConfigurationQuery = {
+    provider_instance_id: string;
+    model_id: string;
+    origin: 'online' | 'manual';
+};
+
+export type SaveModelConfiguration = {
+    provider_instance_id: string;
+    model_id: string;
+    origin: 'online' | 'manual';
+    parameters: ModelParameters;
+};
+
+export type ModelSettings = {
+    default_model: ModelSelection | null;
+    state: 'ready' | 'unavailable';
+    reason: string | null;
+    configuration: ModelConfiguration | null;
+};
+
+export type SaveModelSettings = {
+    default_model: ModelSelection | null;
+};
+
+export type TemplateStatus = {
+    available: boolean;
+    count: number;
+    loaded_at_ms: number | null;
+    error: string | null;
+};
+
+export type RuntimeModelConfiguration = {
+    state: 'ready' | 'unavailable';
+    center_id: string;
+    reason?: string;
+    endpoint?: string;
+    provider_type?: 'openai' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_display_name?: string;
+    protocol?: 'open_ai_responses' | 'open_ai_chat_completions';
+    model_id?: string;
+    parameters?: ModelParameters;
+};
+
+export type CallSnapshot = {
+    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
+    bytes: number | null;
+    sha256: string | null;
+    reason: string | null;
+};
+
+export type CallDetails = {
+    id: string;
+    user_id: number | null;
+    username: string | null;
+    provider_instance_id: string | null;
+    provider_name: string | null;
+    model_id: string | null;
+    kind: 'proxy' | 'admin_test';
+    protocol: 'open_ai_responses' | 'open_ai_chat_completions';
+    started_at: string;
+    ended_at: string | null;
+    http_status: number | null;
+    reason: string | null;
+    outcome: 'in_progress' | 'forwarded' | 'rejected' | 'upstream_error' | 'interrupted' | 'unknown';
+    request: CallSnapshot;
+    response: CallSnapshot;
+};
+
+export type CallPage = {
+    items: Array<CallDetails>;
+    total: number;
+    limit: number;
+    offset: number;
+};
+
+export type SnapshotContent = {
+    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
+    bytes: number | null;
+    sha256: string | null;
+    reason: string | null;
+    text: string | null;
+};
+
+export type RecordingSettings = {
+    enabled: boolean;
+    content_retention_days: number;
+    index_retention_days: number;
+};
+
+export type TestModel = {
+    provider_instance_id: string;
+    model_id: string;
+};
+
+export type ModelTestResult = {
+    call_id: string;
+    http_status: number | null;
+    connected: boolean;
+    reason: string | null;
+};
+
 export type LoginRequestWritable = {
     /**
      * 3—64 位 ASCII 账号，trim 后转小写
@@ -179,6 +400,16 @@ export type CreateUserRequestWritable = {
      * 至少 6 位，包含英文字母和数字；最多 512 UTF-8 字节
      */
     password: string;
+};
+
+export type CredentialChangeWritable = {
+    mode: 'unchanged' | 'replace' | 'clear';
+    value?: string;
+};
+
+export type SaveProviderWritable = {
+    connection: ProviderConnection;
+    credential: CredentialChangeWritable;
 };
 
 export type GetCenterInfoData = {
@@ -433,3 +664,547 @@ export type ListManagementAuditResponses = {
 };
 
 export type ListManagementAuditResponse = ListManagementAuditResponses[keyof ListManagementAuditResponses];
+
+export type ListModelProvidersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/model-providers';
+};
+
+export type ListModelProvidersErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListModelProvidersError = ListModelProvidersErrors[keyof ListModelProvidersErrors];
+
+export type ListModelProvidersResponses = {
+    200: Array<ProviderSummary>;
+};
+
+export type ListModelProvidersResponse = ListModelProvidersResponses[keyof ListModelProvidersResponses];
+
+export type CreateModelProviderData = {
+    body: SaveProviderWritable;
+    path?: never;
+    query?: never;
+    url: '/api/model-providers';
+};
+
+export type CreateModelProviderErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type CreateModelProviderError = CreateModelProviderErrors[keyof CreateModelProviderErrors];
+
+export type CreateModelProviderResponses = {
+    201: ProviderSummary;
+};
+
+export type CreateModelProviderResponse = CreateModelProviderResponses[keyof CreateModelProviderResponses];
+
+export type DeleteModelProviderData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}';
+};
+
+export type DeleteModelProviderErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type DeleteModelProviderError = DeleteModelProviderErrors[keyof DeleteModelProviderErrors];
+
+export type DeleteModelProviderResponses = {
+    200: ProviderUsage;
+};
+
+export type DeleteModelProviderResponse = DeleteModelProviderResponses[keyof DeleteModelProviderResponses];
+
+export type GetModelProviderData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}';
+};
+
+export type GetModelProviderErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetModelProviderError = GetModelProviderErrors[keyof GetModelProviderErrors];
+
+export type GetModelProviderResponses = {
+    200: ProviderSummary;
+};
+
+export type GetModelProviderResponse = GetModelProviderResponses[keyof GetModelProviderResponses];
+
+export type UpdateModelProviderData = {
+    body: SaveProviderWritable;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}';
+};
+
+export type UpdateModelProviderErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdateModelProviderError = UpdateModelProviderErrors[keyof UpdateModelProviderErrors];
+
+export type UpdateModelProviderResponses = {
+    200: ProviderSummary;
+};
+
+export type UpdateModelProviderResponse = UpdateModelProviderResponses[keyof UpdateModelProviderResponses];
+
+export type GetModelProviderUsageData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}/usage';
+};
+
+export type GetModelProviderUsageErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetModelProviderUsageError = GetModelProviderUsageErrors[keyof GetModelProviderUsageErrors];
+
+export type GetModelProviderUsageResponses = {
+    200: ProviderUsage;
+};
+
+export type GetModelProviderUsageResponse = GetModelProviderUsageResponses[keyof GetModelProviderUsageResponses];
+
+export type GetModelCatalogData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}/catalog';
+};
+
+export type GetModelCatalogErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetModelCatalogError = GetModelCatalogErrors[keyof GetModelCatalogErrors];
+
+export type GetModelCatalogResponses = {
+    200: CatalogSnapshot;
+};
+
+export type GetModelCatalogResponse = GetModelCatalogResponses[keyof GetModelCatalogResponses];
+
+export type RefreshModelCatalogData = {
+    body: {
+        [key: string]: never;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/model-providers/{id}/refresh';
+};
+
+export type RefreshModelCatalogErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type RefreshModelCatalogError = RefreshModelCatalogErrors[keyof RefreshModelCatalogErrors];
+
+export type RefreshModelCatalogResponses = {
+    200: CatalogSnapshot;
+};
+
+export type RefreshModelCatalogResponse = RefreshModelCatalogResponses[keyof RefreshModelCatalogResponses];
+
+export type ListFixedModelConfigurationsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        offset?: number;
+        limit?: number;
+    };
+    url: '/api/model-providers/{id}/fixed-configs';
+};
+
+export type ListFixedModelConfigurationsErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListFixedModelConfigurationsError = ListFixedModelConfigurationsErrors[keyof ListFixedModelConfigurationsErrors];
+
+export type ListFixedModelConfigurationsResponses = {
+    200: FixedConfigurationPage;
+};
+
+export type ListFixedModelConfigurationsResponse = ListFixedModelConfigurationsResponses[keyof ListFixedModelConfigurationsResponses];
+
+export type QueryModelConfigurationData = {
+    body: ModelConfigurationQuery;
+    path?: never;
+    query?: never;
+    url: '/api/model-configuration/query';
+};
+
+export type QueryModelConfigurationErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type QueryModelConfigurationError = QueryModelConfigurationErrors[keyof QueryModelConfigurationErrors];
+
+export type QueryModelConfigurationResponses = {
+    200: ModelConfiguration;
+};
+
+export type QueryModelConfigurationResponse = QueryModelConfigurationResponses[keyof QueryModelConfigurationResponses];
+
+export type SaveModelConfigurationData = {
+    body: SaveModelConfiguration;
+    path?: never;
+    query?: never;
+    url: '/api/model-configuration';
+};
+
+export type SaveModelConfigurationErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type SaveModelConfigurationError = SaveModelConfigurationErrors[keyof SaveModelConfigurationErrors];
+
+export type SaveModelConfigurationResponses = {
+    200: ModelConfiguration;
+};
+
+export type SaveModelConfigurationResponse = SaveModelConfigurationResponses[keyof SaveModelConfigurationResponses];
+
+export type ResetModelConfigurationData = {
+    body: ModelSelection;
+    path?: never;
+    query?: never;
+    url: '/api/model-configuration/reset';
+};
+
+export type ResetModelConfigurationErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type ResetModelConfigurationError = ResetModelConfigurationErrors[keyof ResetModelConfigurationErrors];
+
+export type ResetModelConfigurationResponses = {
+    204: void;
+};
+
+export type ResetModelConfigurationResponse = ResetModelConfigurationResponses[keyof ResetModelConfigurationResponses];
+
+export type GetModelSettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/model-settings';
+};
+
+export type GetModelSettingsErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetModelSettingsError = GetModelSettingsErrors[keyof GetModelSettingsErrors];
+
+export type GetModelSettingsResponses = {
+    200: ModelSettings;
+};
+
+export type GetModelSettingsResponse = GetModelSettingsResponses[keyof GetModelSettingsResponses];
+
+export type SaveModelSettingsData = {
+    body: SaveModelSettings;
+    path?: never;
+    query?: never;
+    url: '/api/model-settings';
+};
+
+export type SaveModelSettingsErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type SaveModelSettingsError = SaveModelSettingsErrors[keyof SaveModelSettingsErrors];
+
+export type SaveModelSettingsResponses = {
+    200: ModelSettings;
+};
+
+export type SaveModelSettingsResponse = SaveModelSettingsResponses[keyof SaveModelSettingsResponses];
+
+export type GetModelTemplateStatusData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/model-templates';
+};
+
+export type GetModelTemplateStatusErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetModelTemplateStatusError = GetModelTemplateStatusErrors[keyof GetModelTemplateStatusErrors];
+
+export type GetModelTemplateStatusResponses = {
+    200: TemplateStatus;
+};
+
+export type GetModelTemplateStatusResponse = GetModelTemplateStatusResponses[keyof GetModelTemplateStatusResponses];
+
+export type ReloadModelTemplatesData = {
+    body: {
+        [key: string]: never;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/model-templates/reload';
+};
+
+export type ReloadModelTemplatesErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type ReloadModelTemplatesError = ReloadModelTemplatesErrors[keyof ReloadModelTemplatesErrors];
+
+export type ReloadModelTemplatesResponses = {
+    200: TemplateStatus;
+};
+
+export type ReloadModelTemplatesResponse = ReloadModelTemplatesResponses[keyof ReloadModelTemplatesResponses];
+
+export type GetRuntimeModelConfigurationData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/runtime/model-configuration';
+};
+
+export type GetRuntimeModelConfigurationErrors = {
+    /**
+     * 身份、参数、配置冲突或服务失败；不返回凭据与上游正文
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetRuntimeModelConfigurationError = GetRuntimeModelConfigurationErrors[keyof GetRuntimeModelConfigurationErrors];
+
+export type GetRuntimeModelConfigurationResponses = {
+    200: RuntimeModelConfiguration;
+};
+
+export type GetRuntimeModelConfigurationResponse = GetRuntimeModelConfigurationResponses[keyof GetRuntimeModelConfigurationResponses];
+
+export type ListLlmCallsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        id?: string;
+        user_id?: number;
+        provider_instance_id?: string;
+        model_id?: string;
+        outcome?: string;
+        kind?: string;
+        from?: string;
+        to?: string;
+        limit?: number;
+        offset?: number;
+    };
+    url: '/api/llm-calls';
+};
+
+export type ListLlmCallsErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListLlmCallsError = ListLlmCallsErrors[keyof ListLlmCallsErrors];
+
+export type ListLlmCallsResponses = {
+    200: CallPage;
+};
+
+export type ListLlmCallsResponse = ListLlmCallsResponses[keyof ListLlmCallsResponses];
+
+export type GetLlmCallData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/llm-calls/{id}';
+};
+
+export type GetLlmCallErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetLlmCallError = GetLlmCallErrors[keyof GetLlmCallErrors];
+
+export type GetLlmCallResponses = {
+    200: CallDetails;
+};
+
+export type GetLlmCallResponse = GetLlmCallResponses[keyof GetLlmCallResponses];
+
+export type GetLlmSnapshotData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query: {
+        side: 'request' | 'response';
+    };
+    url: '/api/llm-calls/{id}/snapshot';
+};
+
+export type GetLlmSnapshotErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetLlmSnapshotError = GetLlmSnapshotErrors[keyof GetLlmSnapshotErrors];
+
+export type GetLlmSnapshotResponses = {
+    200: SnapshotContent;
+};
+
+export type GetLlmSnapshotResponse = GetLlmSnapshotResponses[keyof GetLlmSnapshotResponses];
+
+export type GetLlmRecordingSettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/llm-recording-settings';
+};
+
+export type GetLlmRecordingSettingsErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetLlmRecordingSettingsError = GetLlmRecordingSettingsErrors[keyof GetLlmRecordingSettingsErrors];
+
+export type GetLlmRecordingSettingsResponses = {
+    200: RecordingSettings;
+};
+
+export type GetLlmRecordingSettingsResponse = GetLlmRecordingSettingsResponses[keyof GetLlmRecordingSettingsResponses];
+
+export type SaveLlmRecordingSettingsData = {
+    body: RecordingSettings;
+    path?: never;
+    query?: never;
+    url: '/api/llm-recording-settings';
+};
+
+export type SaveLlmRecordingSettingsErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type SaveLlmRecordingSettingsError = SaveLlmRecordingSettingsErrors[keyof SaveLlmRecordingSettingsErrors];
+
+export type SaveLlmRecordingSettingsResponses = {
+    200: RecordingSettings;
+};
+
+export type SaveLlmRecordingSettingsResponse = SaveLlmRecordingSettingsResponses[keyof SaveLlmRecordingSettingsResponses];
+
+export type TestModelConfigurationData = {
+    body: TestModel;
+    path?: never;
+    query?: never;
+    url: '/api/model-configuration/test';
+};
+
+export type TestModelConfigurationErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type TestModelConfigurationError = TestModelConfigurationErrors[keyof TestModelConfigurationErrors];
+
+export type TestModelConfigurationResponses = {
+    200: ModelTestResult;
+};
+
+export type TestModelConfigurationResponse = TestModelConfigurationResponses[keyof TestModelConfigurationResponses];

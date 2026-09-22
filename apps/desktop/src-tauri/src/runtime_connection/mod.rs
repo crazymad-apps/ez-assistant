@@ -3,7 +3,8 @@ mod passwords;
 
 use crate::runtime_bootstrap::{RuntimeBootstrap, RuntimeBootstrapCoordinator};
 use assistant_protocol::{
-    HostLoginRequest, HostLoginResult, RuntimeHostCapabilities, RuntimeHostFeature, SecretValue,
+    HostLoginRequest, HostLoginResult, HostMode, RuntimeHostCapabilities, RuntimeHostFeature,
+    SecretValue,
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -79,8 +80,10 @@ struct Selection {
     context: Option<Arc<TargetContext>>,
 }
 struct TargetContext {
+    cancellation: CancellationToken,
     bootstrap: RuntimeBootstrap,
     local: bool,
+    local_proof: Option<String>,
 }
 
 /// 在 invoke 参数解析时冻结目标；后续 await 不能重新读取全局目标。
@@ -90,12 +93,45 @@ pub(crate) struct RuntimeTarget {
     pub(crate) cancellation: CancellationToken,
 }
 impl RuntimeTarget {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        !self.cancellation.is_cancelled()
+            && !other.cancellation.is_cancelled()
+            && Arc::ptr_eq(&self.context, &other.context)
+    }
+    /// 原生浏览器创建前向已绑定 Host 核验本人；不接受 WebView 自报的用户或 Profile。
+    pub(crate) async fn browser_identity(
+        &self,
+    ) -> Result<(HostLoginResult, bool, String), ConnectionError> {
+        let bootstrap = self.bootstrap().await?;
+        let response = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(stale()),
+            result = http()?.get(format!("{}/auth/session", bootstrap.base_url))
+                .bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers()).send() => result.map_err(|_| unavailable())?,
+        };
+        let identity = decode_login(response).await?;
+        self.ensure_active()?;
+        if identity.instance_id != bootstrap.instance_id {
+            return Err(stale());
+        }
+        Ok((identity, self.context.local, bootstrap.base_url))
+    }
     pub(crate) fn ensure_active(&self) -> Result<(), ConnectionError> {
         if self.cancellation.is_cancelled() {
             Err(stale())
         } else {
             Ok(())
         }
+    }
+    /// 企业普通 Token 表明用户；这份仅原生持有的独立证明表明请求确由本机管理客户端发出。
+    pub(crate) fn native_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = crate::runtime_compatibility::headers();
+        if let Some(proof) = &self.context.local_proof
+            && let Ok(value) = proof.parse()
+        {
+            headers.insert("x-ez-host-bootstrap", value);
+        }
+        headers
     }
     pub(crate) fn ensure_local(&self) -> Result<(), ConnectionError> {
         self.ensure_active()?;
@@ -153,18 +189,36 @@ impl RuntimeConnection {
             .map(|value| value.cancellation.clone())
             .ok_or_else(stale)
     }
+    #[cfg(test)]
     fn bind(
         &self,
         id: &str,
         bootstrap: RuntimeBootstrap,
         local: bool,
     ) -> Result<(), ConnectionError> {
+        self.bind_with_proof(id, bootstrap, local, None)
+    }
+    fn bind_with_proof(
+        &self,
+        id: &str,
+        bootstrap: RuntimeBootstrap,
+        local: bool,
+        local_proof: Option<String>,
+    ) -> Result<(), ConnectionError> {
         let mut selected = self.selected.lock().map_err(|_| unavailable())?;
         let selection = selected
             .as_mut()
             .filter(|value| value.id == id)
             .ok_or_else(stale)?;
-        selection.context = Some(Arc::new(TargetContext { bootstrap, local }));
+        if let Some(previous) = selection.context.take() {
+            previous.cancellation.cancel();
+        }
+        selection.context = Some(Arc::new(TargetContext {
+            cancellation: selection.cancellation.child_token(),
+            bootstrap,
+            local,
+            local_proof,
+        }));
         Ok(())
     }
     fn target(&self, id: &str) -> Result<RuntimeTarget, ConnectionError> {
@@ -175,7 +229,12 @@ impl RuntimeConnection {
             .ok_or_else(stale)?;
         Ok(RuntimeTarget {
             context: selected.context.clone().ok_or_else(stale)?,
-            cancellation: selected.cancellation.clone(),
+            cancellation: selected
+                .context
+                .as_ref()
+                .ok_or_else(stale)?
+                .cancellation
+                .clone(),
         })
     }
 }
@@ -190,13 +249,17 @@ pub(crate) struct PreparedConnection {
 pub(crate) async fn begin_runtime_connection(
     connection: State<'_, RuntimeConnection>,
     resources: State<'_, crate::native_resource::NativeResourceBridge>,
+    browsers: State<'_, crate::browser_resource::BrowserResourceManager>,
 ) -> Result<String, ConnectionError> {
     let id = connection.begin()?;
     resources.clear_target_resources();
+    browsers.close_all();
     connection.cancellation(&id)?;
     Ok(id)
 }
 
+// Tauri 注入三个状态参数，其余为登录表单；不引入额外持久化配置。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) async fn connect_runtime_target(
     app: AppHandle,
@@ -206,19 +269,34 @@ pub(crate) async fn connect_runtime_target(
     origin: Option<String>,
     password: String,
     remember: bool,
+    username: Option<String>,
 ) -> Result<PreparedConnection, ConnectionError> {
     let cancellation = connection.cancellation(&binding_id)?;
     let normalized = origin.as_deref().map(normalize_origin).transpose()?;
-    let bootstrap = tokio::select! {
+    let (bootstrap, local_proof) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(stale()),
         result = async {
-            if let Some(origin) = &normalized { remote_login(origin, &password).await }
-            else { local.bootstrap().await.map_err(|_| unavailable()) }
+            let management = if normalized.is_none() { Some(local.bootstrap().await.map_err(|_| unavailable())?) } else { None };
+            let origin = normalized.as_deref().or_else(|| management.as_ref().map(|value| value.base_url.as_str())).ok_or_else(unavailable)?;
+            let capabilities = discover(origin).await?;
+            let proof = management.as_ref().map(|value| value.access_token.clone());
+            let bootstrap = if capabilities.mode == HostMode::Enterprise {
+                login(origin, HostLoginRequest::Enterprise { username: username.unwrap_or_default(), password: SecretValue::new(password.clone()), native: true }).await?
+            } else if let Some(management) = management { management }
+            else { remote_login(origin, &password).await? };
+            Ok::<_, ConnectionError>((bootstrap, proof))
         } => result?,
     };
-    connection.bind(&binding_id, bootstrap.clone(), normalized.is_none())?;
-    let warning = if let Some(origin) = normalized {
+    connection.bind_with_proof(
+        &binding_id,
+        bootstrap.clone(),
+        normalized.is_none(),
+        local_proof,
+    )?;
+    let warning = if let Some(origin) =
+        normalized.filter(|_| bootstrap.capabilities.mode == HostMode::Personal)
+    {
         passwords::save(app.config().identifier.clone(), origin, password, remember)
             .await
             .err()
@@ -232,6 +310,7 @@ pub(crate) async fn connect_runtime_target(
 
 #[tauri::command]
 pub(crate) async fn refresh_runtime_connection(
+    browsers: State<'_, crate::browser_resource::BrowserResourceManager>,
     connection: State<'_, RuntimeConnection>,
     local: State<'_, RuntimeBootstrapCoordinator>,
     binding_id: String,
@@ -241,12 +320,63 @@ pub(crate) async fn refresh_runtime_connection(
         biased;
         () = target.cancellation.cancelled() => return Err(stale()),
         result = async {
-            if target.context.local { local.bootstrap().await.map_err(|_| unavailable()) }
+            if target.context.local && target.context.bootstrap.capabilities.mode == HostMode::Personal {
+                let bootstrap = local.bootstrap().await.map_err(|_| unavailable())?;
+                if bootstrap.capabilities.mode != HostMode::Personal { return Err(failure("authentication_required", "Host 模式已变化，请重新登录。")); }
+                Ok(bootstrap)
+            }
             else { verify_remote(&target.context.bootstrap.base_url, &target.context.bootstrap.access_token).await }
         } => result?,
     };
-    connection.bind(&binding_id, bootstrap.clone(), target.context.local)?;
+    connection.bind_with_proof(
+        &binding_id,
+        bootstrap.clone(),
+        target.context.local,
+        target.context.local_proof.clone(),
+    )?;
+    browsers.close_cancelled();
     Ok(bootstrap)
+}
+
+#[tauri::command]
+pub(crate) async fn probe_runtime_target(
+    origin: String,
+) -> Result<RuntimeHostCapabilities, ConnectionError> {
+    discover(&normalize_origin(&origin)?).await
+}
+async fn discover(origin: &str) -> Result<RuntimeHostCapabilities, ConnectionError> {
+    let response = http()?
+        .get(format!("{origin}/capabilities"))
+        .headers(crate::runtime_compatibility::headers())
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    if !response.status().is_success() {
+        return Err(unavailable());
+    }
+    decode_json(response).await
+}
+
+#[derive(Serialize)]
+pub(crate) struct RestoredConnection {
+    #[serde(flatten)]
+    bootstrap: RuntimeBootstrap,
+    binding_id: String,
+    target_kind: &'static str,
+}
+/// WebView 刷新复用进程内的普通 Token；应用退出即消失，不从磁盘恢复企业登录。
+#[tauri::command]
+pub(crate) fn restore_runtime_connection(
+    connection: State<'_, RuntimeConnection>,
+) -> Result<Option<RestoredConnection>, ConnectionError> {
+    let selected = connection.selected.lock().map_err(|_| unavailable())?;
+    Ok(selected.as_ref().and_then(|value| {
+        value.context.as_ref().map(|context| RestoredConnection {
+            bootstrap: context.bootstrap.clone(),
+            binding_id: value.id.clone(),
+            target_kind: if context.local { "local" } else { "remote" },
+        })
+    }))
 }
 
 #[tauri::command]
@@ -313,20 +443,37 @@ async fn decode_login(response: reqwest::Response) -> Result<HostLoginResult, Co
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(failure("authentication_required", "密码错误或登录已失效。"));
     }
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        return Err(failure(
-            "component_mismatch",
-            "Host 与 Desktop 软件版本不兼容，请更新对应应用。",
-        ));
-    }
-    if !response.status().is_success() {
+    if response.status().is_redirection() {
         return Err(ConnectionError {
             code: "runtime_unavailable",
             message: format!(
-                "Host 返回 HTTP {}，请检查访问设置。",
+                "Host 返回 HTTP {}，已拒绝转发登录凭据。",
                 response.status().as_u16()
             ),
         });
+    }
+    if !response.status().is_success() {
+        let value: serde_json::Value = decode_json(response).await?;
+        let (code, message) = match value["error"]["code"].as_str() {
+            Some("center_unavailable") => ("center_unavailable", "企业中心暂不可达，请稍后重试。"),
+            Some("center_identity_mismatch") => (
+                "center_identity_mismatch",
+                "企业中心身份与本机绑定不一致，请由本机管理者检查中心配置。",
+            ),
+            Some("center_protocol_incompatible") => (
+                "center_protocol_incompatible",
+                "企业中心协议不兼容，请更新服务。",
+            ),
+            Some("client_too_old" | "host_too_old" | "component_mismatch") => (
+                "component_mismatch",
+                "Host 与 Desktop 版本不兼容，请更新对应应用。",
+            ),
+            _ => (
+                "runtime_unavailable",
+                "Host 暂时无法完成请求，请检查访问设置或稍后重试。",
+            ),
+        };
+        return Err(failure(code, message));
     }
     decode_json(response).await
 }
@@ -350,14 +497,24 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn remote_login(origin: &str, password: &str) -> Result<RuntimeBootstrap, ConnectionError> {
+    login(
+        origin,
+        HostLoginRequest::Password {
+            password: SecretValue::new(password.to_owned()),
+            native: true,
+        },
+    )
+    .await
+}
+async fn login(
+    origin: &str,
+    request: HostLoginRequest,
+) -> Result<RuntimeBootstrap, ConnectionError> {
     let login = decode_login(
         http()?
             .post(format!("{origin}/auth/login"))
             .headers(crate::runtime_compatibility::headers())
-            .json(&HostLoginRequest::Password {
-                password: SecretValue::new(password.to_owned()),
-                native: true,
-            })
+            .json(&request)
             .send()
             .await
             .map_err(|error| transport_error(&error).at_step("发送登录请求"))?,
@@ -434,6 +591,31 @@ async fn verify_remote_with_client(
     })
 }
 
+/// Host 管理始终走本机 bootstrap，与当前选择的企业账号及远程目标无关。
+#[tauri::command]
+pub(crate) async fn manage_local_host(
+    local: State<'_, RuntimeBootstrapCoordinator>,
+    command: assistant_protocol::HostAccessCommand,
+) -> Result<assistant_protocol::HostAccessStatus, ConnectionError> {
+    let bootstrap = local.bootstrap().await.map_err(|_| unavailable())?;
+    let response = http()?.post(format!("{}/commands", bootstrap.base_url))
+        .bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers())
+        .json(&serde_json::json!({"request_id":"desktop-host-management","command":{"scope":"host_access","payload":command}}))
+        .send().await.map_err(|_| unavailable())?;
+    let success = response.status().is_success();
+    let value: serde_json::Value = decode_json(response).await?;
+    if !success {
+        return Err(ConnectionError {
+            code: "configuration_unavailable",
+            message: value["error"]["message"]
+                .as_str()
+                .unwrap_or("无法保存 Host 配置。")
+                .to_owned(),
+        });
+    }
+    serde_json::from_value(value["result"]["payload"].clone()).map_err(|_| unavailable())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +627,7 @@ mod tests {
             access_token: secret.into(),
             started_runtime: false,
             capabilities: RuntimeHostCapabilities {
+                mode: assistant_protocol::HostMode::Personal,
                 platform: None,
                 architecture: None,
                 rg_on_path: None,
@@ -457,6 +640,42 @@ mod tests {
                 features: vec![RuntimeHostFeature::WebLogin],
             },
         }
+    }
+
+    #[tokio::test]
+    async fn local_enterprise_user_token_and_native_proof_stay_separate() {
+        let connection = RuntimeConnection::default();
+        let id = connection.begin().unwrap();
+        let mut user = bootstrap("http://127.0.0.1:1234", "ordinary-user-token");
+        user.capabilities.mode = HostMode::Enterprise;
+        connection
+            .bind_with_proof(&id, user, true, Some("local-management-proof".into()))
+            .unwrap();
+        let target = connection.target(&id).unwrap();
+        assert_eq!(
+            target.bootstrap().await.unwrap().access_token,
+            "ordinary-user-token"
+        );
+        assert_eq!(
+            target.native_headers()["x-ez-host-bootstrap"],
+            "local-management-proof"
+        );
+        let next = connection.begin().unwrap();
+        connection
+            .bind(
+                &next,
+                bootstrap("http://remote.example", "remote-token"),
+                false,
+            )
+            .unwrap();
+        assert!(target.ensure_active().is_err());
+        assert!(
+            !connection
+                .target(&next)
+                .unwrap()
+                .native_headers()
+                .contains_key("x-ez-host-bootstrap")
+        );
     }
 
     #[test]
@@ -512,6 +731,25 @@ mod tests {
         );
         assert!(remote.bootstrap().await.is_err());
         assert!(connection.target(&third).unwrap().ensure_local().is_ok());
+    }
+
+    #[tokio::test]
+    async fn refreshing_a_binding_revokes_its_previous_resource_context() {
+        let connection = RuntimeConnection::default();
+        let id = connection.begin().unwrap();
+        connection
+            .bind(&id, bootstrap("http://127.0.0.1:1234", "old"), true)
+            .unwrap();
+        let old = connection.target(&id).unwrap();
+        assert!(old.same_connection(&connection.target(&id).unwrap()));
+        connection
+            .bind(&id, bootstrap("http://127.0.0.1:1234", "new"), true)
+            .unwrap();
+        let new = connection.target(&id).unwrap();
+        assert!(old.ensure_active().is_err());
+        assert!(!old.same_connection(&new));
+        assert!(new.ensure_active().is_ok());
+        assert!(!connection.cancellation(&id).unwrap().is_cancelled());
     }
 
     #[tokio::test]

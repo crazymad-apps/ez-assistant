@@ -120,3 +120,10 @@ pub(crate) fn sync_file_at(path: &Path) -> io::Result<()> {
 pub(crate) fn verify_replacement_contents(_path: &Path, _expected: &[u8]) -> io::Result<()> {
     Ok(())
 }
+/// 布局备份保留链接目标，不跟随链接读取或移动外部数据。
+pub(crate) fn copy_layout_link(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}

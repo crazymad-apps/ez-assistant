@@ -78,6 +78,8 @@ pub trait ChildTaskWorkspaceFactory: Send + Sync {
 ///
 /// 本类型不实现 `Debug`，因为它短暂借用 API Key。工厂不得保存借用或输出 credential。
 pub struct ModelServiceFactoryRequest<'a> {
+    /// 外部来源的冻结身份，仅供受信宿主处理当前请求拒绝；不含凭据。
+    pub external_configuration: Option<&'a Arc<crate::ExternalModelConfiguration>>,
     pub provider: &'a ProviderId,
     pub protocol: ModelProtocol,
     pub capabilities: &'a ResolvedModelCapabilities,
@@ -121,6 +123,20 @@ impl ModelServiceFactoryError {
 
 /// 从 Runtime 已校验配置构造具体 Provider 模型服务。
 pub trait ModelServiceFactory: Send + Sync {
+    /// 在用户域装配时确定模型权威来源，此后不切换来源。
+    fn configuration_source(&self) -> crate::ModelSource {
+        crate::ModelSource::Local
+    }
+
+    /// 模型来源决定是否已就绪及是否允许本地编辑；普通 Runtime 业务不读取产品模式。
+    fn ensure_available(&self) -> crate::RuntimeResult<()> {
+        Ok(())
+    }
+
+    fn ensure_editable(&self) -> crate::RuntimeResult<()> {
+        Ok(())
+    }
+
     /// 获取本次在线目录。旧的纯推理测试工厂默认不具备此能力，不回退到静态目录。
     ///
     /// # Errors
@@ -142,13 +158,14 @@ pub trait ModelServiceFactory: Send + Sync {
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError>;
 }
 
-/// 一次 Run 冻结使用的工具定义与 Host 基础设施策略。
+/// 一次 Run 冻结使用的工具定义、Host 基础设施策略及默认权限规则来源。
 ///
 /// Bundle 不进入 Protocol 或 Conversation；不同 Run 必须分别由
 /// [`RunToolFactory`] 编译，不得修改共享的可变路径解析器。
 pub struct RunToolBundle {
     tools: ToolSetSnapshot,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
+    default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
 }
 
 /// Host 编译单次 Run 工具所需的 Runtime 绑定能力。
@@ -171,7 +188,19 @@ impl RunToolBundle {
         Self {
             tools,
             infrastructure_policies,
+            default_rules: None,
         }
+    }
+
+    /// 注入宿主默认权限规则；不落入用户可编辑的权限文件。
+    pub fn with_default_rules(mut self, source: Arc<dyn crate::PermissionRuleSource>) -> Self {
+        self.default_rules = Some(source);
+        self
+    }
+
+    /// 默认规则来源按用户装配，父子执行共享；授权时读取最新规则。
+    pub fn default_rules(&self) -> Option<Arc<dyn crate::PermissionRuleSource>> {
+        self.default_rules.clone()
     }
 
     /// 消费 Bundle，取回本 Run 的不可变工具集和 Host 基础设施策略。

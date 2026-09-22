@@ -36,6 +36,9 @@ pub(crate) enum JournalError {
     /// begin 收到的 AssistantMessage 没有 Tool Call。
     #[error("pending assistant message must contain at least one tool call")]
     AssistantHasNoToolCalls,
+    /// 消息标识必须与持久化层的唯一性约束一致。
+    #[error("completed conversation contains a duplicate message id")]
+    DuplicateMessageId,
     /// 新提交会破坏 Tool Call/Result 的规范配对或顺序。
     #[error("completed conversation is invalid")]
     InvalidConversation {
@@ -224,6 +227,19 @@ impl InMemoryJournal {
 }
 
 fn validate(messages: &[ConversationMessage]) -> Result<(), JournalError> {
+    let mut ids = std::collections::HashSet::with_capacity(messages.len());
+    for message in messages {
+        let id = match message {
+            ConversationMessage::System(message) => &message.id,
+            ConversationMessage::ContextSummary(message) => &message.id,
+            ConversationMessage::User(message) => &message.id,
+            ConversationMessage::Assistant(message) => &message.id,
+            ConversationMessage::Tool(message) => &message.id,
+        };
+        if !ids.insert(id) {
+            return Err(JournalError::DuplicateMessageId);
+        }
+    }
     ConversationSnapshot::new(messages.to_vec())
         .validate_tool_exchange_pairs()
         .map_err(|source| JournalError::InvalidConversation { source })

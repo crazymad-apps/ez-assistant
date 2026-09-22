@@ -1,7 +1,7 @@
 # Enterprise Center
 
-C01 M3：企业中心后端，版本 `0.1.0`，Node 24、NestJS/Fastify、PostgreSQL 16.14、TypeORM 1.1.1（pg 驱动）、node-pg-migrate 9.0.0。
-提供数据库升级、超级管理员初始化、协议信息、统一身份、用户管理、管理重置与审计查询；正式 Admin 独立构建后同源合并交付，没有 LLM 代理。M0—M3 已完成并获确认，C01 循环验收状态见[开发计划](../../docs/design/v0.27.0/cycles/C01-企业身份与中心管理基础/开发计划.md)。
+企业中心后端，版本 `0.1.0`，Node 24、NestJS/Fastify、PostgreSQL 16.14、TypeORM 1.1.1（pg 驱动）、node-pg-migrate 9.0.0。
+提供数据库升级、超级管理员初始化、协议信息、统一身份、用户管理、管理重置、审计查询及模型管理；正式 Admin 独立构建后同源合并交付，C04 M1 已增加模型代理与调用追溯。C01 M0—M3 已完成并获确认，C01 循环验收状态见[开发计划](../../docs/versions/v0.27.0/cycles/C01-企业身份与中心管理基础/开发计划.md)。
 
 ## 构建与验证
 
@@ -51,7 +51,7 @@ node --env-file=.env dist/main.js
 
 ## 数据访问与升级边界
 
-- 三张业务表通过 TypeORM Entity 映射，普通 CRUD 使用 Repository/QueryBuilder；用户/审计查询归属各模块 repository，复杂分页保留单语句参数化 SQL。API DTO 不继承 Entity，密码摘要默认不查询，身份核验显式读取。
+- 身份、用户、审计与模型配置通过各模块 TypeORM Entity 映射，普通 CRUD 使用 Repository/QueryBuilder；用户/审计查询归属各模块 repository，复杂分页保留单语句参数化 SQL。API DTO 不继承 Entity，密码摘要默认不查询，身份核验显式读取。
 - `synchronize=false`、`migrationsRun=false`、`dropSchema=false`；表结构、初始化数据和升级账本只由 node-pg-migrate 的 SQL 管理。不新增配置、账号或 ORM 升级命令。
 - 启动先完成升级/准入并关闭维护 Pool，再初始化业务 DataSource 和 HTTP；关闭顺序相反。使用现有显式 Nest Provider 装配，不再建立另一份连接生命周期。
 - 业务与审计共用 QueryRunner 的事务 Manager。COMMIT 成功后才变更内存凭据；提交结果不明清空凭据、不重试。回滚也失败时关闭业务池并拒绝业务请求，须排查后重启。
@@ -74,7 +74,7 @@ Swagger 文档当前随服务可访问，不提供额外鉴权；生产可在反
 | POST /api/auth/login | `{username,password}`；200 返回 center_id、user、token 和 llm_key |
 | GET /api/auth/me | 有效身份凭据；200 返回中心与本人身份，不再次返回秘密 |
 | POST /api/auth/logout | JSON `{}`；204，仅删除当前 Token 和关联 key，重复或未知凭据幂等成功；仍检查传输来源 |
-| POST /api/auth/password | `{old_password,new_password}`；204，验证原密码，更新本人密码并撤销本人全部 Token；管理重置任意用户使用下节独立接口 |
+| POST /api/auth/password | `{old_password,new_password}`；204，验证原密码，更新本人密码，保留已有 Token/key；管理重置任意用户使用下节独立接口 |
 
 账号 trim 后转小写，密码不裁剪；新密码 6—128 个 Unicode 字符，必须包含英文字母和数字，最多 512 UTF-8 字节，不要求大小写并存或特殊符号。历史密码与初始化密码仍可用于登录/原密码验证。拒绝审计只记录固定原因码，不记录账号输入、密码、Token/key 或摘要。HTTP 解析失败、过大请求和底层故障只返回脱敏错误，不承诺故障时审计一定能落库。
 
@@ -96,7 +96,7 @@ Swagger 文档当前随服务可访问，不提供额外鉴权；生产可在反
 
 列表 limit 默认 20、最大 100，offset 默认 0、最大 1000000。search 是字面子串；日期为 UTC ISO Z 格式，from 含、to 不含。用户按创建时间/ID 升序，审计按时间/ID 倒序；单次查询的列表与总数共享 SQL 快照。拒绝未知字段、重复参数、错误类型、非法分页和日期。
 
-禁止通过 API 停用或降权超级管理员，不提供授予/清除标记或删除用户的接口。至少保留一个启用管理员。角色/启用状态实际变更、管理重置成功后撤销目标全部 Token；编辑显示名称不撤销，相同值不重复写入/审计。新密码统一要求 6—128 字符并包含英文字母和数字（512 UTF-8 字节以内）。
+禁止通过 API 停用或降权超级管理员，不提供授予/清除标记或删除用户的接口。至少保留一个启用管理员。角色/启用状态实际变更后撤销目标全部 Token；本人改密和管理重置均保留已有 Token/key，编辑显示名称不撤销，相同值不重复写入/审计。新密码统一要求 6—128 字符并包含英文字母和数字（512 UTF-8 字节以内）。
 
 常见错误：409 USERNAME_EXISTS / SUPER_ADMIN_PROTECTED / LAST_ADMIN_REQUIRED、404 USER_NOT_FOUND、403 ADMIN_REQUIRED。管理重置与个人改密是不同接口，不根据目标是否为自己改变校验。操作成功后自身 Token 失效时，前端应返回登录页。
 
@@ -106,17 +106,17 @@ Swagger 文档当前随服务可访问，不提供额外鉴权；生产可在反
 
 登录只提交 username/password，返回 center_id、user、token 和 llm_key。原 delivery、session_id、session_token 已删除，不保留未发布字段兼容。普通用户和管理员共用接口，管理 API 另行校验管理员权限。
 
-Token 直接保存在单实例进程内 Map，不做哈希、不入库、无 TTL；多次登录互不覆盖。退出只删除当前 Token 和关联 key；本人改密撤销本人全部 Token；进程关闭/重启全部失效，需要重新登录。用户密码仍为 scrypt 摘要，持久用户与审计不受重启影响。
+Token 直接保存在单实例进程内 Map，不做哈希、不入库、无 TTL；多次登录互不覆盖。退出只删除当前 Token 和关联 key；本人改密和管理重置保留已有 Token/key；进程关闭/重启全部失效，需要重新登录。用户密码仍为 scrypt 摘要，持久用户与审计不受重启影响。
 
-全局 [security.ts](src/security.ts) 默认要求 Authorization: Bearer；/api/info 和登录公开，退出可无效/无 Token 幂等调用，Swagger 文档明确公开。Cookie 不参与后端鉴权，后端不设置/清除 Cookie，前端负责保存/清除凭据。鉴权失效返回 401 TOKEN_INVALID。生产须 HTTPS，不将 Token/key 写日志或 URL；没有多实例共享登录能力。
+全局 [security.ts](src/security.ts) 默认要求 Authorization: Bearer；/api/info 和登录公开，退出可无效/无 Token 幂等调用，Swagger 文档明确公开。Cookie 不参与后端鉴权，后端不设置/清除 Cookie，前端负责保存/清除凭据。鉴权失效返回 401 TOKEN_INVALID。默认支持 HTTP，HTTPS 可通过反向代理扩展；不将 Token/key 写日志或 URL；没有多实例共享登录能力。
 
-LLM key 仅在内存关联本次 Token，不能调用身份 API。LLM 代理仍未实现。登录成功审计提交后才加入 Map；退出/改密审计失败时返回失败且不撤销凭据；提交结果不明时清空内存凭据并失败。身份写入串行到提交后的内存变更结束。
+LLM key 仅在内存关联本次 Token，不能调用身份 API。LLM 代理由 C04 M1 实现，见本文调用记录章节。登录成功审计提交后才加入 Map；退出/改密审计失败时返回失败且不撤销凭据；提交结果不明时清空内存凭据并失败。身份写入串行到提交后的内存变更结束。
 
 本次直接调整未发布的 001-initial.sql，不新增兼容升级脚本；旧试验库保留，不原地删表，新安装/验证使用新库。
 
 ## 配置
 
-标准模板见 [.env.example](.env.example)，只列出实际支持的六个配置项。模板采用本机 HTTP 开发配置，数据库连接留空，必须明确填写；生产差异见文件注释。
+标准模板见 [.env.example](.env.example)，只列出主要启动配置项。模板采用本机 HTTP 开发配置，数据库连接留空，必须明确填写；生产差异见文件注释。
 
 在本包目录使用：
 
@@ -137,7 +137,6 @@ node --env-file=.env dist/main.js --api-only
 | `CENTER_DATABASE_AUTO_UPGRADE` | `true`；只接受 `true` / `false` |
 | `CENTER_HOST` / `CENTER_PORT` | `127.0.0.1:7320` |
 | `CENTER_PUBLIC_ORIGIN` | 必填精确 origin，无路径/尾斜线 |
-| `CENTER_ALLOW_HTTP_LOOPBACK` | 仅显式 `true` 允许本机开发 HTTP；非本地监听需 HTTPS origin |
 
 初始 SQL 内置超级管理员 `admin / 123456`，只保存预生成的带盐 scrypt 摘要，不另设初始化代码、命令或配置。该公开默认密码应在正式使用前修改；它是后续新密码长度规则的初始化例外。
 
@@ -175,3 +174,48 @@ PostgreSQL 实测基线 16.14，准入允许后续 16.x 补丁，不自动接受
 测试重新核对源/恢复库全部已存字段（密码摘要不打印），从已验证恢复库复制升级夹具；主库故障场景事务回滚，成功升级只提交到新夹具。新建库、角色与本机 SQL 夹具保留，无 DROP 清理。首个意外失败即停，不连续补救。
 
 M0—M3 已确认；C01 循环确认、提交和阶段归档仍为独立门禁，不代表整个 v0.27.0 或企业分发已完成。
+
+## 模型管理与独立模板（C04 M0）
+
+后台“模型管理”维护服务商连接、在线目录、固定参数和唯一企业默认模型。显式刷新完整成功才替换数据库中的在线快照（允许空列表）；失败保留原快照，连接变更后的迟到结果拒绝提交。固定配置独立存储，刷新目录或模板均不覆盖它；删除服务商保留失效默认引用，后台显示原因并要求重新选择。API Key 仅写入，查询返回是否已设置。
+
+初始模板唯一源文件为 [model-templates.json](../../packages/assistant-protocol/resources/model-templates.json)。构建复制到 `dist/resources/model-templates.json`，个人 Runtime 编译时嵌入同一文件。中心可设置 `CENTER_MODEL_TEMPLATES_FILE` 指向独立部署文件：保持 JSON 数组结构，按 `(provider_type, model_id)` 唯一匹配；`parameters` 为标准参数的部分字段，`protocol_parameters` 可按实际协议覆盖，`document`/`checked_on` 记录来源与核查日期。文件没有可执行表达式或动态版本号。
+
+运维先准备完整文件并原子替换，再由管理员在后台“重新加载模板”。中心校验字段、枚举、数值及组合，全部通过才发布；无效文件保留旧有效模板，初次加载失败显示不可用。限制 8 MiB、10,000 项。模板只补在线未知值，固定配置优先；模板不增加在线目录条目。`xhigh` 是新配置的统一标准档位名，不接受旧 `x_high` 拼写，上游值仍由映射单独指定。文件替换不要求重新构建或更新整个中心。
+
+迁移 `002-models-and-calls.sql` 新增 `providers`、`model_fixed_configs`、`model_settings` 及后续调用追溯所需的 `llm_recording_settings`、`llm_calls`；旧库需先按数据库操作规则备份/恢复核验，再升级。M0 提供 `managed_models`，`GET /api/runtime/model-configuration` 提供受身份保护的当前配置。中心代理、配置测试与调用追溯见下方 M1 说明；正式 Host 消费仍归 M2，当前不能据此认为正式企业客户端模型调用已接通。
+
+## 模型代理与调用记录（C04 M1）
+
+中心声明 `llm_proxy`。模型调用使用 `cl_` key，通过 `POST /api/llm/providers/:id/v1/responses`
+或 `.../chat/completions` 访问当前默认模型；管理 Token 不能替代 LLM key。准入核对当前身份、
+Provider/model/协议，不自动重试或跟随跳转。中心自产错误有 `x-ez-center-control: 1`，上游同名头
+被剥除；已建立索引的响应含 `x-ez-call-id`。HTTP 2xx 完整转发不代表模型业务或任务成功。
+
+管理接口保留 16 KiB 限制；模型代理只接受 UTF-8 JSON，单次正文 32 MiB、在途原始正文合计
+128 MiB。请求和响应字节不改写。`CENTER_LLM_CONNECT_TIMEOUT_MS` 默认 10000，范围 1000—120000；
+`CENTER_LLM_IDLE_TIMEOUT_MS` 默认 300000，范围 1000—3600000，同时约束上游空闲和下游背压等待。
+代理正常收完请求正文不会中断响应；取消、超时和关闭均销毁在途网络。
+
+后台“调用记录”提供管理员分页/筛选、详情及按需查看请求/响应快照。“记录策略”控制正文采集和
+保留期；默认关闭，正文 7 天、索引 90 天。关闭不删除已有文件。模型参数页只能测试已保存且未修改的
+固定配置，使用短非流式请求、30 秒期限与 1 MiB 响应限制；不会修改企业默认，也不证明全部能力可用。
+
+启用正文采集前设置 `CENTER_SNAPSHOT_ROOT`，预先创建独立、绝对、非公开的持久目录。目录权限
+0700、文件 0600；禁止符号链接。文件按 UTC 开始日期及调用 UUID 存放，各侧上限 8 MiB，采集与待写
+缓冲共 64 MiB；超限保留 UTF-8 前缀并标记部分。压缩响应仍原样转发，但不作为文本快照保存。
+文件先独占写入 `.part` 并 flush，使用同目录 hard link 原子发布固定名称后移除 `.part`，避免 POSIX
+rename 覆盖已存在终态文件；快照根所在文件系统须支持同目录 hard link。
+
+关闭先取消模型调用及目录刷新，等待调用索引和文件收尾最多 10 秒，再释放 HTTP/数据库。
+重启将未结算调用标为 unknown，未提交完整性的已发布文件仅恢复为 partial；完整文件缺失/摘要
+不符会单独标记，不改写可靠的转发结果。恢复异常停止启动；每小时最多清理 100 条，先删文件再改
+状态/删索引。清理出错停止调度，排查后重启；未知文件和符号链接不会被递归删除。
+
+部署与备份需同时包含 PostgreSQL、独立模板、快照根；只恢复其中一项不能保证正文完整性。共享开发库
+仍保持自动升级关闭。C04 M1 集成验证使用明确核对的新隔离库，按根规则完成备份恢复后定向运行
+`tests/integration/calls.test.ts`，不直接运行会连接其他循环库的整组集成测试。
+
+## Docker 交付
+
+运行 `npm run package:docker` 在 Docker 外准备完整制品，再按 [部署说明](deploy/README.md) 上传和构建。镜像不安装依赖或编译，前后端共用 7320 端口；默认支持 HTTP，HTTPS 可通过代理扩展。

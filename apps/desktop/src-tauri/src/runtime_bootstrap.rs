@@ -1,5 +1,6 @@
 //! 受信任桌面进程中的 Runtime discovery、启动与 bootstrap。
 
+pub(crate) mod upgrade;
 #[cfg(windows)]
 mod windows;
 
@@ -10,6 +11,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -36,6 +38,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 // 冷启动需要完成本地服务初始化；短连接超时与整个进程的就绪等待分别限制。
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+// 大量历史文件的整套备份/核验发生在监听发布前；锁仍被 Host 持有时继续等待。
+const MIGRATION_STARTUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
@@ -53,6 +57,8 @@ pub(crate) struct RuntimeBootstrapCoordinator {
     runtime_home: PathBuf,
     runtime_executable: PathBuf,
     http: reqwest::Client,
+    // 启动、普通重启和升级共用单一入口，避免同一桌面并发停止/启动同一 Host。
+    lifecycle_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -109,6 +115,7 @@ enum RuntimeBootstrapErrorCode {
     RuntimeStartFailed,
     RuntimeUnavailable,
     ComponentMismatch,
+    RuntimeUpgradeRequired,
     RuntimeStopFailed,
 }
 
@@ -149,6 +156,7 @@ impl RuntimeBootstrapCoordinator {
         Self {
             runtime_home,
             runtime_executable,
+            lifecycle_gate: Arc::default(),
             http: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -181,10 +189,12 @@ impl RuntimeBootstrapCoordinator {
                 .ok_or_else(invalid_discovery)?,
             runtime_executable,
             http,
+            lifecycle_gate: Arc::default(),
         })
     }
 
     pub(crate) async fn bootstrap(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+        let _operation = self.lifecycle_gate.lock().await;
         if self.runtime_home.as_os_str().is_empty() {
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
@@ -198,14 +208,25 @@ impl RuntimeBootstrapCoordinator {
                 }
                 return Ok(bootstrap);
             }
-            Err(error) if matches!(error.code, RuntimeBootstrapErrorCode::ComponentMismatch) => {
+            Err(error)
+                if matches!(
+                    error.code,
+                    RuntimeBootstrapErrorCode::ComponentMismatch
+                        | RuntimeBootstrapErrorCode::RuntimeUpgradeRequired
+                ) =>
+            {
                 return Err(error);
             }
             Err(_) => {}
         }
 
         self.launch_from(&self.runtime_executable).await?;
+        self.wait_for_start().await
+    }
+
+    async fn wait_for_start(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+        let migration_deadline = tokio::time::Instant::now() + MIGRATION_STARTUP_TIMEOUT;
         let mut delay = POLL_INTERVAL;
         loop {
             match self.discover(true).await {
@@ -216,16 +237,23 @@ impl RuntimeBootstrapCoordinator {
                     return Ok(bootstrap);
                 }
                 Err(error)
-                    if matches!(error.code, RuntimeBootstrapErrorCode::ComponentMismatch) =>
+                    if matches!(
+                        error.code,
+                        RuntimeBootstrapErrorCode::ComponentMismatch
+                            | RuntimeBootstrapErrorCode::RuntimeUpgradeRequired
+                    ) =>
                 {
                     return Err(error);
                 }
                 Err(_) => {}
             }
-            if tokio::time::Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= deadline
+                && (tokio::time::Instant::now() >= migration_deadline
+                    || instance_lock_released(&self.runtime_home).unwrap_or(true))
+            {
                 return Err(bootstrap_error(
                     RuntimeBootstrapErrorCode::RuntimeUnavailable,
-                    "Runtime 未能在限定时间内启动，请检查配置后重试。",
+                    "Runtime 尚未就绪。已有后台进程会继续完成备份与升级，请稍后重试；若持续无法启动，请检查配置。",
                 ));
             }
             tokio::time::sleep(delay).await;
@@ -234,6 +262,7 @@ impl RuntimeBootstrapCoordinator {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), RuntimeBootstrapError> {
+        let _operation = self.lifecycle_gate.lock().await;
         let (bootstrap, original) = self.discover_target(false).await?;
         self.send_command_to(
             &bootstrap,
@@ -245,6 +274,7 @@ impl RuntimeBootstrapCoordinator {
     }
 
     pub(crate) async fn restart(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+        let _operation = self.lifecycle_gate.lock().await;
         let (previous, original) = self.discover_target(false).await?;
         let source = original
             .executable_path
@@ -523,15 +553,8 @@ impl RuntimeBootstrapCoordinator {
         &self,
         started_runtime: bool,
     ) -> Result<(RuntimeBootstrap, RuntimeDiscovery), RuntimeBootstrapError> {
-        let discovery = read_discovery(&self.runtime_home)?;
-        validate_discovery(&discovery)?;
-        if !process_is_alive(discovery.pid) {
-            return Err(bootstrap_error(
-                RuntimeBootstrapErrorCode::DiscoveryInvalid,
-                "Runtime discovery 指向的进程已失效。",
-            ));
-        }
-        let capabilities = self.verify_endpoint(&discovery).await?;
+        let (bootstrap, discovery) = self.inspect_target(started_runtime).await?;
+        let capabilities = &bootstrap.capabilities;
         let missing = REQUIRED_FEATURES
             .iter()
             .find(|feature| !capabilities.features.contains(feature));
@@ -546,11 +569,34 @@ impl RuntimeBootstrapCoordinator {
             )
             .is_err()
         {
+            if self.upgrade_source(&discovery, capabilities).await.is_ok() {
+                return Err(bootstrap_error(
+                    RuntimeBootstrapErrorCode::RuntimeUpgradeRequired,
+                    "需要完成本机更新。更新将重启 Runtime 并中断其正在执行的任务，随后自动备份和升级数据。",
+                ));
+            }
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::ComponentMismatch,
                 "Host 与 Desktop 软件版本不兼容或缺少所需能力，请更新对应应用。",
             ));
         }
+        Ok((bootstrap, discovery))
+    }
+
+    /// 仅认证本机实例，不代表已通过业务协议准入；只供正常准入和明确的升级意图消费。
+    async fn inspect_target(
+        &self,
+        started_runtime: bool,
+    ) -> Result<(RuntimeBootstrap, RuntimeDiscovery), RuntimeBootstrapError> {
+        let discovery = read_discovery(&self.runtime_home)?;
+        validate_discovery(&discovery)?;
+        if !process_is_alive(discovery.pid) {
+            return Err(bootstrap_error(
+                RuntimeBootstrapErrorCode::DiscoveryInvalid,
+                "Runtime discovery 指向的进程已失效。",
+            ));
+        }
+        let capabilities = self.verify_endpoint(&discovery).await?;
         Ok((
             RuntimeBootstrap {
                 base_url: discovery.address.clone(),
@@ -1200,12 +1246,12 @@ mod tests {
                 true,
             ),
             (
-                "0.26.1",
+                "0.27.1",
                 Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
                 true,
             ),
             ("0.25.3", Some("0.25.3"), false),
-            ("0.26.1", Some("0.26.1"), false),
+            ("0.27.1", Some("0.27.1"), false),
             ("0.25.3", None, false),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

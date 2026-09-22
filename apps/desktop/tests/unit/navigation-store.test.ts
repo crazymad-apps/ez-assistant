@@ -3,6 +3,26 @@ import { ConversationSearchStore } from "../../src/stores/ConversationSearchStor
 import { NavigationStore } from "../../src/stores/NavigationStore";
 
 describe("NavigationStore", () => {
+  it("removes a deleted owner without losing other owners' reading history", () => {
+    const store = new NavigationStore(); store.selectSession("a");
+    store.updateReadingPosition({ following: false, top: 42 }, 1);
+    store.selectSession("deleted"); store.clearConversationLocations("deleted"); store.selectSession(null, false);
+    store.selectSession("b");
+    expect(store.goBack()?.reading?.top).toBe(42);
+  });
+
+  it("keeps independent main, child and reasoning intent until identity reset", () => {
+    const store = new NavigationStore(); store.selectSession("s");
+    store.updateReadingPosition({ following: false, top: 300, anchor: { message_id: "m", offset: -20 } }, 1);
+    store.updateReadingPosition({ following: false, top: 120 }, 1, "reasoning");
+    store.openChildTask("child"); store.updateReadingPosition({ following: true, top: 900 }, 1);
+    store.closeChildTask();
+    expect(store.current_conversation_location?.reading?.top).toBe(300);
+    expect(store.current_conversation_location?.reasoning?.reasoning.top).toBe(120);
+    store.openChildTask("child"); expect(store.current_conversation_location?.reading?.following).toBe(true);
+    store.clearConversationLocations(); expect(store.current_conversation_location).toBeNull();
+  });
+
   it("restores conversation source locations with browser-style back and forward navigation", () => {
     const store = new NavigationStore();
     store.selectSession("session-1");

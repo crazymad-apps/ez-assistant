@@ -39,22 +39,20 @@ export async function loadDesktopPreferences(namespace?: string): Promise<Deskto
     right_sidebar_open: typeof data.right_sidebar_open === "boolean" ? data.right_sidebar_open : true,
     left_sidebar_width: typeof data.left_sidebar_width === "number" && Number.isFinite(data.left_sidebar_width) ? Math.min(420, Math.max(220, data.left_sidebar_width)) : 286,
     right_sidebar_width: typeof data.right_sidebar_width === "number" && Number.isFinite(data.right_sidebar_width) ? Math.max(320, data.right_sidebar_width) : 380,
-    expanded_workspace_ids: Array.isArray(data.expanded_workspace_ids) ? data.expanded_workspace_ids.filter((id): id is string => typeof id === "string" && id.length <= 256).slice(0,256) : null,
-    resource_workspace: viewingSnapshot(data.resource_workspace, false),
+    expanded_workspace_ids: null,
+    resource_workspace: null,
   };
 }
 export async function saveDesktopPreferences(preferences: DesktopPreferences, namespace?: string): Promise<void> {
   if (isTauri()) { await invoke("save_desktop_preferences", {preferences, namespace: namespace ?? null}); return; }
-  // 同步写入 localStorage，pagehide 时无需等待一个异步任务；同源浏览器存储天然按 Host 隔离。
+  // 同源账号共享 Cookie，只持久化无用户数据的布局；资源、会话 ID 不写浏览器缓存。
   // 普通 Web 不消费或保存 Desktop 设备默认，继续固定 Ask 并跟随 Runtime 全局模型默认。
   const text = JSON.stringify({
     left_sidebar_open: preferences.left_sidebar_open,
     right_sidebar_open: preferences.right_sidebar_open,
     left_sidebar_width: preferences.left_sidebar_width,
     right_sidebar_width: preferences.right_sidebar_width,
-    expanded_workspace_ids: preferences.expanded_workspace_ids,
     close_behavior: preferences.close_behavior,
-    resource_workspace: viewingSnapshot(preferences.resource_workspace, false),
   });
   if (text.length > 4 * 1024 * 1024) throw new Error("视图记录过大，本次未保存。");
   localStorage.setItem(WEB_KEY, text);

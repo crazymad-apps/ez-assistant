@@ -32,6 +32,7 @@ const user: UserRecord = {
 };
 const login: LoginResponse = { center_id: 'center-id', user, token: 'token-a', llm_key: 'never-retain-this-key' };
 const draft = { username: 'new-user', displayName: '新用户', role: 'user' as const, password: 'test-password' };
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -41,11 +42,13 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
 async function signedIn() {
   const store = new AdminStore();
   expect(await store.login('admin', 'password')).toBeUndefined();
   return store;
 }
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.login).mockResolvedValue(login);
@@ -112,17 +115,17 @@ describe('写入闭环', () => {
     expect(api.password).not.toHaveBeenCalled();
     expect(store.token).toBe(login.token);
   });
-  it('管理重置自己清除登录，仍走管理接口', async () => {
+  it('管理重置自己保留登录，仍走管理接口', async () => {
     const store = await signedIn();
     await store.resetPassword(userView(user), 'new-password');
-    expect(store.token).toBe('');
+    expect(store.token).toBe(login.token);
     expect(api.reset).toHaveBeenCalledWith(login.token, user.id, 'new-password');
     expect(api.password).not.toHaveBeenCalled();
   });
-  it('本人改密传原密码与新密码，成功清除登录', async () => {
+  it('本人改密传原密码与新密码，成功保留登录', async () => {
     const store = await signedIn();
     await store.changePassword('old-password', 'new-password');
-    expect(store.token).toBe('');
+    expect(store.token).toBe(login.token);
     expect(api.password).toHaveBeenCalledWith(login.token, 'old-password', 'new-password');
     expect(api.reset).not.toHaveBeenCalled();
   });

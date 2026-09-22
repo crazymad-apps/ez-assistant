@@ -109,7 +109,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
 
   await page.goto("/");
   await expect(page).toHaveTitle("EZ Assistant");
-  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await expect(page.locator("[data-runtime-entry]")).toBeVisible();
   await expect(page.locator("[data-dots-state='ready'] canvas")).toHaveCount(1);
   await page.screenshot({ path: test.info().outputPath("desktop-entry.png"), animations: "disabled" });
   await expect(page.getByText("E2E Workspace", { exact: true })).toHaveCount(0);
@@ -305,7 +305,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(page.getByText("离线回复：DEFAULT_CASE", { exact: true })).toBeVisible();
   await child_header.getByRole("button", { name: "返回主会话" }).click();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await expect(page.locator("[data-runtime-entry]")).toBeVisible();
   await page.getByRole("button", { name: "进入工作空间" }).click();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await expect(session_header.getByRole("button", { name: "M2 临时会话" })).toBeVisible();
@@ -323,7 +323,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   await expect(navigation.getByRole("button", { name: new RegExp(renamed_title) })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "连接你的工作空间" })).toBeVisible();
+  await expect(page.locator("[data-runtime-entry]")).toBeVisible();
   await page.getByRole("button", { name: "进入工作空间" }).click();
   await expect(page.getByText("运行时已连接")).toBeVisible();
   await navigation.getByRole("button", { name: new RegExp(renamed_title) }).click();

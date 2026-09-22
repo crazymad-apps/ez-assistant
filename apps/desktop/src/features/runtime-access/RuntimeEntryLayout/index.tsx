@@ -6,13 +6,11 @@ import styles from "./index.module.scss";
 import { DesktopWindowControls } from "../../desktop-lifecycle/DesktopWindowControls";
 
 type RuntimeEntryLayoutProps = {
-  readonly description: string;
   readonly children: ReactNode;
 };
 
 /** Desktop 连接与 Web 登录共用视觉外壳；表单和连接状态由各自 children 承载。 */
 export function RuntimeEntryLayout({
-  description,
   children,
 }: RuntimeEntryLayoutProps) {
   return (
@@ -29,11 +27,8 @@ export function RuntimeEntryLayout({
       <DotsBackground />
       <section className={styles.content} data-runtime-entry-content>
         <img className={styles.mark} src={appLogo} alt="EZ Assistant" />
-        <h1>连接你的工作空间</h1>
-        <p className={styles.subtitle}>{description}</p>
         {children}
       </section>
-      <footer className={styles.footer}>你的工作，由此连接。</footer>
     </main>
   );
 }

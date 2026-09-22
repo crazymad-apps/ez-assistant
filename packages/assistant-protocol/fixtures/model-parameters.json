@@ -1,0 +1,84 @@
+[
+  {
+    "name": "unknown uses template and active protocol",
+    "online": {},
+    "protocol_preference": "responses",
+    "expected": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      },
+      "default_reasoning_effort": "medium",
+      "tool_image_projection": "native_tool_result"
+    },
+    "sources": {
+      "context_window_tokens": "template",
+      "reasoning_efforts": "template"
+    }
+  },
+  {
+    "name": "invalid and unsupported facts survive",
+    "online": {
+      "context_window_tokens": {
+        "state": "invalid"
+      },
+      "image_input": "unsupported",
+      "reasoning": "unsupported"
+    },
+    "protocol_preference": "chat_completions",
+    "expected": {
+      "context_window_tokens": {
+        "state": "invalid"
+      },
+      "image_input": "unsupported",
+      "reasoning": "unsupported",
+      "reasoning_mode": "unknown",
+      "reasoning_efforts": null,
+      "default_reasoning_effort": null,
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "sources": {
+      "context_window_tokens": "online",
+      "image_input": "online"
+    }
+  },
+  {
+    "name": "explicit empty efforts never inherit default",
+    "online": {
+      "reasoning_efforts": {}
+    },
+    "protocol_preference": "responses",
+    "expected": {
+      "reasoning_efforts": {},
+      "default_reasoning_effort": null
+    },
+    "sources": {
+      "reasoning_efforts": "online"
+    }
+  },
+  {
+    "name": "default must belong to final effort set",
+    "online": {
+      "reasoning_efforts": {
+        "high": "vendor-high"
+      }
+    },
+    "protocol_preference": "responses",
+    "expected": {
+      "reasoning_efforts": {
+        "high": "vendor-high"
+      },
+      "default_reasoning_effort": null
+    },
+    "sources": {
+      "reasoning_efforts": "online"
+    }
+  }
+]

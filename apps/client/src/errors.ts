@@ -15,6 +15,7 @@ export function errorFromHost(value: unknown): ClientError {
     busy: "Host 或另一配置提交正在持锁，请重新读取状态。",
     invalid_request: "Host 拒绝此设置，请核对密码、端口、域名、证书及非本地访问条件。",
     port_in_use: "配置端口已被占用，请调整端口后重试。",
+    authentication_required: "本机认证失败，请重新查询 Host。",
     unauthorized: "本机认证失败，请重新查询 Host。",
     forbidden: "当前操作未获 Host 授权。",
   };

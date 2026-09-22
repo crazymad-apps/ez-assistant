@@ -14,9 +14,10 @@ use super::HttpState;
 
 pub(super) async fn stream_events(
     State(state): State<HttpState>,
+    axum::Extension(permit): axum::Extension<crate::access::AccessPermit>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, super::error::HttpError>
 {
-    let services = state.startup.services()?;
+    let services = state.user_services(&permit).await?;
     Ok(Sse::new(project_events(
         services.runtime.subscribe_event_envelopes(),
         services.device_gateway.subscribe_events(),
@@ -48,10 +49,12 @@ fn project_events(
             };
             match received {
                 EventSource::Runtime(Ok(event)) => {
+                    let closing = matches!(event.event, assistant_protocol::RuntimeEvent::RuntimeShuttingDown);
                     let Ok(data) = serde_json::to_string(&event) else {
                         break;
                     };
                     yield Ok(Event::default().event("runtime_event").data(data));
+                    if closing { break; }
                 }
                 EventSource::Device(Ok(event)) => {
                     let Ok(data) = serde_json::to_string(&event) else {
@@ -93,6 +96,26 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn recycling_a_user_runtime_closes_its_stream_without_stopping_the_host() {
+        let (sender, receiver) = broadcast::channel(4);
+        let (_device, devices) = broadcast::channel(4);
+        let host = CancellationToken::new();
+        let events = project_events(receiver, devices, host.clone());
+        tokio::pin!(events);
+        assert!(events.next().await.is_some());
+        sender
+            .send(RuntimeEventEnvelope {
+                sequence: 1,
+                emitted_at_ms: 0,
+                event: RuntimeEvent::RuntimeShuttingDown,
+            })
+            .unwrap();
+        assert!(events.next().await.is_some());
+        assert!(events.next().await.is_none());
+        assert!(!host.is_cancelled());
+    }
 
     #[tokio::test]
     async fn new_subscriber_gets_an_immediate_connection_frame() {

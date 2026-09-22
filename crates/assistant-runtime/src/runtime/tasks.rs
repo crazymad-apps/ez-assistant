@@ -23,6 +23,7 @@ pub(super) struct RuntimeTasks {
     tracker: TaskTracker,
     next_id: AtomicU64,
     aborts: Arc<Mutex<BTreeMap<u64, AbortHandle>>>,
+    changed: tokio::sync::watch::Sender<()>,
 }
 
 impl RuntimeTasks {
@@ -31,6 +32,7 @@ impl RuntimeTasks {
             tracker: TaskTracker::new(),
             next_id: AtomicU64::new(0),
             aborts: Arc::new(Mutex::new(BTreeMap::new())),
+            changed: tokio::sync::watch::channel(()).0,
         }
     }
 
@@ -43,7 +45,9 @@ impl RuntimeTasks {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (abort, registration) = AbortHandle::new_pair();
         self.abort_handles().insert(id, abort);
+        self.changed.send_replace(());
         let aborts = self.aborts.clone();
+        let changed = self.changed.clone();
         self.tracker.spawn(async move {
             let outcome = AssertUnwindSafe(Abortable::new(future, registration))
                 .catch_unwind()
@@ -58,7 +62,16 @@ impl RuntimeTasks {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&id);
+            changed.send_replace(());
         });
+    }
+
+    pub(super) fn has_work(&self) -> bool {
+        !self.abort_handles().is_empty()
+    }
+
+    pub(super) fn subscribe_work(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 
     pub(super) fn close(&self) {

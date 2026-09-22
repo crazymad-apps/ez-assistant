@@ -385,3 +385,33 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
   提供稳定错误码和脱敏消息。旧载荷缺少字段时必须读取为 `None`。
 - 该增量不携带 Provider 原始响应、prompt 或 credential，不进入 Session/Run 持久化；应用协议
   minimum 已因 M0 的破坏性目录响应固定为 `0.26.0`，不因这一可选字段再次机械提高。
+
+## v0.27.0 C03 M0 兼容基线
+
+- Runtime 套件的软件版本与应用协议最低兼容版本统一为 0.27.0，数据库最低 Host 也提升为 0.27.0，以明确用户域布局与持久化定位契约变化；不能用旧 Client/Host 混连绕过目录准入。Center/Admin 版本独立。
+- SkillSourceSnapshot 增加 `legacy_user_ez_assistant` 和 `host_supplement` 来源；TS 投影由既有导出器生成，Desktop 只按来源显示分组，不持有目录或身份权威。
+
+## v0.27.0 C03 M1 Host 身份契约
+
+`host_access.rs` 承载 HostMode、Enterprise 登录输入、本人身份与登录上下文、改密输入及企业退出结果；Center DTO/Token/key 留在 Host 私有适配层。capabilities 发布运行模式及 enterprise_identity 能力；HostLoginResult 的 Token 仅用于原生签发响应，身份查询与 Web 响应不返回凭据。Rust 定义经既有生成器更新 TS，客户端登录及就绪闭环继续由 C03 后续里程碑实现。
+
+## v0.27.0 C03 M3 Cookie 资源上下文
+
+`UserTerminalControl::Open.login_context` 为可空字段，缺省反序列化为空；Cookie 连接必须与当前 Host 登录上下文一致，Bearer 已固定用户，无需该提示。HTTP 普通请求通过 header、直接 GET 资源通过 query 承载同一非秘密上下文。它不写入 Session/Run，不是后端 Token/key，不改变设备 Gateway 协议。TS 仍由正式 Rust 导出器生成。
+
+## v0.27.0 C03 M4 Host 管理投影
+
+`HostAccessStatus` 的可选 mode/center_url/center_id 表示已保存配置；当前生效模式仍读 capabilities，restart_required 表示需要重启。Configure 的可选身份字段及 clear_center_binding 只由本机管理入口提交，省略时保留原值。该增量复用 HostAccess 契约，不新增客户端权威配置或用户持久化字段；Rust 定义与 TS 生成投影同步。
+
+## C04 M0 推理档位兼容
+
+2026-09-21 用户要求核对官方定义后，`ReasoningEffortKey::XHigh` 新序列化统一为 `xhigh`，按用户最新要求不保留旧 `x_high` 别名；`parse` 和 `as_str` 与新写法一致。全部生成 TS 投影与界面消费者同步；JSON 固定参数、目录和会话快照仅接受 `xhigh`；既有 SQLite 标量已用 `xhigh`，本次不迁移或批量改写存量库。标准档位与服务商 wire value 仍分别保存。
+
+## v0.27.0 C04 M2 中心模型投影
+
+- `ModelSettings.management` 为可选配置管理策略与刷新状态，只包含只读标记、不可用原因、获取时间和刷新错误。两种来源共用默认模型、服务商、目录及参数协议，不另建企业模型数据投影；不包含代理凭据或中心 key。
+- `RefreshModelSource` 由 Host 路由至当前用户域加载器，返回最新 `ModelSettings`；该状态不写入个人 Provider 持久化表。Rust 与 TypeScript 投影同步生成。
+
+## v0.27.0 C05 子任务上下文
+
+`ChildTaskUsageSnapshot.context` 为可缺失的 `ContextUsageSnapshot`，缺失表示无法可靠确定，不等价于零。`accumulated` 保留原累计口径。该变化随未发布的 v0.27.0 同版交付；历史分页的 `observed_sequence` 不授权客户端跳过实时事件。

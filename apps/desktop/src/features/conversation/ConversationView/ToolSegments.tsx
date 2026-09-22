@@ -1,4 +1,4 @@
-import { Fragment, useId, useState } from "react";
+import { Fragment, useId, useRef, useState } from "react";
 import type {
   AssistantSegment,
   ChildTaskTreeItemSnapshot,
@@ -28,6 +28,8 @@ import {
   visibleToolSummary,
 } from "./conversationRows";
 import styles from "./index.module.scss";
+import { useOutputFollow } from "./useOutputFollow";
+import { useRootStore } from "../../../stores/RootStoreContext";
 
 export function AssistantSegmentView(props: Readonly<{
   child_tasks: readonly ChildTaskTreeItemSnapshot[];
@@ -39,7 +41,7 @@ export function AssistantSegmentView(props: Readonly<{
   on_tool_click: (message_id: MessageId, call_id: ToolCallId) => void;
 }>) {
   if (props.segment.type === "reasoning") {
-    return <ReasoningBox is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
+    return <ReasoningBox state_key={`${props.message_id}:${props.segment.part_id}`} is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
   }
   if (props.segment.type === "text") {
     return (
@@ -79,6 +81,7 @@ export function LiveSteps(props: Readonly<{
         const state_key = liveSegmentStateKey(props.run.run_id, step.step, segment, index);
         return <LiveSegmentView
           child_tasks={props.child_tasks}
+          state_key={state_key}
           key={state_key}
           is_reasoning_open={segment.type === "reasoning" ? (reasoning_open[state_key] ?? true) : false}
           on_reasoning_toggle={() => segment.type === "reasoning" && setReasoningOpen((current) => ({ ...current, [state_key]: !(current[state_key] ?? true) }))}
@@ -93,6 +96,7 @@ export function LiveSteps(props: Readonly<{
 
 function LiveSegmentView(props: Readonly<{
   child_tasks: readonly ChildTaskTreeItemSnapshot[];
+  state_key: string;
   segment: LiveExecutionSegment;
   is_reasoning_open: boolean;
   on_child_open?: (item: ChildTaskTreeItemSnapshot) => void;
@@ -100,7 +104,7 @@ function LiveSegmentView(props: Readonly<{
   on_tool_click: (tool: LiveToolSnapshot) => void;
 }>) {
   if (props.segment.type === "reasoning") {
-    return <ReasoningBox is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
+    return <ReasoningBox state_key={props.state_key} is_open={props.is_reasoning_open} on_toggle={props.on_reasoning_toggle} text={props.segment.text} />;
   }
   if (props.segment.type === "text") {
     return <div className={styles.assistant_text}><ConversationMarkdownContent is_streaming text={props.segment.text} /></div>;
@@ -108,7 +112,7 @@ function LiveSegmentView(props: Readonly<{
   return <LiveToolGroup child_tasks={props.child_tasks} on_child_open={props.on_child_open} on_tool_click={props.on_tool_click} tools={props.segment.tools} />;
 }
 
-function ReasoningBox(props: Readonly<{ text: string; is_open: boolean; on_toggle: () => void }>) {
+function ReasoningBox(props: Readonly<{ state_key: string; text: string; is_open: boolean; on_toggle: () => void }>) {
   const content_id = useId();
   return (
     <section className={styles.reasoning} data-open={props.is_open}>
@@ -122,9 +126,39 @@ function ReasoningBox(props: Readonly<{ text: string; is_open: boolean; on_toggl
         <span>思考过程</span>
         <Icon name="chevron-down" size={15} />
       </button>
-      <Collapse class_name={styles.reasoning_content} id={content_id} open={props.is_open}>{props.text}</Collapse>
+      <Collapse id={content_id} open={props.is_open}><ReasoningContent state_key={props.state_key} text={props.text} /></Collapse>
     </section>
   );
+}
+
+function ReasoningContent(props: Readonly<{ state_key: string; text: string }>) {
+  const store = useRootStore();
+  const scroll = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const session_id = store.navigation.selected_session_id;
+  const child_id = store.navigation.selected_child_task_id;
+  const history = child_id ? store.projection.child_conversation_histories.get(child_id)
+    : session_id ? store.projection.conversation_histories.get(session_id) : undefined;
+  const generation = history?.generation ?? 0;
+  useOutputFollow({
+    scroll, content,
+    identity: `${session_id}:${child_id}:${store.navigation.conversation_history_index}:${generation}:${props.state_key}`,
+    active: true,
+    restore: () => {
+      const location = store.navigation.current_conversation_location;
+      return location?.session_id === session_id && location.child_task_id === child_id
+        && location.reading_generation === generation ? location.reasoning?.[props.state_key] : undefined;
+    },
+    save: (position) => {
+      const location = store.navigation.current_conversation_location;
+      if (location?.session_id === session_id && location.child_task_id === child_id) {
+        store.navigation.updateReadingPosition(position, generation, props.state_key);
+      }
+    },
+  });
+  return <div aria-label="思考内容" className={styles.reasoning_content} data-output-scroll="true" ref={scroll} tabIndex={0}>
+    <div ref={content}>{props.text}</div>
+  </div>;
 }
 
 function ToolGroup(props: Readonly<{

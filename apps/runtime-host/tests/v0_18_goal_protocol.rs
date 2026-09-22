@@ -205,7 +205,7 @@ fn formal_host_projects_and_controls_goal_and_work_plan_across_restart() {
 }
 
 fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &str) {
-    let database = runtime_home.join("data/runtime.sqlite3");
+    let database = runtime_home.join("users/_personal/data/runtime.sqlite3");
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open Goal acceptance database read-only");
     let (generation, message_count): (i64, i64) = connection
@@ -254,7 +254,7 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
     drop(connection);
 
     let body = runtime_home.join(format!(
-        "data/sessions/{session_id}/conversation.{generation}.jsonl"
+        "users/_personal/data/sessions/{session_id}/conversation.{generation}.jsonl"
     ));
     let content = fs::read_to_string(body).expect("read authoritative Goal Conversation JSONL");
     assert_eq!(

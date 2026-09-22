@@ -185,4 +185,5 @@ fn wire_request(trace: Option<TraceContext>) -> TransportRequest {
 }
 
 mod errors;
+mod injected_transport;
 mod observation;

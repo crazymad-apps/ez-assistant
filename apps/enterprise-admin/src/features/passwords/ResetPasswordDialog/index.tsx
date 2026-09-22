@@ -79,8 +79,8 @@ export function ResetPasswordDialog(props: ResetPasswordDialogProps) {
           showIcon
           title={
             props.user.id === props.currentId
-              ? '你正在重置自己的密码，当前登录也将失效。'
-              : '重置后，该用户的全部登录将失效。'
+              ? '你正在重置自己的密码，已有登录将保留。'
+              : '重置后，该用户的已有登录将保留，后续登录须使用新密码。'
           }
         />
       </Form>

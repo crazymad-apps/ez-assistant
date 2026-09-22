@@ -6,7 +6,7 @@ use assistant_protocol::{RuntimeErrorCode, RuntimeErrorInfo, SessionMaterializat
 use assistant_runtime::StagedSessionAttachment;
 use axum::{
     Extension, Json,
-    extract::{Multipart, State},
+    extract::Multipart,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -15,7 +15,7 @@ use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    HttpState, MAX_ATTACHMENT_BYTES, MAX_COMMAND_BYTES,
+    MAX_ATTACHMENT_BYTES, MAX_COMMAND_BYTES,
     attachments::{cleanup, create_staging_file, runtime_error, valid_original_name},
     error::runtime_status,
 };
@@ -29,14 +29,10 @@ struct MaterializationErrorBody {
 }
 
 pub(super) async fn materialize_session(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return materialization_error(error.to_protocol_info()),
-    };
     let manifest = match read_manifest(&mut multipart).await {
         Ok(value) => value,
         Err(error) => return materialization_error(error),
@@ -74,13 +70,14 @@ pub(super) async fn materialize_session(
                 "materialization file does not match manifest",
             ));
         }
-        let (staging_path, mut staging_file) = match create_staging_file(&state).await {
-            Ok(value) => value,
-            Err(_) => {
-                cleanup_all(&staged).await;
-                return materialization_error(storage_unavailable());
-            }
-        };
+        let (staging_path, mut staging_file) =
+            match create_staging_file(&services.paths.user_root).await {
+                Ok(value) => value,
+                Err(_) => {
+                    cleanup_all(&staged).await;
+                    return materialization_error(storage_unavailable());
+                }
+            };
         let mut hasher = attachment_hash::new_hasher(&declared.original_name);
         let mut size_bytes = 0_u64;
         loop {

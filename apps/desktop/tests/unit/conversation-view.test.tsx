@@ -509,6 +509,7 @@ describe("ConversationView scroll anchoring", () => {
     ], () => frame);
     expect(scroll_top).toBe(1_000);
 
+    fireEvent.wheel(scroll, { deltaY: -500 });
     scroll_top = 400;
     fireEvent.scroll(scroll);
     scroll_height = 1_200;

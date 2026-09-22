@@ -369,6 +369,7 @@ mod tests {
         let child_task_id = ChildTaskId::new("ct-recorder-child").expect("child id");
         store
             .create_child_task(NewStoredChildTask {
+                context_window_tokens: 8192,
                 child_task_id: child_task_id.clone(),
                 session_id: session_id.clone(),
                 parent_run_id: run_id,

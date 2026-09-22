@@ -12,7 +12,7 @@ use crate::{
     McpConfigSource, McpConnection, McpConnectionError, McpConnectionFactory,
     McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions, McpRawCallResult,
     McpRawContent, McpServerConfig, McpToolDefinition, McpToolPage,
-    runtime::product::{empty_child_projection, project_conversation},
+    runtime::product::{empty_child_projection, project_child_usage, project_conversation},
 };
 
 struct MissingMcpTestSource;
@@ -1535,7 +1535,8 @@ async fn mcp_candidate_test_times_out_without_persisting_or_enabling_tools() {
 
 #[tokio::test]
 async fn conversation_pages_are_latest_first_queries_with_generation_bound_cursors() {
-    let runtime = runtime_with_tools(
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
         Arc::new(ScriptedModelService::new(
             model_capabilities(false),
             8_192,
@@ -1544,8 +1545,10 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
                 ModelScript::Events(message_events(&assistant_text("a-page-2", "second"))),
             ],
         )),
-        ToolSetSnapshot::default(),
-    );
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -1567,6 +1570,12 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
             .expect("submit");
         wait_for_terminal(&runtime, &session.session.session_id, &submitted.run.run_id).await;
     }
+
+    // 每次读取窗口都穿插实时事件：历史页不应要求全局 sequence 静止。
+    let events = runtime.event_sender.clone();
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::ConfigChanged);
+    }));
 
     let owner = ConversationOwner::MainSession {
         session_id: session.session.session_id.clone(),
@@ -1610,6 +1619,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         ConversationItem::User(message) if message.text == "one"
     ));
 
+    let window_hook = store.window_read_hook.lock().unwrap().take();
     let view = runtime
         .get_session_view(GetSessionViewRequest {
             session_id: session.session.session_id,
@@ -1620,6 +1630,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
     assert_eq!(view.value.runs.len(), 2);
     assert!(view.value.queue.items.is_empty());
     assert!(view.observed_sequence >= 5);
+    *store.window_read_hook.lock().unwrap() = window_hook;
     let around = runtime
         .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
             session_id: view.value.session.session_id.clone(),
@@ -1980,4 +1991,63 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         .expect("stable tool resource");
     assert!(resolved.path.ends_with("report.txt"));
     assert_eq!(resolved.display_name, "report.txt");
+}
+
+#[test]
+fn child_context_uses_latest_compaction_boundary_and_keeps_cumulative_usage() {
+    use agent_types::{ContextSummaryMessage, ContextUsageAdjustment};
+    let summary = |id: &str, retained: &str, subtract| {
+        ConversationMessage::ContextSummary(ContextSummaryMessage {
+            id: MessageId::new(id).unwrap(),
+            text: "abcd".into(),
+            model: None,
+            usage: None,
+            compacted_usage: None,
+            programmatic_context: None,
+            usage_adjustment: Some(ContextUsageAdjustment::Subtract {
+                retained_assistant_id: MessageId::new(retained).unwrap(),
+                subtract_total_tokens: subtract,
+            }),
+        })
+    };
+    let mut history = ConversationSnapshot::new(vec![
+        ConversationMessage::Assistant(assistant_text_with_usage("old", "first", 6000)),
+        summary("summary-1", "retained-1", 4000),
+        ConversationMessage::Assistant(assistant_text_with_usage("retained-1", "kept", 5000)),
+    ]);
+    let first = project_child_usage(&history, Some(8192));
+    assert_eq!(first.context.as_ref().unwrap().used_tokens, 1005);
+    assert_eq!(
+        first.accumulated.as_ref().unwrap().total_tokens,
+        Some(11000)
+    );
+    history.messages.extend([
+        summary("summary-2", "retained-2", 2800),
+        ConversationMessage::Assistant(assistant_text_with_usage("retained-2", "second", 3000)),
+    ]);
+    let second = project_child_usage(&history, Some(8192));
+    assert_eq!(second.context.as_ref().unwrap().used_tokens, 205);
+    assert_eq!(
+        second.accumulated.as_ref().unwrap().total_tokens,
+        Some(14000)
+    );
+    assert!(project_child_usage(&history, None).context.is_none());
+    assert!(project_child_usage(&history, Some(0)).context.is_none());
+    history
+        .messages
+        .push(ConversationMessage::Assistant(assistant_text_with_usage(
+            "fresh", "fresh", 400,
+        )));
+    assert_eq!(
+        project_child_usage(&history, Some(8192))
+            .context
+            .unwrap()
+            .used_tokens,
+        400
+    );
+    assert!(
+        project_child_usage(&ConversationSnapshot::default(), Some(8192))
+            .context
+            .is_none()
+    );
 }

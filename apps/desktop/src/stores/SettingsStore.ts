@@ -1,5 +1,5 @@
-import { McpSettingsStore } from "../features/settings";
-import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
+import { McpSettingsStore } from '../features/settings';
+import { action, makeObservable, observable, observableRef, runInAction } from 'mobx';
 import type {
   AgentShellSettings,
   ShellKind,
@@ -27,11 +27,12 @@ import type {
   SkillManagementSnapshot,
   ValidateModelConnectionResult,
   WorkspaceId,
-} from "@ez-assistant/protocol";
-import type { RuntimeClient } from "../runtime-client/RuntimeClient";
+} from '@ez-assistant/protocol';
+import type { RuntimeClient } from '../runtime-client/RuntimeClient';
 
-export type RuntimeSettingsPageId = "runtime" | "runtime_connection" | "host_access" | "runtime_diagnostics" | "runtime_local";
-export type SettingsPage = RuntimeSettingsPageId | "models" | "permissions" | "memory" | "skills" | "devices" | "mcp";
+export type RuntimeSettingsPageId =
+  'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local';
+export type SettingsPage = RuntimeSettingsPageId | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp';
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;
@@ -51,7 +52,7 @@ export class SettingsStore {
   #shell_read = 0;
   readonly mcp: McpSettingsStore;
   is_open = false;
-  page: SettingsPage = "runtime";
+  page: SettingsPage = 'runtime';
   loading = false;
   pending_action: string | null = null;
   status: ConfigurationStatus | null = null;
@@ -117,14 +118,14 @@ export class SettingsStore {
     });
   }
 
-  open(page: SettingsPage = "runtime"): void {
+  open(page: SettingsPage = 'runtime'): void {
     this.is_open = true;
     this.page = page;
     this.#skill_scope_initialized_for_open = false;
     this.clearSkillDetail();
     void this.load();
-    if (page === "permissions") void this.loadPermissions();
-    if (page === "skills") {
+    if (page === 'permissions') void this.loadPermissions();
+    if (page === 'skills') {
       this.skill_workspace_id = this.dependencies.get_permission_context().workspace_id;
       this.#skill_scope_initialized_for_open = true;
       void this.loadSkills();
@@ -143,12 +144,12 @@ export class SettingsStore {
   }
 
   selectPage(page: SettingsPage): void {
-    if (page !== "mcp") this.mcp.deactivate();
+    if (page !== 'mcp') this.mcp.deactivate();
     this.page = page;
     this.clearMessages();
-    if (page !== "skills") this.clearSkillDetail();
-    if (page === "permissions") void this.loadPermissions();
-    if (page === "skills") {
+    if (page !== 'skills') this.clearSkillDetail();
+    if (page === 'permissions') void this.loadPermissions();
+    if (page === 'skills') {
       if (!this.#skill_scope_initialized_for_open) {
         this.skill_workspace_id = this.dependencies.get_permission_context().workspace_id;
         this.#skill_scope_initialized_for_open = true;
@@ -173,7 +174,7 @@ export class SettingsStore {
     this.clearMessages();
     try {
       const result = await client.command({
-        type: "list_skills",
+        type: 'list_skills',
         payload: { workspace_id: workspace_id ?? undefined },
       });
       runInAction(() => {
@@ -204,14 +205,14 @@ export class SettingsStore {
     this.clearMessages();
     try {
       const result = await client.command({
-        type: "get_skill_detail",
+        type: 'get_skill_detail',
         payload: { workspace_id: workspace_id ?? undefined, name },
       });
       runInAction(() => {
         if (this.skill_workspace_id !== workspace_id || this.#skill_detail_request !== request) return;
         this.skill_detail = result.payload.detail ?? null;
         if (!result.payload.detail) {
-          this.error_message = "技能已发生变化，请返回列表重新选择。";
+          this.error_message = '技能已发生变化，请返回列表重新选择。';
         }
       });
     } catch (error: unknown) {
@@ -241,7 +242,7 @@ export class SettingsStore {
     this.clearMessages();
     try {
       const result = await client.command({
-        type: "set_skill_enabled",
+        type: 'set_skill_enabled',
         payload: { workspace_id: workspace_id ?? undefined, name, enabled },
       });
       runInAction(() => {
@@ -283,7 +284,7 @@ export class SettingsStore {
   async load(): Promise<void> {
     const client = this.dependencies.get_client();
     if (!client) {
-      this.error_message = "运行时尚未连接。";
+      this.error_message = '运行时尚未连接。';
       return;
     }
     const request = ++this.#model_read;
@@ -291,9 +292,9 @@ export class SettingsStore {
     this.error_message = null;
     try {
       const [status, providers, settings] = await Promise.all([
-        client.command({ type: "get_config_status", payload: {} }),
-        client.command({ type: "list_providers", payload: {} }),
-        client.command({ type: "get_model_settings", payload: {} }),
+        client.command({ type: 'get_config_status', payload: {} }),
+        client.command({ type: 'list_providers', payload: {} }),
+        client.command({ type: 'get_model_settings', payload: {} }),
       ]);
       runInAction(() => {
         if (client !== this.dependencies.get_client() || request !== this.#model_read) return;
@@ -317,11 +318,11 @@ export class SettingsStore {
   async reloadConfiguration(): Promise<void> {
     const client = this.requireClient();
     if (!client) return;
-    await this.runAction("reload", async () => {
-      const result = await client.command({ type: "reload_config", payload: {} });
+    await this.runAction('reload', async () => {
+      const result = await client.command({ type: 'reload_config', payload: {} });
       this.status = result.payload.status;
       await this.loadModelSettings();
-      this.notice_message = "配置已重新加载。";
+      this.notice_message = '配置已重新加载。';
       await this.dependencies.refresh_application();
     });
   }
@@ -330,20 +331,24 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) return;
     const context = this.dependencies.get_permission_context();
-    const scopes: PermissionDocumentScope[] = [{ type: "global" }];
+    const scopes: PermissionDocumentScope[] = [{ type: 'global' }];
     if (context.workspace_id) {
-      scopes.unshift({ type: "workspace", payload: { workspace_id: context.workspace_id } });
+      scopes.unshift({ type: 'workspace', payload: { workspace_id: context.workspace_id } });
     }
     if (context.session_id) {
-      scopes.unshift({ type: "session", payload: { session_id: context.session_id } });
+      scopes.unshift({ type: 'session', payload: { session_id: context.session_id } });
     }
     this.loading = true;
     this.clearMessages();
     try {
-      const results = await Promise.all(scopes.map((scope) => client.command({
-        type: "get_permission_document",
-        payload: { scope },
-      })));
+      const results = await Promise.all(
+        scopes.map((scope) =>
+          client.command({
+            type: 'get_permission_document',
+            payload: { scope },
+          }),
+        ),
+      );
       runInAction(() => {
         this.permission_documents = results.map((result) => result.payload.document);
       });
@@ -362,19 +367,19 @@ export class SettingsStore {
     const client = this.requireClient();
     const { session_id } = this.dependencies.get_permission_context();
     if (!client || !session_id) {
-      this.error_message = "请先选择一个会话，再重新加载权限。";
+      this.error_message = '请先选择一个会话，再重新加载权限。';
       return false;
     }
-    return this.runAction("permission:reload", async () => {
+    return this.runAction('permission:reload', async () => {
       const result = await client.command({
-        type: "reload_permissions",
+        type: 'reload_permissions',
         payload: { session_id },
       });
       if (!result.payload.applied) {
-        throw new Error(result.payload.diagnostics[0]?.message ?? "权限文件校验失败。" );
+        throw new Error(result.payload.diagnostics[0]?.message ?? '权限文件校验失败。');
       }
       await this.loadPermissions();
-      this.notice_message = "权限规则已重新加载。";
+      this.notice_message = '权限规则已重新加载。';
     });
   }
 
@@ -385,15 +390,15 @@ export class SettingsStore {
   ): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("permission:save", async () => {
+    return this.runAction('permission:save', async () => {
       const result = await client.command({
-        type: "replace_permission_document",
+        type: 'replace_permission_document',
         payload: { scope, expected_revision, document },
       });
-      this.permission_documents = this.permission_documents.map((current) => (
-        samePermissionScope(current.scope, scope) ? result.payload.document : current
-      ));
-      this.notice_message = "权限规则已保存。";
+      this.permission_documents = this.permission_documents.map((current) =>
+        samePermissionScope(current.scope, scope) ? result.payload.document : current,
+      );
+      this.notice_message = '权限规则已保存。';
     });
   }
 
@@ -401,11 +406,13 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) return false;
     const request = ++this.#model_read;
-    runInAction(() => { this.loading = true; });
+    runInAction(() => {
+      this.loading = true;
+    });
     try {
       const [providers, settings] = await Promise.all([
-        client.command({ type: "list_providers", payload: {} }, { signal }),
-        client.command({ type: "get_model_settings", payload: {} }, { signal }),
+        client.command({ type: 'list_providers', payload: {} }, { signal }),
+        client.command({ type: 'get_model_settings', payload: {} }, { signal }),
       ]);
       if (signal?.aborted || client !== this.dependencies.get_client() || request !== this.#model_read) return false;
       runInAction(() => {
@@ -414,18 +421,27 @@ export class SettingsStore {
       });
       return true;
     } catch (error: unknown) {
-      if (!signal?.aborted && client === this.dependencies.get_client() && request === this.#model_read) runInAction(() => this.showError(displayError(error)));
+      if (!signal?.aborted && client === this.dependencies.get_client() && request === this.#model_read)
+        runInAction(() => this.showError(displayError(error)));
       return false;
     } finally {
-      runInAction(() => { if (request === this.#model_read) this.loading = false; });
+      runInAction(() => {
+        if (request === this.#model_read) this.loading = false;
+      });
     }
   }
 
-  async loadProviderModelCatalog(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderModelCatalogSnapshot> {
+  async loadProviderModelCatalog(
+    provider_instance_id: ProviderInstanceId,
+    signal?: AbortSignal,
+  ): Promise<ProviderModelCatalogSnapshot> {
     const client = this.requireClient();
-    if (!client) throw new Error("运行时尚未连接。");
-    const result = await client.command({ type: "list_provider_models", payload: { provider_instance_id } }, { signal });
-    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    if (!client) throw new Error('运行时尚未连接。');
+    const result = await client.command(
+      { type: 'list_provider_models', payload: { provider_instance_id } },
+      { signal },
+    );
+    if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
     return result.payload;
   }
 
@@ -433,24 +449,48 @@ export class SettingsStore {
     return (await this.loadProviderModelCatalog(provider_instance_id, signal)).models;
   }
 
-  async refreshProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderModelCatalogSnapshot> {
+  async refreshProviderModels(
+    provider_instance_id: ProviderInstanceId,
+    signal?: AbortSignal,
+  ): Promise<ProviderModelCatalogSnapshot> {
     const client = this.requireClient();
-    if (!client) throw new Error("运行时尚未连接。");
-    const result = await client.command({ type: "refresh_provider_models", payload: { provider_instance_id } }, { signal });
-    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    if (!client) throw new Error('运行时尚未连接。');
+    const result = await client.command(
+      { type: 'refresh_provider_models', payload: { provider_instance_id } },
+      { signal },
+    );
+    if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
     return result.payload;
+  }
+
+  async refreshModelSource(): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction('model:refresh-source', async () => {
+      try {
+        const result = await client.command({ type: 'refresh_model_source', payload: {} });
+        if (client !== this.dependencies.get_client()) return;
+        this.invalidateModelRead();
+        runInAction(() => {
+          this.model_settings = result.payload;
+        });
+        await this.dependencies.refresh_application();
+      } finally {
+        if (client === this.dependencies.get_client()) await this.loadModelSettings();
+      }
+    });
   }
 
   async setDefaultModel(selection: ModelSelection | null): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("default", async () => {
-      const result = await client.command({ type: "set_default_model", payload: { selection } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+    return this.runAction('default', async () => {
+      const result = await client.command({ type: 'set_default_model', payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       this.invalidateModelRead();
       runInAction(() => {
         this.model_settings = result.payload;
-        this.notice_message = "默认模型已更新。";
+        this.notice_message = '默认模型已更新。';
       });
       await this.refreshAfterModelMutation(client);
     });
@@ -463,7 +503,7 @@ export class SettingsStore {
     this.shell_loading = Boolean(client);
     if (!client) return;
     try {
-      const result = await client.command({ type: "get_agent_shell_settings", payload: {} });
+      const result = await client.command({ type: 'get_agent_shell_settings', payload: {} });
       runInAction(() => {
         if (client === this.dependencies.get_client() && request === this.#shell_read) {
           this.agent_shell_settings = result.payload;
@@ -476,21 +516,23 @@ export class SettingsStore {
         }
       });
     } finally {
-      runInAction(() => { if (request === this.#shell_read) this.shell_loading = false; });
+      runInAction(() => {
+        if (request === this.#shell_read) this.shell_loading = false;
+      });
     }
   }
 
   async setDefaultAgentShell(shell: ShellKind): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("default-shell", async () => {
-      const result = await client.command({ type: "set_default_agent_shell", payload: { shell } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+    return this.runAction('default-shell', async () => {
+      const result = await client.command({ type: 'set_default_agent_shell', payload: { shell } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       ++this.#shell_read;
       runInAction(() => {
         this.shell_loading = false;
         this.agent_shell_settings = result.payload;
-        this.notice_message = "默认 Agent Shell 已更新，仅影响之后新建的会话。";
+        this.notice_message = '默认 Agent Shell 已更新，仅影响之后新建的会话。';
       });
     });
   }
@@ -498,32 +540,39 @@ export class SettingsStore {
   async setAuxiliaryVisionModel(selection: ModelSelection | null): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("vision-model", async () => {
-      const result = await client.command({ type: "set_auxiliary_vision_model", payload: { selection } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+    return this.runAction('vision-model', async () => {
+      const result = await client.command({ type: 'set_auxiliary_vision_model', payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       this.invalidateModelRead();
       runInAction(() => {
         this.model_settings = result.payload;
-        this.notice_message = selection ? "默认识图模型已更新。" : "默认识图模型已清除。";
+        this.notice_message = selection ? '默认识图模型已更新。' : '默认识图模型已清除。';
       });
       await this.refreshAfterModelMutation(client);
     });
   }
 
-  async saveProvider(provider_instance_id: ProviderInstanceId | null, connection: ProviderConnection, credential: ProviderCredentialChange): Promise<ProviderSummary | null> {
+  async saveProvider(
+    provider_instance_id: ProviderInstanceId | null,
+    connection: ProviderConnection,
+    credential: ProviderCredentialChange,
+  ): Promise<ProviderSummary | null> {
     const client = this.requireClient();
     if (!client) return null;
     let saved: ProviderSummary | null = null;
-    const applied = await this.runAction("provider:save", async () => {
+    const applied = await this.runAction('provider:save', async () => {
       const result = provider_instance_id
-        ? await client.command({ type: "update_provider", payload: { provider_instance_id, connection, credential } })
-        : await client.command({ type: "create_provider", payload: { connection, credential } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+        ? await client.command({ type: 'update_provider', payload: { provider_instance_id, connection, credential } })
+        : await client.command({ type: 'create_provider', payload: { connection, credential } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       saved = result.payload;
       this.invalidateModelRead();
       runInAction(() => {
-        this.providers = [...this.providers.filter((item) => item.provider_instance_id !== result.payload.provider_instance_id), result.payload];
-        this.showNotice("服务商已保存。");
+        this.providers = [
+          ...this.providers.filter((item) => item.provider_instance_id !== result.payload.provider_instance_id),
+          result.payload,
+        ];
+        this.showNotice('服务商已保存。');
       });
       await this.refreshAfterModelMutation(client);
     });
@@ -532,51 +581,76 @@ export class SettingsStore {
 
   async getProviderUsage(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderUsage> {
     const client = this.requireClient();
-    if (!client) throw new Error("运行时尚未连接。");
-    const result = await client.command({ type: "get_provider_usage", payload: { provider_instance_id } }, { signal });
-    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取影响。");
+    if (!client) throw new Error('运行时尚未连接。');
+    const result = await client.command({ type: 'get_provider_usage', payload: { provider_instance_id } }, { signal });
+    if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取影响。');
     return result.payload;
   }
 
   async deleteProvider(provider_instance_id: ProviderInstanceId): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("provider:delete", async () => {
-      const result = await client.command({ type: "delete_provider", payload: { provider_instance_id } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取设置。");
+    return this.runAction('provider:delete', async () => {
+      const result = await client.command({ type: 'delete_provider', payload: { provider_instance_id } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       this.invalidateModelRead();
       runInAction(() => {
         this.providers = this.providers.filter((item) => item.provider_instance_id !== provider_instance_id);
-        this.showNotice(`服务商已删除，已删除 ${result.payload.fixed_config_count} 条固定配置；${result.payload.session_count} 个显式引用会话需重选模型。${result.payload.default_model ? "默认模型需重选。" : ""}${result.payload.vision_model ? "辅助识图模型需重选。" : ""}`);
+        this.showNotice(
+          `服务商已删除，已删除 ${result.payload.fixed_config_count} 条固定配置；${result.payload.session_count} 个显式引用会话需重选模型。${result.payload.default_model ? '默认模型需重选。' : ''}${result.payload.vision_model ? '辅助识图模型需重选。' : ''}`,
+        );
       });
       await this.refreshAfterModelMutation(client);
     });
   }
 
-  async getModelConfiguration(selection: ModelSelection, signal?: AbortSignal, origin: ModelConfigOrigin = "online"): Promise<ModelConfigurationDetail> {
+  async getModelConfiguration(
+    selection: ModelSelection,
+    signal?: AbortSignal,
+    origin: ModelConfigOrigin = 'online',
+  ): Promise<ModelConfigurationDetail> {
     const client = this.requireClient();
-    if (!client) throw new Error("运行时尚未连接。");
-    const result = await client.command({ type: "get_model_configuration", payload: { ...selection, origin } }, { signal });
-    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    if (!client) throw new Error('运行时尚未连接。');
+    const result = await client.command(
+      { type: 'get_model_configuration', payload: { ...selection, origin } },
+      { signal },
+    );
+    if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
     const detail = result.payload;
     // Dev 前端可能热更新而独立 Host 仍运行旧构建。拒绝不完整详情，不让 render 访问缺失字段。
-    if (!detail || !["online", "manual"].includes(detail.origin) || !detail.field_sources || Array.isArray(detail.field_sources)
-      || typeof detail.field_sources !== "object" || !detail.parameters?.tool_choice
-      || Array.isArray(detail.parameters.reasoning_efforts)) {
-      throw new Error("模型详情格式与当前界面不一致，请重启对应 Runtime 后重试。");
+    if (
+      !detail ||
+      !['online', 'manual'].includes(detail.origin) ||
+      !detail.field_sources ||
+      Array.isArray(detail.field_sources) ||
+      typeof detail.field_sources !== 'object' ||
+      !detail.parameters?.tool_choice ||
+      Array.isArray(detail.parameters.reasoning_efforts)
+    ) {
+      throw new Error('模型详情格式与当前界面不一致，请重启对应 Runtime 后重试。');
     }
     return detail;
   }
 
-  async listFixedModels(provider_instance_id: ProviderInstanceId, offset: number, signal?: AbortSignal): Promise<ModelFixedConfig[]> {
+  async listFixedModels(
+    provider_instance_id: ProviderInstanceId,
+    offset: number,
+    signal?: AbortSignal,
+  ): Promise<ModelFixedConfig[]> {
     const client = this.requireClient();
-    if (!client) throw new Error("运行时尚未连接。");
-    const result = await client.command({ type: "list_fixed_model_configs", payload: { provider_instance_id, offset, limit: 20 } }, { signal });
-    if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    if (!client) throw new Error('运行时尚未连接。');
+    const result = await client.command(
+      { type: 'list_fixed_model_configs', payload: { provider_instance_id, offset, limit: 20 } },
+      { signal },
+    );
+    if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
     return result.payload;
   }
 
-  async listAllFixedModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ModelFixedConfig[]> {
+  async listAllFixedModels(
+    provider_instance_id: ProviderInstanceId,
+    signal?: AbortSignal,
+  ): Promise<ModelFixedConfig[]> {
     const records: ModelFixedConfig[] = [];
     for (let offset = 0; !signal?.aborted; offset += 20) {
       const page = await this.listFixedModels(provider_instance_id, offset, signal);
@@ -586,27 +660,34 @@ export class SettingsStore {
     return records;
   }
 
-  async saveModelFixedConfig(selection: ModelSelection, parameters: ModelParameters, origin: ModelConfigOrigin = "online"): Promise<ModelFixedConfig | null> {
+  async saveModelFixedConfig(
+    selection: ModelSelection,
+    parameters: ModelParameters,
+    origin: ModelConfigOrigin = 'online',
+  ): Promise<ModelFixedConfig | null> {
     const client = this.requireClient();
     if (!client) return null;
     let saved: ModelFixedConfig | null = null;
-    const applied = await this.runAction("model:save", async () => {
-      const result = await client.command({ type: "save_model_fixed_config", payload: { selection, parameters, origin } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取配置。");
+    const applied = await this.runAction('model:save', async () => {
+      const result = await client.command({
+        type: 'save_model_fixed_config',
+        payload: { selection, parameters, origin },
+      });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取配置。');
       saved = result.payload;
-      this.showNotice("已固定，下次执行生效。");
+      this.showNotice('已固定，下次执行生效。');
       await this.refreshAfterModelMutation(client);
     });
     return applied ? saved : null;
   }
 
-  async resetModelFixedConfig(selection: ModelSelection, origin: ModelConfigOrigin = "online"): Promise<boolean> {
+  async resetModelFixedConfig(selection: ModelSelection, origin: ModelConfigOrigin = 'online'): Promise<boolean> {
     const client = this.requireClient();
     if (!client) return false;
-    return this.runAction("model:reset", async () => {
-      await client.command({ type: "reset_model_fixed_config", payload: selection });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重新读取配置。");
-      this.showNotice(origin === "manual" ? "手动模型已删除。" : "固定配置已重置。");
+    return this.runAction('model:reset', async () => {
+      await client.command({ type: 'reset_model_fixed_config', payload: selection });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取配置。');
+      this.showNotice(origin === 'manual' ? '手动模型已删除。' : '固定配置已重置。');
       await this.refreshAfterModelMutation(client);
     });
   }
@@ -615,11 +696,11 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) return null;
     let validation: ValidateModelConnectionResult | null = null;
-    const applied = await this.runAction("model:validate", async () => {
-      const result = await client.command({ type: "validate_model_connection", payload: { selection } });
-      if (client !== this.dependencies.get_client()) throw new Error("运行时连接已切换，请重试。");
+    const applied = await this.runAction('model:validate', async () => {
+      const result = await client.command({ type: 'validate_model_connection', payload: { selection } });
+      if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
       validation = result.payload;
-      if (result.payload.outcome.status === "succeeded") this.showNotice("连接测试成功。");
+      if (result.payload.outcome.status === 'succeeded') this.showNotice('连接测试成功。');
       else this.showError(displayConnectionFailure(result.payload.outcome.failure));
     });
     return applied ? validation : null;
@@ -627,27 +708,34 @@ export class SettingsStore {
 
   private invalidateModelRead(): void {
     this.#model_read += 1;
-    runInAction(() => { this.loading = false; });
+    runInAction(() => {
+      this.loading = false;
+    });
   }
 
   private async refreshAfterModelMutation(client: RuntimeClient): Promise<void> {
     // 写命令已成功；刷新失败不能把已提交保存显示为失败并诱发重复创建。
-    try { await this.dependencies.refresh_application(); }
-    catch {
-      if (client === this.dependencies.get_client()) this.showError("保存已完成，但刷新应用状态失败，请重新连接后核对。");
+    try {
+      await this.dependencies.refresh_application();
+    } catch {
+      if (client === this.dependencies.get_client())
+        this.showError('保存已完成，但刷新应用状态失败，请重新连接后核对。');
     }
   }
 
   private requireClient(): RuntimeClient | null {
     const client = this.dependencies.get_client();
-    if (!client) this.showError("运行时尚未连接。");
+    if (!client) this.showError('运行时尚未连接。');
     return client;
   }
 
   private async runAction(name: string, operation: () => Promise<void>): Promise<boolean> {
     if (this.pending_action) return false;
     const client = this.dependencies.get_client();
-    runInAction(() => { this.pending_action = name; this.clearMessages(); });
+    runInAction(() => {
+      this.pending_action = name;
+      this.clearMessages();
+    });
     try {
       await operation();
       return client === this.dependencies.get_client();
@@ -655,8 +743,8 @@ export class SettingsStore {
       runInAction(() => {
         if (client !== this.dependencies.get_client()) return;
         this.error_message = displayError(error);
-        this.configuration_conflict = (error as { code?: string }).code === "configuration_conflict";
-        this.permission_conflict = (error as { code?: string }).code === "permission_file_conflict";
+        this.configuration_conflict = (error as { code?: string }).code === 'configuration_conflict';
+        this.permission_conflict = (error as { code?: string }).code === 'permission_file_conflict';
       });
       return false;
     } finally {
@@ -669,29 +757,28 @@ export class SettingsStore {
 
 function samePermissionScope(left: PermissionDocumentScope, right: PermissionDocumentScope): boolean {
   if (left.type !== right.type) return false;
-  if (left.type === "global" || right.type === "global") return true;
-  if (left.type === "workspace" && right.type === "workspace") {
+  if (left.type === 'global' || right.type === 'global') return true;
+  if (left.type === 'workspace' && right.type === 'workspace') {
     return left.payload.workspace_id === right.payload.workspace_id;
   }
-  return left.type === "session" && right.type === "session"
-    && left.payload.session_id === right.payload.session_id;
+  return left.type === 'session' && right.type === 'session' && left.payload.session_id === right.payload.session_id;
 }
 
 function displayError(error: unknown): string {
-  return error instanceof Error ? error.message : "操作失败，请重试。";
+  return error instanceof Error ? error.message : '操作失败，请重试。';
 }
 
 function displayConnectionFailure(failure: ConnectionValidationFailure): string {
-  const messages: Record<ConnectionValidationFailure["kind"], string> = {
-    configuration: "当前模型配置无法用于连接测试，请检查协议、服务地址和模型 ID。",
-    connection: "无法连接模型服务，请检查服务地址和网络状态。",
-    timeout: "模型连接测试超时，请稍后重试。",
-    authentication: "API Key 无效或无权访问该模型，请检查凭据。",
-    model_unavailable: "当前模型不可用，请检查模型 ID 和账号权限。",
-    rate_limited: "模型服务触发限流，请稍后重试。",
-    service_unavailable: "模型服务暂时不可用，请稍后重试。",
-    provider_rejected: "模型服务拒绝了测试请求，请检查模型配置。",
-    protocol: "模型服务返回了无法识别的响应，请检查接口兼容性。",
+  const messages: Record<ConnectionValidationFailure['kind'], string> = {
+    configuration: '当前模型配置无法用于连接测试，请检查协议、服务地址和模型 ID。',
+    connection: '无法连接模型服务，请检查服务地址和网络状态。',
+    timeout: '模型连接测试超时，请稍后重试。',
+    authentication: 'API Key 无效或无权访问该模型，请检查凭据。',
+    model_unavailable: '当前模型不可用，请检查模型 ID 和账号权限。',
+    rate_limited: '模型服务触发限流，请稍后重试。',
+    service_unavailable: '模型服务暂时不可用，请稍后重试。',
+    provider_rejected: '模型服务拒绝了测试请求，请检查模型配置。',
+    protocol: '模型服务返回了无法识别的响应，请检查接口兼容性。',
   };
   return messages[failure.kind];
 }

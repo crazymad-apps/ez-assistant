@@ -82,7 +82,7 @@ fn database_snapshot(
     home: &std::path::Path,
 ) -> std::collections::BTreeMap<String, (i64, Vec<Vec<String>>)> {
     let mut connection = rusqlite::Connection::open_with_flags(
-        home.join("data/runtime.sqlite3"),
+        home.join("users/_personal/data/runtime.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -208,10 +208,13 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
         .next()
         .unwrap()
         .to_owned();
-    assert!(browser.json::<Value>().unwrap()["token"].is_null());
+    let identity = browser.json::<Value>().unwrap();
+    assert!(identity["token"].is_null());
+    let context = identity["login_context"].as_str().unwrap();
     let missing = http
         .get(format!("{}/sessions/missing/export.md", host.base_url()))
         .header("Cookie", &cookie)
+        .header("x-ez-login-context", context)
         .send()
         .unwrap();
     assert_eq!(
@@ -222,6 +225,7 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
     let stale = http
         .get(format!("{}/sessions/missing/export.md", host.base_url()))
         .header("Cookie", &cookie)
+        .header("x-ez-login-context", context)
         .header(assistant_protocol::CLIENT_VERSION_HEADER, "0.25.1")
         .header(assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER, "0.25.1")
         .send()
@@ -234,12 +238,14 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
     let missing = http
         .get(format!("{}/events", host.base_url()))
         .header("Cookie", &cookie)
+        .header("x-ez-login-context", context)
         .send()
         .unwrap();
     assert_eq!(missing.status(), StatusCode::CONFLICT);
     let mut events = http
         .get(format!("{}/events", host.base_url()))
         .header("Cookie", &cookie)
+        .header("x-ez-login-context", context)
         .headers(support::compatibility_headers())
         .send()
         .unwrap()
@@ -249,6 +255,7 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
     assert_eq!(
         http.post(format!("{}/auth/logout", host.base_url()))
             .header("Cookie", &cookie)
+            .header("x-ez-login-context", context)
             .header("Origin", host.base_url())
             .send()
             .unwrap()
@@ -261,6 +268,7 @@ fn loopback_cookie_login_media_and_events_require_the_current_page_declaration()
     assert_eq!(
         http.get(format!("{}/health", host.base_url()))
             .header("Cookie", &cookie)
+            .header("x-ez-login-context", context)
             .send()
             .unwrap()
             .status(),

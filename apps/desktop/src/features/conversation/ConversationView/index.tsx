@@ -32,9 +32,9 @@ import {
   type ResourceMenuLocation,
 } from "../../resource-workspace/ResourceContextMenu";
 import styles from "./index.module.scss";
+import { useOutputFollow } from "./useOutputFollow";
 
 const BOTTOM_THRESHOLD = 72;
-const PINNED_BOTTOM_THRESHOLD = 24;
 
 export const ConversationView = observer(function ConversationView() {
   const store = useRootStore();
@@ -49,10 +49,31 @@ export const ConversationView = observer(function ConversationView() {
     : session_id ? store.live_execution.runForSession(session_id) : null;
   const scroll_ref = useRef<HTMLDivElement>(null);
   const message_list_ref = useRef<HTMLDivElement>(null);
-  const previous_scroll_height = useRef<number | null>(null);
   const quote_scroll_top = useRef<number | null>(null);
-  const is_pinned_to_bottom = useRef(true);
   const [show_scroll_bottom, setShowScrollBottom] = useState(false);
+  const follow = useOutputFollow({
+    scroll: scroll_ref,
+    content: message_list_ref,
+    identity: `${session_id}:${child_task_id}:${store.navigation.conversation_history_index}:${history?.generation}`,
+    active: Boolean(history && (history.items.length > 0 || live_run || child_view)),
+    restore: () => {
+      const location = store.navigation.current_conversation_location;
+      if (location?.session_id !== session_id || location.child_task_id !== child_task_id) return undefined;
+      if (location.reading_generation === history?.generation) return location.reading;
+      return location.reading?.anchor ? { ...location.reading, top: 0 } : undefined;
+    },
+    recoverAnchor: (message_id) => session_id
+      ? store.restoreReadingAnchor(session_id, child_task_id, message_id) : Promise.resolve(false),
+    save: (position) => {
+      const location = store.navigation.current_conversation_location;
+      if (history && location?.session_id === session_id && location.child_task_id === child_task_id) {
+        store.navigation.updateReadingPosition(position, history.generation);
+      }
+      const node = scroll_ref.current;
+      setShowScrollBottom(Boolean(node && node.scrollHeight - node.scrollTop - node.clientHeight > BOTTOM_THRESHOLD));
+    },
+  });
+  const is_pinned_to_bottom = follow.following;
   const [detail_state, setDetailState] = useState<{
     detail: ToolDetailView | null;
     error: string | null;
@@ -129,78 +150,15 @@ export const ConversationView = observer(function ConversationView() {
     }
   }, [fork_point, history, session_id, store]);
 
-  const loadPrevious = useCallback(async () => {
-    const node = scroll_ref.current;
-    if (!session_id || !node || !history?.has_more || history.is_loading_previous) {
-      return;
-    }
-    previous_scroll_height.current = node.scrollHeight;
-    const loaded = await store.loadPreviousConversationPage(session_id, child_task_id);
-    if (!loaded) {
-      previous_scroll_height.current = null;
-    }
-  }, [child_task_id, history?.has_more, history?.is_loading_previous, session_id, store]);
-
-  useLayoutEffect(() => {
-    const node = scroll_ref.current;
-    if (!node || previous_scroll_height.current === null) {
-      return;
-    }
-    node.scrollTop += node.scrollHeight - previous_scroll_height.current;
-    previous_scroll_height.current = null;
-  }, [history?.items.length]);
+  const loadPrevious = useCallback(async (retry = false) => {
+    if (!session_id || !history?.has_more || history.is_loading_previous || (!retry && history.load_error)) return;
+    follow.remember();
+    await store.loadPreviousConversationPage(session_id, child_task_id);
+  }, [child_task_id, history?.has_more, history?.is_loading_previous, history?.load_error, session_id, store, follow.remember]);
 
   const updateScrollState = useCallback((node: HTMLDivElement) => {
-    const distance_from_bottom = Math.max(0, node.scrollHeight - node.scrollTop - node.clientHeight);
-    is_pinned_to_bottom.current = distance_from_bottom <= PINNED_BOTTOM_THRESHOLD;
-    setShowScrollBottom(distance_from_bottom > BOTTOM_THRESHOLD);
+    setShowScrollBottom(node.scrollHeight - node.scrollTop - node.clientHeight > BOTTOM_THRESHOLD);
   }, []);
-
-  const pinToBottomIfNeeded = useCallback(() => {
-    const node = scroll_ref.current;
-    if (!node || previous_scroll_height.current !== null || !is_pinned_to_bottom.current) {
-      return;
-    }
-    node.scrollTop = node.scrollHeight;
-    updateScrollState(node);
-  }, [updateScrollState]);
-
-  useLayoutEffect(() => {
-    pinToBottomIfNeeded();
-  }, [history?.items.length, live_run, pinToBottomIfNeeded]);
-
-  useEffect(() => {
-    const content = message_list_ref.current;
-    if (!content || typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(() => pinToBottomIfNeeded());
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [pinToBottomIfNeeded, session_id]);
-
-  useLayoutEffect(() => {
-    const node = scroll_ref.current;
-    is_pinned_to_bottom.current = true;
-    setShowScrollBottom(false);
-    if (node) {
-      const location = store.navigation.current_conversation_location;
-      const matches_location = location?.session_id === session_id
-        && location.child_task_id === child_task_id;
-      if (matches_location && location.scroll_offset !== null) {
-        node.scrollTop = location.scroll_offset;
-        updateScrollState(node);
-      } else {
-        node.scrollTop = node.scrollHeight;
-      }
-    }
-  }, [
-    child_task_id,
-    session_id,
-    store.navigation,
-    store.navigation.conversation_history_index,
-    updateScrollState,
-  ]);
 
   useLayoutEffect(() => {
     const message_id = store.navigation.conversation_anchor_message_id;
@@ -218,6 +176,7 @@ export const ConversationView = observer(function ConversationView() {
       if (!quote_will_position_range) {
         is_pinned_to_bottom.current = false;
         target.scrollIntoView({ block: "center" });
+        follow.remember();
         store.navigation.updateCurrentScrollOffset(node.scrollTop);
       }
       store.navigation.consumeConversationAnchor(message_id);
@@ -387,6 +346,7 @@ export const ConversationView = observer(function ConversationView() {
       quote_scroll_top.current = target_scroll_top;
       is_pinned_to_bottom.current = false;
       node.scrollTo({ top: target_scroll_top, behavior: "auto" });
+      follow.remember();
       store.navigation.updateCurrentScrollOffset(node.scrollTop);
       updateScrollState(node);
     }
@@ -403,15 +363,7 @@ export const ConversationView = observer(function ConversationView() {
 
   useEffect(() => () => store.transient_focus.clear(), [store.transient_focus]);
 
-  const scrollToBottom = useCallback(() => {
-    const node = scroll_ref.current;
-    if (!node) {
-      return;
-    }
-    is_pinned_to_bottom.current = true;
-    setShowScrollBottom(false);
-    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-  }, []);
+  const scrollToBottom = follow.bottom;
 
   const openToolDetail = useCallback(async (message_id: MessageId, call_id: ToolCallId) => {
     if (!owner) {
@@ -591,6 +543,8 @@ export const ConversationView = observer(function ConversationView() {
     <div className={styles.viewport}>
       <div
         aria-label="消息列表"
+        tabIndex={0}
+        data-output-scroll="true"
         className={styles.scroll}
         onMouseUp={(event) => {
           if (event.button === 0 && !event.ctrlKey) captureSelection();
@@ -603,7 +557,7 @@ export const ConversationView = observer(function ConversationView() {
             <EmptyConversation title={child_view.task.task.title} detail="子智能体尚未产生可展示的消息。" />
           )}
           {history.has_more && (
-            <button className={styles.load_previous} disabled={history.is_loading_previous} onClick={() => void loadPrevious()} type="button">
+            <button className={styles.load_previous} disabled={history.is_loading_previous} onClick={() => void loadPrevious(true)} type="button">
               {history.is_loading_previous ? "正在加载更早消息…" : "加载更早消息"}
             </button>
           )}

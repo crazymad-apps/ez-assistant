@@ -44,6 +44,26 @@ impl LocalFileSystem {
         &self.config
     }
 
+    /// 搜索时在遍历前排除宿主给定的后代路径，其他 rg 行为和资源限制保持不变。
+    ///
+    /// # Errors
+    /// 排除路径不在搜索根内、后端失败或取消时返回现有文件能力错误。
+    pub async fn search_excluding(
+        &self,
+        request: SearchFilesRequest,
+        context: FileToolContext,
+        exclusions: &[std::path::PathBuf],
+    ) -> Result<SearchFilesResult, FileToolError> {
+        search::run_excluding(
+            &self.config.ripgrep_program,
+            request,
+            self.config.max_search_stderr_bytes,
+            context.cancellation,
+            exclusions,
+        )
+        .await
+    }
+
     async fn read_text_bytes(&self, path: &AbsolutePath) -> Result<Vec<u8>, FileToolError> {
         let metadata = tokio::fs::metadata(path.as_path())
             .await

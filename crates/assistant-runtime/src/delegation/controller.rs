@@ -46,6 +46,7 @@ pub(crate) struct ParentDelegationController {
     session: Arc<SessionController>,
     parent_run_id: assistant_protocol::RunId,
     variant: AgentVariant,
+    context_window_tokens: u64,
     child_agent: Arc<Agent>,
     child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     store: Arc<dyn RuntimeStore>,
@@ -54,6 +55,7 @@ pub(crate) struct ParentDelegationController {
     permission_coordinator: Arc<PermissionCoordinator>,
     approval_registry: Arc<ApprovalRegistry>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
+    default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
     events: ObservationCoordinator,
     limits: crate::DelegationConfig,
     execution_permits: Arc<Semaphore>,
@@ -61,6 +63,7 @@ pub(crate) struct ParentDelegationController {
     skill_catalog: SkillCatalog,
     mcp_registry: Arc<McpRegistry>,
     disclosure_context: Option<agent_types::UserMessage>,
+    resource_projection: crate::runtime::resource_reference::ResourceReferenceProjection,
     shell_context: Option<agent_types::UserMessage>,
 }
 
@@ -68,6 +71,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) session: Arc<SessionController>,
     pub(crate) parent_run_id: assistant_protocol::RunId,
     pub(crate) variant: AgentVariant,
+    pub(crate) context_window_tokens: u64,
     pub(crate) child_agent: Arc<Agent>,
     pub(crate) child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     pub(crate) store: Arc<dyn RuntimeStore>,
@@ -76,11 +80,13 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) permission_coordinator: Arc<PermissionCoordinator>,
     pub(crate) approval_registry: Arc<ApprovalRegistry>,
     pub(crate) infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
+    pub(crate) default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
     pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
     pub(crate) skill_catalog: SkillCatalog,
     pub(crate) mcp_registry: Arc<McpRegistry>,
     pub(crate) disclosure_context: Option<agent_types::UserMessage>,
+    pub(crate) resource_projection: crate::runtime::resource_reference::ResourceReferenceProjection,
     pub(crate) shell_context: Option<agent_types::UserMessage>,
 }
 
@@ -88,6 +94,7 @@ fn with_disclosure_context(
     mut conversation: ConversationSnapshot,
     context: Option<&agent_types::UserMessage>,
     shell_context: Option<&agent_types::UserMessage>,
+    resources: &crate::runtime::resource_reference::ResourceReferenceProjection,
 ) -> ConversationSnapshot {
     if let Some(shell_context) = shell_context
         && !crate::shell::context_is_current(&conversation, shell_context)
@@ -101,7 +108,7 @@ fn with_disclosure_context(
             .messages
             .push(ConversationMessage::User(context.clone()));
     }
-    conversation
+    resources.apply(conversation)
 }
 
 impl ParentDelegationController {
@@ -114,6 +121,7 @@ impl ParentDelegationController {
             session: resources.session,
             parent_run_id: resources.parent_run_id,
             variant: resources.variant,
+            context_window_tokens: resources.context_window_tokens,
             child_agent: resources.child_agent,
             child_compactor: resources.child_compactor,
             store: resources.store,
@@ -122,6 +130,7 @@ impl ParentDelegationController {
             permission_coordinator: resources.permission_coordinator,
             approval_registry: resources.approval_registry,
             infrastructure_policies: resources.infrastructure_policies,
+            default_rules: resources.default_rules,
             events: resources.events,
             limits: resources.limits,
             execution_permits,
@@ -129,6 +138,7 @@ impl ParentDelegationController {
             skill_catalog: resources.skill_catalog,
             mcp_registry: resources.mcp_registry,
             disclosure_context: resources.disclosure_context,
+            resource_projection: resources.resource_projection,
             shell_context: resources.shell_context,
         }
     }
@@ -148,6 +158,7 @@ impl ParentDelegationController {
         let mut stored = self
             .store
             .create_child_task(NewStoredChildTask {
+                context_window_tokens: self.context_window_tokens,
                 child_task_id: child_task_id.clone(),
                 session_id: self.session.id().clone(),
                 parent_run_id: self.parent_run_id.clone(),
@@ -344,7 +355,11 @@ impl ParentDelegationController {
                     events: self.events.clone(),
                 }),
             )
-            .map(|authorizer| authorizer.with_mcp_registry(self.mcp_registry.clone()))
+            .map(|authorizer| {
+                authorizer
+                    .with_default_rules(self.default_rules.clone())
+                    .with_mcp_registry(self.mcp_registry.clone())
+            })
             .and_then(|authorizer| authorizer.with_additional_private_root(workspace.path()))
             .map_err(internal_tool_error)?,
         );
@@ -367,6 +382,7 @@ impl ParentDelegationController {
             conversation,
             self.disclosure_context.as_ref(),
             self.shell_context.as_ref(),
+            &self.resource_projection,
         );
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
@@ -457,6 +473,7 @@ impl ParentDelegationController {
                             .snapshot(),
                         self.disclosure_context.as_ref(),
                         self.shell_context.as_ref(),
+                        &self.resource_projection,
                     ),
                 };
                 continue;
@@ -498,11 +515,20 @@ impl ParentDelegationController {
                     self.registry
                         .upsert(stored.clone())
                         .map_err(internal_tool_error)?;
+                    // 正文和 registry 换代完成后才通知观察者，刷新子任务窗口及历史。
+                    let _ = self.events.send(RuntimeEvent::ConversationCommitted {
+                        owner: assistant_protocol::ConversationOwner::ChildTask {
+                            session_id: stored.session_id.clone(),
+                            child_task_id: stored.child_task_id.clone(),
+                        },
+                        generation: stored.body_generation,
+                    });
                     input = ExecutionInput {
                         conversation: with_disclosure_context(
                             replacement,
                             self.disclosure_context.as_ref(),
                             self.shell_context.as_ref(),
+                            &self.resource_projection,
                         ),
                     };
                 }

@@ -189,6 +189,19 @@ pub struct ProviderSummary {
 pub struct ModelSettings {
     pub default_model: Option<ModelSelection>,
     pub vision_model: Option<ModelSelection>,
+    /// 配置源提供的管理策略与刷新状态；不参与模型选择和参数读取，不持久化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub management: Option<ModelManagementStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ModelManagementStatus {
+    pub read_only: bool,
+    pub unavailable_reason: Option<String>,
+    pub last_success_at_ms: Option<i64>,
+    pub last_refresh_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -256,7 +269,7 @@ impl ReasoningEffortKey {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::XHigh => "x_high",
+            Self::XHigh => "xhigh",
             Self::Max => "max",
         }
     }
@@ -356,4 +369,34 @@ impl From<ModelSelection> for GetModelConfigurationRequest {
 pub struct ModelConfigurationSummary {
     pub uses_template: bool,
     pub requires_configuration: bool,
+}
+
+#[cfg(test)]
+mod effort_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn xhigh_uses_only_the_official_spelling_for_scalar_and_map_keys() {
+        assert_eq!(
+            ReasoningEffortKey::parse("xhigh"),
+            Some(ReasoningEffortKey::XHigh)
+        );
+        assert_eq!(ReasoningEffortKey::parse("x_high"), None);
+        let value: ReasoningEffortKey = serde_json::from_value(serde_json::json!("xhigh")).unwrap();
+        assert_eq!(serde_json::to_value(value).unwrap(), "xhigh");
+        assert!(serde_json::from_value::<ReasoningEffortKey>(serde_json::json!("x_high")).is_err());
+        let map: BTreeMap<ReasoningEffortKey, String> =
+            serde_json::from_value(serde_json::json!({"xhigh": "vendor-value"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(map).unwrap(),
+            serde_json::json!({"xhigh": "vendor-value"})
+        );
+        assert!(
+            serde_json::from_value::<BTreeMap<ReasoningEffortKey, String>>(
+                serde_json::json!({"x_high": "vendor-value"})
+            )
+            .is_err()
+        );
+        assert_eq!(ReasoningEffortKey::XHigh.as_str(), "xhigh");
+    }
 }

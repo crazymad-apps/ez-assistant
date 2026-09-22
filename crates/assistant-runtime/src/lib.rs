@@ -39,10 +39,11 @@ pub use channel::{
 pub use config::{
     ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
-    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig, ModelProtocol,
-    ReasoningEffortKey, ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities,
-    ResolvedModelConfig, ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig,
-    RuntimeConfigSource, RuntimeModelTransportConfig, compile_runtime_config,
+    ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig,
+    ExternalModelConfiguration, ModelProtocol, ModelSource, ReasoningEffortKey,
+    ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities, ResolvedModelConfig,
+    ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig, RuntimeConfigSource,
+    RuntimeModelTransportConfig, compile_runtime_config,
 };
 pub use conversation_recall::HmacRecallReferenceCodec;
 pub use delegation::DELEGATE_TASK_TOOL_NAME;
@@ -86,11 +87,12 @@ pub use permission::{
     McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionDocument,
     PermissionDocumentError, PermissionEffect, PermissionFileLoad, PermissionFileOperation,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionMatcher,
-    PermissionProcessMode, PermissionRule, PermissionSourceDiagnostic, PermissionStoreFuture,
-    ShellPermissionMatcher,
+    PermissionProcessMode, PermissionRule, PermissionRuleSource, PermissionSourceDiagnostic,
+    PermissionStoreFuture, ShellPermissionMatcher, file_matcher_matches, resolve_permission_path,
 };
 pub use runtime::{
-    AssistantRuntime, ResolvedToolFileResource, StagedAttachmentUpload, StagedSessionAttachment,
+    AssistantRuntime, ExternalModelPublication, ResolvedToolFileResource, StagedAttachmentUpload,
+    StagedSessionAttachment,
 };
 pub use skill::{
     MAX_CATALOG_SKILLS, SkillActivationOwner, SkillActivationResolveError, SkillActivationTrigger,

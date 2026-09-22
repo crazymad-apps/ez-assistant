@@ -635,6 +635,7 @@ pub(crate) fn rules_for_approval(
         ToolApprovalSubject::File {
             operation, path, ..
         } => vec![PermissionMatcher::File(FilePermissionMatcher {
+            excluded_paths: Vec::new(),
             operation: parse_file_operation(operation)?,
             path: path.clone(),
             path_match: PathMatch::Exact,
@@ -645,6 +646,7 @@ pub(crate) fn rules_for_approval(
             .iter()
             .map(|path| {
                 Ok(PermissionMatcher::File(FilePermissionMatcher {
+                    excluded_paths: Vec::new(),
                     operation: parse_file_operation(operation)?,
                     path: path.clone(),
                     path_match: PathMatch::Exact,

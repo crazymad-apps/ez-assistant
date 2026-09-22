@@ -2,11 +2,20 @@ import { action, computed, makeObservable, observable } from "mobx";
 import type { ChildTaskId, MessageId, SessionId, WorkspaceId } from "@ez-assistant/protocol";
 import type { NewSessionDraftKey } from "./NewSessionDraftStore";
 
+export type ConversationReadingPosition = Readonly<{
+  following: boolean;
+  top: number;
+  anchor?: Readonly<{ message_id: string; offset: number }>;
+}>;
+
 export type ConversationLocation = Readonly<{
   session_id: SessionId;
   child_task_id: ChildTaskId | null;
   anchor_message_id: MessageId | null;
   scroll_offset: number | null;
+  reading?: ConversationReadingPosition;
+  reading_generation?: number;
+  reasoning?: Readonly<Record<string, ConversationReadingPosition>>;
 }>;
 
 export const LEFT_SIDEBAR_DEFAULT_WIDTH = 286;
@@ -79,6 +88,8 @@ export class NavigationStore {
       goForward: action,
       navigateTo: action,
       updateCurrentScrollOffset: action,
+      updateReadingPosition: action,
+      clearConversationLocations: action,
       ensureWorkspaceExpanded: action,
       applyPreferences: action,
     });
@@ -194,6 +205,12 @@ export class NavigationStore {
    * 记录一次 UI 来源跳转。栈只保存可恢复的视图位置，不参与 Runtime 业务状态。
    */
   navigateTo(location: ConversationLocation): void {
+    if (!location.anchor_message_id && location.scroll_offset === null) {
+      const previous = [...this.conversation_history].reverse().find((item) => (
+        item.session_id === location.session_id && item.child_task_id === location.child_task_id
+      ));
+      if (previous) location = { ...previous, anchor_message_id: null };
+    }
     const current = this.conversation_history[this.conversation_history_index];
     if (
       current
@@ -208,6 +225,7 @@ export class NavigationStore {
       this.conversation_history.splice(this.conversation_history_index + 1);
     }
     this.conversation_history.push(location);
+    if (this.conversation_history.length > 128) this.conversation_history.shift();
     this.conversation_history_index = this.conversation_history.length - 1;
     this.#applyLocation(location);
   }
@@ -245,6 +263,39 @@ export class NavigationStore {
       ...current,
       scroll_offset: Math.max(0, scroll_offset),
     };
+  }
+
+  /** 同一客户端的阅读投影；不会产生导航条目或持久化业务状态。 */
+  updateReadingPosition(position: ConversationReadingPosition, generation: number, reasoning_key?: string): void {
+    const current = this.current_conversation_location;
+    if (!current) return;
+    const previous = reasoning_key ? current.reasoning?.[reasoning_key] : current.reading;
+    if (current.reading_generation === generation && previous?.following === position.following
+      && previous.top === position.top && previous.anchor?.message_id === position.anchor?.message_id
+      && previous.anchor?.offset === position.anchor?.offset) return;
+    const same_generation = current.reading_generation === generation;
+    const reasoning = { ...(same_generation ? current.reasoning : {}), ...(reasoning_key ? { [reasoning_key]: position } : {}) };
+    const keys = Object.keys(reasoning);
+    for (const key of keys.slice(0, Math.max(0, keys.length - 100))) delete reasoning[key];
+    this.conversation_history[this.conversation_history_index] = {
+      ...current,
+      reading_generation: generation,
+      reasoning,
+      ...(reasoning_key ? {} : { reading: position, scroll_offset: position.top }),
+    };
+  }
+
+  clearConversationLocations(session_id?: SessionId): void {
+    if (!session_id) {
+      this.conversation_history.clear();
+      this.conversation_history_index = -1;
+    } else {
+      const current = this.current_conversation_location;
+      this.conversation_history.replace(this.conversation_history.filter((item) => item.session_id !== session_id));
+      const retained_index = current ? this.conversation_history.indexOf(current) : -1;
+      this.conversation_history_index = retained_index >= 0 ? retained_index
+        : Math.min(this.conversation_history_index, this.conversation_history.length - 1);
+    }
   }
 
   setSearchQuery(query: string): void {

@@ -221,6 +221,7 @@ impl fmt::Debug for ModelSecret {
 /// 该类型不实现 Debug/Serialize；只有明确的只读 getter 可跨越配置编译边界。它同时保留
 /// 模型静态硬上限和已计算的 generation，使后续 Run 不必重新解释配置覆盖规则。
 pub struct ResolvedModelConfig {
+    pub(crate) external_configuration: Option<std::sync::Arc<super::ExternalModelConfiguration>>,
     pub(super) display_name: String,
     pub(super) protocol: ModelProtocol,
     pub(super) provider: ProviderId,

@@ -1146,6 +1146,8 @@ pub enum RuntimeCommand {
     ListProviderModels(crate::ProviderRequest),
     RefreshProviderModels(crate::ProviderRequest),
     GetModelSettings(crate::GetModelSettingsRequest),
+    /// 刷新受信外部模型来源，由 Host 固定用户域后适配。
+    RefreshModelSource {},
     GetAgentShellSettings {},
     SetDefaultAgentShell {
         shell: crate::ShellKind,
@@ -1330,6 +1332,7 @@ pub enum RuntimeCommandResult {
     ListProviderModels(crate::ProviderModelCatalogSnapshot),
     RefreshProviderModels(crate::ProviderModelCatalogSnapshot),
     GetModelSettings(crate::ModelSettings),
+    RefreshModelSource(crate::ModelSettings),
     GetAgentShellSettings(crate::AgentShellSettings),
     SetDefaultAgentShell(crate::AgentShellSettings),
     GetModelConfiguration(crate::ModelConfigurationDetail),

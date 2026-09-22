@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateUserData, CreateUserErrors, CreateUserResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses } from './types.gen';
+import type { ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -64,7 +64,7 @@ export const logout = <ThrowOnError extends boolean = false>(options: Options<Lo
 });
 
 /**
- * 验证原密码并修改本人密码，撤销本人全部 Token；不是管理重置
+ * 验证原密码并修改本人密码，保留已有 Token/key；不是管理重置
  */
 export const changeOwnPassword = <ThrowOnError extends boolean = false>(options: Options<ChangeOwnPasswordData, ThrowOnError>): RequestResult<ChangeOwnPasswordResponses, ChangeOwnPasswordErrors, ThrowOnError> => (options.client ?? client).post<ChangeOwnPasswordResponses, ChangeOwnPasswordErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -117,7 +117,7 @@ export const updateUser = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
- * 管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；撤销目标全部 Token
+ * 管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；保留目标已有 Token/key
  */
 export const resetUserPassword = <ThrowOnError extends boolean = false>(options: Options<ResetUserPasswordData, ThrowOnError>): RequestResult<ResetUserPasswordResponses, ResetUserPasswordErrors, ThrowOnError> => (options.client ?? client).post<ResetUserPasswordResponses, ResetUserPasswordErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -137,4 +137,204 @@ export const listManagementAudit = <ThrowOnError extends boolean = false>(option
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/api/audit',
     ...options
+});
+
+export const listModelProviders = <ThrowOnError extends boolean = false>(options?: Options<ListModelProvidersData, ThrowOnError>): RequestResult<ListModelProvidersResponses, ListModelProvidersErrors, ThrowOnError> => (options?.client ?? client).get<ListModelProvidersResponses, ListModelProvidersErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers',
+    ...options
+});
+
+export const createModelProvider = <ThrowOnError extends boolean = false>(options: Options<CreateModelProviderData, ThrowOnError>): RequestResult<CreateModelProviderResponses, CreateModelProviderErrors, ThrowOnError> => (options.client ?? client).post<CreateModelProviderResponses, CreateModelProviderErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const deleteModelProvider = <ThrowOnError extends boolean = false>(options: Options<DeleteModelProviderData, ThrowOnError>): RequestResult<DeleteModelProviderResponses, DeleteModelProviderErrors, ThrowOnError> => (options.client ?? client).delete<DeleteModelProviderResponses, DeleteModelProviderErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}',
+    ...options
+});
+
+export const getModelProvider = <ThrowOnError extends boolean = false>(options: Options<GetModelProviderData, ThrowOnError>): RequestResult<GetModelProviderResponses, GetModelProviderErrors, ThrowOnError> => (options.client ?? client).get<GetModelProviderResponses, GetModelProviderErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}',
+    ...options
+});
+
+export const updateModelProvider = <ThrowOnError extends boolean = false>(options: Options<UpdateModelProviderData, ThrowOnError>): RequestResult<UpdateModelProviderResponses, UpdateModelProviderErrors, ThrowOnError> => (options.client ?? client).put<UpdateModelProviderResponses, UpdateModelProviderErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getModelProviderUsage = <ThrowOnError extends boolean = false>(options: Options<GetModelProviderUsageData, ThrowOnError>): RequestResult<GetModelProviderUsageResponses, GetModelProviderUsageErrors, ThrowOnError> => (options.client ?? client).get<GetModelProviderUsageResponses, GetModelProviderUsageErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}/usage',
+    ...options
+});
+
+export const getModelCatalog = <ThrowOnError extends boolean = false>(options: Options<GetModelCatalogData, ThrowOnError>): RequestResult<GetModelCatalogResponses, GetModelCatalogErrors, ThrowOnError> => (options.client ?? client).get<GetModelCatalogResponses, GetModelCatalogErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}/catalog',
+    ...options
+});
+
+export const refreshModelCatalog = <ThrowOnError extends boolean = false>(options: Options<RefreshModelCatalogData, ThrowOnError>): RequestResult<RefreshModelCatalogResponses, RefreshModelCatalogErrors, ThrowOnError> => (options.client ?? client).post<RefreshModelCatalogResponses, RefreshModelCatalogErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}/refresh',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const listFixedModelConfigurations = <ThrowOnError extends boolean = false>(options: Options<ListFixedModelConfigurationsData, ThrowOnError>): RequestResult<ListFixedModelConfigurationsResponses, ListFixedModelConfigurationsErrors, ThrowOnError> => (options.client ?? client).get<ListFixedModelConfigurationsResponses, ListFixedModelConfigurationsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-providers/{id}/fixed-configs',
+    ...options
+});
+
+export const queryModelConfiguration = <ThrowOnError extends boolean = false>(options: Options<QueryModelConfigurationData, ThrowOnError>): RequestResult<QueryModelConfigurationResponses, QueryModelConfigurationErrors, ThrowOnError> => (options.client ?? client).post<QueryModelConfigurationResponses, QueryModelConfigurationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-configuration/query',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const saveModelConfiguration = <ThrowOnError extends boolean = false>(options: Options<SaveModelConfigurationData, ThrowOnError>): RequestResult<SaveModelConfigurationResponses, SaveModelConfigurationErrors, ThrowOnError> => (options.client ?? client).put<SaveModelConfigurationResponses, SaveModelConfigurationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-configuration',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const resetModelConfiguration = <ThrowOnError extends boolean = false>(options: Options<ResetModelConfigurationData, ThrowOnError>): RequestResult<ResetModelConfigurationResponses, ResetModelConfigurationErrors, ThrowOnError> => (options.client ?? client).post<ResetModelConfigurationResponses, ResetModelConfigurationErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-configuration/reset',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getModelSettings = <ThrowOnError extends boolean = false>(options?: Options<GetModelSettingsData, ThrowOnError>): RequestResult<GetModelSettingsResponses, GetModelSettingsErrors, ThrowOnError> => (options?.client ?? client).get<GetModelSettingsResponses, GetModelSettingsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-settings',
+    ...options
+});
+
+export const saveModelSettings = <ThrowOnError extends boolean = false>(options: Options<SaveModelSettingsData, ThrowOnError>): RequestResult<SaveModelSettingsResponses, SaveModelSettingsErrors, ThrowOnError> => (options.client ?? client).put<SaveModelSettingsResponses, SaveModelSettingsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-settings',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getModelTemplateStatus = <ThrowOnError extends boolean = false>(options?: Options<GetModelTemplateStatusData, ThrowOnError>): RequestResult<GetModelTemplateStatusResponses, GetModelTemplateStatusErrors, ThrowOnError> => (options?.client ?? client).get<GetModelTemplateStatusResponses, GetModelTemplateStatusErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-templates',
+    ...options
+});
+
+export const reloadModelTemplates = <ThrowOnError extends boolean = false>(options: Options<ReloadModelTemplatesData, ThrowOnError>): RequestResult<ReloadModelTemplatesResponses, ReloadModelTemplatesErrors, ThrowOnError> => (options.client ?? client).post<ReloadModelTemplatesResponses, ReloadModelTemplatesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-templates/reload',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getRuntimeModelConfiguration = <ThrowOnError extends boolean = false>(options?: Options<GetRuntimeModelConfigurationData, ThrowOnError>): RequestResult<GetRuntimeModelConfigurationResponses, GetRuntimeModelConfigurationErrors, ThrowOnError> => (options?.client ?? client).get<GetRuntimeModelConfigurationResponses, GetRuntimeModelConfigurationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/model-configuration',
+    ...options
+});
+
+export const listLlmCalls = <ThrowOnError extends boolean = false>(options?: Options<ListLlmCallsData, ThrowOnError>): RequestResult<ListLlmCallsResponses, ListLlmCallsErrors, ThrowOnError> => (options?.client ?? client).get<ListLlmCallsResponses, ListLlmCallsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-calls',
+    ...options
+});
+
+export const getLlmCall = <ThrowOnError extends boolean = false>(options: Options<GetLlmCallData, ThrowOnError>): RequestResult<GetLlmCallResponses, GetLlmCallErrors, ThrowOnError> => (options.client ?? client).get<GetLlmCallResponses, GetLlmCallErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-calls/{id}',
+    ...options
+});
+
+export const getLlmSnapshot = <ThrowOnError extends boolean = false>(options: Options<GetLlmSnapshotData, ThrowOnError>): RequestResult<GetLlmSnapshotResponses, GetLlmSnapshotErrors, ThrowOnError> => (options.client ?? client).get<GetLlmSnapshotResponses, GetLlmSnapshotErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-calls/{id}/snapshot',
+    ...options
+});
+
+export const getLlmRecordingSettings = <ThrowOnError extends boolean = false>(options?: Options<GetLlmRecordingSettingsData, ThrowOnError>): RequestResult<GetLlmRecordingSettingsResponses, GetLlmRecordingSettingsErrors, ThrowOnError> => (options?.client ?? client).get<GetLlmRecordingSettingsResponses, GetLlmRecordingSettingsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-recording-settings',
+    ...options
+});
+
+export const saveLlmRecordingSettings = <ThrowOnError extends boolean = false>(options: Options<SaveLlmRecordingSettingsData, ThrowOnError>): RequestResult<SaveLlmRecordingSettingsResponses, SaveLlmRecordingSettingsErrors, ThrowOnError> => (options.client ?? client).put<SaveLlmRecordingSettingsResponses, SaveLlmRecordingSettingsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-recording-settings',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const testModelConfiguration = <ThrowOnError extends boolean = false>(options: Options<TestModelConfigurationData, ThrowOnError>): RequestResult<TestModelConfigurationResponses, TestModelConfigurationErrors, ThrowOnError> => (options.client ?? client).post<TestModelConfigurationResponses, TestModelConfigurationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/model-configuration/test',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });

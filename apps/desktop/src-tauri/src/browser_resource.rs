@@ -1,7 +1,11 @@
 //! Desktop 持有的子 WebView；外部网页不获得应用能力。
 
+#[path = "browser_resource/owner.rs"]
+mod owner;
 #[path = "browser_resource/platform.rs"]
 mod platform;
+
+use crate::runtime_connection::RuntimeTarget;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,10 +23,16 @@ use tauri::{
 use url::Url;
 
 pub struct BrowserResourceManager {
-    views: Mutex<HashMap<String, Webview>>,
+    views: Mutex<HashMap<String, OwnedBrowser>>,
     next_id: AtomicU64,
     user_agent: Option<String>,
     capture_gate: Arc<tokio::sync::Semaphore>,
+}
+
+/// 窗口只能由创建它的已验证原生连接操作，身份切换不能复用旧窗口 ID。
+struct OwnedBrowser {
+    view: Webview,
+    target: RuntimeTarget,
 }
 
 impl Default for BrowserResourceManager {
@@ -138,12 +148,13 @@ fn http_url(value: &str) -> Result<Url, String> {
 }
 
 impl BrowserResourceManager {
-    fn get(&self, id: &str) -> Result<Webview, String> {
+    fn get(&self, id: &str, target: &RuntimeTarget) -> Result<Webview, String> {
         self.views
             .lock()
             .map_err(|_| "browser_state_unavailable")?
             .get(id)
-            .cloned()
+            .filter(|entry| entry.target.same_connection(target))
+            .map(|entry| entry.view.clone())
             .ok_or_else(|| "browser_not_found".into())
     }
 
@@ -153,7 +164,7 @@ impl BrowserResourceManager {
             .lock()
             .map_err(|_| "browser_state_unavailable")?
             .values()
-            .cloned()
+            .map(|entry| entry.view.clone())
             .collect())
     }
 
@@ -164,13 +175,32 @@ impl BrowserResourceManager {
         Ok(())
     }
 
+    pub(crate) fn close_cancelled(&self) {
+        let stale = match self.views.lock() {
+            Ok(mut views) => {
+                let ids: Vec<_> = views
+                    .iter()
+                    .filter(|(_, entry)| entry.target.cancellation.is_cancelled())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| views.remove(&id))
+                    .collect::<Vec<_>>()
+            }
+            Err(_) => return,
+        };
+        for entry in stale {
+            let _ = platform::close(&entry.view);
+        }
+    }
+
     pub fn close_all(&self) {
         let views = match self.views.lock() {
             Ok(mut views) => std::mem::take(&mut *views),
             Err(_) => return,
         };
         for view in views.into_values() {
-            if let Err(error) = platform::close(&view) {
+            if let Err(error) = platform::close(&view.view) {
                 eprintln!("failed to close browser: {error}");
             }
         }
@@ -196,12 +226,24 @@ async fn on_main<T: Send + 'static>(
 #[tauri::command]
 pub async fn create_resource_browser(
     caller: Webview,
+    target: RuntimeTarget,
     url: String,
     events: Channel<BrowserEvent>,
 ) -> Result<String, String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     let url = http_url(&url)?;
+    let (identity, local, origin) = target
+        .browser_identity()
+        .await
+        .map_err(|_| "请先连接并登录 Host。")?;
+    let profile = owner::profile(&identity, local, &origin)?;
     on_main(caller.app_handle().clone(), move |app| {
+        target
+            .ensure_active()
+            .map_err(|_| "browser_owner_changed")?;
         let manager = app.state::<BrowserResourceManager>();
         let id = format!(
             "resource-browser-{}-{}",
@@ -212,9 +254,17 @@ pub async fn create_resource_browser(
         let title_events = events.clone();
         let popup_events = events.clone();
         let download_events = events.clone();
+        let navigation_owner = target.clone();
+        let title_owner = target.clone();
+        let page_owner = target.clone();
+        let popup_owner = target.clone();
+        let download_owner = target.clone();
         let mut builder = WebviewBuilder::new(&id, WebviewUrl::External(url))
             .disable_drag_drop_handler()
             .on_navigation(move |url| {
+                if navigation_owner.ensure_active().is_err() {
+                    return false;
+                }
                 let allowed = http_url(url.as_str()).is_ok();
                 // 许可回调也包含 iframe 等子框架跳转，不能据此更新整页 URL 或加载状态。
                 if !allowed {
@@ -226,6 +276,9 @@ pub async fn create_resource_browser(
                 allowed
             })
             .on_document_title_changed(move |_, title| {
+                if title_owner.ensure_active().is_err() {
+                    return;
+                }
                 let title = title
                     .chars()
                     .filter(|character| !character.is_control())
@@ -234,6 +287,9 @@ pub async fn create_resource_browser(
                 let _ = title_events.send(BrowserEvent::Title { title });
             })
             .on_page_load(move |_, payload| {
+                if page_owner.ensure_active().is_err() {
+                    return;
+                }
                 // 使用本次页面事件的地址；失败导航时 WKWebView 当前 URL 可能尚为空。
                 let url = payload.url().to_string();
                 let event = match payload.event() {
@@ -243,6 +299,9 @@ pub async fn create_resource_browser(
                 let _ = events.send(event);
             })
             .on_new_window(move |url, _| {
+                if popup_owner.ensure_active().is_err() {
+                    return NewWindowResponse::Deny;
+                }
                 let event = if http_url(url.as_str()).is_ok() {
                     BrowserEvent::Popup {
                         url: url.to_string(),
@@ -257,6 +316,9 @@ pub async fn create_resource_browser(
                 NewWindowResponse::Deny
             })
             .on_download(move |_, event| {
+                if download_owner.ensure_active().is_err() {
+                    return false;
+                }
                 if let DownloadEvent::Requested { url, .. } = event {
                     let _ = download_events.send(BrowserEvent::Notice {
                         message: "请在系统浏览器中下载文件。".into(),
@@ -265,6 +327,7 @@ pub async fn create_resource_browser(
                 }
                 false
             });
+        builder = owner::configure(builder, &app, profile)?;
         if let Some(user_agent) = &manager.user_agent {
             builder = builder.user_agent(user_agent);
         }
@@ -283,7 +346,12 @@ pub async fn create_resource_browser(
         }
         match manager.views.lock() {
             Ok(mut views) => {
-                views.insert(id.clone(), view);
+                if target.ensure_active().is_err() {
+                    drop(views);
+                    let _ = platform::close(&view);
+                    return Err("browser_owner_changed".into());
+                }
+                views.insert(id.clone(), OwnedBrowser { view, target });
             }
             Err(_) => {
                 let _ = platform::close(&view);
@@ -298,14 +366,18 @@ pub async fn create_resource_browser(
 #[tauri::command]
 pub async fn navigate_resource_browser(
     caller: Webview,
+    target: RuntimeTarget,
     browser_id: String,
     url: String,
 ) -> Result<(), String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     let url = http_url(&url)?;
     on_main(caller.app_handle().clone(), move |app| {
         app.state::<BrowserResourceManager>()
-            .get(&browser_id)?
+            .get(&browser_id, &target)?
             .navigate(url)
             .map_err(|error| error.to_string())
     })
@@ -315,12 +387,18 @@ pub async fn navigate_resource_browser(
 #[tauri::command]
 pub async fn act_on_resource_browser(
     caller: Webview,
+    target: RuntimeTarget,
     browser_id: String,
     action: BrowserAction,
 ) -> Result<(), String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     on_main(caller.app_handle().clone(), move |app| {
-        let view = app.state::<BrowserResourceManager>().get(&browser_id)?;
+        let view = app
+            .state::<BrowserResourceManager>()
+            .get(&browser_id, &target)?;
         match action {
             BrowserAction::Back => view.eval("history.back()"),
             BrowserAction::Forward => view.eval("history.forward()"),
@@ -336,12 +414,19 @@ pub async fn act_on_resource_browser(
 #[tauri::command]
 pub async fn layout_resource_browser(
     caller: Webview,
+    target: RuntimeTarget,
     browser_id: Option<String>,
     bounds: Option<BrowserBounds>,
     viewport: BrowserViewport,
 ) -> Result<(), String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     on_main(caller.app_handle().clone(), move |app| {
+        target
+            .ensure_active()
+            .map_err(|_| "browser_owner_changed")?;
         let manager = app.state::<BrowserResourceManager>();
         for view in manager.snapshot()? {
             if Some(view.label()) != browser_id.as_deref() || bounds.is_none() {
@@ -351,7 +436,7 @@ pub async fn layout_resource_browser(
         if let (Some(id), Some(bounds)) = (browser_id, bounds) {
             let window = caller.window();
             let scale = window.scale_factor().map_err(|error| error.to_string())?;
-            let view = manager.get(&id)?;
+            let view = manager.get(&id, &target)?;
             let main_size = caller
                 .size()
                 .map_err(|error| error.to_string())?
@@ -395,11 +480,15 @@ pub struct BrowserPreview {
 #[tauri::command]
 pub async fn capture_resource_browser(
     caller: Webview,
+    target: RuntimeTarget,
     browser_id: String,
 ) -> Result<Option<BrowserPreview>, String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     let manager = caller.state::<BrowserResourceManager>();
-    let view = manager.get(&browser_id)?;
+    let view = manager.get(&browser_id, &target)?;
     let Ok(permit) = manager.capture_gate.clone().try_acquire_owned() else {
         return Ok(None);
     };
@@ -410,6 +499,9 @@ pub async fn capture_resource_browser(
     if platform::current_url(&view).await?.as_ref() != Some(&url) {
         return Ok(None);
     }
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     Ok(image.map(|image| BrowserPreview { url, image }))
 }
 
@@ -455,19 +547,36 @@ impl BrowserBounds {
 #[tauri::command]
 pub async fn resource_browser_url(
     caller: Webview,
+    target: RuntimeTarget,
     browser_id: String,
 ) -> Result<Option<String>, String> {
     require_main(&caller)?;
-    let view = caller.state::<BrowserResourceManager>().get(&browser_id)?;
-    platform::current_url(&view).await
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
+    let view = caller
+        .state::<BrowserResourceManager>()
+        .get(&browser_id, &target)?;
+    let url = platform::current_url(&view).await?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
+    Ok(url)
 }
 
 #[tauri::command]
-pub async fn close_resource_browser(caller: Webview, browser_id: String) -> Result<(), String> {
+pub async fn close_resource_browser(
+    caller: Webview,
+    target: RuntimeTarget,
+    browser_id: String,
+) -> Result<(), String> {
     require_main(&caller)?;
+    target
+        .ensure_active()
+        .map_err(|_| "browser_owner_changed")?;
     on_main(caller.app_handle().clone(), move |app| {
         let manager = app.state::<BrowserResourceManager>();
-        let view = manager.get(&browser_id)?;
+        let view = manager.get(&browser_id, &target)?;
         platform::close(&view)?;
         manager
             .views

@@ -1,4 +1,4 @@
-//! 与全局策略共享同一配置来源及 CAS，只编辑 Host 所有的访问节。
+//! Host 私有配置源及 CAS；只编辑访问节，保留模式、中心和布局版本。
 
 use std::path::Path;
 
@@ -23,7 +23,13 @@ pub(super) struct AccessDocument {
 }
 
 pub(super) async fn load(source: &dyn RuntimeConfigSource) -> Result<AccessDocument, AccessError> {
+    let host_file = source.display_path().is_some_and(|path| {
+        Path::new(&path)
+            .file_name()
+            .is_some_and(|n| n == crate::host_configuration::FILE)
+    });
     let (document, revision) = match source.load().await {
+        ConfigSourceLoad::Missing if host_file => return Err(AccessError::Unavailable),
         ConfigSourceLoad::Missing => (
             "schema_version = 1\n"
                 .parse::<DocumentMut>()
@@ -39,6 +45,18 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> Result<AccessDocum
         ),
         ConfigSourceLoad::Unavailable(_) => return Err(AccessError::Unavailable),
     };
+    if host_file {
+        crate::host_configuration::parse(&document.to_string()).map_err(AccessError::Invalid)?;
+    }
+    let access = parse_access(&document)?;
+    Ok(AccessDocument {
+        document,
+        revision,
+        access,
+    })
+}
+
+fn parse_access(document: &DocumentMut) -> Result<AccessConfiguration, AccessError> {
     let access = match document.get("host_access") {
         Some(section) => toml::from_str::<AccessConfiguration>(&section.to_string())
             .map_err(|_| AccessError::Invalid("Host 访问配置无效。"))?,
@@ -47,11 +65,17 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> Result<AccessDocum
     if let Some(hash) = &access.password_hash {
         validate_hash(hash)?;
     }
-    Ok(AccessDocument {
-        document,
-        revision,
-        access,
-    })
+    Ok(access)
+}
+
+pub(super) fn validate_layout_configuration(contents: &str) -> Result<(), AccessError> {
+    let document = contents
+        .parse::<DocumentMut>()
+        .map_err(|_| AccessError::Invalid("配置文件不是有效 TOML。"))?;
+    let access = parse_access(&document)?;
+    // Password initialization may follow the layout upgrade via --password-stdin.
+    // HostAccessService::prepare still rejects remote access without a password before listening.
+    validate(&access.public)
 }
 
 pub(super) async fn save(
@@ -140,10 +164,87 @@ pub(super) fn same_endpoint(
         && left.tls_private_key == right.tls_private_key
 }
 
+/// 在线与离线管理共用同一修改规则；清除绑定仅影响下次启动，原用户目录不移动。
+pub(super) fn configure_identity(
+    document: &mut DocumentMut,
+    mode: Option<assistant_protocol::HostMode>,
+    center_url: Option<&str>,
+    clear_binding: bool,
+) -> Result<(), AccessError> {
+    if mode.is_none() && center_url.is_none() && !clear_binding {
+        return Ok(());
+    }
+    let mode = mode.ok_or(AccessError::Invalid("修改中心配置时必须指定模式。"))?;
+    if clear_binding
+        && let Some(table) = document
+            .get_mut("enterprise")
+            .and_then(|item| item.as_table_like_mut())
+    {
+        table.remove("center_id");
+    }
+    crate::host_configuration::set_mode(document, mode, center_url).map_err(AccessError::Invalid)
+}
+
+pub(super) fn identity_fields(
+    document: &DocumentMut,
+) -> (
+    Option<assistant_protocol::HostMode>,
+    Option<String>,
+    Option<String>,
+) {
+    let configuration = crate::host_configuration::parse(&document.to_string()).ok();
+    let mode = configuration
+        .as_ref()
+        .map(|value| value.mode)
+        .or(Some(assistant_protocol::HostMode::Personal));
+    let enterprise = configuration.and_then(|value| value.enterprise);
+    (
+        mode,
+        enterprise.as_ref().map(|value| value.center_url.clone()),
+        enterprise.and_then(|value| value.center_id),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config_source::LocalConfigSource;
+
+    #[test]
+    fn switching_center_requires_explicit_binding_clear_and_keeps_other_configuration() {
+        let mut document = crate::host_configuration::personal_document();
+        configure_identity(
+            &mut document,
+            Some(assistant_protocol::HostMode::Enterprise),
+            Some("https://first.example"),
+            false,
+        )
+        .unwrap();
+        document["enterprise"]["center_id"] =
+            toml_edit::value("01234567-89ab-4cde-8f01-23456789abcd");
+        document["host_access"]["port"] = toml_edit::value(7241);
+        assert!(
+            configure_identity(
+                &mut document,
+                Some(assistant_protocol::HostMode::Enterprise),
+                Some("https://second.example"),
+                false
+            )
+            .is_err()
+        );
+        configure_identity(
+            &mut document,
+            Some(assistant_protocol::HostMode::Enterprise),
+            Some("https://second.example"),
+            true,
+        )
+        .unwrap();
+        let (mode, url, id) = identity_fields(&document);
+        assert_eq!(mode, Some(assistant_protocol::HostMode::Enterprise));
+        assert_eq!(url.as_deref(), Some("https://second.example"));
+        assert!(id.is_none());
+        assert_eq!(document["host_access"]["port"].as_integer(), Some(7241));
+    }
 
     #[test]
     fn a_port_override_keeps_remote_access_closed_by_default() {

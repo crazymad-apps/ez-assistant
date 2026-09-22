@@ -29,6 +29,7 @@ impl AssistantRuntime {
         &self,
         request: ValidateModelConnectionRequest,
     ) -> RuntimeResult<ValidateModelConnectionResult> {
+        self.model_factory.ensure_available()?;
         self.ensure_running()?;
         let cancellation = self.root_cancellation.child_token();
         // 探测的总时限包含模型准备，不能受正式推理的长超时影响。
@@ -62,6 +63,7 @@ impl AssistantRuntime {
             .config_registry
             .prepare_model(&snapshot, Some(&selection), self.store.as_ref())
             .await?;
+        let selection = prepared.selection.clone();
         let compiled = match super::model::compile_resolved_model_service(
             &snapshot,
             &prepared.model,

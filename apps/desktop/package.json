@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.26.0",
+  "version": "0.27.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,7 @@
     "test:packaging": "node --test tests/unit/sidecar-packaging.test.mjs",
     "test:e2e": "npm run build:host && playwright test",
     "test:e2e:web": "npm run build:host && playwright test --config playwright.web.config.ts",
+    "test:e2e:enterprise": "npm run build:host && playwright test --config playwright.enterprise.config.ts",
     "preview": "vite preview",
     "build:host": "node scripts/build-host.mjs",
     "prepare:sidecar": "npm run build:host -- --release && node scripts/prepare-sidecar.mjs",

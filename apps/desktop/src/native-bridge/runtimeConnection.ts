@@ -1,3 +1,4 @@
+import type { HostAccessCommand, HostAccessStatus, RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import { invoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import type { RuntimeBootstrap } from "./runtimeBootstrap";
 
@@ -12,8 +13,8 @@ export async function beginRuntimeConnection(): Promise<string> {
   binding_id = null;
   return invoke<string>("begin_runtime_connection");
 }
-export async function connectRuntimeTarget(binding: string, origin: string | null, password: string, remember: boolean): Promise<{ bootstrap: RuntimeBootstrap; warning: string | null }> {
-  const result = await invoke<{ bootstrap: RuntimeBootstrap; warning: string | null }>("connect_runtime_target", { bindingId: binding, origin, password, remember });
+export async function connectRuntimeTarget(binding: string, origin: string | null, password: string, remember: boolean, username = ""): Promise<{ bootstrap: RuntimeBootstrap; warning: string | null }> {
+  const result = await invoke<{ bootstrap: RuntimeBootstrap; warning: string | null }>("connect_runtime_target", { bindingId: binding, origin, password, remember, username });
   return { ...result, bootstrap: { ...result.bootstrap, binding_id: binding, target_kind: origin === null ? "local" : "remote" } };
 }
 export function activateRuntimeBinding(bootstrap: RuntimeBootstrap): void {
@@ -34,4 +35,15 @@ export async function invokeRuntime<T>(command: string, args?: InvokeArgs, optio
   const result = await invoke<T>(command, args, owner ? { ...options, headers: { ...options?.headers, "x-ez-runtime-binding": owner } } : options);
   if (owner !== binding_id) throw new Error("连接目标已切换，已丢弃旧操作结果。");
   return result;
+}
+
+export function probeRuntimeTarget(origin: string): Promise<RuntimeHostCapabilities> {
+  return invoke("probe_runtime_target", { origin });
+}
+export async function restoreRuntimeConnection(): Promise<RuntimeBootstrap | null> {
+  return invoke("restore_runtime_connection");
+}
+
+export function manageLocalHost(command: HostAccessCommand): Promise<HostAccessStatus> {
+  return invoke("manage_local_host", { command });
 }

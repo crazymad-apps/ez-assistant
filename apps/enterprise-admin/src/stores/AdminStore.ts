@@ -1,4 +1,8 @@
 import { action, computed, makeObservable, observable, runInAction } from 'mobx';
+import { callApi } from '../request/calls';
+import type { RecordingSettings, ModelTestResult } from '../request/openapi';
+import { modelApi } from '../request/models';
+import type { ModelSelection, SaveProviderWritable as SaveProvider, SaveModelConfiguration } from '../request/openapi';
 import { api, failure } from '../request/api';
 import type { IdentityUser } from '../request/openapi';
 import { userView } from '../model';
@@ -18,6 +22,7 @@ export class AdminStore {
   restoreState: 'none' | 'pending' | 'failed' = 'none';
   private identityRequest?: AbortController;
   private loginAttempt?: object;
+
   constructor() {
     makeObservable<this, 'clear' | 'write'>(this, {
       user: observable.ref,
@@ -35,15 +40,26 @@ export class AdminStore {
       logout: action.bound,
       verifyIdentity: action.bound,
       restoreIdentity: action.bound,
+      saveRecordingSettings: action.bound,
+      testModel: action.bound,
       saveUser: action.bound,
       toggle: action.bound,
       resetPassword: action.bound,
       changePassword: action.bound,
+      saveModelProvider: action.bound,
+      deleteModelProvider: action.bound,
+      refreshModels: action.bound,
+      saveModel: action.bound,
+      resetModel: action.bound,
+      setDefaultModel: action.bound,
+      reloadModelTemplates: action.bound,
     });
   }
+
   get currentUser() {
     return this.user ? userView(this.user) : undefined;
   }
+
   private clear(notice = '', forgetToken = true) {
     if (forgetToken) clearTokenCookie(this.token);
     this.loginAttempt = undefined;
@@ -54,17 +70,21 @@ export class AdminStore {
     this.notice = notice;
     this.restoreState = 'none';
   }
+
   dispose() {
     // 应用销毁只释放内存和在途请求，不等同于登出，保留刷新恢复所需 Cookie。
     this.clear('', false);
   }
+
   private valid(token: string) {
     return this.token === token && this.logoutState === 'none';
   }
+
   invalidateIdentity(token: string, notice: string) {
     // 迟到的旧 Token 失败不能清空另一身份；页面投影随路由守卫卸载，不由本方法逐个清理。
     if (token && this.valid(token)) this.clear(notice);
   }
+
   async login(username: string, password: string): Promise<string | undefined> {
     if (this.loginAttempt) return '正在登录，请稍候。';
     const attempt = {};
@@ -101,11 +121,13 @@ export class AdminStore {
       if (this.loginAttempt === attempt) this.loginAttempt = undefined;
     }
   }
+
   restoreIdentity() {
     if (this.token) return;
     this.token = readTokenCookie();
     return this.verifyIdentity();
   }
+
   async verifyIdentity() {
     const token = this.token;
     if (!token || !this.valid(token) || this.busy) return;
@@ -133,6 +155,7 @@ export class AdminStore {
       });
     }
   }
+
   async logout() {
     if (!this.token || this.busy || this.logoutState === 'pending') return;
     const token = this.token;
@@ -149,6 +172,7 @@ export class AdminStore {
       });
     }
   }
+
   /** 写入不自动重试；成功与后续读取失败分开呈现，不让保存按钮重新发起已完成的操作。 */
   private async write(work: (token: string) => Promise<unknown>, selfInvalidates = false): Promise<string | undefined> {
     if (this.busy) return '操作正在提交，请稍候。';
@@ -172,6 +196,49 @@ export class AdminStore {
       });
     }
   }
+
+  saveRecordingSettings(settings: RecordingSettings) {
+    return this.write((token) => callApi.save(token, settings));
+  }
+
+  testModel(selection: ModelSelection, signal: AbortSignal, completed: (result: ModelTestResult) => void) {
+    return this.write(async (token) => {
+      const result = await callApi.test(token, selection, signal);
+      if (this.valid(token) && !signal.aborted) completed(result);
+    });
+  }
+
+  saveModelProvider(input: SaveProvider, id?: string, saved?: (id: string) => void) {
+    return this.write(async (token) => {
+      const provider = await modelApi.saveProvider(token, input, id);
+      if (this.valid(token)) saved?.(provider.provider_instance_id);
+    });
+  }
+
+  deleteModelProvider(id: string) {
+    return this.write((token) => modelApi.remove(token, id));
+  }
+
+  refreshModels(id: string) {
+    return this.write((token) => modelApi.refresh(token, id));
+  }
+
+  saveModel(input: SaveModelConfiguration) {
+    return this.write((token) => modelApi.save(token, input));
+  }
+
+  resetModel(selection: ModelSelection) {
+    return this.write((token) => modelApi.reset(token, selection));
+  }
+
+  setDefaultModel(selection: ModelSelection | null) {
+    return this.write((token) => modelApi.setDefault(token, selection));
+  }
+
+  reloadModelTemplates() {
+    return this.write((token) => modelApi.reload(token));
+  }
+
   saveUser(draft: UserDraft, original?: UserView) {
     if (original)
       return this.write(
@@ -193,14 +260,17 @@ export class AdminStore {
       }),
     );
   }
+
   toggle(user: UserView) {
     return this.write((token) => api.update(token, user.id, { enabled: !user.enabled }), user.id === this.user?.id);
   }
+
   resetPassword(user: UserView, password: string) {
-    return this.write((token) => api.reset(token, user.id, password), user.id === this.user?.id);
+    return this.write((token) => api.reset(token, user.id, password));
   }
+
   changePassword(oldPassword: string, newPassword: string) {
-    return this.write((token) => api.password(token, oldPassword, newPassword), true);
+    return this.write((token) => api.password(token, oldPassword, newPassword));
   }
 }
 

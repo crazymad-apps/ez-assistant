@@ -394,7 +394,10 @@ fn candidate_priority(candidate: &SkillCandidate) -> (u8, usize, SkillSource) {
             candidate.workspace_root_order.unwrap_or(usize::MAX),
             candidate.source,
         ),
-        SkillSource::UserEzAssistant | SkillSource::UserAgents => (1, 0, candidate.source),
+        SkillSource::UserEzAssistant
+        | SkillSource::LegacyUserEzAssistant
+        | SkillSource::HostSupplement
+        | SkillSource::UserAgents => (1, 0, candidate.source),
     }
 }
 

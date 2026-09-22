@@ -53,6 +53,7 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
           ) : (
             <p>{intent === "restart_runtime" ? "本机 Runtime 将受控停止并启动新实例。" : "桌面客户端会保留，你可以稍后重新启动 Runtime。"}</p>
           )}
+          {stops_runtime && <p>将中断本机 Host 所有用户的任务，并使所有客户端断开。下方如有数量，仅代表当前用户。</p>}
           {stops_runtime && !lifecycle.local_impact_known && <p>当前连接为其他 Runtime；本机任务数量未载入。本次操作只影响本机 Runtime。</p>}
           {stops_runtime && lifecycle.local_impact_known && (
             <div className={styles.impact}>

@@ -17,6 +17,7 @@
     "start": "node dist/main.js",
     "start:api": "node dist/main.js --api-only",
     "assemble": "node scripts/assemble.mjs",
+    "package:docker": "node scripts/package-docker.mjs",
     "build:bundle": "npm --prefix ../enterprise-admin run build && npm run build && npm run assemble",
     "db:check": "node dist/database/cli.js check",
     "db:upgrade": "node dist/database/cli.js upgrade",

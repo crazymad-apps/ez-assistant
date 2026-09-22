@@ -16,7 +16,9 @@ use assistant_protocol::{AgentVariant, ApprovalDecision, ApprovalId, ApprovalMod
 
 use super::{
     PermissionCoordinator, PermissionFileScope,
-    matcher::{InvocationFactKind, fact_kind, file_matcher_matches, matches_rule},
+    matcher::{
+        InvocationFactKind, fact_kind, file_matcher_matches_with_paths, matches_rule_with_paths,
+    },
 };
 use crate::{
     RuntimeError, RuntimeResult, SessionExecutionEnvironment,
@@ -92,6 +94,7 @@ pub(crate) struct RuntimeToolAuthorizer {
     permission_scopes: Vec<PermissionFileScope>,
     permission_coordinator: Arc<PermissionCoordinator>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
+    default_rules: Option<Arc<dyn super::PermissionRuleSource>>,
     workspace_roots: Vec<AbsolutePath>,
     private_roots: Vec<AbsolutePath>,
     approval_resolver: Arc<dyn PermissionApprovalResolver>,
@@ -132,12 +135,39 @@ impl RuntimeToolAuthorizer {
             permission_scopes,
             permission_coordinator,
             infrastructure_policies,
+            default_rules: None,
             workspace_roots,
             private_roots,
             approval_resolver,
             goal_signal_latch: None,
             mcp_registry: None,
         })
+    }
+
+    pub(crate) fn with_default_rules(
+        mut self,
+        source: Option<Arc<dyn super::PermissionRuleSource>>,
+    ) -> Self {
+        self.default_rules = source;
+        self
+    }
+
+    async fn current_rules(&self) -> Result<Vec<super::PermissionRule>, ()> {
+        let loads = self
+            .permission_coordinator
+            .snapshot(&self.permission_scopes)
+            .map_err(|_| ())?;
+        let mut rules = Vec::new();
+        for load in loads {
+            let document = load.document.as_ref().ok_or(())?;
+            rules.extend(document.rules.iter().cloned());
+        }
+        if let Some(source) = &self.default_rules {
+            let document = source.load().await.map_err(|_| ())?;
+            document.validate().map_err(|_| ())?;
+            rules.extend(document.rules);
+        }
+        Ok(rules)
     }
 
     pub(crate) fn with_goal_signal_latch(mut self, latch: Option<Arc<GoalRunSignalLatch>>) -> Self {
@@ -269,18 +299,12 @@ impl RuntimeToolAuthorizer {
             }
         }
 
-        let loads = match self
-            .permission_coordinator
-            .snapshot(&self.permission_scopes)
-        {
-            Ok(loads) => loads,
-            Err(_) => {
-                return deny("permission rules are unavailable");
-            }
-        };
-        if loads.iter().any(|load| !load.is_valid()) {
+        let Ok(rules) = self.current_rules().await else {
             return deny("permission rules are unavailable");
-        }
+        };
+        let Ok(paths) = super::PermissionPaths::load(invocation).await else {
+            return deny("permission paths are unavailable");
+        };
 
         if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
             // Workspace 缺省能力只依赖 Session 创建时冻结的目录，不落入可编辑权限文件。
@@ -296,29 +320,30 @@ impl RuntimeToolAuthorizer {
                     )
                 })
                 .collect::<Vec<_>>();
-            for load in &loads {
-                let Some(document) = &load.document else {
-                    return deny("permission rules are unavailable");
+            for rule in &rules {
+                if !rule.variants.contains(&self.variant) {
+                    continue;
+                }
+                let super::PermissionMatcher::File(matcher) = &rule.matcher else {
+                    continue;
                 };
-                for rule in &document.rules {
-                    if !rule.variants.contains(&self.variant) {
+                for (index, path) in facts.paths.iter().enumerate() {
+                    if !file_matcher_matches_with_paths(
+                        matcher,
+                        facts.operation,
+                        path,
+                        Some(&paths),
+                    ) {
                         continue;
                     }
-                    let super::PermissionMatcher::File(matcher) = &rule.matcher else {
-                        continue;
-                    };
-                    for (index, path) in facts.paths.iter().enumerate() {
-                        if !file_matcher_matches(matcher, facts.operation, path) {
-                            continue;
-                        }
-                        match rule.effect {
-                            super::PermissionEffect::Deny => path_effects[index].0 = true,
-                            super::PermissionEffect::Ask => path_effects[index].1 = true,
-                            super::PermissionEffect::Allow => path_effects[index].2 = true,
-                        }
+                    match rule.effect {
+                        super::PermissionEffect::Deny => path_effects[index].0 = true,
+                        super::PermissionEffect::Ask => path_effects[index].1 = true,
+                        super::PermissionEffect::Allow => path_effects[index].2 = true,
                     }
                 }
             }
+
             if path_effects.iter().any(|(denied, _, _)| *denied) {
                 return deny("tool call is denied by a permission rule");
             }
@@ -345,21 +370,17 @@ impl RuntimeToolAuthorizer {
         let mut allow_rule = invocation
             .facts::<FileAuthorizationFacts>()
             .is_some_and(|facts| self.workspace_default_allows(facts.operation, &facts.path));
-        for load in &loads {
-            let Some(document) = &load.document else {
-                return deny("permission rules are unavailable");
-            };
-            for rule in &document.rules {
-                if !matches_rule(rule, self.variant, invocation) {
-                    continue;
-                }
-                match rule.effect {
-                    super::PermissionEffect::Deny => deny_rule = true,
-                    super::PermissionEffect::Ask => ask_rule = true,
-                    super::PermissionEffect::Allow => allow_rule = true,
-                };
+        for rule in &rules {
+            if !matches_rule_with_paths(rule, self.variant, invocation, Some(&paths)) {
+                continue;
             }
+            match rule.effect {
+                super::PermissionEffect::Deny => deny_rule = true,
+                super::PermissionEffect::Ask => ask_rule = true,
+                super::PermissionEffect::Allow => allow_rule = true,
+            };
         }
+
         if deny_rule {
             return deny("tool call is denied by a permission rule");
         }
@@ -449,27 +470,22 @@ impl RuntimeToolAuthorizer {
         }) {
             return Some(deny("tool call became denied while approval was pending"));
         }
-        let Ok(loads) = self
-            .permission_coordinator
-            .snapshot(&self.permission_scopes)
-        else {
+        let Ok(rules) = self.current_rules().await else {
             return Some(deny(
                 "permission rules became unavailable while approval was pending",
             ));
         };
-        for load in loads {
-            let Some(document) = &load.document else {
-                return Some(deny(
-                    "permission rules became unavailable while approval was pending",
-                ));
-            };
-            if document.rules.iter().any(|rule| {
-                (rule.effect == super::PermissionEffect::Deny
-                    || (recheck_ask_rules && rule.effect == super::PermissionEffect::Ask))
-                    && matches_rule(rule, self.variant, invocation)
-            }) {
-                return Some(deny("tool call became denied while approval was pending"));
-            }
+        let Ok(paths) = super::PermissionPaths::load(invocation).await else {
+            return Some(deny(
+                "permission paths became unavailable while approval was pending",
+            ));
+        };
+        if rules.iter().any(|rule| {
+            (rule.effect == super::PermissionEffect::Deny
+                || (recheck_ask_rules && rule.effect == super::PermissionEffect::Ask))
+                && matches_rule_with_paths(rule, self.variant, invocation, Some(&paths))
+        }) {
+            return Some(deny("tool call became denied while approval was pending"));
         }
         None
     }
@@ -557,6 +573,7 @@ fn deny(reason: &'static str) -> ToolAuthorization {
 
 #[cfg(test)]
 mod tests {
+    mod default_rules;
     use std::sync::Arc;
 
     use agent_core::{ToolAuthorization, ToolAuthorizer};

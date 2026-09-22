@@ -77,6 +77,7 @@ impl StorageEngine {
     ) -> StorageResult<StoredWorkspace> {
         super::filesystem::validate_workspace_component(&registration.workspace_id)?;
         let (canonical, additional_directories) = canonicalize_workspace_directories(
+            &self.runtime_home,
             &registration.requested_primary_directory,
             &registration.requested_additional_directories,
         )?;
@@ -178,6 +179,7 @@ impl StorageEngine {
             ));
         }
         let (primary_directory, additional_directories) = canonicalize_workspace_directories(
+            &self.runtime_home,
             &update.requested_primary_directory,
             &update.requested_additional_directories,
         )?;
@@ -339,6 +341,7 @@ impl StorageEngine {
 }
 
 fn canonicalize_workspace_directories(
+    user_root: &Path,
     primary_directory: &str,
     additional_directories: &[String],
 ) -> StorageResult<(String, Vec<String>)> {
@@ -353,13 +356,15 @@ fn canonicalize_workspace_directories(
                 "workspace path must be absolute",
             ));
         }
-        let directory = fs::canonicalize(requested).map_err(|source| {
-            StoreError::with_source(
-                StoreErrorKind::ResourceUnavailable,
-                "workspace directory is unavailable",
-                source,
-            )
-        })?;
+        let directory = crate::user_paths::UserPaths::new(user_root, Vec::new())
+            .resolve(requested, false)
+            .map_err(|source| {
+                StoreError::with_source(
+                    StoreErrorKind::ResourceUnavailable,
+                    "workspace directory is unavailable",
+                    source,
+                )
+            })?;
         let metadata = fs::metadata(&directory).map_err(|source| {
             StoreError::with_source(
                 StoreErrorKind::ResourceUnavailable,

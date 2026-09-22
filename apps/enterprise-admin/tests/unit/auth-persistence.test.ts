@@ -18,9 +18,11 @@ let cookies: Map<string, string>;
 let writes: string[];
 let requests: InternalAxiosRequestConfig[];
 let respond: (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>;
+
 function response(config: InternalAxiosRequestConfig, data: unknown): AxiosResponse {
   return { config, data, status: 200, statusText: 'OK', headers: {} };
 }
+
 beforeEach(() => {
   cookies = new Map();
   writes = [];
@@ -30,6 +32,7 @@ beforeEach(() => {
     get cookie() {
       return [...cookies].map(([key, value]) => `${key}=${value}`).join('; ');
     },
+
     set cookie(value: string) {
       writes.push(value);
       const entry = value.split(';')[0]!;
@@ -134,10 +137,10 @@ describe('刷新恢复后台登录', () => {
     await app.store.logout();
     expect(readTokenCookie()).toBe('');
   });
-  it('本人改密成功删除 Cookie', async () => {
+  it('本人改密成功保留 Cookie', async () => {
     await app.store.login('admin', 'password');
     await app.store.changePassword('old-password', 'new-password');
-    expect(readTokenCookie()).toBe('');
+    expect(readTokenCookie()).toBe('token-a');
   });
   it('恢复的迟到响应不能覆盖之后的登录身份', async () => {
     writeTokenCookie('token-a');

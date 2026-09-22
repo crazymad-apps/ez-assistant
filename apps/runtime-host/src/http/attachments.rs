@@ -6,7 +6,7 @@ use assistant_protocol::{RuntimeErrorCode, RuntimeErrorInfo, SessionId};
 use assistant_runtime::{RuntimeError, StagedAttachmentUpload};
 use axum::{
     Extension, Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -15,7 +15,7 @@ use serde::Serialize;
 use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
-use super::{HttpState, MAX_ATTACHMENT_BYTES, error::runtime_status};
+use super::{MAX_ATTACHMENT_BYTES, error::runtime_status};
 use crate::{access::AccessPermit, attachment_hash};
 
 const RANDOM_NAME_BYTES: usize = 16;
@@ -26,15 +26,11 @@ struct UploadErrorBody {
 }
 
 pub(super) async fn upload_attachment(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     Path(session_id): Path<String>,
     Extension(permit): Extension<AccessPermit>,
     mut multipart: Multipart,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return runtime_error(error),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return upload_error(invalid_upload("session id is invalid")),
@@ -56,7 +52,7 @@ pub(super) async fn upload_attachment(
         Some(name) if valid_original_name(name) => name.to_owned(),
         _ => return upload_error(invalid_upload("uploaded file name is invalid")),
     };
-    let (staging_path, mut staging) = match create_staging_file(&state).await {
+    let (staging_path, mut staging) = match create_staging_file(&services.paths.user_root).await {
         Ok(value) => value,
         Err(_) => return upload_error(storage_unavailable()),
     };
@@ -162,13 +158,13 @@ pub(super) async fn upload_attachment(
 }
 
 pub(super) async fn create_staging_file(
-    state: &HttpState,
+    user_root: &std::path::Path,
 ) -> io::Result<(PathBuf, tokio::fs::File)> {
     for _ in 0..16 {
         let mut random = [0_u8; RANDOM_NAME_BYTES];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
-        let path = state
-            .upload_staging_directory
+        let path = user_root
+            .join("data/staging/uploads")
             .join(format!("{}.part", URL_SAFE_NO_PAD.encode(random)));
         match tokio::fs::OpenOptions::new()
             .create_new(true)

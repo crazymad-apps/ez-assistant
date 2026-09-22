@@ -4,7 +4,7 @@ import type { HostLoginRequest, HostLoginResult, RuntimeHostCapabilities } from 
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
 export class WebLoginError extends Error {
-  readonly code = "authentication_required";
+  constructor(message: string, readonly code = "authentication_required") { super(message); }
 }
 
 export async function loginWeb(request: HostLoginRequest): Promise<void> {
@@ -12,6 +12,10 @@ export async function loginWeb(request: HostLoginRequest): Promise<void> {
     method: "POST", credentials: "same-origin", redirect: "error",
     headers: { ...compatibilityHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(request),
   }));
+}
+
+export async function discoverWebHost(): Promise<RuntimeHostCapabilities> {
+  return fetch("/capabilities", { credentials: "same-origin", headers: compatibilityHeaders(), redirect: "error", cache: "no-store" }).then(readResponse) as Promise<RuntimeHostCapabilities>;
 }
 
 export async function bootstrapWebRuntime(): Promise<RuntimeBootstrap> {
@@ -24,11 +28,12 @@ export async function bootstrapWebRuntime(): Promise<RuntimeBootstrap> {
   if (!capabilities.features?.includes("web_login")) {
     throw new Error("Host 缺少 Web 登录能力，请更新 Host。");
   }
-  return { base_url: window.location.origin, instance_id: session.instance_id, access_token: "", capabilities, started_runtime: false, authentication: "web" };
+  return { base_url: window.location.origin, instance_id: session.instance_id, access_token: "", capabilities, started_runtime: false, session, authentication: "web", login_context: session.login_context };
 }
 
-export async function logoutWeb(): Promise<void> {
-  const response = await fetch("/auth/logout", { method: "POST", credentials: "same-origin", redirect: "error" });
+export async function logoutWeb(login_context: string | null | undefined): Promise<void> {
+  const headers: Record<string, string> = login_context ? { "x-ez-login-context": login_context } : {};
+  const response = await fetch("/auth/logout", { method: "POST", credentials: "same-origin", redirect: "error", headers });
   if (!response.ok) throw new Error("Host 退出请求未完成。");
 }
 
@@ -46,12 +51,14 @@ export function takeWebLoginToken(): string | null {
 
 async function readResponse(response: Response): Promise<unknown> {
   if (response.ok) return response.json();
+  let code = "runtime_unavailable";
   let message = response.status === 401 ? "请输入密码登录。" : "无法连接 Host，请稍后重试。";
   try {
     const body = await response.json() as { error?: { message?: unknown; code?: unknown } };
+    if (typeof body.error?.code === "string") code = body.error.code;
     if (isCompatibilityCode(body.error?.code)) message = compatibilityMessage(body.error.code);
     else if (typeof body.error?.message === "string") message = body.error.message;
   } catch { /* 非 JSON 网络错误使用固定文案。 */ }
   if (response.status === 401) throw new WebLoginError(message);
-  throw new Error(message);
+  throw new WebLoginError(message, code);
 }

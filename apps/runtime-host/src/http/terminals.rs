@@ -98,12 +98,28 @@ fn authenticate_http(
     }
 }
 
-pub(crate) fn authenticate(
+pub(crate) async fn authenticate(
     auth: &SocketAuthentication,
     bearer: Option<&str>,
+    login_context: Option<&str>,
 ) -> Result<AccessPermit, crate::user_terminal::TerminalError> {
-    authenticate_http(auth, bearer)
-        .map_err(|_| crate::user_terminal::failure("登录已失效，请重新登录。"))
+    let fail = || crate::user_terminal::failure("登录已失效或当前账号已变化，请重新登录。");
+    let mut permit = authenticate_http(auth, bearer).map_err(|_| fail())?;
+    if bearer.is_none() && !permit.native && login_context != permit.login_context().as_deref() {
+        return Err(fail());
+    }
+    if auth.state.access.center().is_some() {
+        if permit.native {
+            return Err(fail());
+        }
+        auth.state
+            .access
+            .credentials
+            .verify_enterprise(&mut permit)
+            .await
+            .map_err(|_| fail())?;
+    }
+    Ok(permit)
 }
 
 pub(crate) fn validate_compatibility(
@@ -134,7 +150,8 @@ pub(crate) fn validate_compatibility(
 }
 
 pub(crate) async fn directory(
-    state: &HttpState,
+    services: &super::ReadyServices,
+    permit: &AccessPermit,
     source: &UserTerminalSource,
 ) -> Result<(TerminalOrigin, std::path::PathBuf), crate::user_terminal::TerminalError> {
     let fail = || crate::user_terminal::failure("终端来源或启动目录已不可用。");
@@ -143,10 +160,7 @@ pub(crate) async fn directory(
             session_id,
             locator,
         } => {
-            let session = state
-                .startup
-                .services()
-                .map_err(|_| fail())?
+            let session = services
                 .runtime
                 .get_session(GetSessionRequest {
                     session_id: session_id.clone(),
@@ -154,10 +168,7 @@ pub(crate) async fn directory(
                 .await
                 .map_err(|_| fail())?
                 .session;
-            let root = state
-                .startup
-                .services()
-                .map_err(|_| fail())?
+            let root = services
                 .runtime
                 .resolve_session_resource_root(session_id, &locator.root)
                 .await
@@ -167,6 +178,7 @@ pub(crate) async fn directory(
                 .map_err(|_| fail())?;
             (
                 TerminalOrigin {
+                    user: permit.user_key().cloned(),
                     session: Some(session_id.clone()),
                     workspace: session.workspace_id,
                 },
@@ -174,10 +186,7 @@ pub(crate) async fn directory(
             )
         }
         UserTerminalSource::Workspace { workspace_id } => {
-            let workspace = state
-                .startup
-                .services()
-                .map_err(|_| fail())?
+            let workspace = services
                 .runtime
                 .get_workspace(GetWorkspaceRequest {
                     workspace_id: workspace_id.clone(),
@@ -189,6 +198,7 @@ pub(crate) async fn directory(
             }
             (
                 TerminalOrigin {
+                    user: permit.user_key().cloned(),
                     session: None,
                     workspace: Some(workspace_id.clone()),
                 },
@@ -197,10 +207,7 @@ pub(crate) async fn directory(
         }
     };
     if let Some(id) = &origin.workspace {
-        let workspace = state
-            .startup
-            .services()
-            .map_err(|_| fail())?
+        let workspace = services
             .runtime
             .get_workspace(GetWorkspaceRequest {
                 workspace_id: id.clone(),
@@ -211,6 +218,11 @@ pub(crate) async fn directory(
             return Err(fail());
         }
     }
+    let paths = services.paths.clone();
+    let directory = tokio::task::spawn_blocking(move || paths.resolve(&directory, false))
+        .await
+        .map_err(|_| fail())?
+        .map_err(|_| fail())?;
     if !tokio::fs::metadata(&directory)
         .await
         .is_ok_and(|metadata| metadata.is_dir())
@@ -218,6 +230,16 @@ pub(crate) async fn directory(
         return Err(fail());
     }
     Ok((origin, directory))
+}
+
+pub(crate) async fn services(
+    auth: &SocketAuthentication,
+    permit: &AccessPermit,
+) -> Result<std::sync::Arc<super::ReadyServices>, crate::user_terminal::TerminalError> {
+    auth.state
+        .user_services(permit)
+        .await
+        .map_err(|_| crate::user_terminal::failure("用户服务暂不可用。"))
 }
 
 #[cfg(test)]
@@ -244,7 +266,7 @@ mod compatibility_tests {
         );
         assert!(validate_compatibility(&headers, Some(&own)).is_ok());
         let newer = ClientCompatibility {
-            version: "0.26.1".into(),
+            version: "99.0.0".into(),
             ..own
         };
         assert_eq!(
@@ -281,8 +303,8 @@ mod compatibility_tests {
             Code::ClientTooOld
         );
         let newer_floor = ClientCompatibility {
-            version: "0.26.1".into(),
-            min_compatible_version: "0.26.1".into(),
+            version: "99.0.0".into(),
+            min_compatible_version: "99.0.0".into(),
         };
         assert_eq!(
             validate_compatibility(&HeaderMap::new(), Some(&newer_floor))

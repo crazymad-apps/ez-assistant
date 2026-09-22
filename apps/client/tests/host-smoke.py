@@ -8,7 +8,7 @@ def main():
     f.cli('start');first=f.discovery();before=f.audit('before')
     assert '已复用现有 Host' in f.cli('start');assert f.discovery()['instance_id']==first['instance_id']
     assert '手动访问' in f.cli('web');assert 'token=' not in f.logs[-1]['output'];assert first['access_token'] not in json.dumps(f.logs)
-    f.cli('restart');second=f.discovery();assert first['instance_id']!=second['instance_id'];assert first['executable_path']==second['executable_path'];assert before==inventory(f.home/'data/runtime.sqlite3')
+    f.cli('restart');second=f.discovery();assert first['instance_id']!=second['instance_id'];assert first['executable_path']==second['executable_path'];assert before==inventory(f.home/'users/_personal/data/runtime.sqlite3')
     # 在线端口修改经真实交互保存；当前监听保留，重启后才切换。
     import socket
     with socket.socket() as sock:sock.bind(('127.0.0.1',0));new_port=sock.getsockname()[1]

@@ -67,6 +67,9 @@ pub enum UserTerminalControl {
         client_compatibility: Option<crate::ClientCompatibility>,
         #[ts(type = "string | null")]
         bearer: Option<SecretValue>,
+        /// Cookie 页面期望的登录上下文；不可作为凭据授权。
+        #[serde(default)]
+        login_context: Option<String>,
         source: UserTerminalSource,
         size: UserTerminalSize,
         /// 未提供时使用 Host 平台默认；显式不可用的 Shell 不自动回退。

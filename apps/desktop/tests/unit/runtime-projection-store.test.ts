@@ -36,6 +36,20 @@ const application: ApplicationSnapshot = {
 };
 
 describe("RuntimeProjectionStore", () => {
+  it("preserves a single pending previous request across a streaming tail refresh", () => {
+    const store = new RuntimeProjectionStore();
+    store.applySessionSnapshot({ observed_sequence: 4, value: sessionView(page(1, [assistant("m3"), assistant("m4")], "c2", true)) });
+    expect(store.beginLoadingPrevious("session-1")).toBe(true);
+    const pending = store.conversation_histories.get("session-1")?.previous_request;
+    store.applySessionSnapshot({ observed_sequence: 10, value: sessionView(page(1, [assistant("m4"), assistant("m5")], "c3", true)) });
+    expect(store.conversation_histories.get("session-1")?.previous_request).toBe(pending);
+    expect(store.beginLoadingPrevious("session-1")).toBe(false);
+    expect(store.applyPreviousConversationPage("session-1", { observed_sequence: 5, value: page(1, [assistant("m1"), assistant("m2")], null, false) })).toBe(true);
+    expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(store.observed_sequence).toBe(0);
+    expect(store.applySessionSnapshot({ observed_sequence: 9, value: sessionView(page(1, [], null, false)) })).toBe(false);
+  });
+
   it("uses a snapshot watermark and detects an event gap", () => {
     const store = new RuntimeProjectionStore();
     store.applyApplicationSnapshot({ observed_sequence: 4, value: application });

@@ -1,4 +1,7 @@
 //! Runtime Host 私有 HTTP transport：只转换跨进程请求、响应与观察事件。
+//!
+//! `routes` 展示路由及中间件执行顺序；`auth` 实现身份与传输边界，
+//! `compatibility` 检查软件版本，其余模块处理对应业务协议。
 
 mod attachments;
 mod auth;
@@ -9,51 +12,37 @@ mod events;
 mod login;
 mod materializations;
 mod resources;
+mod routes;
 mod startup;
 pub(crate) mod terminals;
 mod web;
+pub(crate) use routes::router;
+pub(crate) use startup::ReadyServices;
 pub(crate) use startup::StartupStateHandle;
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use assistant_protocol::{
     MIN_COMPATIBLE_VERSION, RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth,
 };
-use axum::{
-    Json, Router,
-    extract::DefaultBodyLimit,
-    middleware,
-    routing::{get, post},
-};
+use axum::Json;
 use tokio_util::sync::CancellationToken;
 
-use self::{
-    attachments::upload_attachment,
-    auth::authorize,
-    commands::handle_command,
-    events::stream_events,
-    materializations::materialize_session,
-    resources::{
-        export_session_markdown, list_session_resource_files, preview_attachment,
-        preview_child_tool_file, preview_session_resource_file, preview_tool_file,
-        resolve_child_tool_file_native_path, resolve_session_resource_native_path,
-        resolve_tool_file_native_path, thumbnail_attachment,
-    },
-};
 use crate::access::HostAccessHandle;
 
 pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Desktop HTTP 路由共享的应用状态。
+/// Desktop、Web 与 Client 共用的 Host HTTP 状态。
 ///
-/// Runtime 持有业务权威状态，Gateway/Speech 句柄只桥接 Host 子系统；本结构不缓存它们的第二份投影。
+/// 用户业务服务经 `user_services` 按已认证身份获取，不能在此缓存某个“当前用户”。
+/// Runtime 持有业务权威状态，本结构只持有 Host 配置、用户域入口与传输资源。
 #[derive(Clone)]
 pub(crate) struct HttpState {
+    pub(crate) domains: Option<Arc<crate::user_domain::UserDomains>>,
     pub(crate) startup: StartupStateHandle,
     access_token: Arc<str>,
     authority: Arc<str>,
-    upload_staging_directory: Arc<PathBuf>,
     shutdown: CancellationToken,
     pub(crate) access: HostAccessHandle,
     instance_id: Arc<str>,
@@ -73,7 +62,6 @@ pub(crate) struct HttpEndpointState {
     authority: Arc<str>,
     base_url: Arc<str>,
     instance_id: Arc<str>,
-    upload_staging_directory: Arc<PathBuf>,
 }
 
 impl HttpEndpointState {
@@ -81,7 +69,6 @@ impl HttpEndpointState {
         access_token: &str,
         authority: String,
         base_url: String,
-        runtime_home: PathBuf,
         instance_id: String,
     ) -> Self {
         Self {
@@ -89,24 +76,26 @@ impl HttpEndpointState {
             authority: Arc::from(authority),
             base_url: Arc::from(base_url),
             instance_id: Arc::from(instance_id),
-            upload_staging_directory: Arc::new(runtime_home.join("data/staging/uploads")),
         }
     }
 }
 
 impl HttpState {
-    /// Host 设置与 Runtime 模型设置共用文件，提交后刷新唯一配置投影的 revision。
-    pub(crate) async fn refresh_configuration_projection(
+    async fn user_services(
         &self,
-    ) -> Result<(), crate::access::AccessError> {
-        self.startup
-            .services()
-            .map_err(|_| crate::access::AccessError::Unavailable)?
-            .runtime
-            .reload_config(assistant_protocol::ReloadConfigRequest::default())
-            .await
-            .map(|_| ())
-            .map_err(|_| crate::access::AccessError::Unavailable)
+        permit: &crate::access::AccessPermit,
+    ) -> Result<Arc<ReadyServices>, error::HttpError> {
+        if let Some(domains) = &self.domains {
+            return domains
+                .ensure(permit)
+                .await
+                .map_err(error::HttpError::from_domain);
+        }
+        // 既有私有测试宿主显式发布的服务也经过同一 handler 获取流程。
+        permit
+            .check()
+            .map_err(|_| error::HttpError::unauthorized())?;
+        Ok(self.startup.services()?)
     }
 
     pub(crate) fn starting(
@@ -120,9 +109,9 @@ impl HttpState {
             authority,
             base_url,
             instance_id,
-            upload_staging_directory,
         } = endpoint;
         Self {
+            domains: None,
             terminals,
             file_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             startup: StartupStateHandle::new(),
@@ -133,7 +122,6 @@ impl HttpState {
                 .ok()
                 .and_then(|url| url.port_or_known_default())
                 .expect("published endpoint has a port"),
-            upload_staging_directory,
             connections: shutdown.child_token(),
             shutdown,
             access,
@@ -143,78 +131,12 @@ impl HttpState {
     }
 }
 
-pub(crate) fn router(state: HttpState) -> Router {
-    let command_route = post(handle_command).layer(DefaultBodyLimit::max(MAX_COMMAND_BYTES));
-    let attachment_route = post(upload_attachment).layer(DefaultBodyLimit::disable());
-    let materialization_route = post(materialize_session).layer(DefaultBodyLimit::disable());
-    let api = Router::new()
-        .route("/auth/login", post(login::login).layer(DefaultBodyLimit::max(4096)))
-        .route("/auth/logout", post(login::logout))
-        .route("/auth/session", get(login::session))
-        .route("/commands", command_route)
-        .route("/sessions/{session_id}/attachments/{attachment_id}/download", get(resources::download_attachment))
-        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_tool_file))
-        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_child_tool_file))
-        .route("/host-files/list", post(resources::list_host_files))
-        .route("/host-files/select-directory", post(resources::select_host_directory))
-        .route("/host-files/preview", post(resources::preview_host_file))
-        .route("/host-files/download", post(resources::download_host_file))
-        .route("/sessions/{session_id}/resource-files/download", post(resources::download_session_file))
-        .route("/session-materializations", materialization_route)
-        .route("/sessions/{session_id}/attachments", attachment_route)
-        .route(
-            "/sessions/{session_id}/attachments/{attachment_id}/preview",
-            get(preview_attachment),
-        )
-        .route(
-            "/sessions/{session_id}/attachments/{attachment_id}/thumbnail",
-            get(thumbnail_attachment),
-        )
-        .route(
-            "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview",
-            get(preview_tool_file),
-        )
-        .route(
-            "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/native-path",
-            get(resolve_tool_file_native_path),
-        )
-        .route(
-            "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/preview",
-            get(preview_child_tool_file),
-        )
-        .route(
-            "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/native-path",
-            get(resolve_child_tool_file_native_path),
-        )
-        .route(
-            "/sessions/{session_id}/export.md",
-            get(export_session_markdown),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/list",
-            post(list_session_resource_files),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/preview",
-            post(preview_session_resource_file),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/native-path",
-            post(resolve_session_resource_native_path),
-        )
-        .route("/user-terminals/socket", get(terminals::upgrade))
-        .route("/events", get(stream_events))
-        .route("/health", get(health))
-        .route("/capabilities", get(capabilities))
-        .layer(middleware::from_fn_with_state(state.clone(), authorize));
-
-    let pages = Router::new()
-        .fallback(web::serve)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::authorize_page,
-        ));
-    api.merge(pages).with_state(state)
+async fn ensure_ready(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    axum::Extension(permit): axum::Extension<crate::access::AccessPermit>,
+) -> Result<axum::http::StatusCode, error::HttpError> {
+    state.user_services(&permit).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn health(
@@ -223,22 +145,30 @@ async fn health(
     Json(state.startup.health())
 }
 
-async fn capabilities() -> Json<RuntimeHostCapabilities> {
+async fn capabilities(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    axum::Extension(permit): axum::Extension<Option<crate::access::AccessPermit>>,
+) -> Json<RuntimeHostCapabilities> {
     // 只在 capabilities 查询时读取 PATH；不启动命令、不探测 Shell 环境，不进入普通输入路径。
-    let rg_on_path = tokio::task::spawn_blocking(|| {
-        std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|directory| {
-                directory
-                    .join(if cfg!(windows) { "rg.exe" } else { "rg" })
-                    .is_file()
+    let rg_on_path = if permit.is_some() {
+        tokio::task::spawn_blocking(|| {
+            std::env::var_os("PATH").is_some_and(|path| {
+                std::env::split_paths(&path).any(|directory| {
+                    directory
+                        .join(if cfg!(windows) { "rg.exe" } else { "rg" })
+                        .is_file()
+                })
             })
         })
-    })
-    .await
-    .ok();
+        .await
+        .ok()
+    } else {
+        None
+    };
     Json(RuntimeHostCapabilities {
-        platform: Some(std::env::consts::OS.to_owned()),
-        architecture: Some(std::env::consts::ARCH.to_owned()),
+        mode: state.access.mode(),
+        platform: permit.as_ref().map(|_| std::env::consts::OS.to_owned()),
+        architecture: permit.as_ref().map(|_| std::env::consts::ARCH.to_owned()),
         rg_on_path,
         min_compatible_version: MIN_COMPATIBLE_VERSION.to_owned(),
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -246,22 +176,28 @@ async fn capabilities() -> Json<RuntimeHostCapabilities> {
         max_attachment_bytes: Some(MAX_ATTACHMENT_BYTES),
         sse: true,
         streaming_upload: true,
-        features: vec![
-            RuntimeHostFeature::StartupDiagnostics,
-            RuntimeHostFeature::EventEnvelopes,
-            RuntimeHostFeature::ApplicationSnapshot,
-            RuntimeHostFeature::SessionView,
-            RuntimeHostFeature::ChildTaskView,
-            RuntimeHostFeature::ConversationPaging,
-            RuntimeHostFeature::ToolDetail,
-            RuntimeHostFeature::QueueControl,
-            RuntimeHostFeature::ApprovalQueue,
-            RuntimeHostFeature::SessionManagement,
-            RuntimeHostFeature::SessionMaterialization,
-            RuntimeHostFeature::SessionResourceFiles,
-            RuntimeHostFeature::HostAccess,
-            RuntimeHostFeature::WebLogin,
-            RuntimeHostFeature::UserTerminals,
-        ],
+        features: {
+            let mut features = vec![
+                RuntimeHostFeature::StartupDiagnostics,
+                RuntimeHostFeature::EventEnvelopes,
+                RuntimeHostFeature::ApplicationSnapshot,
+                RuntimeHostFeature::SessionView,
+                RuntimeHostFeature::ChildTaskView,
+                RuntimeHostFeature::ConversationPaging,
+                RuntimeHostFeature::ToolDetail,
+                RuntimeHostFeature::QueueControl,
+                RuntimeHostFeature::ApprovalQueue,
+                RuntimeHostFeature::SessionManagement,
+                RuntimeHostFeature::SessionMaterialization,
+                RuntimeHostFeature::SessionResourceFiles,
+                RuntimeHostFeature::HostAccess,
+                RuntimeHostFeature::WebLogin,
+                RuntimeHostFeature::UserTerminals,
+            ];
+            if state.access.center().is_some() {
+                features.push(RuntimeHostFeature::EnterpriseIdentity);
+            }
+            features
+        },
     })
 }

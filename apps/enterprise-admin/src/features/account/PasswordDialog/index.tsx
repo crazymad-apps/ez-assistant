@@ -1,6 +1,6 @@
 import { passwordRule } from '../../passwords/validation';
 import { useState } from 'react';
-import { Alert, Form, Input, Modal, Typography } from 'antd';
+import { App, Alert, Form, Input, Modal, Typography } from 'antd';
 import styles from './index.module.scss';
 
 type PasswordForm = { oldPassword: string; newPassword: string; confirmPassword: string };
@@ -11,6 +11,7 @@ type PasswordDialogProps = Readonly<{
 
 /** 修改本人密码弹窗：校验原密码；管理重置他人密码使用另一个组件。 */
 export function PasswordDialog(props: PasswordDialogProps) {
+  const { message } = App.useApp();
   const [form] = Form.useForm<PasswordForm>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
@@ -44,6 +45,10 @@ export function PasswordDialog(props: PasswordDialogProps) {
             if (result) {
               setError(result);
               form.resetFields();
+            } else {
+              form.resetFields();
+              void message.success('密码已修改');
+              props.onClose();
             }
           } finally {
             setPending(false);
@@ -77,7 +82,7 @@ export function PasswordDialog(props: PasswordDialogProps) {
           <Input.Password placeholder="再次输入新密码" autoComplete="new-password" />
         </Form.Item>
         <Typography.Text type="secondary" className={styles.hint}>
-          修改成功后需要重新登录。
+          修改成功后保留当前登录，后续登录请使用新密码。
         </Typography.Text>
       </Form>
     </Modal>

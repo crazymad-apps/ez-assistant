@@ -412,6 +412,7 @@
 }
 
 .reasoning_content {
+  overflow-anchor: none;
   max-height: 180px;
   overflow-y: auto;
   margin-top: 3px;
@@ -664,6 +665,8 @@
   strong { overflow: hidden; color: var(--ez-text-secondary); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
   small { overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 }
+
+.task_usages { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px 8px; max-width: 170px; }
 
 .task_usage { color: var(--ez-text-muted); font-size: var(--ez-font-small); white-space: nowrap; }
 

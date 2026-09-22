@@ -9,8 +9,10 @@ use assistant_protocol::{
     RuntimeCompatibilityError, RuntimeCompatibilityErrorCode, check_compatibility,
 };
 use axum::{
-    Json,
+    Extension, Json,
+    extract::Request,
     http::{HeaderMap, Method, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 
@@ -49,37 +51,47 @@ fn invalid() -> RuntimeCompatibilityError {
     }
 }
 
-pub(super) fn admit(
-    headers: &HeaderMap,
-    method: &Method,
-    route: &str,
-    permit: Option<&AccessPermit>,
-) -> Result<ClientCompatibility, RuntimeCompatibilityError> {
-    let declared = declaration(headers)?;
-    // 显式头优先，即使不兼容也不回退到登录声明；白名单之外必须每次携带头。
-    let client = declared.or_else(|| {
-        if method == Method::GET && media_route(route) {
-            permit.and_then(AccessPermit::compatibility).cloned()
-        } else {
-            None
-        }
-    });
-    check_compatibility(client.as_ref(), &ClientCompatibility::current())?;
-    client.ok_or_else(invalid)
+/// 普通 API 每次声明版本；在鉴权之后、正文读取和用户 Runtime 初始化之前执行。
+pub(super) async fn require_declaration(request: Request, next: Next) -> Response {
+    admit_request(request, next, None).await
 }
 
-fn media_route(route: &str) -> bool {
-    matches!(
-        route,
-        "/sessions/{session_id}/attachments/{attachment_id}/download"
-            | "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download"
-            | "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download"
-            | "/sessions/{session_id}/attachments/{attachment_id}/preview"
-            | "/sessions/{session_id}/attachments/{attachment_id}/thumbnail"
-            | "/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview"
-            | "/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/preview"
-            | "/sessions/{session_id}/export.md"
-    )
+/// 只挂在浏览器直接加载的 GET 媒体组：图片和下载不能自行添加版本头，允许沿用
+/// 当前普通登录保存的声明。原生 bootstrap 没有登录声明，仍需显式头；HEAD 不回退。
+pub(super) async fn allow_session_declaration(
+    Extension(permit): Extension<Option<AccessPermit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let fallback = if request.method() == Method::GET {
+        permit
+            .as_ref()
+            .and_then(AccessPermit::compatibility)
+            .cloned()
+    } else {
+        None
+    };
+    admit_request(request, next, fallback).await
+}
+
+async fn admit_request(
+    mut request: Request,
+    next: Next,
+    fallback: Option<ClientCompatibility>,
+) -> Response {
+    // 显式头存在时只检查显式值；非法或不兼容均不得被登录声明掩盖。
+    let client = match declaration(request.headers()) {
+        Ok(declared) => declared.or(fallback),
+        Err(error) => return response(error),
+    };
+    if let Err(error) = check_compatibility(client.as_ref(), &ClientCompatibility::current()) {
+        return response(error);
+    }
+    let Some(client) = client else {
+        return response(invalid());
+    };
+    request.extensions_mut().insert(client);
+    next.run(request).await
 }
 
 pub(super) fn response(error: RuntimeCompatibilityError) -> Response {

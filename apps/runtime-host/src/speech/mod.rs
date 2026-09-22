@@ -4,4 +4,4 @@ mod config;
 mod provider;
 mod service;
 
-pub(crate) use service::{SpeechService, SpeechServiceError, SpeechServiceHandle};
+pub(crate) use service::{SpeechService, SpeechServiceError, SpeechServiceHandle, SpeechSlots};

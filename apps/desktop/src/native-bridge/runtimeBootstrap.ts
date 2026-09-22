@@ -1,8 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { RuntimeHostCapabilities } from "@ez-assistant/protocol";
+import type { HostLoginResult, RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import { bootstrapWebRuntime } from "../runtime-client/webLogin";
 
 export type RuntimeBootstrap = {
+  readonly session?: HostLoginResult;
+  readonly login_context?: string | null;
   readonly base_url: string;
   readonly instance_id: string;
   readonly access_token: string;
@@ -24,6 +26,15 @@ export async function bootstrapRuntime(): Promise<RuntimeBootstrap> {
   }
   try {
     return await invoke<RuntimeBootstrap>("bootstrap_runtime");
+  } catch (error: unknown) {
+    throw normalizeBootstrapFailure(error);
+  }
+}
+
+/** 明确更新意图；普通探测/重试不能静默停止旧 Runtime。 */
+export async function upgradeRuntime(): Promise<RuntimeBootstrap> {
+  try {
+    return await invoke<RuntimeBootstrap>("upgrade_runtime");
   } catch (error: unknown) {
     throw normalizeBootstrapFailure(error);
   }

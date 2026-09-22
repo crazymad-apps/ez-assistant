@@ -160,6 +160,33 @@ impl OpenAiChatCompletionsService {
         ))
     }
 
+    /// 使用上层编译的能力与定制 Transport；请求编码、路由和流式解码保持原协议语义。
+    ///
+    /// # Errors
+    /// base URL 不满足安全约束时返回配置错误。
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_transport_and_capabilities(
+        base_url: impl Into<String>,
+        credential: BearerCredential,
+        model: impl Into<String>,
+        context_window_tokens: u64,
+        adapter: ChatProtocolAdapter,
+        capabilities: ModelCapabilities,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self, OpenAiChatCompletionsServiceError> {
+        let base_url = validate_base_url(base_url.into())
+            .map_err(OpenAiChatCompletionsServiceError::InvalidBaseUrl)?;
+        Ok(Self::build(
+            base_url,
+            credential,
+            model,
+            context_window_tokens,
+            adapter,
+            transport,
+            Some(capabilities),
+        ))
+    }
+
     /// 使用已验证的 base URL 组装服务。
     fn build(
         base_url: String,
@@ -359,6 +386,7 @@ fn parse_retry_after_ms(headers: &[(String, String)]) -> Option<u64> {
 /// 保留 Transport 原始分类，避免重试等上层策略解析展示文本。
 fn map_transport_error(error: TransportError) -> ModelError {
     let (kind, message) = match error {
+        TransportError::Rejected(error) => return error,
         TransportError::Connect(message) => (ModelTransportErrorKind::Connection, message),
         TransportError::Timeout => (
             ModelTransportErrorKind::Timeout,

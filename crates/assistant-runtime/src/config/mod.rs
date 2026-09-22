@@ -4,12 +4,14 @@
 mod capabilities;
 mod compile;
 mod domain;
+mod external;
 mod managed_model;
 pub(crate) mod model_templates;
 mod protocol;
 mod registry;
 mod schema;
 mod source;
+pub(crate) mod validation;
 
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -23,6 +25,7 @@ pub use domain::{
     DelegationConfig, McpRuntimeConfig, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
     RuntimeModelTransportConfig,
 };
+pub use external::{ExternalModelConfiguration, ModelSource};
 pub use source::{
     ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
     ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture, RuntimeConfigSource,
@@ -58,3 +61,5 @@ impl RuntimeConfig {
         self
     }
 }
+
+mod model_source;

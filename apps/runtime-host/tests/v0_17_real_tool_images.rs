@@ -103,7 +103,7 @@ fn run_read_image_case(model_key: &str) {
 
     let tool_image_directory = runtime_home
         .path()
-        .join("data/sessions")
+        .join("users/_personal/data/sessions")
         .join(&session_id)
         .join("tool-images");
     let stable_images = fs::read_dir(&tool_image_directory)

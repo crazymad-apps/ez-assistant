@@ -1,3 +1,5 @@
+import { SettingsDialog } from "../features/settings/SettingsDialog";
+import { AccountDialog } from "../features/runtime-access/AccountDialog";
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { AppErrorBoundary } from "./AppErrorBoundary";
@@ -26,9 +28,14 @@ export const App = observer(function App(props: AppProps) {
     // Release it when the document itself is going away instead.
     const dispose = () => connection.dispose();
     const accept_token = () => { void connection.acceptTokenLink(); };
+    const recheck = () => { if (document.visibilityState !== "hidden") void connection.recheckSession(); };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", recheck);
     window.addEventListener("pagehide", dispose);
     window.addEventListener("hashchange", accept_token);
     return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", recheck);
       window.removeEventListener("pagehide", dispose);
       window.removeEventListener("hashchange", accept_token);
     };
@@ -41,13 +48,14 @@ export const App = observer(function App(props: AppProps) {
     transition_key = "desktop";
     entry = <>
       <DesktopEntryPage connection={connection} />
-      {connection.phase !== "workspace" && connection.current && <RootStoreProvider store={connection.current}><DesktopLifecycleDialog /></RootStoreProvider>}
+      {connection.phase !== "workspace" && connection.current && <RootStoreProvider store={connection.current}><DesktopLifecycleDialog /><SettingsDialog /></RootStoreProvider>}
     </>;
   }
 
   return (
     <AppErrorBoundary>
       <ApplicationConnectionContext.Provider value={connection}>
+        <AccountDialog connection={connection} />
         <WorkspaceTransition
           key={transition_key}
           ready={connection.phase === "workspace"}

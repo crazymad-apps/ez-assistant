@@ -4,6 +4,22 @@ impl AssistantRuntime {
     /// 启动恢复仅加载连接和全局选择，固定参数按二元键读取；不得导入旧 TOML 模型。
     pub async fn restore_model_settings(&self) -> RuntimeResult<()> {
         let _gate = self.model_binding_gate.write().await;
+        if self.model_factory.configuration_source() == crate::ModelSource::External {
+            let mut state = self.managed_models_mut()?;
+            state.source = crate::ModelSource::External;
+            state.external = None;
+            state.providers.clear();
+            state.settings = ModelSettings {
+                management: Some(assistant_protocol::ModelManagementStatus {
+                    read_only: true,
+                    unavailable_reason: Some("正在获取模型配置。".to_owned()),
+                    last_success_at_ms: None,
+                    last_refresh_error: None,
+                }),
+                ..Default::default()
+            };
+            return Ok(());
+        }
         let providers = self
             .store
             .load_providers()
@@ -22,6 +38,7 @@ impl AssistantRuntime {
         state.settings = settings;
         Ok(())
     }
+
     pub fn list_providers(&self) -> RuntimeResult<Vec<ProviderSummary>> {
         self.ensure_running()?;
         Ok(self
@@ -31,14 +48,17 @@ impl AssistantRuntime {
             .map(|provider| summary(provider))
             .collect())
     }
+
     pub fn get_model_settings(&self) -> RuntimeResult<ModelSettings> {
         self.ensure_running()?;
         Ok(self.managed_models()?.settings.clone())
     }
+
     pub async fn create_provider(
         &self,
         request: CreateProviderRequest,
     ) -> RuntimeResult<ProviderSummary> {
+        self.ensure_model_editable()?;
         validate_connection(&request.connection)?;
         let api_key = credential(SecretValue::new(String::new()), request.credential)?;
         validate_provider_credential(&request.connection, &api_key)?;
@@ -69,10 +89,12 @@ impl AssistantRuntime {
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(summary(&provider))
     }
+
     pub async fn update_provider(
         &self,
         request: UpdateProviderRequest,
     ) -> RuntimeResult<ProviderSummary> {
+        self.ensure_model_editable()?;
         validate_connection(&request.connection)?;
         let _operation = self.operation_gate.read().await;
         let _gate = self.model_binding_gate.write().await;
@@ -119,10 +141,12 @@ impl AssistantRuntime {
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(summary(&provider))
     }
+
     pub async fn delete_provider(
         &self,
         id: ProviderInstanceId,
     ) -> RuntimeResult<assistant_protocol::ProviderUsage> {
+        self.ensure_model_editable()?;
         let _operation = self.operation_gate.read().await;
         let _gate = self.model_binding_gate.write().await;
         self.ensure_running()?;

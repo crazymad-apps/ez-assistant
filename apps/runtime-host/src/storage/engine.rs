@@ -69,6 +69,23 @@ impl StorageEngine {
         let blobs_directory = data_directory.join(BLOBS_DIRECTORY);
         let upload_staging_directory = data_directory.join(STAGING_DIRECTORY);
         let deletion_staging_directory = data_directory.join(DELETION_STAGING_DIRECTORY);
+        // 文件缺失与全新用户域不同：已有配套内容时拒绝新建空库，避免掩盖数据丢失。
+        if !data_directory
+            .join(DATABASE_FILE)
+            .try_exists()
+            .map_err(|source| internal_error("database path check failed", source))?
+            && data_directory
+                .try_exists()
+                .map_err(|source| internal_error("data directory check failed", source))?
+            && fs::read_dir(&data_directory)
+                .map_err(|source| internal_error("data directory read failed", source))?
+                .next()
+                .is_some()
+        {
+            return Err(invalid_data(
+                "database is missing while managed data remains",
+            ));
+        }
         // 准入必须先于业务目录创建、权限修改和任何写连接；失败时只保留外层诊断。
         super::migrations::align(runtime_home, |stage| {
             if let Some(progress) = progress {

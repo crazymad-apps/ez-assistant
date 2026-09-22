@@ -1061,3 +1061,45 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
         Err(RuntimeError::RunNotFound { run_id, .. }) if run_id == missing
     ));
 }
+
+#[tokio::test]
+async fn duplicate_provider_message_id_settles_as_failure_without_replaying_tools() {
+    let tool_call = assistant_tool_call("duplicate-provider-id", "echo_tool");
+    let final_message = assistant_text("duplicate-provider-id", "invalid duplicate response");
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&tool_call)),
+            ModelScript::Events(message_events(&final_message)),
+        ],
+    ));
+    let tool = ScriptedTool::succeed("echo_tool", json!({"ok": true}), OrderLog::new());
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).unwrap();
+    let runtime = runtime_with_tools(model, tools.snapshot());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session_id).await;
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: "call the tool".into(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let terminal = wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Failed);
+    assert_eq!(tool.executed_inputs().len(), 1);
+}

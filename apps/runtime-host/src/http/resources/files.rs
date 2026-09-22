@@ -48,7 +48,15 @@ pub(super) fn path_text(path: &Path) -> Result<String, RuntimeErrorInfo> {
         .ok_or_else(|| super::invalid_request("路径包含无法显示的字符。"))
 }
 
+#[cfg(test)]
 pub(super) fn host_path(value: Option<&str>) -> Result<PathBuf, RuntimeErrorInfo> {
+    host_path_guarded(value, None)
+}
+
+pub(super) fn host_path_guarded(
+    value: Option<&str>,
+    paths: Option<&crate::user_paths::UserPaths>,
+) -> Result<PathBuf, RuntimeErrorInfo> {
     let path = match value {
         None => dirs::home_dir().ok_or_else(super::resource_unavailable)?,
         Some(value) if value.starts_with("file:") => {
@@ -67,6 +75,9 @@ pub(super) fn host_path(value: Option<&str>) -> Result<PathBuf, RuntimeErrorInfo
     };
     if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(super::invalid_request("请输入 Host 上的绝对路径。"));
+    }
+    if let Some(paths) = paths {
+        paths.resolve(&path, false).map_err(error)?;
     }
     let path = canonicalize(&path)?;
     path_text(&path)?;
@@ -127,12 +138,26 @@ pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, Runtim
         .map(|opened| opened.file)
         .map_err(error)
 }
+#[cfg(test)]
 pub(super) fn list(
     directory: &Path,
     boundary: Option<&Path>,
     hidden: bool,
     generated: bool,
 ) -> Result<ListHostFilesResult, RuntimeErrorInfo> {
+    list_guarded(directory, boundary, hidden, generated, None)
+}
+
+pub(super) fn list_guarded(
+    directory: &Path,
+    boundary: Option<&Path>,
+    hidden: bool,
+    generated: bool,
+    paths: Option<&crate::user_paths::UserPaths>,
+) -> Result<ListHostFilesResult, RuntimeErrorInfo> {
+    if let Some(paths) = paths {
+        paths.resolve(directory, false).map_err(error)?;
+    }
     let file = open_resolved(directory, true)?;
     let names = directory_entry_names(&file, directory)?;
     let mut result = ListHostFilesResult {
@@ -155,6 +180,9 @@ pub(super) fn list(
             continue;
         }
         let candidate = directory.join(&name);
+        if paths.is_some_and(|p| p.resolve(&candidate, false).is_err()) {
+            continue;
+        }
         #[cfg(unix)]
         let known_directory = std::fs::metadata(&candidate).is_ok_and(|m| m.is_dir());
         #[cfg(windows)]
@@ -210,6 +238,13 @@ pub(super) fn list(
             size_bytes: size,
             is_symbolic_link,
         });
+    }
+    if result
+        .parent_path
+        .as_ref()
+        .is_some_and(|p| paths.is_some_and(|paths| paths.resolve(Path::new(p), false).is_err()))
+    {
+        result.parent_path = None;
     }
     result.entries.sort_by(|a, b| {
         (b.kind == SessionResourceEntryKind::Directory)

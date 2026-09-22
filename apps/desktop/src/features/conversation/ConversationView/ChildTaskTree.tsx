@@ -29,9 +29,12 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
               <strong>{item.task.title}</strong>
               <small>{childTaskStatusLabel(item.task.status)}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
             </span>
-            {item.usage.accumulated?.total_tokens !== null && item.usage.accumulated?.total_tokens !== undefined && (
-              <span className={styles.task_usage}>{formatCompactTokens(item.usage.accumulated.total_tokens)}</span>
-            )}
+            <span className={styles.task_usages}>
+              <span className={styles.task_usage} title="当前上下文窗口占用">上下文 {item.usage.context ? `${(item.usage.context.usage_basis_points / 100).toFixed(1)}%` : "—"}</span>
+              {item.usage.accumulated?.total_tokens !== null && item.usage.accumulated?.total_tokens !== undefined && (
+                <span className={styles.task_usage}>累计 {formatCompactTokens(item.usage.accumulated.total_tokens)}</span>
+              )}
+            </span>
             <Icon name="chevron-right" size={14} />
           </button>
         </div>

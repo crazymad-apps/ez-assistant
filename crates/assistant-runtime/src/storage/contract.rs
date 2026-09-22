@@ -71,6 +71,20 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    /// 为已从本域 Store 核实的附件提供旧定位别名。仅用于可靠历史中的结构化引用，
+    /// 不能将客户端任意路径交给此接口授权；默认实现没有历史目录别名。
+    fn historical_attachment_path(&self, _attachment: &StoredAttachment) -> Option<String> {
+        None
+    }
+    /// 只处理已经按 owner/message/tool resource 核实的可靠记录；HTTP 任意路径不得调用。
+    /// 适配后的路径仍需由文件入口执行原有根和物理文件校验。
+    fn current_recorded_resource_path(
+        &self,
+        path: &str,
+        _environment: &crate::SessionExecutionEnvironment,
+    ) -> String {
+        path.to_owned()
+    }
     fn load_providers(&self) -> StoreFuture<'_, Vec<crate::StoredProvider>>;
     fn put_provider(&self, provider: crate::StoredProvider) -> StoreFuture<'_, ()>;
     /// 只有持久连接仍与联网前捕获值一致时，才原子替换最后成功目录。

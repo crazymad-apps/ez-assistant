@@ -148,6 +148,7 @@ impl StorageEngine {
     pub(super) fn load_model_settings(&self) -> StorageResult<ModelSettings> {
         let raw = sql(self.connection.query_row("SELECT default_provider_instance_id, default_model_id, vision_provider_instance_id, vision_model_id FROM model_settings WHERE singleton_key=1", [], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?))))?;
         Ok(ModelSettings {
+            management: None,
             default_model: selection(raw.0, raw.1)?,
             vision_model: selection(raw.2, raw.3)?,
         })

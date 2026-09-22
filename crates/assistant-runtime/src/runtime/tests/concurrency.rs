@@ -1,6 +1,45 @@
 use super::{store::FaultInjectingStore, *};
 
 #[tokio::test]
+async fn host_recycling_rechecks_work_after_inflight_admission_and_observes_its_completion() {
+    let runtime = Arc::new(runtime(empty_model()));
+    let mut changed = runtime.subscribe_work_changes();
+    let admission = runtime.operation_gate.read().await;
+    let closing = runtime.clone();
+    let attempt = tokio::spawn(async move { closing.request_shutdown_if_unused(|| true).await });
+    tokio::task::yield_now().await;
+    assert!(!attempt.is_finished());
+    let finished = Arc::new(Notify::new());
+    let complete = finished.clone();
+    runtime.tasks.spawn(
+        async move {
+            complete.notified().await;
+        },
+        async {},
+    );
+    drop(admission);
+    assert!(!attempt.await.unwrap().unwrap());
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Running);
+    assert!(runtime.has_background_work());
+    changed.changed().await.unwrap();
+    finished.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while runtime.has_background_work() {
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!runtime.request_shutdown_if_unused(|| false).await.unwrap());
+    assert!(runtime.request_shutdown_if_unused(|| true).await.unwrap());
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Stopped);
+}
+
+#[tokio::test]
 async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent() {
     let entered = Arc::new(Notify::new());
     let cleanup = Arc::new(Notify::new());

@@ -41,6 +41,7 @@ use crate::{
 
 #[derive(Clone)]
 struct QueueDriverContext {
+    attachments: Arc<RwLock<BTreeMap<assistant_protocol::AttachmentId, crate::StoredAttachment>>>,
     session_loader: Arc<super::session_loading::SessionLoader>,
     workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
     config_registry: Arc<ConfigRegistry>,
@@ -68,6 +69,7 @@ fn with_disclosure_context(
     mut conversation: agent_types::ConversationSnapshot,
     context: Option<&agent_types::UserMessage>,
     shell_context: Option<&agent_types::UserMessage>,
+    resources: &super::resource_reference::ResourceReferenceProjection,
 ) -> agent_types::ConversationSnapshot {
     if let Some(shell_context) = shell_context
         && !crate::shell::context_is_current(&conversation, shell_context)
@@ -81,7 +83,7 @@ fn with_disclosure_context(
             .messages
             .push(ConversationMessage::User(context.clone()));
     }
-    conversation
+    resources.apply(conversation)
 }
 
 impl AssistantRuntime {
@@ -97,6 +99,7 @@ impl AssistantRuntime {
 
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
+            attachments: self.attachments.clone(),
             session_loader: self.session_loader.clone(),
             workspaces: self.workspaces.clone(),
             config_registry: self.config_registry.clone(),
@@ -350,6 +353,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 &config,
                 &context.config_registry,
                 RunCompilationResources {
+                    attachments: context.attachments.clone(),
                     shell,
                     skill_catalog: skill_catalog?,
                     model_factory: context.model_factory.as_ref(),
@@ -460,6 +464,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     skill_activation_latch,
                     can_speak,
                     disclosure_context,
+                    resource_projection,
                 } = compiled.into_parts();
                 let shell_context = match shell
                     .as_ref()
@@ -643,6 +648,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 conversation,
                                 disclosure_context.as_ref(),
                                 shell_context.as_ref(),
+                                &resource_projection,
                             ),
                         },
                         cancellation,
@@ -788,6 +794,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                                     journal.snapshot(),
                                                     disclosure_context.as_ref(),
                                                     shell_context.as_ref(),
+                                                    &resource_projection,
                                                 ),
                                             })
                                         })
@@ -842,6 +849,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                     journal.snapshot(),
                                     disclosure_context.as_ref(),
                                     shell_context.as_ref(),
+                                    &resource_projection,
                                 ),
                             })
                         }) {
@@ -900,6 +908,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                     replacement,
                                     disclosure_context.as_ref(),
                                     shell_context.as_ref(),
+                                    &resource_projection,
                                 ),
                             };
                         }

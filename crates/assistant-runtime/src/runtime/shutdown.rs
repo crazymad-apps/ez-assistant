@@ -15,6 +15,26 @@ use crate::{
 };
 
 impl AssistantRuntime {
+    /// 与正在准备/接纳的业务操作串行后再检查任务，避免客户端到期时抢先关闭尚在接纳的工作。
+    pub async fn request_shutdown_if_unused(
+        &self,
+        still_unused: impl FnOnce() -> bool,
+    ) -> RuntimeResult<bool> {
+        let _operation = self.operation_gate.write().await;
+        if self.has_background_work() || !still_unused() {
+            return Ok(false);
+        }
+        self.request_shutdown()?;
+        Ok(true)
+    }
+
+    /// 宿主结束用户访问时立即封闭准入并通知执行取消；资源仍须由 shutdown 异步收尾。
+    pub fn request_shutdown(&self) -> RuntimeResult<()> {
+        self.begin_shutdown()?;
+        self.root_cancellation.cancel();
+        Ok(())
+    }
+
     /// 拒绝新工作、取消活动 Run，并在各自等待上限内收敛 supervisor 与 Store。
     pub async fn shutdown(
         &self,

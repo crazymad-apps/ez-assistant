@@ -8,6 +8,7 @@ import type {
 describe("generated assistant protocol", () => {
   it("represents additive host capabilities", () => {
     const capabilities = {
+      mode: "personal",
       min_compatible_version: "0.25.2",
       runtime_version: "0.25.2",
       max_command_bytes: 1024,

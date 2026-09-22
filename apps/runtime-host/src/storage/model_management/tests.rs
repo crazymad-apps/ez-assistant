@@ -78,6 +78,7 @@ fn fixed_values_roundtrip_reset_and_provider_delete_preserve_selections_and_othe
     changed_origin.origin = assistant_protocol::ModelConfigOrigin::Online;
     assert!(engine.put_model_fixed_config(changed_origin).is_err());
     let settings = ModelSettings {
+        management: None,
         default_model: Some(first.selection.clone()),
         vision_model: Some(second.selection.clone()),
     };

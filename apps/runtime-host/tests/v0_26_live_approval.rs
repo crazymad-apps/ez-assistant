@@ -148,7 +148,7 @@ fn create_session_without_implicit_permissions(
         .expect("session id")
         .to_owned();
     fs::write(
-        home.join("data/sessions")
+        home.join("users/_personal/data/sessions")
             .join(&session_id)
             .join("private/permissions.json"),
         b"{\"schema_version\":1,\"rules\":[]}",

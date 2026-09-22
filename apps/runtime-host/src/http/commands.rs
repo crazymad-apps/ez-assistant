@@ -89,6 +89,27 @@ pub(super) async fn handle_command(
     if let Err(error) = permit.check() {
         return command_error(Some(request.request_id), error.protocol_info());
     }
+    if state.access.center().is_some() {
+        let management = matches!(
+            request.command,
+            HostCommand::HostAccess(_) | HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
+        );
+        if management != permit.native {
+            return super::error::HttpError::forbidden("企业用户与本机管理凭据不能相互替代。")
+                .into_response();
+        }
+    }
+    // Host 配置独立于任一用户 Runtime 的就绪状态。
+    if let HostCommand::HostAccess(command) = request.command {
+        return match state.access.command(Some(command), permit).await {
+            Ok(status) => Json(CommandResponse {
+                request_id: request.request_id,
+                result: HostCommandResult::HostAccess(status),
+            })
+            .into_response(),
+            Err(error) => command_error(Some(request.request_id), error.protocol_info()),
+        };
+    }
     if matches!(
         request.command,
         HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
@@ -100,35 +121,41 @@ pub(super) async fn handle_command(
         )
             .into_response();
     }
-    // 本机关闭属于进程控制；未就绪时不能进入任何业务 dispatch。
-    if state.startup.services().is_err() {
-        if matches!(
-            request.command,
-            HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
-        ) {
-            state.shutdown.cancel();
-            return Json(CommandResponse {
-                request_id: request.request_id,
-                result: HostCommandResult::Runtime(Box::new(
-                    RuntimeCommandResult::ShutdownRuntime(
-                        assistant_protocol::ShutdownRuntimeResult {
-                            lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
-                        },
-                    ),
-                )),
-            })
-            .into_response();
-        }
-        return super::error::HttpError::unavailable().into_response();
+    // 停止 Host 是进程操作，不为此打开任何用户数据库。
+    if matches!(
+        request.command,
+        HostCommand::Runtime(RuntimeCommand::ShutdownRuntime(_))
+    ) {
+        state.shutdown.cancel();
+        let lifecycle = if let Some(domains) = &state.domains {
+            if let Err(error) = domains.wait_shutdown().await {
+                return super::error::HttpError::from_domain(error).into_response();
+            }
+            assistant_protocol::RuntimeLifecycle::Stopped
+        } else {
+            assistant_protocol::RuntimeLifecycle::ShuttingDown
+        };
+        return Json(CommandResponse {
+            request_id: request.request_id,
+            result: HostCommandResult::Runtime(Box::new(RuntimeCommandResult::ShutdownRuntime(
+                assistant_protocol::ShutdownRuntimeResult { lifecycle },
+            ))),
+        })
+        .into_response();
     }
+    let services = match state.user_services(&permit).await {
+        Ok(services) => services,
+        Err(error) => return error.into_response(),
+    };
     if matches!(
         request.command,
         HostCommand::Runtime(RuntimeCommand::ReloadConfig(_))
-    ) && let Err(error) = state.access.command(None, permit.clone()).await
+    ) && permit.native
+        && let Err(error) = state.access.command(None, permit.clone()).await
     {
         return command_error(Some(request.request_id), error.protocol_info());
     }
-    let dispatched = dispatch(&state, request.command, permit).await;
+    let dispatched = dispatch(&state, &services, request.command, permit).await;
     match dispatched {
         Ok((result, shutdown_requested)) => {
             let response = (
@@ -155,14 +182,15 @@ fn command_error(request_id: Option<String>, error: RuntimeErrorInfo) -> Respons
 
 async fn dispatch(
     state: &HttpState,
+    services: &super::ReadyServices,
     command: HostCommand,
     permit: AccessPermit,
 ) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
     match command {
-        HostCommand::Runtime(command) => dispatch_runtime(state, command)
+        HostCommand::Runtime(command) => dispatch_runtime(state, services, command, &permit)
             .await
             .map_err(|error| error.to_protocol_info()),
-        HostCommand::DeviceGateway(command) => dispatch_device_gateway(state, command).await,
+        HostCommand::DeviceGateway(command) => dispatch_device_gateway(services, command).await,
         HostCommand::HostAccess(command) => state
             .access
             .command(Some(command), permit)
@@ -173,13 +201,9 @@ async fn dispatch(
 }
 
 async fn dispatch_device_gateway(
-    state: &HttpState,
+    services: &super::ReadyServices,
     command: DeviceGatewayCommand,
 ) -> Result<(HostCommandResult, bool), RuntimeErrorInfo> {
-    let services = state
-        .startup
-        .services()
-        .map_err(|error| error.to_protocol_info())?;
     let result = match command {
         DeviceGatewayCommand::GetSnapshot(_) => DeviceGatewayCommandResult::GetSnapshot(
             services
@@ -280,9 +304,10 @@ async fn dispatch_device_gateway(
 
 async fn dispatch_runtime(
     state: &HttpState,
+    services: &super::ReadyServices,
     command: RuntimeCommand,
+    permit: &AccessPermit,
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
-    let services = state.startup.services()?;
     let runtime = services.runtime.as_ref();
     let (result, shutdown) = match command {
         RuntimeCommand::ListProviders(_) => (
@@ -329,6 +354,19 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::RefreshModelSource {} => {
+            let loader = services
+                .models
+                .as_ref()
+                .ok_or(RuntimeError::InvalidRequest {
+                    reason: "当前模型来源不支持此刷新。",
+                })?;
+            loader.refresh().await?;
+            (
+                RuntimeCommandResult::RefreshModelSource(runtime.get_model_settings()?),
+                false,
+            )
+        }
         RuntimeCommand::GetModelSettings(_) => (
             RuntimeCommandResult::GetModelSettings(runtime.get_model_settings()?),
             false,
@@ -483,8 +521,8 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::ReloadConfig(request) => {
             let result = runtime.reload_config(request).await?;
-            state.startup.services()?.speech.reload().await;
-            state.startup.services()?.device_gateway.notify_changed();
+            services.speech.reload().await;
+            services.device_gateway.notify_changed();
             (RuntimeCommandResult::ReloadConfig(result), false)
         }
         RuntimeCommand::SetDefaultModel(request) => (
@@ -583,7 +621,10 @@ async fn dispatch_runtime(
             let _gate = state.terminals.source_gate.lock().await;
             let id = request.workspace_id.clone();
             let result = runtime.remove_workspace(request).await?;
-            state.terminals.source_removed(None, Some(&id)).await;
+            state
+                .terminals
+                .source_removed(permit.user_key(), None, Some(&id))
+                .await;
             (RuntimeCommandResult::RemoveWorkspace(result), false)
         }
         RuntimeCommand::GetAttachment(request) => (
@@ -612,7 +653,10 @@ async fn dispatch_runtime(
             let _gate = state.terminals.source_gate.lock().await;
             let id = request.session_id.clone();
             let result = runtime.delete_session(request).await?;
-            state.terminals.source_removed(Some(&id), None).await;
+            state
+                .terminals
+                .source_removed(permit.user_key(), Some(&id), None)
+                .await;
             (RuntimeCommandResult::DeleteSession(result), false)
         }
         RuntimeCommand::ClearSession(request) => (

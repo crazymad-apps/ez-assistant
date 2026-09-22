@@ -789,3 +789,40 @@ refresh 沿用已约定机制：插入一条 `user` role 消息，不触发 Run�
 - `set_session_approval_mode` 在 Session mutation gate 内先提交 Store，再更新内存 state、发布事件并
   返回成功；state 更新失败时不发布成功事实，并尝试把 Session 标记为 faulted。没有新增协议字段、
   数据库列、迁移或恢复时的模式回填。
+
+## v0.27.0 C03 M0 历史资源适配
+
+- Runtime 接收 Host 已装配的用户配置、Store 和目录，普通业务不检查 Host 模式。Store 可提供已核实附件的历史地址及已记录工具资源的当前物理位置；默认实现保持原行为，旧个人域规则由 Host 私有实现解释。
+- 附件显示及 Fork 先匹配本 Session 附件记录；请求编译只在恢复校验后的副本中适配结构化 FileReferences，旧目录提示通过现有隐藏 InternalContext 补充并进入正常预算。子任务沿用新生成的 delegation 目录上下文。不得改写 Journal、C02 摘要、冻结 Skill 或任意自由文本来伪造历史一致性。
+- Skill 来源增加个人兼容根与 Host 补充根，优先级低于当前个人根；活动事实仍属于当前 Runtime。本阶段不引入逐输入登录绑定、用户配额或空闲回收机制。
+
+## v0.27.0 C03 M2 用户 Runtime 生命周期
+
+- Host 装配时可通过 `with_cancellation` 注入整个 Runtime 的生命周期信号；必须在发布 Runtime 前绑定，不能使用浏览器连接或单个客户端 Token 作为该信号。取消后业务准入立即关闭，仍须调用既有异步 shutdown 完成任务、服务和 Store 收尾。
+- `RuntimeTaskOwner` 复用已有任务注册表提供工作查询及变化通知，不另存活动 Run 计数。Host 可据此判断 Token 到期后是否仍有已接纳工作；关闭前通过 `request_shutdown_if_unused` 持有既有操作写门禁，复核任务事实和调用方的当前登录条件，再关闭准入，防止检查与接纳竞态。
+- 模型来源与只读策略由配置层集中处理；模型准备、标题、压缩和模型管理复用统一接口。C03 的不可用占位已由 C04 配置源接入取代；没有有效默认模型时使用既有模型错误，Runtime 不判断 Host 模式、不读取企业凭据、不回退其他用户模型。
+- 任务、Input、SessionState 和持久化结构不增加登录绑定或企业凭据副本；同一用户新登录不重建 Runtime，用户统一退出的取消范围由 Host 对整域生命周期发出。
+
+## C04 M0 模型参数模板
+
+原 `config/model_templates.rs` 的型号规格纯数据迁至共享 `packages/assistant-protocol/resources/model-templates.json`，Runtime 编译嵌入一次解析；协议解析、仅补 Unknown、字段来源及参数一致性判断继续由 Rust 实现。型号列表不构成在线目录或固定配置回退，个人运行行为保持。中心独立文件重载归 Center，不给个人 Runtime 新增文件监听或网络模板加载。两端使用共享参数样例约束协议覆盖及冲突合并。
+
+## v0.27.0 C04 M2 外部模型来源
+
+- Runtime 构造时确定 `ModelSource`。外部来源跳过个人 Provider Store，所有模型准备入口使用唯一当前外部配置，忽略历史会话的个人模型选择；本地编辑入口拒绝修改。
+- `ExternalModelConfiguration` 在配置层规范化成已有服务商、目录、固定参数和默认模型。业务查询、主调用、标题、压缩与 child 共用读取及编译路径；参数来源选择集中在 `config/model_source.rs`，不在业务端分流。Provider Arc 沿用原接纳校验，配置归属 Arc 仅用于远程 Transport 的精确拒绝处理。
+- Host 先获取 `ExternalModelPublication` 门禁，再在当前身份短锁内提交；完成后释放身份锁与门禁再通知。明确拒绝只失效匹配的 Arc；普通刷新失败保留有效配置，已失效配置不能因刷新失败恢复。
+- `ModelSettings.management` 只承载只读策略、不可用原因、获取时间及刷新错误；默认、服务商、目录与参数继续使用已有统一接口，不复制到专用企业模型投影。
+- Conversation Journal 在内存提交前校验消息 ID 唯一性，与持久化约束一致；上游复用消息 ID 时以失败结束当前 Run，不把不可持久化的消息作为完成结果，也不重放历史工具。
+
+## v0.27.0 C05 长任务观察
+
+- 历史分页和 around 定位以目标 Session 的既有异步 mutation gate 及 Store owner/generation 窗口为一致性边界，不要求全局事件 sequence 静止。历史页返回读取起点水位，不能据此吞掉未消费的实时事件。子任务读取继续核验其独立 generation。
+- 子任务创建时冻结实际装配模型的 `context_window_tokens`；公开 context 由完整产品历史派生有效上下文后复用 `agent-context::context_token_usage`，累计消耗仍从完整历史求和。压缩提交使用既有 `ConversationCommitted` 通知刷新，旧任务窗口缺失则保持未知。
+
+## v0.27.0 C06 默认文件权限规则
+
+Host 通过 RunToolBundle 注入 PermissionRuleSource，仅提供普通规则数据，不返回授权结果；父子
+Authorizer 在每次调用和审批返回后加载，与用户规则统一匹配并按 Deny > Ask > Allow 合并。
+默认规则不写权限文件、不进入设置列表；文件 matcher 的内存例外子树不能被持久化。逻辑路径
+和物理目标都参与文件规则匹配，路径解析失败关闭授权；Host 文件 I/O 复核复用同一匹配器。

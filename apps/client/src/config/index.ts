@@ -1,13 +1,13 @@
 import * as p from "@clack/prompts";
 import { isAbsolute } from "node:path";
 import { isIP } from "node:net";
-import type { HostAccessConfiguration } from "@ez-assistant/protocol/node";
+import type { HostMode, HostAccessConfiguration } from "@ez-assistant/protocol/node";
 import { Cancelled, ClientError, cancelled } from "../errors.js";
 import { HostControl } from "../host/control.js";
 import { note, safe } from "../terminal/output.js";
 import { configureStartup } from "./startup.js";
 
-type Action = "password" | "remote" | "port" | "transport" | "domains" | "review" | "save" | "reload" | "back";
+type Action = "identity" | "password" | "remote" | "port" | "transport" | "domains" | "review" | "save" | "reload" | "back";
 export function answer<T>(value: T | symbol): T { if (p.isCancel(value)) throw new Cancelled(); return value as T; }
 export function endpointChanged(a: HostAccessConfiguration, b: HostAccessConfiguration): boolean {
   return a.port !== b.port || a.scheme !== b.scheme || a.tls_certificate !== b.tls_certificate || a.tls_private_key !== b.tls_private_key;
@@ -41,13 +41,17 @@ export async function configure(host: HostControl): Promise<boolean> {
       if (root === "startup") { failed = await configureStartup(host.home, signal, () => saved.push("启动设置")); continue; }
       let session = await host.configuration();
       let draft = structuredClone(session.status.configuration); let blocked = false;
-      p.log.info(session.target ? "Host 业务就绪 · 在线配置" : "Host 未启动 · 离线配置，保存供下次启动使用");
+      let mode: HostMode = session.status.mode ?? "personal";
+      let center_url = session.status.center_url ?? "";
+      let clear_center_binding = false;
+      p.log.info(session.target ? "Host 管理可用 · 在线配置" : "Host 未启动 · 离线配置，保存供下次启动使用");
       p.log.info("↑↓ 选择 · Enter 确定 · Esc / Ctrl+C 取消配置");
       note(fields(draft).map(([key, value]) => `${key}  ${value}`).join("\n"), "当前访问设置");
       access: while (true) {
         cancelled(signal);
-        const dirty = JSON.stringify(draft) !== JSON.stringify(session.status.configuration);
+        const dirty = JSON.stringify(draft) !== JSON.stringify(session.status.configuration) || mode !== (session.status.mode ?? "personal") || center_url !== (session.status.center_url ?? "") || clear_center_binding;
         const action = answer(await p.select<Action>({ message: blocked ? "配置状态已变化，请重新读取" : dirty ? "访问设置 · 有未保存修改" : "选择要配置的项目", signal, showInstructions: false, options: [
+          { value: "identity", label: "模式与企业中心", hint: mode === "enterprise" ? "企业模式" : "个人模式" },
           { value: "password", label: "访问密码", hint: session.status.password_configured ? "已设置 · 独立保存" : "未设置" },
           { value: "remote", label: "非本地访问", hint: draft.remote_enabled ? "开启" : "仅本机" },
           { value: "port", label: "监听端口", hint: String(draft.port) },
@@ -63,9 +67,18 @@ export async function configure(host: HostControl): Promise<boolean> {
               break access;
             case "reload":
               if (!await confirm("重新读取会丢弃当前访问草稿，继续？", false)) break;
-              session = await host.configuration(); draft = structuredClone(session.status.configuration); blocked = false; failed = false;
+              session = await host.configuration(); draft = structuredClone(session.status.configuration); mode = session.status.mode ?? "personal"; center_url = session.status.center_url ?? ""; clear_center_binding = false; blocked = false; failed = false;
               p.log.success("已重新读取访问设置"); break;
             case "review": preview(session.status.configuration, draft); break;
+            case "identity": {
+              mode = answer(await p.select<HostMode>({ message: "Host 模式", initialValue: mode, signal, options: [{ value: "personal", label: "个人模式" }, { value: "enterprise", label: "企业模式" }] }));
+              if (mode === "enterprise") {
+                center_url = answer(await p.text({ message: "企业中心地址（首次配置可留空使用发包默认值）", initialValue: center_url, placeholder: "https://center.example.com", signal }));
+                if (session.status.center_id) clear_center_binding = await confirm(`已绑定中心 ${session.status.center_id}。是否清除绑定，下次登录重新绑定？原用户数据保留。`, false);
+              }
+              p.log.warn("保存后须显式重启 Host；重启将中断所有用户任务并断开所有客户端。");
+              break;
+            }
             case "password": {
               const password = answer(await p.password({ message: "设置访问密码", mask: "●", signal, validate(value) {
                 if (!value?.trim()) return "密码不能为空或全空白。";
@@ -79,7 +92,7 @@ export async function configure(host: HostControl): Promise<boolean> {
               p.log.info("其他访问草稿仍保留，保存前请重新预览。"); break;
             }
             case "remote":
-              if (!session.status.password_configured && !draft.remote_enabled) { p.log.warn("请先设置访问密码，再开启非本地访问。"); break; }
+              if (!session.status.password_configured && mode !== "enterprise" && !draft.remote_enabled) { p.log.warn("请先设置访问密码，再开启非本地访问。"); break; }
               if (session.target && !draft.remote_enabled && (session.status.restart_required || endpointChanged(draft, session.status.configuration))) { p.log.warn("请先保存监听配置并重启 Host，再开启非本地访问。"); break; }
               draft.remote_enabled = await confirm("允许其他设备访问本机 Host？", draft.remote_enabled); break;
             case "port":
@@ -105,9 +118,12 @@ export async function configure(host: HostControl): Promise<boolean> {
               if (!dirty) { p.log.info("访问设置没有变化。"); break; }
               if (session.target && draft.remote_enabled && endpointChanged(draft, session.status.configuration)) { p.log.warn("请先关闭非本地访问，修改监听并重启后再开启。"); break; }
               preview(session.status.configuration, draft);
+              note(`模式  ${mode}
+中心地址  ${mode === "enterprise" ? center_url || "首次配置使用发包默认值" : "不使用"}
+中心绑定  ${clear_center_binding ? "清除，原用户数据保留" : session.status.center_id ?? "未绑定"}`, "身份配置预览");
               if (!await confirm("保存这些访问设置？", true)) break;
-              await session.save({ type: "configure", payload: { expected_revision: session.status.revision, configuration: draft } });
-              draft = structuredClone(session.status.configuration); saved.push("访问设置"); failed = false;
+              await session.save({ type: "configure", payload: { expected_revision: session.status.revision, configuration: draft, mode, ...(mode === "enterprise" && center_url ? { center_url } : {}), clear_center_binding } });
+              draft = structuredClone(session.status.configuration); mode = session.status.mode ?? "personal"; center_url = session.status.center_url ?? ""; clear_center_binding = false; saved.push("访问设置"); failed = false;
               if (!session.target) p.log.success("已保存，供下次启动使用。");
               else if (session.status.restart_required) p.log.warn("已保存，需显式 restart 后生效；当前地址保持不变。");
               else p.log.success("访问策略已即时生效。");

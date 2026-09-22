@@ -113,7 +113,7 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     fs::write(
         runtime_home
             .path()
-            .join("data/sessions")
+            .join("users/_personal/data/sessions")
             .join(&session_id)
             .join("private/permissions.json"),
         b"{\"schema_version\":1,\"rules\":[]}",
@@ -322,7 +322,7 @@ fn first_user_message_id(conversation: &Value) -> String {
 }
 
 fn verify_physical_state(runtime_home: &Path, session_id: &str) {
-    let database = runtime_home.join("data/runtime.sqlite3");
+    let database = runtime_home.join("users/_personal/data/runtime.sqlite3");
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open acceptance database read-only phase");
     let (lifecycle, model_id, generation, message_count): (String, String, i64, i64) = connection
@@ -355,7 +355,7 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
     }
 
     let body = runtime_home.join(format!(
-        "data/sessions/{session_id}/conversation.{generation}.jsonl"
+        "users/_personal/data/sessions/{session_id}/conversation.{generation}.jsonl"
     ));
     let content = fs::read_to_string(body).expect("read authoritative conversation JSONL");
     assert_eq!(content.lines().count(), 2);

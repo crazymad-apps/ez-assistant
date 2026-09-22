@@ -381,6 +381,7 @@ pub(super) struct CompiledRunAgent {
     skill_activation_latch: Arc<SkillActivationLatch>,
     can_speak: bool,
     disclosure_context: Option<agent_types::UserMessage>,
+    resource_projection: super::resource_reference::ResourceReferenceProjection,
 }
 
 pub(super) struct CompiledRunParts {
@@ -394,6 +395,7 @@ pub(super) struct CompiledRunParts {
     pub(super) skill_activation_latch: Arc<SkillActivationLatch>,
     pub(super) can_speak: bool,
     pub(super) disclosure_context: Option<agent_types::UserMessage>,
+    pub(super) resource_projection: super::resource_reference::ResourceReferenceProjection,
 }
 
 impl CompiledRunAgent {
@@ -424,6 +426,7 @@ impl CompiledRunAgent {
             skill_activation_latch: self.skill_activation_latch,
             can_speak: self.can_speak,
             disclosure_context: self.disclosure_context,
+            resource_projection: self.resource_projection,
         }
     }
 }
@@ -442,6 +445,11 @@ pub(super) struct RunAuthorizationInput {
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
 pub(super) struct RunCompilationResources<'a> {
+    pub(super) attachments: Arc<
+        std::sync::RwLock<
+            std::collections::BTreeMap<assistant_protocol::AttachmentId, crate::StoredAttachment>,
+        >,
+    >,
     pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) skill_catalog: crate::SkillCatalog,
     pub(super) model_factory: &'a dyn crate::ModelServiceFactory,
@@ -490,6 +498,7 @@ impl AssistantRuntime {
         session: &SessionController,
         selection: Option<&assistant_protocol::ModelSelection>,
     ) -> RuntimeResult<(RuntimeContextCompactor, Arc<crate::config::PreparedModel>)> {
+        self.model_factory.ensure_available()?;
         let snapshot = self.config_registry.snapshot()?;
         let prepared = resolve_session_model(
             &self.config_registry,
@@ -536,6 +545,7 @@ pub(super) async fn compile_run_agent(
     authorization: RunAuthorizationInput,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledRunAgent> {
+    resources.model_factory.ensure_available()?;
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
@@ -609,6 +619,23 @@ pub(super) async fn compile_run_agent(
     if let Some(auxiliary) = &auxiliary_prepared {
         auxiliary.ensure_current(registry)?;
     }
+    let current_prompt = session.current_system_prompt()?;
+    let resource_projection =
+        {
+            let attachments = resources.attachments.read().map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "attachment registry",
+                }
+            })?;
+            super::resource_reference::ResourceReferenceProjection::new(
+                resources.store.as_ref(),
+                attachments
+                    .values()
+                    .filter(|a| a.session_id == *session.id()),
+                session.environment(),
+                &current_prompt,
+            )?
+        };
     bind_image_preparation(&mut compiled, session.environment());
     let requested_effort = session.reasoning_effort()?;
     let frozen_reasoning_effort = requested_effort.or_else(|| {
@@ -658,6 +685,7 @@ pub(super) async fn compile_run_agent(
             }
             RuntimeError::RunToolsBuildFailed { source }
         })?;
+    let default_rules = bundle.default_rules();
     let (base_tools, infrastructure_policies) = bundle.into_parts();
     let active_skill_names = {
         let state = session.lock_state()?;
@@ -793,6 +821,7 @@ pub(super) async fn compile_run_agent(
                 events: authorization.events.clone(),
             }),
         )?
+        .with_default_rules(default_rules.clone())
         .with_goal_signal_latch(goal_signal_latch.clone())
         .with_mcp_registry(resources.mcp_registry.clone()),
     );
@@ -964,6 +993,7 @@ pub(super) async fn compile_run_agent(
         );
         let delegation_controller =
             Arc::new(ParentDelegationController::new(ParentDelegationResources {
+                context_window_tokens: compiled.model.context_window_tokens(),
                 session: session.clone(),
                 parent_run_id: authorization.run_id,
                 variant: authorization.variant,
@@ -975,11 +1005,13 @@ pub(super) async fn compile_run_agent(
                 permission_coordinator: authorization.permission_coordinator,
                 approval_registry: authorization.approval_registry,
                 infrastructure_policies,
+                default_rules,
                 events: authorization.events,
                 limits: delegation,
                 skill_catalog: resources.skill_catalog.clone(),
                 mcp_registry: resources.mcp_registry.clone(),
                 disclosure_context: mcp_disclosure.context.clone(),
+                resource_projection: resource_projection.for_child(),
                 shell_context: resources
                     .shell
                     .as_ref()
@@ -1033,6 +1065,7 @@ pub(super) async fn compile_run_agent(
         skill_activation_latch,
         can_speak,
         disclosure_context: mcp_disclosure.context,
+        resource_projection,
     };
     result.ensure_models_current(registry)?;
     Ok(result)
@@ -1044,12 +1077,14 @@ pub(super) fn compile_resolved_model_service(
     model_factory: &dyn crate::ModelServiceFactory,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledModelService> {
+    model_factory.ensure_available()?;
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let transport = active.transport();
     let bundle = model_factory
         .create_model(ModelServiceFactoryRequest {
+            external_configuration: model_config.external_configuration.as_ref(),
             provider: model_config.provider(),
             protocol: model_config.protocol(),
             capabilities: model_config.capabilities(),

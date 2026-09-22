@@ -20,7 +20,7 @@ struct TransportErrorInfo {
 #[serde(rename_all = "snake_case")]
 enum TransportErrorCode {
     InvalidRequest,
-    Unauthorized,
+    AuthenticationRequired,
     Forbidden,
     RuntimeUnavailable,
 }
@@ -31,6 +31,18 @@ struct ErrorBody {
 }
 
 impl HttpError {
+    pub(super) fn from_domain(error: crate::user_domain::DomainError) -> Self {
+        use crate::user_domain::DomainError;
+        match error {
+            DomainError::Access(crate::access::AccessError::Unauthorized) => Self::unauthorized(),
+            error => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                TransportErrorCode::RuntimeUnavailable,
+                error.to_string(),
+            ),
+        }
+    }
+
     pub(super) fn unavailable() -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -49,7 +61,7 @@ impl HttpError {
     pub(super) fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
-            TransportErrorCode::Unauthorized,
+            TransportErrorCode::AuthenticationRequired,
             "runtime access token is missing or invalid",
         )
     }

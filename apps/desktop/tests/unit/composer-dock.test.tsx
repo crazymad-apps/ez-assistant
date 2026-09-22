@@ -278,7 +278,7 @@ describe("ComposerDock", () => {
     const store = new RootStore();
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
-      min_compatible_version: "0.25.2",
+      mode: "personal", min_compatible_version: "0.25.2",
       runtime_version: "0.25.2",
       max_command_bytes: 64 * 1024,
       max_attachment_bytes: null,
@@ -319,7 +319,7 @@ describe("ComposerDock", () => {
     const store = new RootStore();
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
     store.connection.markConnected("instance-1", {
-      min_compatible_version: "0.25.2",
+      mode: "personal", min_compatible_version: "0.25.2",
       runtime_version: "0.25.2",
       max_command_bytes: 64 * 1024,
       max_attachment_bytes: null,
@@ -1242,7 +1242,7 @@ function renderComposer(overrides: Readonly<{
   vi.spyOn(store.settings, "listProviderModels").mockResolvedValue([discoveredModel(), discoveredModel("alternate")]);
   vi.spyOn(store, "listSkills").mockResolvedValue(overrides.skill_catalog ?? { available: true, skills: [], diagnostics: [] });
   store.connection.markConnected("instance-1", {
-    min_compatible_version: "0.25.2",
+    mode: "personal", min_compatible_version: "0.25.2",
     runtime_version: "0.25.2",
     max_command_bytes: 64 * 1024,
     max_attachment_bytes: null,

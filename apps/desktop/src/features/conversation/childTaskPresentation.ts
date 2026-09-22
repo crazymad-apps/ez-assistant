@@ -26,6 +26,7 @@ export function mergeChildTaskItems(
         : live_task,
       usage: live_usage
         ? {
+            context: reliable?.usage.context,
             accumulated: {
               input_tokens: live_usage.input_tokens,
               output_tokens: live_usage.output_tokens,

@@ -5,6 +5,8 @@
   display: grid;
   place-items: center;
   overflow: clip;
+  box-sizing: border-box;
+  padding: 58px 24px 24px;
   // 色层覆盖整个视口，给点阵增加远近层次，不围绕表单制造白色光圈。
   background:
     radial-gradient(ellipse at 3% 12%, #d8e5f6 0, transparent 52%),
@@ -33,48 +35,18 @@
 .content {
   position: relative;
   z-index: 1;
-  width: min(384px, calc(100vw - 48px));
-  margin: 100px 0 48px;
+  width: min(384px, 100%);
 }
 .mark {
   display: block;
-  width: 64px;
-  height: 64px;
-  margin: 0 auto 20px;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 24px;
 }
-.content h1 {
-  font-size: 29px;
-  font-weight: 600;
-  letter-spacing: -1px;
-  text-align: center;
-  margin: 0 0 10px;
-}
-.subtitle {
-  color: var(--ez-text-muted);
-  font-size: 13px;
-  text-align: center;
-  overflow-wrap: anywhere;
-  margin: 0 0 32px;
-}
-.footer {
-  position: absolute;
-  bottom: 22px;
-  color: var(--ez-text-muted);
-  font-size: 11px;
-  letter-spacing: 1.5px;
-}
+// 矮窗口优先收紧装饰；极小窗口仍允许内容自然滚动，避免裁掉表单或错误。
 @media (max-height: 620px) {
-  .content {
-    margin-top: 68px;
-  }
-  .mark {
-    width: 52px;
-    height: 52px;
-    margin-bottom: 14px;
-  }
-  .subtitle {
-    margin-bottom: 20px;
-  }
+  .page { padding-top: 50px; padding-bottom: 16px; }
+  .mark { width: 40px; height: 40px; margin-bottom: 16px; }
 }
 
 .title_bar[data-native-window="true"] {

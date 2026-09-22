@@ -1,0 +1,17 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+  min-width: 0;
+}
+/* 详情页统一滚动，卡片按内容高度排布，不再压缩出第二个纵向滚动区。 */
+.page > * {
+  flex-shrink: 0;
+}
+.models {
+  min-width: 0;
+}
+.toolbar {
+  margin-bottom: 12px;
+}

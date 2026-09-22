@@ -158,7 +158,7 @@
 - 验证按最小有效范围执行，最终说明已执行、未执行及原因。
 - 2026-09-07 用户调整开发环境为 `~/.ez-assistant`。`npm run tauri -- dev` 默认注入该目录；
   手动启动开发 GUI／Host 时分别显式设置 `EZ_ASSISTANT_RUNTIME_HOME`／`--runtime-home`。
-  自动化与隔离验收仍使用临时 Runtime Home，不得把测试数据或批量清理操作指向用户目录。
+  自动化与隔离验收使用项目 `.runtime-test/` 下按场景新建的独立 Runtime Home（2026-09-20 用户指定），不得把测试数据或批量清理操作指向用户目录，也不复用该目录中已有测试数据。
   未经启动脚本或环境覆盖的 debug／Dev 二进制仍回退 `.ez-assistant-dev`；开发 GUI（含 Release 验证）
   继续使用 `tauri.dev.conf.json` 隔离应用偏好和 WebView 存储。数据库操作按第七节区分生产与非生产环境。
 

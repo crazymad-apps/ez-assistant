@@ -19,6 +19,7 @@ impl AssistantRuntime {
         &self,
         id: ProviderInstanceId,
     ) -> RuntimeResult<ProviderModelCatalogSnapshot> {
+        self.ensure_model_editable()?;
         self.ensure_running()?;
         let provider = self.provider(&id)?;
         let mut models = self

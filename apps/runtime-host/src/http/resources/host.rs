@@ -35,6 +35,7 @@ pub(super) fn permit(
 
 pub(in crate::http) async fn list_host_files(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     Json(request): Json<ListHostFilesRequest>,
 ) -> Response {
     let permit = match permit(&state) {
@@ -43,8 +44,14 @@ pub(in crate::http) async fn list_host_files(
     };
     match read(move || {
         let _permit = permit;
-        let path = files::host_path(request.path.as_deref())?;
-        files::list(&path, None, request.include_hidden, true)
+        let path = files::host_path_guarded(request.path.as_deref(), Some(&services.paths))?;
+        files::list_guarded(
+            &path,
+            None,
+            request.include_hidden,
+            true,
+            Some(&services.paths),
+        )
     })
     .await
     {
@@ -54,6 +61,7 @@ pub(in crate::http) async fn list_host_files(
 }
 pub(in crate::http) async fn select_host_directory(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     Json(request): Json<HostFileRequest>,
 ) -> Response {
     let permit = match permit(&state) {
@@ -62,7 +70,7 @@ pub(in crate::http) async fn select_host_directory(
     };
     match read(move || {
         let _permit = permit;
-        let path = files::host_path(Some(&request.path))?;
+        let path = checked_path(&services.paths, &request.path)?;
         files::open_resolved(&path, true)?;
         Ok(HostFileRequest {
             path: files::path_text(&path)?,
@@ -76,6 +84,7 @@ pub(in crate::http) async fn select_host_directory(
 }
 pub(in crate::http) async fn preview_host_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     Json(request): Json<HostFileRequest>,
 ) -> Response {
     let permit = match permit(&state) {
@@ -84,7 +93,7 @@ pub(in crate::http) async fn preview_host_file(
     };
     match read(move || {
         let _permit = permit;
-        files::preview(&files::host_path(Some(&request.path))?)
+        files::preview(&checked_path(&services.paths, &request.path)?)
     })
     .await
     {
@@ -94,6 +103,7 @@ pub(in crate::http) async fn preview_host_file(
 }
 pub(in crate::http) async fn download_host_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     Json(request): Json<HostFileRequest>,
 ) -> Response {
     let permit = match permit(&state) {
@@ -101,7 +111,7 @@ pub(in crate::http) async fn download_host_file(
         Err(e) => return resource_error(e),
     };
     match read(move || {
-        let path = files::host_path(Some(&request.path))?;
+        let path = checked_path(&services.paths, &request.path)?;
         Ok((files::open_resolved(&path, false)?, path, permit))
     })
     .await
@@ -112,13 +122,10 @@ pub(in crate::http) async fn download_host_file(
 }
 pub(in crate::http) async fn download_session_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<PreviewSessionResourceFileRequest>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let id = match SessionId::new(session_id) {
         Ok(id) => id,
         Err(_) => return resource_error(invalid_request("会话标识无效。")),
@@ -139,7 +146,12 @@ pub(in crate::http) async fn download_session_file(
         Ok(p) => p,
         Err(e) => return resource_error(e),
     };
-    match read(move || Ok((files::open_resolved(&path, false)?, path, permit))).await {
+    match read(move || {
+        let path = services.paths.resolve(&path, false).map_err(files::error)?;
+        Ok((files::open_resolved(&path, false)?, path, permit))
+    })
+    .await
+    {
         Ok((file, path, permit)) => download(file, &path, permit),
         Err(e) => resource_error(e),
     }
@@ -196,12 +208,9 @@ fn download(file: File, path: &Path, permit: tokio::sync::OwnedSemaphorePermit) 
 /// 下载只接受已登录客户端提供的资源身份，再由 Runtime 解析权威文件路径。
 pub(in crate::http) async fn download_attachment(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     RoutePath((session, attachment)): RoutePath<(String, String)>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     use assistant_protocol::{AttachmentId, AttachmentState, GetAttachmentRequest};
     let request = match (SessionId::new(session), AttachmentId::new(attachment)) {
         (Ok(session_id), Ok(attachment_id)) => GetAttachmentRequest {
@@ -217,6 +226,7 @@ pub(in crate::http) async fn download_attachment(
     };
     download_path(
         &state,
+        services.paths.clone(),
         attachment.agent_readable_path,
         attachment.original_name,
     )
@@ -224,6 +234,7 @@ pub(in crate::http) async fn download_attachment(
 }
 pub(in crate::http) async fn download_tool_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     RoutePath((session, message, resource)): RoutePath<(String, String, String)>,
 ) -> Response {
     let Some((owner, message, resource)) =
@@ -231,10 +242,11 @@ pub(in crate::http) async fn download_tool_file(
     else {
         return resource_error(invalid_request("工具资源标识无效。"));
     };
-    download_tool(state, owner, message, resource).await
+    download_tool(state, services, owner, message, resource).await
 }
 pub(in crate::http) async fn download_child_tool_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
     RoutePath((session, child, message, resource)): RoutePath<(String, String, String, String)>,
 ) -> Response {
     let Some((owner, message, resource)) =
@@ -242,18 +254,15 @@ pub(in crate::http) async fn download_child_tool_file(
     else {
         return resource_error(invalid_request("工具资源标识无效。"));
     };
-    download_tool(state, owner, message, resource).await
+    download_tool(state, services, owner, message, resource).await
 }
 async fn download_tool(
     state: HttpState,
+    services: std::sync::Arc<crate::http::ReadyServices>,
     owner: assistant_protocol::ConversationOwner,
     message: assistant_protocol::MessageId,
     resource: assistant_protocol::ResourceRefId,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let resource_id = resource.clone();
     match services
         .runtime
@@ -265,7 +274,7 @@ async fn download_tool(
         {
             // 复用预览对产品私有图片的内容哈希校验，下载不绕过该资源契约。
             let mut response = super::preview_tool_resource(
-                state,
+                services,
                 owner,
                 message,
                 resource_id,
@@ -284,17 +293,30 @@ async fn download_tool(
             }
             response
         }
-        Ok(resource) => download_path(&state, resource.path, resource.display_name).await,
+        Ok(resource) => {
+            download_path(
+                &state,
+                services.paths.clone(),
+                resource.path,
+                resource.display_name,
+            )
+            .await
+        }
         Err(error) => resource_error(error.to_protocol_info()),
     }
 }
-async fn download_path(state: &HttpState, path: String, name: String) -> Response {
+async fn download_path(
+    state: &HttpState,
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
+    path: String,
+    name: String,
+) -> Response {
     let permit = match permit(state) {
         Ok(permit) => permit,
         Err(error) => return resource_error(error),
     };
     match read(move || {
-        let path = files::host_path(Some(&path))?;
+        let path = checked_path(&paths, &path)?;
         Ok((files::open_resolved(&path, false)?, permit))
     })
     .await
@@ -302,4 +324,11 @@ async fn download_path(state: &HttpState, path: String, name: String) -> Respons
         Ok((file, permit)) => download(file, Path::new(&name), permit),
         Err(error) => resource_error(error),
     }
+}
+
+fn checked_path(
+    paths: &crate::user_paths::UserPaths,
+    path: &str,
+) -> Result<std::path::PathBuf, RuntimeErrorInfo> {
+    files::host_path_guarded(Some(path), Some(paths))
 }

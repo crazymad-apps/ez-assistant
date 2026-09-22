@@ -6,6 +6,9 @@ use super::*;
 fn remote_ip_access_includes_forwarded_loopback_but_requires_enabled_policy() {
     let (commands, _receive) = mpsc::channel(1);
     let handle = HostAccessHandle {
+        protected_files: Arc::new(RwLock::new(Vec::new())),
+        center: Arc::new(RwLock::new(None)),
+        binding: mpsc::channel(1).0,
         credentials: Arc::new(Credentials::new()),
         commands,
         remote: Arc::new(RwLock::new(RemoteAccess::default())),

@@ -37,6 +37,12 @@ impl StorageEngine {
         super::filesystem::validate_session_component(&task.session_id)?;
         super::filesystem::validate_child_task_component(&task.child_task_id)?;
         self.ensure_parent_ownership(&task.session_id, &task.parent_run_id)?;
+        let context_window = i64::try_from(task.context_window_tokens)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                invalid_data("child context window must be a positive SQLite integer")
+            })?;
 
         // 先完成所有纯内存编码，避免在可预见的序列化失败前创建任何磁盘资源。
         let prompt_json = serde_json::to_string(&task.system_prompt).map_err(|source| {
@@ -84,9 +90,9 @@ impl StorageEngine {
                 child_task_id, session_id, parent_run_id, parent_tool_call_id, title,
                 system_prompt_json, agent_variant, status, cancel_requested, body_generation,
                 message_count, final_message_id, error_code, error_message, created_at_ms,
-                started_at_ms, finished_at_ms
+                started_at_ms, finished_at_ms, context_window_tokens
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'accepted', 0, 1, 0, NULL, NULL, NULL,
-                       ?8, NULL, NULL)",
+                       ?8, NULL, NULL, ?9)",
             params![
                 task.child_task_id.as_str(),
                 task.session_id.as_str(),
@@ -96,6 +102,7 @@ impl StorageEngine {
                 prompt_json,
                 agent_variant_value(task.agent_variant),
                 task.created_at_ms,
+                context_window,
             ],
         );
         if let Err(source) = persisted {
@@ -114,6 +121,7 @@ impl StorageEngine {
         let _ = self.initialize_recall_owner(&recall_owner, 1, task.created_at_ms);
 
         Ok(StoredChildTask {
+            context_window_tokens: Some(task.context_window_tokens),
             child_task_id: task.child_task_id,
             session_id: task.session_id,
             parent_run_id: task.parent_run_id,
@@ -268,7 +276,7 @@ impl StorageEngine {
                 "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title,
                         system_prompt_json, agent_variant, status, cancel_requested,
                         body_generation, message_count, final_message_id, error_code,
-                        error_message, created_at_ms, started_at_ms, finished_at_ms
+                        error_message, created_at_ms, started_at_ms, finished_at_ms, context_window_tokens
                  FROM child_tasks WHERE {predicate} ORDER BY created_at_ms, child_task_id"
             ))
             .map_err(|source| internal_error("child tasks could not be queried", source))?;
@@ -294,6 +302,7 @@ impl StorageEngine {
                         row.get::<_, i64>(14)?,
                         row.get::<_, Option<i64>>(15)?,
                         row.get::<_, Option<i64>>(16)?,
+                        row.get::<_, Option<i64>>(17)?,
                     ))
                 },
             )
@@ -322,6 +331,10 @@ impl StorageEngine {
                 _ => return Err(invalid_data("stored child task error is incomplete")),
             };
             tasks.push(StoredChildTask {
+                context_window_tokens: row
+                    .17
+                    .map(|value| positive_u64(value, "stored child context window is invalid"))
+                    .transpose()?,
                 conversation_state: if self
                     .unavailable_child_tasks
                     .contains(child_task_id.as_str())

@@ -15,6 +15,12 @@ export function WorkspaceTransition({ ready, connected, entry, children }: Works
   const canvas = useRef<HTMLCanvasElement>(null);
   const workspace = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (ready) return;
+    // 身份失效/切换后重新显示入口，不能沿用上次转场留下的透明度和已完成标记。
+    setSettled(false);
+    scene.current?.removeAttribute("style");
+  }, [ready]);
+  useEffect(() => {
     if (!ready || settled) return;
     const root = scene.current;
     const surface = canvas.current;
@@ -65,11 +71,11 @@ export function WorkspaceTransition({ ready, connected, entry, children }: Works
   }, [settled]);
 
   return (
-    <div className={styles.scene} ref={scene} data-workspace-transition={settled ? "complete" : ready ? "playing" : "waiting"}>
+    <div className={styles.scene} ref={scene} data-workspace-transition={ready && settled ? "complete" : ready ? "playing" : "waiting"}>
       <div className={styles.workspace} ref={workspace} inert={!settled} aria-hidden={!settled} tabIndex={-1}>
         {(ready || settled) && children}
       </div>
-      {!settled && <div className={styles.entry} inert={ready} aria-hidden={ready}>{entry}</div>}
+      {(!ready || !settled) && <div className={styles.entry} inert={ready} aria-hidden={ready}>{entry}</div>}
       {ready && !settled && <canvas className={styles.rocket} ref={canvas} width={1024} height={640} aria-hidden="true" />}
     </div>
   );

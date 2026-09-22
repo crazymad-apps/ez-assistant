@@ -132,3 +132,52 @@ async fn closing_does_not_submit_unfinished_input() {
         "closing must not execute the incomplete command"
     );
 }
+
+#[tokio::test]
+async fn identical_session_ids_only_close_the_matching_user_terminal() {
+    use super::{Entry, TerminalOrigin, UserTerminalService};
+    use crate::access::enterprise::UserKey;
+    use assistant_protocol::SessionId;
+    use tokio_util::sync::CancellationToken;
+    let terminals = UserTerminalService::new();
+    let sid = SessionId::new("same-session").unwrap();
+    let alice = UserKey {
+        center_id: "center".into(),
+        user_id: 1,
+    };
+    let bob = UserKey {
+        center_id: "center".into(),
+        user_id: 2,
+    };
+    let (a, _a_events) = spawn("sleep 60").await;
+    let (b, _b_events) = spawn("sleep 60").await;
+    let a_cancel = CancellationToken::new();
+    let b_cancel = CancellationToken::new();
+    for (id, user, process, cancelled) in [
+        ("a", alice.clone(), a.clone(), a_cancel.clone()),
+        ("b", bob, b.clone(), b_cancel.clone()),
+    ] {
+        terminals.handle.entries.lock().await.insert(
+            id.into(),
+            Entry {
+                origin: TerminalOrigin {
+                    user: Some(user),
+                    session: Some(sid.clone()),
+                    workspace: None,
+                },
+                domain: CancellationToken::new(),
+                login: None,
+                process,
+                cancelled,
+            },
+        );
+    }
+    terminals
+        .handle
+        .source_removed(Some(&alice), Some(&sid), None)
+        .await;
+    assert!(a_cancel.is_cancelled());
+    assert!(!b_cancel.is_cancelled());
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}

@@ -46,6 +46,15 @@ pub(crate) fn matches_rule(
     variant: AgentVariant,
     invocation: &ResolvedToolInvocation,
 ) -> bool {
+    matches_rule_with_paths(rule, variant, invocation, None)
+}
+
+pub(crate) fn matches_rule_with_paths(
+    rule: &PermissionRule,
+    variant: AgentVariant,
+    invocation: &ResolvedToolInvocation,
+    paths: Option<&super::PermissionPaths>,
+) -> bool {
     rule.variants.contains(&variant)
         && match &rule.matcher {
             PermissionMatcher::General(matcher) => {
@@ -60,13 +69,23 @@ pub(crate) fn matches_rule(
                 invocation
                     .facts::<FileAuthorizationFacts>()
                     .is_some_and(|facts| {
-                        file_matcher_matches(matcher, facts.operation, &facts.path)
+                        file_matcher_matches_with_paths(
+                            matcher,
+                            facts.operation,
+                            &facts.path,
+                            paths,
+                        )
                     })
                     || invocation
                         .facts::<FileBatchAuthorizationFacts>()
                         .is_some_and(|facts| {
                             let matches = |path: &agent_tools::AbsolutePath| {
-                                file_matcher_matches(matcher, facts.operation, path)
+                                file_matcher_matches_with_paths(
+                                    matcher,
+                                    facts.operation,
+                                    path,
+                                    paths,
+                                )
                             };
                             match rule.effect {
                                 super::PermissionEffect::Allow => facts.paths.iter().all(matches),
@@ -111,13 +130,28 @@ pub(crate) fn mcp_matcher_matches(
     server_matches && tool_matches
 }
 
-pub(crate) fn file_matcher_matches(
+pub(crate) fn file_matcher_matches_with_paths(
+    matcher: &super::FilePermissionMatcher,
+    operation: FileOperation,
+    path: &agent_tools::AbsolutePath,
+    paths: Option<&super::PermissionPaths>,
+) -> bool {
+    file_matcher_matches(matcher, operation, path)
+        || paths.is_some_and(|paths| file_matcher_matches(matcher, operation, paths.actual(path)))
+}
+
+/// 按操作、路径组件和例外子树匹配文件规则；调用方提供已规范化的路径事实。
+pub fn file_matcher_matches(
     matcher: &super::FilePermissionMatcher,
     operation: FileOperation,
     path: &agent_tools::AbsolutePath,
 ) -> bool {
     file_operation(operation) == matcher.operation
         && path_matches(path.as_path(), Path::new(&matcher.path), matcher.path_match)
+        && !matcher
+            .excluded_paths
+            .iter()
+            .any(|excluded| path.as_path().starts_with(excluded))
 }
 
 /// 只有能完整表达一次已解析调用事实的 Allow 规则才可以用于审批队列自动重核。
@@ -379,6 +413,7 @@ mod tests {
             effect,
             variants: vec![AgentVariant::Build],
             matcher: PermissionMatcher::File(crate::permission::FilePermissionMatcher {
+                excluded_paths: Vec::new(),
                 operation: PermissionFileOperation::Read,
                 path: path.to_owned(),
                 path_match: PathMatch::Recursive,

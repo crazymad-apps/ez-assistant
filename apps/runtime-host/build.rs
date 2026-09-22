@@ -7,7 +7,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "src/host_configuration/center_url.rs"]
+mod center_url;
+
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-env-changed=EZ_ASSISTANT_DEFAULT_CENTER_URL");
+    if let Some(value) = env::var_os("EZ_ASSISTANT_DEFAULT_CENTER_URL") {
+        let value = value.to_str().ok_or("default center URL must be UTF-8")?;
+        center_url::validate(value).map_err(|_| "invalid default center URL")?;
+        println!("cargo:rustc-env=EZ_ASSISTANT_DEFAULT_CENTER_URL={value}");
+    }
     println!("cargo:rerun-if-env-changed=EZ_ASSISTANT_WEB_DIST");
     let output =
         PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is required")?).join("web_assets.rs");

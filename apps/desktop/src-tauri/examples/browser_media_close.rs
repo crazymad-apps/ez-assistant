@@ -5,6 +5,8 @@
 
 #[path = "../src/browser_resource.rs"]
 mod browser_resource;
+#[path = "../../tests/native/browser-probe-owner.rs"]
+mod runtime_connection;
 
 use std::{
     sync::{
@@ -65,9 +67,11 @@ async fn verify(
     base: &str,
     raw_close: bool,
 ) -> Result<(), String> {
+    let target = runtime_connection::RuntimeTarget::fixture(base, None);
     let page = format!("probe-{}", std::process::id());
     let id = browser_resource::create_resource_browser(
         caller.clone(),
+        target.clone(),
         format!("{base}/?id={page}"),
         Channel::new(|_| Ok(())),
     )
@@ -90,7 +94,7 @@ async fn verify(
     if before["audio"] != true || before["ctx"] != "running" {
         return Err("fixture did not start both media types".into());
     }
-    browser_resource::capture_resource_browser(caller.clone(), id.clone()).await?;
+    browser_resource::capture_resource_browser(caller.clone(), target.clone(), id.clone()).await?;
     view.hide().map_err(|e| e.to_string())?;
     tokio::time::sleep(Duration::from_secs(1)).await;
     let hidden = status(&client, base, &page).await?;
@@ -101,13 +105,14 @@ async fn verify(
         return Err("hiding the page interrupted playback".into());
     }
     view.show().map_err(|e| e.to_string())?;
-    let active_capture = browser_resource::capture_resource_browser(caller.clone(), id.clone());
+    let active_capture =
+        browser_resource::capture_resource_browser(caller.clone(), target.clone(), id.clone());
     let capturing = tauri::async_runtime::spawn(active_capture);
     tokio::time::sleep(Duration::from_millis(5)).await;
     if raw_close {
         view.close().map_err(|e| e.to_string())?;
     } else {
-        browser_resource::close_resource_browser(caller, id).await?;
+        browser_resource::close_resource_browser(caller.clone(), target, id).await?;
     }
     let _ = capturing.await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -119,6 +124,7 @@ async fn verify(
         return Err("closed page is still executing".into());
     }
     println!("PASS: both media types started; closed page stopped sending heartbeats");
+    verify_profiles(app, caller, base).await?;
     Ok(())
 }
 
@@ -135,4 +141,59 @@ async fn status(
         .json()
         .await
         .map_err(|e| e.to_string())
+}
+
+// 真实 WKWebView Cookie/localStorage 读写；每次新随机 origin，不接触任何用户浏览数据。
+async fn verify_profiles(
+    app: &tauri::AppHandle,
+    caller: tauri::Webview,
+    base: &str,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let mut previous = None;
+    for (user, marker, expected) in [
+        (None, "personal", ""),
+        (Some(1), "alice", ""),
+        (Some(2), "bob", ""),
+        (Some(1), "alice-again", "alice"),
+    ] {
+        let target = runtime_connection::RuntimeTarget::fixture(base, user);
+        let id = browser_resource::create_resource_browser(
+            caller.clone(),
+            target.clone(),
+            format!("{base}/profile?id={marker}"),
+            Channel::new(|_| Ok(())),
+        )
+        .await?;
+        if let Some((old_target, old_id)) = previous.take() {
+            if browser_resource::resource_browser_url(caller.clone(), target.clone(), old_id)
+                .await
+                .is_ok()
+            {
+                return Err("new owner accessed old view".into());
+            }
+            let old_target: runtime_connection::RuntimeTarget = old_target;
+            old_target.cancellation.cancel();
+            app.state::<browser_resource::BrowserResourceManager>()
+                .close_cancelled();
+        }
+        let mut value = serde_json::Value::Null;
+        for _ in 0..40 {
+            value = status(&client, base, marker).await?;
+            if value["profile_ready"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if value["storage"] != expected || value["cookie"] != expected {
+            return Err(format!("profile {marker} leaked or lost state: {value}"));
+        }
+        previous = Some((target, id));
+    }
+    app.state::<browser_resource::BrowserResourceManager>()
+        .close_all();
+    println!(
+        "PASS: personal / Alice / Bob Cookie and localStorage isolated; Alice profile restored; cross-owner window denied"
+    );
+    Ok(())
 }

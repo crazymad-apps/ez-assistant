@@ -1,9 +1,11 @@
 //! 分层权限文件的领域模型、基础设施端口与内存快照。
 //!
-//! JSON 文件是唯一规则源；Registry 只保存已完整校验的不可变快照。
+//! JSON 文件承载可编辑规则；Host 默认规则在授权时注入，复用同一匹配器与合并顺序。
+//! Registry 只保存已完整校验的用户文件快照。
 
 mod approval;
 mod authorizer;
+mod defaults;
 mod document;
 mod matcher;
 mod projection;
@@ -18,13 +20,16 @@ use crate::StoreError;
 
 pub(crate) use approval::{ApprovalRegistry, RuntimeApprovalResolver, rules_for_approval};
 pub(crate) use authorizer::{RunAuthorizationScope, RuntimeToolAuthorizer};
+pub(crate) use defaults::PermissionPaths;
+pub use defaults::{PermissionRuleSource, resolve_permission_path};
 pub use document::{
     CommandMatch, FilePermissionMatcher, GeneralPermissionMatcher, McpPermissionMatcher,
     McpPermissionServerMatch, McpPermissionToolMatch, PathMatch, PermissionDocument,
     PermissionDocumentError, PermissionEffect, PermissionFileOperation, PermissionMatcher,
     PermissionProcessMode, PermissionRule, ShellPermissionMatcher,
 };
-pub(crate) use matcher::{file_matcher_matches, is_exact_allow_rule, matches_rule};
+pub use matcher::file_matcher_matches;
+pub(crate) use matcher::{is_exact_allow_rule, matches_rule};
 pub(crate) use projection::{
     document_from_protocol, revision_from_protocol, scope_from_protocol, snapshot_from_load,
 };

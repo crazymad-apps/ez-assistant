@@ -340,6 +340,7 @@ fn default_file_permission_rules(
                 ]
             },
             matcher: PermissionMatcher::File(FilePermissionMatcher {
+                excluded_paths: Vec::new(),
                 operation,
                 path: path.to_owned(),
                 path_match: PathMatch::Recursive,

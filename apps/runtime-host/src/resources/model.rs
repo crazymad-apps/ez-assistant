@@ -1,6 +1,9 @@
 //! 已编译 Runtime 模型配置到 OpenAI-compatible Adapter 的 Host 装配。
 
 mod discovery;
+mod managed;
+pub(crate) use managed::CenterModelLoader;
+pub(crate) use managed::CenterModelServiceFactory;
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -16,12 +19,12 @@ use assistant_runtime::{
 
 use crate::image::HostModelImagePreprocessor;
 
-pub(super) struct HostModelServiceFactory {
+pub(crate) struct HostModelServiceFactory {
     image_preprocessor: Arc<HostModelImagePreprocessor>,
 }
 
 impl HostModelServiceFactory {
-    pub(super) fn new(runtime_home: &Path) -> Self {
+    pub(crate) fn new(runtime_home: &Path) -> Self {
         Self {
             image_preprocessor: Arc::new(HostModelImagePreprocessor::new(runtime_home)),
         }
@@ -40,6 +43,16 @@ impl ModelServiceFactory for HostModelServiceFactory {
         &self,
         request: ModelServiceFactoryRequest<'_>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        self.create_with_transport(request, None)
+    }
+}
+
+impl HostModelServiceFactory {
+    fn create_with_transport(
+        &self,
+        request: ModelServiceFactoryRequest<'_>,
+        transport: Option<Arc<dyn agent_openai_compatible::Transport>>,
+    ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
         let capabilities = ModelCapabilities {
             reasoning: request.capabilities.reasoning_enabled(),
             image_input: request.capabilities.image_input,
@@ -52,6 +65,13 @@ impl ModelServiceFactory for HostModelServiceFactory {
         let timeouts = TransportTimeouts {
             connect: request.connect_timeout,
             request: request.request_timeout,
+        };
+        let transport = match transport {
+            Some(transport) => transport,
+            None => Arc::new(
+                agent_openai_compatible::ReqwestTransport::with_timeouts(timeouts)
+                    .map_err(model_service_error)?,
+            ),
         };
         let effort_values = compile_effort_values(request.capabilities);
         let service: Arc<dyn ModelService> = match request.protocol {
@@ -76,14 +96,14 @@ impl ModelServiceFactory for HostModelServiceFactory {
                 adapter =
                     adapter.with_tool_image_projection(request.capabilities.tool_image_projection);
                 Arc::new(
-                    OpenAiChatCompletionsService::new_with_capabilities(
+                    OpenAiChatCompletionsService::with_transport_and_capabilities(
                         request.endpoint,
                         BearerCredential::new(request.api_key.to_owned()),
                         request.model,
                         request.context_window_tokens,
                         adapter,
                         capabilities,
-                        timeouts,
+                        transport,
                     )
                     .map_err(model_service_error)?
                     .with_max_input_tokens(request.max_input_tokens)
@@ -101,14 +121,14 @@ impl ModelServiceFactory for HostModelServiceFactory {
                     adapter = adapter.with_function_output_shape(FunctionOutputShape::ContentParts);
                 }
                 Arc::new(
-                    OpenAiResponsesService::new_with_capabilities(
+                    OpenAiResponsesService::with_transport_and_capabilities(
                         request.endpoint,
                         BearerCredential::new(request.api_key.to_owned()),
                         request.model,
                         request.context_window_tokens,
                         adapter,
                         capabilities,
-                        timeouts,
+                        transport,
                     )
                     .map_err(model_service_error)?
                     .with_max_input_tokens(request.max_input_tokens)
@@ -214,6 +234,7 @@ mod tests {
         ] {
             for limit in [None, Some(64000), Some(0), Some(128001)] {
                 let result = factory.create_model(ModelServiceFactoryRequest {
+                    external_configuration: None,
                     provider: &provider,
                     protocol,
                     capabilities: &capabilities,

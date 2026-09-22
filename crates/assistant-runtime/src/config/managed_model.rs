@@ -34,10 +34,11 @@ impl PreparedModel {
             return Err(RuntimeError::ConfigurationConflict);
         }
         let current = registry.managed_models()?;
+        let provider = &self.provider;
         if !current
             .providers
-            .get(&self.provider.provider_instance_id)
-            .is_some_and(|provider| Arc::ptr_eq(provider, &self.provider))
+            .get(&provider.provider_instance_id)
+            .is_some_and(|current| Arc::ptr_eq(current, provider))
             || (self.follows_default
                 && current.settings.default_model.as_ref() != Some(&self.selection))
         {
@@ -48,6 +49,18 @@ impl PreparedModel {
 }
 
 impl super::ConfigRegistry {
+    fn compile_selected_model(
+        &self,
+        provider: &StoredProvider,
+        selection: &ModelSelection,
+        parameters: &ModelParameters,
+        generation: &GenerationConfig,
+    ) -> RuntimeResult<ResolvedModelConfig> {
+        let mut model = compile_managed_model(provider, selection, parameters, generation)?;
+        model.external_configuration = self.managed_models()?.external.clone();
+        Ok(model)
+    }
+
     /// 旁路操作只读取已有固定参数；不进行在线发现，缺配置由用户重新选择或补齐。
     pub(crate) async fn configured_model(
         &self,
@@ -58,12 +71,11 @@ impl super::ConfigRegistry {
         let active = snapshot
             .active()
             .ok_or(RuntimeError::ConfigurationUnavailable)?;
+        let selection = self
+            .effective_model_selection(requested)?
+            .ok_or_else(|| invalid("当前会话没有可用模型，请手动选择模型。"))?;
         let (selection, provider) = {
             let models = self.managed_models()?;
-            let selection = requested
-                .or(models.settings.default_model.as_ref())
-                .cloned()
-                .ok_or_else(|| invalid("当前会话没有可用模型，请手动选择模型。"))?;
             let provider = models
                 .providers
                 .get(&selection.provider_instance_id)
@@ -71,15 +83,14 @@ impl super::ConfigRegistry {
                 .ok_or_else(|| invalid("所选服务商已删除，请手动重新选择模型。"))?;
             (selection, provider)
         };
-        let fixed = store
-            .get_model_fixed_config(selection.clone())
-            .await
-            .map_err(|e| RuntimeError::from_store("load configured model", e))?
+        let fixed = self
+            .fixed_model(selection.clone(), store)
+            .await?
             .ok_or_else(|| {
                 invalid("当前会话没有可复用的模型参数，请重新选择模型或保存固定配置。")
             })?;
         let prepared = PreparedModel {
-            model: compile_managed_model(
+            model: self.compile_selected_model(
                 &provider,
                 &selection,
                 &fixed.parameters,
@@ -106,12 +117,11 @@ impl super::ConfigRegistry {
         let active = snapshot
             .active()
             .ok_or(RuntimeError::ConfigurationUnavailable)?;
+        let selection = self
+            .effective_model_selection(requested)?
+            .ok_or_else(|| invalid("尚未选择模型，请配置默认模型或为当前会话选择模型。"))?;
         let (selection, provider) = {
             let settings = self.managed_models()?;
-            let selection = requested
-                .or(settings.settings.default_model.as_ref())
-                .cloned()
-                .ok_or_else(|| invalid("尚未选择模型，请配置默认模型或为当前会话选择模型。"))?;
             let provider = settings
                 .providers
                 .get(&selection.provider_instance_id)
@@ -119,11 +129,7 @@ impl super::ConfigRegistry {
                 .ok_or_else(|| invalid("所选服务商已删除，请重新选择模型。"))?;
             (selection, provider)
         };
-        let parameters = match store
-            .get_model_fixed_config(selection.clone())
-            .await
-            .map_err(|e| RuntimeError::from_store("load model execution parameters", e))?
-        {
+        let parameters = match self.fixed_model(selection.clone(), store).await? {
             Some(fixed) => fixed.parameters,
             None => {
                 let model = provider
@@ -146,7 +152,8 @@ impl super::ConfigRegistry {
                 .parameters
             }
         };
-        let model = compile_managed_model(&provider, &selection, &parameters, active.generation())?;
+        let model =
+            self.compile_selected_model(&provider, &selection, &parameters, active.generation())?;
         let prepared = PreparedModel {
             selection,
             provider,
@@ -284,6 +291,7 @@ pub(crate) fn compile_managed_model(
             .map_or(output, |budget| budget.min(output)),
     );
     Ok(ResolvedModelConfig {
+        external_configuration: None,
         display_name: selection.model_id.clone(),
         protocol,
         provider: ProviderId::new(provider_name.to_owned())

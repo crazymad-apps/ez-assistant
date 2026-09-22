@@ -1,0 +1,18 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+.tabs {
+  flex: 1;
+  min-height: 0;
+}
+/* Tabs 内容继承剩余空间，正文面板拥有唯一滚动容器。 */
+.tabs :global(.ant-tabs-content-holder),
+.tabs :global(.ant-tabs-content),
+.tabs :global(.ant-tabs-tabpane) {
+  height: 100%;
+  min-height: 0;
+}

@@ -111,6 +111,7 @@ fn provider_and_fixed_configuration_commands_round_trip() {
             "get_model_settings",
             RuntimeCommand::GetModelSettings(GetModelSettingsRequest {}),
             RuntimeCommandResult::GetModelSettings(ModelSettings {
+                management: None,
                 default_model: Some(selection.clone()),
                 vision_model: None,
             }),

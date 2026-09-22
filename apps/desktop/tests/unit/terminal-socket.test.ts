@@ -90,3 +90,15 @@ it("does not report successful cleanup when Host reports failure without Closed"
   await failed;
   expect(socket.readyState).toBe(3);
 });
+
+it("sends the captured Cookie login context in Open without putting it in the URL", async () => {
+  const owner = new AbortController();
+  const terminal = new TerminalSocket("http://runtime.test", "", source, { cols: 80, rows: 24 }, vi.fn(), owner.signal, undefined, "login-a");
+  const socket = SocketFixture.connections[0]!;
+  socket.open();
+  expect(socket.url.search).toBe("");
+  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: null, login_context: "login-a" });
+  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace" });
+  await terminal.created;
+  owner.abort();
+});

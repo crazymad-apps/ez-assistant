@@ -1,0 +1,25 @@
+services:
+  center:
+    image: ${CENTER_IMAGE:?Specify the versioned Center image}
+    container_name: ez-enterprise-center
+    restart: unless-stopped
+    ports:
+      - "${CENTER_BIND_ADDRESS:-0.0.0.0}:${CENTER_PUBLISHED_PORT:-7320}:7320"
+    env_file:
+      - ./center.env
+    environment:
+      CENTER_HOST: 0.0.0.0
+      CENTER_PORT: "7320"
+      CENTER_DATABASE_AUTO_UPGRADE: "false"
+      CENTER_SNAPSHOT_ROOT: /data/snapshots
+      CENTER_MODEL_TEMPLATES_FILE: /config/model-templates.json
+    volumes:
+      - ./data/snapshots:/data/snapshots
+      - ./config/model-templates.json:/config/model-templates.json:ro
+    networks:
+      - database
+    stop_grace_period: 15s
+networks:
+  database:
+    external: true
+    name: ${CENTER_DOCKER_NETWORK:-1panel-network}

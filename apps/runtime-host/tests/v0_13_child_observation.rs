@@ -61,6 +61,19 @@ fn parallel_children_survive_archive_restore_and_formal_host_restart() {
         .clone();
     assert_eq!(before.len(), 2);
     assert!(before.iter().all(|task| task["status"] == "completed"));
+    let usages: Vec<_> = before
+        .iter()
+        .map(|task| {
+            let view = first.runtime(
+                "get_child_task_view",
+                json!({ "session_id": session_id, "child_task_id": task["child_task_id"] }),
+            );
+            let usage = view["snapshot"]["value"]["task"]["usage"].clone();
+            assert!(usage["context"]["window_tokens"].as_u64().unwrap() > 0);
+            assert!(usage["context"]["used_tokens"].as_u64().unwrap() > 0);
+            usage
+        })
+        .collect();
 
     assert_eq!(
         first.runtime("archive_session", json!({ "session_id": session_id }))["session"]["lifecycle"],
@@ -88,7 +101,12 @@ fn parallel_children_survive_archive_restore_and_formal_host_restart() {
     )["tasks"]
         .clone();
     assert_eq!(recovered, json!(before));
-    for task in before {
+    for (task, usage) in before.into_iter().zip(usages) {
+        let view = second.runtime(
+            "get_child_task_view",
+            json!({ "session_id": session_id, "child_task_id": task["child_task_id"] }),
+        );
+        assert_eq!(view["snapshot"]["value"]["task"]["usage"], usage);
         let child_id = task["child_task_id"].as_str().expect("child id");
         assert_eq!(
             second.runtime(

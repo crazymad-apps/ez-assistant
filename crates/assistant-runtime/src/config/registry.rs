@@ -49,6 +49,8 @@ pub(crate) struct ManagedModels {
     pub(crate) providers:
         BTreeMap<assistant_protocol::ProviderInstanceId, Arc<crate::StoredProvider>>,
     pub(crate) settings: assistant_protocol::ModelSettings,
+    pub(crate) source: super::ModelSource,
+    pub(crate) external: Option<Arc<super::ExternalModelConfiguration>>,
 }
 
 /// Runtime 的唯一配置状态所有者。
@@ -60,7 +62,10 @@ pub(crate) struct ConfigRegistry {
 }
 
 impl ConfigRegistry {
-    pub(crate) fn new(source: Arc<dyn RuntimeConfigSource>) -> Self {
+    pub(crate) fn new(
+        source: Arc<dyn RuntimeConfigSource>,
+        model_source: super::ModelSource,
+    ) -> Self {
         Self {
             source,
             snapshot: RwLock::new(Arc::new(ConfigSnapshot::from_compilation(
@@ -68,7 +73,10 @@ impl ConfigRegistry {
                 None,
             ))),
             reload_gate: Mutex::new(()),
-            model_settings: RwLock::new(ManagedModels::default()),
+            model_settings: RwLock::new(ManagedModels {
+                source: model_source,
+                ..Default::default()
+            }),
         }
     }
 
@@ -79,6 +87,7 @@ impl ConfigRegistry {
                 component: "model settings",
             })
     }
+
     pub(crate) fn managed_models_mut(&self) -> RuntimeResult<RwLockWriteGuard<'_, ManagedModels>> {
         self.model_settings
             .write()

@@ -698,7 +698,7 @@ where
     let response = http
         .post(url)
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .json(request)
         .send()
         .await
@@ -1716,7 +1716,7 @@ async fn get_tool_file_native_path(
         .http
         .get(url)
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;

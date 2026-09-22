@@ -36,7 +36,8 @@ pub const MIN_COMPATIBLE_VERSION: &str = env!("EZ_ASSISTANT_MIN_COMPATIBLE_VERSI
 
 pub use host_access::{
     HostAccessCommand, HostAccessConfiguration, HostAccessScheme, HostAccessStatus,
-    HostListenerState, HostLoginRequest, HostLoginResult,
+    HostIdentityKind, HostListenerState, HostLoginRequest, HostLoginResult, HostLogoutResult,
+    HostMode, HostPasswordRequest, HostUserIdentity,
 };
 
 pub use command::{
@@ -197,9 +198,9 @@ pub use model_management::{
     ListFixedModelConfigsRequest, ListProvidersRequest, ModelCatalogDiagnosticCode,
     ModelConfigOrigin, ModelConfigurationDetail, ModelConfigurationSource,
     ModelConfigurationSummary, ModelDiscoveryFormat, ModelFeatureSupport, ModelFixedConfig,
-    ModelParameters, ModelReasoningMode, ModelSelection, ModelSettings, ModelTokenLimit,
-    ModelToolChoiceSupport, ModelToolImageProjection, ProviderConnection, ProviderCredentialChange,
-    ProviderModelCatalogSnapshot, ProviderProtocolPreference, ProviderRequest,
-    ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
+    ModelManagementStatus, ModelParameters, ModelReasoningMode, ModelSelection, ModelSettings,
+    ModelTokenLimit, ModelToolChoiceSupport, ModelToolImageProjection, ProviderConnection,
+    ProviderCredentialChange, ProviderModelCatalogSnapshot, ProviderProtocolPreference,
+    ProviderRequest, ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
     SaveModelFixedConfigRequest, UpdateProviderRequest,
 };

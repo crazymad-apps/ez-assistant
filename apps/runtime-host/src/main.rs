@@ -6,6 +6,8 @@ mod config;
 mod config_source;
 mod device;
 mod endpoint;
+mod host_configuration;
+mod host_layout;
 mod http;
 mod image;
 mod mcp;
@@ -18,6 +20,8 @@ mod server;
 mod speech;
 mod storage;
 mod supervisor;
+mod user_domain;
+mod user_paths;
 mod user_terminal;
 
 mod startup;

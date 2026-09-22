@@ -20,6 +20,8 @@ export type ConversationHistoryProjection = Readonly<{
   previous_cursor: string | null;
   has_more: boolean;
   is_loading_previous: boolean;
+  /** 单次前页读取的客户端身份；实时尾页合并保留，分页链重建即丢弃。 */
+  previous_request?: Readonly<{ cursor: string; first_id: string | null }>;
   load_error: string | null;
 }>;
 
@@ -133,6 +135,7 @@ export class RuntimeProjectionStore {
     this.conversation_histories.set(session_id, {
       ...history,
       is_loading_previous: true,
+      previous_request: { cursor: history.previous_cursor, first_id: history.items[0]?.message_id ?? null },
       load_error: null,
     });
     return true;
@@ -146,6 +149,7 @@ export class RuntimeProjectionStore {
     this.child_conversation_histories.set(child_task_id, {
       ...history,
       is_loading_previous: true,
+      previous_request: { cursor: history.previous_cursor, first_id: history.items[0]?.message_id ?? null },
       load_error: null,
     });
     return true;
@@ -183,6 +187,7 @@ export class RuntimeProjectionStore {
       || current.generation !== page.generation
       || page.owner.type !== "child_task"
       || page.owner.child_task_id !== child_task_id
+      || page.owner.session_id !== current.owner.session_id
     ) {
       return false;
     }
@@ -205,6 +210,7 @@ export class RuntimeProjectionStore {
     }
     this.conversation_histories.set(session_id, {
       ...current,
+      previous_request: undefined,
       is_loading_previous: false,
       load_error: message,
     });
@@ -217,6 +223,7 @@ export class RuntimeProjectionStore {
     }
     this.child_conversation_histories.set(child_task_id, {
       ...current,
+      previous_request: undefined,
       is_loading_previous: false,
       load_error: message,
     });
@@ -274,8 +281,9 @@ export class RuntimeProjectionStore {
       items: mergeConversationItems(current.items, page.items),
       previous_cursor: retained_previous ? current.previous_cursor : page.previous_cursor,
       has_more: retained_previous ? current.has_more : page.has_more,
-      is_loading_previous: false,
-      load_error: null,
+      is_loading_previous: current.is_loading_previous,
+      previous_request: current.previous_request,
+      load_error: current.load_error,
     });
   }
 
@@ -303,8 +311,9 @@ export class RuntimeProjectionStore {
       items: mergeConversationItems(current.items, page.items),
       previous_cursor: retained_previous ? current.previous_cursor : page.previous_cursor,
       has_more: retained_previous ? current.has_more : page.has_more,
-      is_loading_previous: false,
-      load_error: null,
+      is_loading_previous: current.is_loading_previous,
+      previous_request: current.previous_request,
+      load_error: current.load_error,
     });
   }
 }

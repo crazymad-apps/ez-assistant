@@ -2,7 +2,7 @@
 
 正式管理前端使用 React、Ant Design 6、MobX、TypeScript 和 Vite，位于 `src/`。
 原型位于独立 `prototype/`，其主题、布局及组件样式原样复用，不参与正式构建。
-前后端独立工程；提供 `/admin/` 静态构建及 Vite manifest，Center 的 `npm run build:bundle` 负责配对构建并合并制品。M3 已完成并获用户确认；C01 循环验收状态见[开发计划](../../docs/design/v0.27.0/cycles/C01-企业身份与中心管理基础/开发计划.md)。
+前后端独立工程；提供 `/admin/` 静态构建及 Vite manifest，Center 的 `npm run build:bundle` 负责配对构建并合并制品。M3 已完成并获用户确认；C01 循环验收状态见[开发计划](../../docs/versions/v0.27.0/cycles/C01-企业身份与中心管理基础/开发计划.md)。
 
 ## 正式开发
 
@@ -104,4 +104,4 @@ npm run build:prototype
 
 单元测试仅覆盖演示模型。界面需另行在真实浏览器中检查；上述命令不验证正式认证、安全、会话、审计或数据库。
 包版本已随正式前端设为 `0.1.0`，与 Center 配对，不改变 Runtime 版本；这不表示 C01 已验收或发布。
-框架决策与原型边界见 [C01 UI 框架决策与原型](../../docs/design/v0.27.0/cycles/C01-企业身份与中心管理基础/UI框架决策与原型.md)。
+框架决策与原型边界见 [C01 UI 框架决策与原型](../../docs/versions/v0.27.0/cycles/C01-企业身份与中心管理基础/UI框架决策与原型.md)。

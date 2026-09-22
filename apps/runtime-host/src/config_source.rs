@@ -1,4 +1,4 @@
-//! Runtime Home 建立与私有 `config.toml` 安全读取。
+//! Host 根建立与私有配置文件安全读取；Host 和各用户分别持有绑定到具体文件的来源。
 //!
 //! 平台差异（mode/属主/O_NOFOLLOW/目录 fsync 与 Windows 等价物）收敛在
 //! [`crate::platform`]；本模块只保留业务语义：单一配置文件、CAS 替换与上限校验。
@@ -80,7 +80,7 @@ pub(crate) fn prepare_private_directory(path: &Path) -> Result<(), RuntimeHomeEr
 pub(crate) struct LocalConfigSource {
     path: PathBuf,
     repair_permissions: bool,
-    /// 同一来源的 Runtime／Speech／Host 设置串行提交，避免两个 CAS 同时通过后互相覆盖。
+    /// 同一物理文件的写入串行提交；Host 与用户配置不得复用同一源。
     write_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -156,7 +156,7 @@ fn read_private_config(path: &Path) -> ConfigSourceLoad {
     read_config(path, true)
 }
 
-fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
+pub(crate) fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
     let initial = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -279,7 +279,7 @@ fn read_config(path: &Path, repair: bool) -> ConfigSourceLoad {
     }
 }
 
-fn replace_private_config(
+pub(crate) fn replace_private_config(
     path: &Path,
     expected_revision: Option<&str>,
     document: &str,

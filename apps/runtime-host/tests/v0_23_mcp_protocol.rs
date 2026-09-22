@@ -163,7 +163,9 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
 
     // 只读核验刚创建的隔离库；控制指令持久化但不创建 Run 或 Run body append。
     let connection = Connection::open_with_flags(
-        runtime_home.path().join("data/runtime.sqlite3"),
+        runtime_home
+            .path()
+            .join("users/_personal/data/runtime.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("open isolated database read-only");

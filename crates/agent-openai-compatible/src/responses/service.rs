@@ -131,6 +131,33 @@ impl OpenAiResponsesService {
         ))
     }
 
+    /// 使用上层编译的能力与定制 Transport；请求编码、路由和流式解码保持原协议语义。
+    ///
+    /// # Errors
+    /// base URL 不满足安全约束时返回配置错误。
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_transport_and_capabilities(
+        base_url: impl Into<String>,
+        credential: BearerCredential,
+        model: impl Into<String>,
+        context_window_tokens: u64,
+        adapter: ResponsesProtocolAdapter,
+        capabilities: ModelCapabilities,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self, OpenAiResponsesServiceError> {
+        let base_url = validate_base_url(base_url.into())
+            .map_err(OpenAiResponsesServiceError::InvalidBaseUrl)?;
+        Ok(Self::build(
+            base_url,
+            credential,
+            model,
+            context_window_tokens,
+            adapter,
+            transport,
+            Some(capabilities),
+        ))
+    }
+
     fn build(
         base_url: String,
         credential: BearerCredential,
@@ -312,6 +339,7 @@ fn parse_retry_after_ms(headers: &[(String, String)]) -> Option<u64> {
 
 fn map_transport_error(error: TransportError) -> ModelError {
     let (kind, message) = match error {
+        TransportError::Rejected(error) => return error,
         TransportError::Connect(message) => (ModelTransportErrorKind::Connection, message),
         TransportError::Timeout => (
             ModelTransportErrorKind::Timeout,

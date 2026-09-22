@@ -103,6 +103,10 @@ pub enum SkillSource {
     WorkspaceAgents,
     /// 用户 Home 下的 `.ez-assistant/skills`。
     UserEzAssistant,
+    /// 自定义 Host 根沿用的旧个人 Skill 补充。
+    LegacyUserEzAssistant,
+    /// Host 根的公共补充，低于个人 Skill。
+    HostSupplement,
     /// 用户 Home 下的 `.agents/skills`。
     UserAgents,
 }

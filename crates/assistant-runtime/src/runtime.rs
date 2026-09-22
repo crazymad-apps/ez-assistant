@@ -15,11 +15,13 @@ mod mcp;
 mod memory;
 mod model;
 mod model_management;
+pub use model_management::ExternalModelPublication;
 mod permission;
 pub(crate) mod product;
 mod quote;
 mod recovery;
 mod resource;
+pub(crate) mod resource_reference;
 mod session_loading;
 mod session_management;
 mod shell;
@@ -134,6 +136,16 @@ struct PendingDeleteConfirmation {
 }
 
 impl AssistantRuntime {
+    /// 宿主回收前读取既有任务 owner；不把任务清单或登录身份复制到宿主。
+    pub fn has_background_work(&self) -> bool {
+        self.tasks.has_work()
+    }
+
+    /// 仅提示宿主重新读取工作事实，覆盖队列驱动、Run、child 及标题等受管任务。
+    pub fn subscribe_work_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.tasks.subscribe_work()
+    }
+
     /// 创建不跨进程保留数据的易失 Runtime，供无 Host 的嵌入式调用与单元测试使用。
     ///
     /// 正式 Runtime Host 必须使用 [`Self::open`] 注入产品 Store 并先完成启动恢复。
@@ -272,7 +284,10 @@ impl AssistantRuntime {
             model_binding_gate: Arc::new(AsyncRwLock::new(())),
             workspace_mutation_gate: AsyncMutex::new(()),
             device_mutation_gate: AsyncMutex::new(()),
-            config_registry: Arc::new(ConfigRegistry::new(config_source)),
+            config_registry: Arc::new(ConfigRegistry::new(
+                config_source,
+                model_factory.configuration_source(),
+            )),
             permission_coordinator,
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
@@ -297,6 +312,12 @@ impl AssistantRuntime {
     /// 返回构造时已经校验的 Runtime 配置。
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    /// 宿主开放入口前绑定整个 Runtime 的生命周期；与任何客户端连接/登录 Token 的期限无关。
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.root_cancellation = cancellation;
+        self
     }
 
     /// 在 Host 开放入口前替换附加 Channel 输出端口。
@@ -395,6 +416,9 @@ impl AssistantRuntime {
         };
         let config_snapshot = self.config_registry.snapshot()?;
         let model_selection = request.model_selection;
+        if model_selection.is_some() {
+            self.model_factory.ensure_editable()?;
+        }
         let prepared_model = match model_selection.as_ref() {
             Some(selection) => Some(
                 self.config_registry
@@ -776,6 +800,14 @@ impl AssistantRuntime {
     }
 
     fn ensure_running(&self) -> RuntimeResult<()> {
+        if self.root_cancellation.is_cancelled() {
+            return Err(RuntimeError::RuntimeNotRunning {
+                lifecycle: match self.lifecycle()? {
+                    RuntimeLifecycle::Stopped => RuntimeLifecycle::Stopped,
+                    _ => RuntimeLifecycle::ShuttingDown,
+                },
+            });
+        }
         let lifecycle = self.lifecycle()?;
         if lifecycle == RuntimeLifecycle::Running {
             Ok(())

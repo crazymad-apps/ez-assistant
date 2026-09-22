@@ -43,7 +43,9 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
   const directory_sources: ReadonlyArray<{ source: SkillSourceSnapshot; label: string; workspace: boolean }> = [
     { source: "workspace_ez_assistant", label: "工作区 .ez-assistant/skills", workspace: true },
     { source: "workspace_agents", label: "工作区 .agents/skills", workspace: true },
-    { source: "user_ez_assistant", label: "用户目录 .ez-assistant/skills", workspace: false },
+    { source: "user_ez_assistant", label: "个人 Skill", workspace: false },
+    { source: "legacy_user_ez_assistant", label: "旧个人目录 .ez-assistant/skills", workspace: false },
+    { source: "host_supplement", label: "Host 公共补充", workspace: false },
     { source: "user_agents", label: "用户目录 .agents/skills", workspace: false },
   ];
 
@@ -216,7 +218,9 @@ function sourceLabel(source: SkillSourceSnapshot): string {
   return {
     workspace_ez_assistant: "工作区 .ez-assistant",
     workspace_agents: "工作区 .agents",
-    user_ez_assistant: "用户目录 .ez-assistant",
+    user_ez_assistant: "个人 Skill",
+    legacy_user_ez_assistant: "旧个人目录 .ez-assistant",
+    host_supplement: "Host 公共补充",
     user_agents: "用户目录 .agents",
   }[source];
 }

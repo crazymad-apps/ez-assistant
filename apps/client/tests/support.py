@@ -4,6 +4,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 NODE = shutil.which('node')
 HOST = pathlib.Path(os.environ.get('EZ_ASSISTANT_RUNTIME_EXECUTABLE', REPO/'target/debug/ez-assistant-runtime')).resolve()
+VERSION = json.loads((ROOT/'package.json').read_text())['version']
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 class Fixture:
@@ -33,12 +34,12 @@ class Fixture:
     def discovery(self):return json.loads((self.home/'run/runtime.json').read_text())
     def request(self,path,body=None):
         d=self.discovery()
-        req=urllib.request.Request(d['address']+path,headers={'Authorization':'Bearer '+d['access_token'],'X-Ez-Client-Version':'0.25.2','X-Ez-Min-Compatible-Version':'0.25.2','Content-Type':'application/json'},data=json.dumps(body).encode() if body is not None else None)
+        req=urllib.request.Request(d['address']+path,headers={'Authorization':'Bearer '+d['access_token'],'X-Ez-Client-Version':VERSION,'X-Ez-Min-Compatible-Version':VERSION,'Content-Type':'application/json'},data=json.dumps(body).encode() if body is not None else None)
         with OPENER.open(req,timeout=5) as res:return json.load(res)
     def runtime(self,kind,payload=None):return self.request('/commands',{'request_id':'m4-'+kind,'command':{'scope':'runtime','payload':{'type':kind,'payload':payload or {}}}})['result']['payload']['payload']
     def access(self,kind,payload=None):return self.request('/commands',{'request_id':'m4-'+kind,'command':{'scope':'host_access','payload':{'type':kind,**({'payload':payload} if payload is not None else {})}}})['result']['payload']
     def audit(self,name):
-        db=self.home/'data/runtime.sqlite3'; destination=self.root/(name+'.sqlite3')
+        db=self.home/'users/_personal/data/runtime.sqlite3'; destination=self.root/(name+'.sqlite3')
         assert not destination.exists()
         before=inventory(db)
         source=sqlite3.connect(db.as_uri()+'?mode=ro',uri=True);target=sqlite3.connect(destination)
@@ -59,7 +60,8 @@ def inventory(db):
             count=c.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]
             rows=sorted(repr(r) for r in c.execute('SELECT * FROM '+table))
             result[name]={'count':count,'fields_sha256':hashlib.sha256('\n'.join(rows).encode()).hexdigest()}
-        assert len(result)==42
+        assert {'schema_migrations','database_compatibility','sessions','session_resources','attachments','inputs'} <= result.keys()
+        assert c.execute('SELECT version FROM schema_migrations ORDER BY applied_at_ms DESC, version DESC LIMIT 1').fetchone()==(VERSION,)
         return result
     finally:c.close()
 

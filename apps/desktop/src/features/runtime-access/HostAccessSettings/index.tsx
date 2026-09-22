@@ -1,9 +1,10 @@
+import { manageLocalHost } from "../../../native-bridge/runtimeConnection";
 import { isTauri } from "@tauri-apps/api/core";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { SelectionPopover } from "../../../components/SelectionPopover";
-import type { HostAccessConfiguration, HostAccessStatus } from "@ez-assistant/protocol";
+import type { HostMode, HostAccessCommand, HostAccessConfiguration, HostAccessStatus } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SettingsPageContainer } from "../../settings/SettingsDialog/SettingsPageContainer";
 import styles from "./index.module.scss";
@@ -13,16 +14,24 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
   const client = root.connection.state === "connected" ? root.runtime_client : null;
   const [status, setStatus] = useState<HostAccessStatus | null>(null);
   const [draft, setDraft] = useState<HostAccessConfiguration | null>(null);
+  const [mode, setMode] = useState<HostMode>("personal");
+  const [center_url, setCenterUrl] = useState("");
+  const [clear_binding, setClearBinding] = useState(false);
+  const [mode_open, setModeOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [scheme_open, setSchemeOpen] = useState(false);
 
+  const command = (value: HostAccessCommand) => isTauri() && root.files.native_host ? manageLocalHost(value) : client ? client.hostAccessCommand(value) : Promise.reject(new Error("请先连接 Host。"));
+  function apply(value: HostAccessStatus) {
+    setStatus(value); setDraft(value.configuration); setMode(value.mode ?? "personal"); setCenterUrl(value.center_url ?? ""); setClearBinding(false);
+  }
   useEffect(() => {
     let active = true;
-    if (client) void client.hostAccessCommand({ type: "get_status" }).then((value) => {
-      if (active) { setStatus(value); setDraft(value.configuration); }
+    if (client || isTauri()) void command({ type: "get_status" }).then((value) => {
+      if (active) apply(value);
     }).catch((error: unknown) => { if (active) setError(displayError(error)); });
     return () => { active = false; onDirtyChange(false); };
   }, [client, onDirtyChange]);
@@ -34,28 +43,28 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
   }
 
   async function refresh() {
-    if (!client) return;
+    if (!client && !isTauri()) return;
     setPending(true); setError(null);
     try {
-      const next = await client.hostAccessCommand({ type: "get_status" });
-      setStatus(next); setDraft(next.configuration); setPassword(""); onDirtyChange(false);
+      const next = await command({ type: "get_status" });
+      apply(next); setPassword(""); onDirtyChange(false);
     } catch (error) { setError(displayError(error)); }
     finally { setPending(false); }
   }
 
   async function save(kind: "password" | "configuration") {
-    if (!client || !status || !draft) return;
+    if ((!client && !isTauri()) || !status || !draft) return;
     setPending(true); setError(null); setNotice(null);
     const submitted = password;
     if (kind === "password") setPassword("");
     try {
-      const next = await client.hostAccessCommand(kind === "password"
+      const next = await command(kind === "password"
         ? { type: "set_password", payload: { expected_revision: status.revision, password: submitted } }
-        : { type: "configure", payload: { expected_revision: status.revision, configuration: { ...draft, server_names: draft.server_names.map((name) => name.trim().toLowerCase()).filter(Boolean) } } });
+        : { type: "configure", payload: { expected_revision: status.revision, ...(isTauri() && root.files.native_host ? { mode, center_url: mode === "enterprise" ? center_url || undefined : undefined, clear_center_binding: clear_binding } : {}), configuration: { ...draft, server_names: draft.server_names.map((name) => name.trim().toLowerCase()).filter(Boolean) } } });
       setStatus(next);
-      if (kind === "configuration") setDraft(next.configuration);
+      if (kind === "configuration") apply(next);
       onDirtyChange(kind === "password" ? JSON.stringify(draft) !== JSON.stringify(next.configuration) : password.length > 0);
-      setNotice(kind === "password" ? "密码已更新，已有普通登录已失效。" : next.restart_required ? "已保存，重启 Host 后端口、协议和证书生效。" : "访问设置已保存。");
+      setNotice(kind === "password" ? "密码已更新，已有普通登录已失效。" : next.restart_required ? "已保存，重启 Host 后模式、中心与监听配置生效。" : "访问设置已保存。");
     } catch (error) { setError(displayError(error)); }
     finally { setPending(false); }
   }
@@ -64,7 +73,15 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
   const closing_current = locked && draft?.remote_enabled === false && !isLoopbackAddress(client?.address);
   return <SettingsPageContainer title="访问设置" on_back={on_back} back_label="返回 Runtime" actions={<Button disabled={pending} onClick={() => void refresh()} variant="text">重新载入</Button>}>
     {!status || !draft ? <p role="status">{error ?? "正在读取访问设置…"}</p> : <div className={styles.settings}>
-      <section className={styles.card}>
+      {isTauri() && root.files.native_host && <section className={styles.card}>
+        <h4>本机 Host 身份配置</h4>
+        <SelectionPopover aria_label="Host 模式" disabled={pending} open={mode_open} on_open_change={setModeOpen} on_select={(value) => { setMode(value); setPassword(""); onDirtyChange(true); }} options={[{ value: "personal", label: "个人模式" }, { value: "enterprise", label: "企业模式" }]} selected={mode} trigger_variant="field" />
+        {mode === "enterprise" && <><label htmlFor="center-url">企业中心地址</label><input id="center-url" value={center_url} placeholder="https://center.example.com" onChange={(event) => { setCenterUrl(event.target.value); onDirtyChange(true); }} /><p>中心 ID：{status.center_id ?? "首次成功登录后绑定"}</p>
+          {status.center_id && <label><input type="checkbox" checked={clear_binding} onChange={(event) => { setClearBinding(event.target.checked); onDirtyChange(true); }} />清除旧中心绑定，下次登录重新绑定（原用户数据保留）</label>}
+        </>}
+        <p>保存后须重启。重启会中断本机 Host 所有用户的任务，并使所有客户端断开。</p>
+      </section>}
+      {mode === "personal" && <section className={styles.card}>
         <h4>访问密码</h4>
         <p>{status.password_configured ? "已设置密码，可直接修改。" : "先设置密码，再允许非本机客户端访问。"}</p>
         <label htmlFor="new-host-password">新密码</label>
@@ -72,10 +89,10 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
           <input autoComplete="new-password" disabled={pending} id="new-host-password" onChange={(event) => { setPassword(event.target.value); onDirtyChange(true); }} placeholder="输入新密码" type="password" value={password} />
           <Button disabled={pending || !password.trim() || new TextEncoder().encode(password).length > 1024} onClick={() => void save("password")}>保存密码</Button>
         </div>
-      </section>
+      </section>}
       <section className={styles.card}>
         <div className={styles.heading}><h4>非本地访问</h4><span>{locked ? "已开启" : "已关闭"}</span></div>
-        <label className={styles.toggle}><input checked={draft.remote_enabled} disabled={pending || !status.password_configured || status.restart_required} onChange={(event) => update({ remote_enabled: event.target.checked })} type="checkbox" />允许其他设备连接</label>
+        <label className={styles.toggle}><input checked={draft.remote_enabled} disabled={pending || (!status.password_configured && status.mode !== "enterprise") || status.restart_required} onChange={(event) => update({ remote_enabled: event.target.checked })} type="checkbox" />允许其他设备连接</label>
         <p>本机与其他设备共用同一个端口，使用这台电脑的 IP 直接访问。</p>
         <label htmlFor="host-server-names">允许的 IP 或域名（可选，每行一个）</label>
         <textarea disabled={pending} id="host-server-names" onChange={(event) => update({ server_names: event.target.value.split("\n") })} placeholder={"127.0.0.1\n::1\nassistant.example.com"} rows={3} value={draft.server_names.join("\n")} />
@@ -97,7 +114,7 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
           </>}
         </fieldset>
         {locked ? <p>关闭非本地访问后，可修改端口、协议和证书。</p> : <p>修改端口、协议或证书后需重启 Host；访问开关和允许地址立即生效。</p>}
-        {status.restart_required && <p role="status" className={styles.warning}>端口、协议或证书已修改，请重启 Host 后再开启非本地访问。</p>}
+        {status.restart_required && <p role="status" className={styles.warning}>Host 配置已修改，请重启后生效。</p>}
 
         {status.restart_required && isTauri() && root.desktop_lifecycle.local_impact_known && <Button disabled={pending || root.desktop_lifecycle.pending} onClick={() => root.desktop_lifecycle.request("restart_runtime")}>重启本机 Runtime</Button>}
         <Button disabled={pending || !Number.isInteger(draft.port) || draft.port < 1 || draft.port > 65535} onClick={() => void save("configuration")} variant="primary">{pending ? "保存中…" : "保存访问设置"}</Button>

@@ -200,6 +200,12 @@ impl StorageEngine {
                 attachment_io::ensure_stable_view(&view, &source.blob_hash, &source.original_name)?;
                 let readable_path = path_text(&view)?;
                 rewrites.insert(source.agent_readable_path.clone(), readable_path.clone());
+                if let Some(old) = super::resource_reference::historical_attachment_path(
+                    &self.runtime_home,
+                    source,
+                ) {
+                    rewrites.insert(old, readable_path.clone());
+                }
                 attachments.push(StoredAttachment {
                     attachment_id: reference.attachment_id.clone(),
                     session_id: fork.session.session_id.clone(),

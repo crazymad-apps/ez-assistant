@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 const DEFAULT_RUNTIME_HOME_DIRECTORY: &str = ".ez-assistant";
-const CONFIG_FILE: &str = "config.toml";
+const CONFIG_FILE: &str = "host.toml";
 const DEFAULT_EVENT_CAPACITY: usize = 256;
 
 /// Runtime Host 的进程级命令行入口。

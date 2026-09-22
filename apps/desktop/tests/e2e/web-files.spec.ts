@@ -20,7 +20,7 @@ async function login(page: Page) {
   expect(new URL(page.url()).hash).toBe("");
 }
 
-test("Web selects an unregistered Host directory, sends browser files, previews and downloads Host content, then restores view", async ({
+test("Web selects a Host directory, uploads and downloads files, and clears resource tabs on refresh", async ({
   page,
 }, info) => {
   const directory = process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE!;
@@ -100,8 +100,12 @@ test("Web selects an unregistered Host directory, sends browser files, previews 
     session: { session_id: string };
     attachments: { attachment_id: string }[];
   };
+  // 直接发出的 Cookie 请求也绑定同一次登录，与页面上传时的身份上下文一致。
+  const login_context = response.request().headers()["x-ez-login-context"];
+  expect(login_context).toBeTruthy();
   const uploaded = await page.request.get(
     `${new URL(page.url()).origin}/sessions/${result.session.session_id}/attachments/${result.attachments[0].attachment_id}/download`,
+    { headers: { ...compatibilityHeaders(), "x-ez-login-context": login_context } },
   );
   expect(await uploaded.text()).toBe("BROWSER FILE CONTENT");
   await page.getByRole("button", { name: "新建资源标签", exact: true }).click();
@@ -143,14 +147,17 @@ test("Web selects an unregistered Host directory, sends browser files, previews 
   expect(await readFile((await download.path())!, "utf8")).toBe(
     "HOST FILE CONTENT",
   );
+  await page.screenshot({ path: info.outputPath("web-host-file-preview.png") });
   await page.reload();
+  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  // C03 的普通 Web 只缓存匿名布局，重新核验登录后不恢复旧资源标签。
   await expect(
     page.getByText("HOST FILE CONTENT", { exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   const stored = await page.evaluate(() => JSON.stringify(localStorage));
   expect(stored).not.toContain("BROWSER FILE CONTENT");
   expect(stored).not.toContain("HOST FILE CONTENT");
-  await page.screenshot({ path: info.outputPath("web-host-file-preview.png") });
+  expect(stored).not.toContain(directory);
   expect(errors).toEqual([]);
 });
 

@@ -60,9 +60,10 @@ fn assert_no_runtime(home: &Path) {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert!(
-        names
-            .iter()
-            .all(|name| name == "run" || name == "config.toml"),
+        names.iter().all(|name| name == "run"
+            || name == "host.toml"
+            || name == "users"
+            || name == "backups"),
         "{names:?}"
     );
 }
@@ -136,7 +137,7 @@ fn password_and_configuration_share_cas_and_preserve_other_sections() {
     assert!(!saved.to_string().contains("offline-password-123"));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let before = fs::read(home.join("config.toml")).unwrap();
+    let before = fs::read(home.join("host.toml")).unwrap();
     failure(
         configure(&home, revision, port, true),
         "configuration_conflict",
@@ -145,13 +146,14 @@ fn password_and_configuration_share_cas_and_preserve_other_sections() {
         configure(&home, saved["revision"].clone(), port, true),
         "port_in_use",
     );
-    assert_eq!(fs::read(home.join("config.toml")).unwrap(), before);
+    assert_eq!(fs::read(home.join("host.toml")).unwrap(), before);
     drop(listener);
     let configured = success(configure(&home, saved["revision"].clone(), port, true));
     assert_eq!(configured["configuration"]["port"], port);
     assert_eq!(configured["configuration"]["remote_enabled"], true);
-    let text = fs::read_to_string(home.join("config.toml")).unwrap();
-    assert!(text.contains("# preserve this comment") && text.contains("value = 23"));
+    let text = fs::read_to_string(home.join("host.toml")).unwrap();
+    let personal = fs::read_to_string(home.join("users/_personal/config.toml")).unwrap();
+    assert!(personal.contains("# preserve this comment") && personal.contains("value = 23"));
     assert!(text.contains("$argon2id$"));
     assert!(!text.contains("offline-password-123"));
     assert_no_runtime(&home);

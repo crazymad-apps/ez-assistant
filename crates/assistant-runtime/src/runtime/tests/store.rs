@@ -48,6 +48,7 @@ pub(super) struct FaultInjectingStore {
     conversation_loads: AtomicUsize,
     session_loads: Mutex<Vec<SessionId>>,
     full_loads: AtomicUsize,
+    pub(super) window_read_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl FaultInjectingStore {
@@ -67,6 +68,7 @@ impl FaultInjectingStore {
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
+            window_read_hook: Mutex::new(None),
         }
     }
 
@@ -86,6 +88,7 @@ impl FaultInjectingStore {
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
+            window_read_hook: Mutex::new(None),
         }
     }
 
@@ -105,6 +108,7 @@ impl FaultInjectingStore {
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
+            window_read_hook: Mutex::new(None),
         }
     }
 
@@ -124,6 +128,7 @@ impl FaultInjectingStore {
             conversation_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
+            window_read_hook: Mutex::new(None),
         }
     }
 
@@ -652,7 +657,13 @@ impl RuntimeStore for FaultInjectingStore {
         &self,
         request: ConversationWindowRequest,
     ) -> StoreFuture<'_, StoredConversationWindow> {
-        self.inner.load_conversation_window(request)
+        Box::pin(async move {
+            let window = self.inner.load_conversation_window(request).await?;
+            if let Some(hook) = self.window_read_hook.lock().unwrap().as_ref() {
+                hook();
+            }
+            Ok(window)
+        })
     }
 
     fn load_conversation_raw_window(

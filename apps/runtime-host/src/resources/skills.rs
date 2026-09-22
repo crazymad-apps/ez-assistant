@@ -43,32 +43,38 @@ impl Default for ScanLimits {
 
 /// 正式 Host 的本地 Skill 包扫描适配器。
 pub(super) struct HostSkillPackageSource {
-    /// Host 启动时解析的用户 Home；不可用时扫描返回 incomplete 而非伪造路径。
-    user_home: Option<PathBuf>,
+    roots: Vec<(SkillSource, Option<usize>, PathBuf)>,
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
 }
 
 impl HostSkillPackageSource {
-    /// 构造扫描适配器；不在此时读取任一 Skill Root。
-    pub(super) fn new(user_home: Option<PathBuf>) -> Self {
-        Self { user_home }
+    pub(super) fn user(
+        user_root: &Path,
+        paths: std::sync::Arc<crate::user_paths::UserPaths>,
+    ) -> Self {
+        Self {
+            roots: skill_roots(None, Some(user_root), &[]),
+            paths,
+        }
+    }
+    pub(super) fn personal(
+        user_root: &Path,
+        paths: std::sync::Arc<crate::user_paths::UserPaths>,
+    ) -> Self {
+        Self {
+            roots: skill_roots(dirs::home_dir().as_deref(), Some(user_root), &[]),
+            paths,
+        }
     }
 }
-
 impl SkillPackageSource for HostSkillPackageSource {
     fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_> {
-        let user_home = self.user_home.clone();
+        let mut roots = skill_roots(None, None, &request.workspace_directories);
+        roots.extend(self.roots.clone());
+        let paths = self.paths.clone();
         Box::pin(async move {
-            // `std::fs` 和 YAML 解析都在专用阻塞任务中执行，不占用 Runtime 异步执行线程。
-            tokio::task::spawn_blocking(move || match user_home {
-                Some(user_home) => scan_sync(&user_home, &request.workspace_directories),
-                None => SkillScanResult {
-                    candidates: Vec::new(),
-                    diagnostics: vec![SkillDiagnostic::error(
-                        SkillDiagnosticCode::RootUnreadable,
-                        "user home directory is unavailable",
-                    )],
-                    complete: false,
-                },
+            tokio::task::spawn_blocking(move || {
+                scan_roots(roots, ScanLimits::default(), Some(&paths))
             })
             .await
             .map_err(|source| {
@@ -81,15 +87,38 @@ impl SkillPackageSource for HostSkillPackageSource {
     }
 }
 
+#[cfg(test)]
 fn scan_sync(user_home: &Path, workspace_directories: &[String]) -> SkillScanResult {
     scan_sync_with_limits(user_home, workspace_directories, ScanLimits::default())
 }
 
+#[cfg(test)]
 fn scan_sync_with_limits(
     user_home: &Path,
     workspace_directories: &[String],
     limits: ScanLimits,
 ) -> SkillScanResult {
+    scan_personal(Some(user_home), None, workspace_directories, limits)
+}
+
+#[cfg(test)]
+fn scan_personal(
+    user_home: Option<&Path>,
+    user_root: Option<&Path>,
+    workspace_directories: &[String],
+    limits: ScanLimits,
+) -> SkillScanResult {
+    scan_roots(
+        skill_roots(user_home, user_root, workspace_directories),
+        limits,
+        None,
+    )
+}
+fn skill_roots(
+    user_home: Option<&Path>,
+    user_root: Option<&Path>,
+    workspace_directories: &[String],
+) -> Vec<(SkillSource, Option<usize>, PathBuf)> {
     // Workspace 根顺序优先，每个根内部再按 `SkillSource` 排序；用户 Root 固定在最后。
     let mut roots = Vec::with_capacity(workspace_directories.len() * 2 + 2);
     for (root_order, workspace) in workspace_directories.iter().enumerate() {
@@ -105,23 +134,72 @@ fn scan_sync_with_limits(
             workspace.join(".agents/skills"),
         ));
     }
-    roots.push((
-        SkillSource::UserEzAssistant,
-        None,
-        user_home.join(".ez-assistant/skills"),
-    ));
-    roots.push((
-        SkillSource::UserAgents,
-        None,
-        user_home.join(".agents/skills"),
-    ));
+    if let Some(user_root) = user_root {
+        roots.push((SkillSource::UserEzAssistant, None, user_root.join("skills")));
+        if let Some(host_root) = user_root.parent().and_then(Path::parent) {
+            if let Some(user_home) = user_home
+                && host_root != user_home.join(".ez-assistant")
+            {
+                roots.push((
+                    SkillSource::LegacyUserEzAssistant,
+                    None,
+                    user_home.join(".ez-assistant/skills"),
+                ));
+            }
+            roots.push((SkillSource::HostSupplement, None, host_root.join("skills")));
+        }
+    } else if let Some(user_home) = user_home {
+        roots.push((
+            SkillSource::UserEzAssistant,
+            None,
+            user_home.join(".ez-assistant/skills"),
+        ));
+    }
+    if let Some(user_home) = user_home {
+        roots.push((
+            SkillSource::UserAgents,
+            None,
+            user_home.join(".agents/skills"),
+        ));
+    }
 
+    roots
+}
+
+fn scan_roots(
+    roots: Vec<(SkillSource, Option<usize>, PathBuf)>,
+    limits: ScanLimits,
+    paths: Option<&crate::user_paths::UserPaths>,
+) -> SkillScanResult {
     let mut result = SkillScanResult {
         complete: true,
         ..SkillScanResult::default()
     };
     let mut candidate_count = 0_usize;
+    let mut visited = BTreeSet::new();
     for (source, workspace_root_order, root) in roots {
+        // 不存在的补充 Root 本来就是空来源，不让它使已找到的工作区 Skill 整体失效。
+        if fs::symlink_metadata(&root)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        if paths.is_some_and(|paths| paths.resolve(&root, false).is_err()) {
+            result.complete = false;
+            result.diagnostics.push(path_diagnostic(
+                SkillDiagnosticSeverity::Error,
+                SkillDiagnosticCode::RootUnreadable,
+                source,
+                &root,
+                "skill root is outside the current user domain",
+            ));
+            break;
+        }
+        if let Ok(canonical) = fs::canonicalize(&root)
+            && !visited.insert(canonical)
+        {
+            continue;
+        }
         // 全局候选超限或任一 Root 读取不完整后立即停止，禁止发布部分扫描结果。
         if !scan_root(
             source,
@@ -956,6 +1034,38 @@ mod tests {
         assert_eq!(
             first.candidates[0].source_path,
             skill.to_str().expect("UTF-8 source directory")
+        );
+    }
+    #[test]
+    fn personal_root_overrides_host_supplement_and_keeps_custom_home_legacy_source() {
+        let temporary = tempfile::tempdir().unwrap();
+        let os_home = temporary.path().join("os-home");
+        let host = temporary.path().join("custom-host");
+        let personal = host.join("users/_personal");
+        write_skill(&personal.join("skills"), "one", "review", "");
+        write_skill(&host.join("skills"), "two", "review", "");
+        write_skill(&os_home.join(".ez-assistant/skills"), "three", "legacy", "");
+        let discovery = compile_skill_discovery(
+            scan_personal(Some(&os_home), Some(&personal), &[], ScanLimits::default()),
+            &[],
+        );
+        assert_eq!(
+            discovery
+                .winners
+                .iter()
+                .find(|v| v.name.as_str() == "review")
+                .unwrap()
+                .source,
+            SkillSource::UserEzAssistant
+        );
+        assert_eq!(
+            discovery
+                .winners
+                .iter()
+                .find(|v| v.name.as_str() == "legacy")
+                .unwrap()
+                .source,
+            SkillSource::LegacyUserEzAssistant
         );
     }
 }

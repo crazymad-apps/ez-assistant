@@ -1,4 +1,5 @@
-import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { invokeRuntime as invoke } from "./runtimeConnection";
+import { Channel, isTauri } from "@tauri-apps/api/core";
 
 export type BrowserEvent =
   | Readonly<{ type: "load_started" | "loaded" | "popup"; url: string }>

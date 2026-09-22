@@ -609,6 +609,7 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
     );
     assert!(child.error.is_none());
     assert_eq!(child.body_generation, 2);
+    assert_eq!(child.context_window_tokens, Some(8192));
     let child_conversation = store
         .load_child_conversation(&session.session.session_id, &child.child_task_id)
         .await

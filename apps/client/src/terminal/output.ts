@@ -9,7 +9,8 @@ export function targetHome(home: string): void { line(`目标目录  ${home}`); 
 export function showTarget(target: Target | null): void {
   if (!target) { line("Host      未启动"); return; }
   const labels = { ready: "业务就绪", starting: "初始化中", unavailable: "初始化失败" };
-  line(`Host      ${labels[target.health.status]}`);
+  line(`Host      ${target.capabilities.mode === "enterprise" && target.health.status === "ready" ? "身份服务就绪" : labels[target.health.status]}`);
+  line(`运行模式  ${target.capabilities.mode === "enterprise" ? "企业" : "个人"}`);
   line(`软件版本  ${target.capabilities.runtime_version} · 最低兼容 ${target.capabilities.min_compatible_version}`);
   line(`当前地址  ${target.discovery.address}`);
   if (target.health.stage) line(`当前阶段  ${target.health.stage}`);

@@ -103,6 +103,7 @@ pub enum ReasoningEffortKey {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
     XHigh,
     Max,
 }

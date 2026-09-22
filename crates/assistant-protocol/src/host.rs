@@ -75,12 +75,15 @@ pub enum RuntimeHostFeature {
     WebLogin,
     UserTerminals,
     StartupDiagnostics,
+    EnterpriseIdentity,
 }
 
 /// 当前 Host 实例公开给客户端的传输能力，不包含地址、Token 或业务状态。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RuntimeHostCapabilities {
+    #[serde(default)]
+    pub mode: crate::HostMode,
     /// Host 构建平台，不从客户端 UA 推断；旧 Host 未提供时保持未知。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -123,6 +126,7 @@ mod tests {
         );
 
         let capabilities = RuntimeHostCapabilities {
+            mode: crate::HostMode::Personal,
             platform: Some("windows".into()),
             architecture: Some("x86_64".into()),
             rg_on_path: Some(false),

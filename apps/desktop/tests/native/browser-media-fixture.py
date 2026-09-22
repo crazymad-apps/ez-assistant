@@ -43,6 +43,13 @@ document.querySelector('button').onclick = async () => {
 setInterval(() => report('tick'), 500);
 addEventListener('pagehide', () => navigator.sendBeacon('/event', JSON.stringify({id, event: 'pagehide'})));
 </script>'''
+PROFILE = b'''<!doctype html><meta charset="utf-8"><title>Profile probe</title><script>
+const id = new URL(location).searchParams.get('id');
+const storage = localStorage.getItem('probe') || '';
+const cookie = document.cookie.split('; ').find(v => v.startsWith('probe='))?.slice(6) || '';
+localStorage.setItem('probe', id); document.cookie = 'probe=' + id + '; Path=/';
+fetch('/event', {method:'POST',body:JSON.stringify({id, storage, cookie, profile_ready:true})});
+</script>'''
 LATEST = {}
 
 
@@ -56,6 +63,8 @@ class Handler(BaseHTTPRequestHandler):
         data = PAGE
         if url.path == "/tone.wav":
             kind, data = "audio/wav", TONE
+        elif url.path == "/profile":
+            data = PROFILE
         elif url.path == "/shell":
             data = b"<title>Native media close probe</title>"
         elif url.path == "/status":

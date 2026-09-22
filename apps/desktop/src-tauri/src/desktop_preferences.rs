@@ -167,7 +167,22 @@ fn save_to_directory(
 
 fn validate_namespace(value: &str) -> Result<(), DesktopPreferencesError> {
     let url = reqwest::Url::parse(value).map_err(|_| DesktopPreferencesError::Invalid)?;
-    if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != value {
+    // 企业视图按 Host / Center / 用户分区；只接纳固定数字 ID 路径，不接受凭据或任意路径。
+    let path: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    let user_scope = path.len() == 3
+        && path[0] == "users"
+        && path[1].len() == 36
+        && path[1]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        && path[2].parse::<i32>().is_ok_and(|id| id > 0);
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.origin().ascii_serialization() != value && !user_scope)
+    {
         return Err(DesktopPreferencesError::Invalid);
     }
     Ok(())

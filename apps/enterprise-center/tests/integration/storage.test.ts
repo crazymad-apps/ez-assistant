@@ -81,7 +81,7 @@ async function freePort() {
 }
 function envFor(uri: string, port: number, autoUpgrade = 'true') {
   return { CENTER_DATABASE_URL: uri, CENTER_DATABASE_AUTO_UPGRADE: autoUpgrade, CENTER_PORT: String(port),
-    CENTER_HOST: '127.0.0.1', CENTER_PUBLIC_ORIGIN: `http://127.0.0.1:${port}`, CENTER_ALLOW_HTTP_LOOPBACK: 'true' };
+    CENTER_HOST: '127.0.0.1', CENTER_PUBLIC_ORIGIN: `http://127.0.0.1:${port}` };
 }
 function testUpgradeFiles(kind: 'success' | 'failure' | 'initial-failure') {
   const base = migrations.upgradeFiles();

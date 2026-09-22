@@ -1,6 +1,10 @@
-//! 网络准入、统一凭据认证和 Cookie 同源保护；页面来源不代表客户端身份。
+//! HTTP 安全边界；各路由需要的检查在 `routes` 中组合，不在这里维护路径白名单。
+//!
+//! `authorize` 只处理网络来源、凭据解析和 CORS。其余中间件分别约束登录、
+//! 用户身份、就绪服务和传输生命周期；页面来源与本机证明都不能替代用户身份。
 
 use axum::{
+    Extension,
     body::Body,
     extract::{ConnectInfo, Request, State},
     http::{
@@ -31,8 +35,7 @@ pub(super) fn require_same_origin(state: &HttpState, headers: &HeaderMap) -> Res
     }
 }
 
-// Cookies do not isolate TCP ports. Include the validated authority's port so two
-// Host processes on one machine can stay logged in in the same browser.
+/// Cookie 本身不隔离端口；把已校验的协议和端口写入名称，避免同机多个 Host 覆盖登录。
 pub(super) fn cookie_name(secure: bool, headers: &HeaderMap) -> String {
     let port = headers
         .get(axum::http::header::HOST)
@@ -58,6 +61,8 @@ pub(super) async fn authorize_page(
     }
 }
 
+/// 所有 API 的最外层：包括错误响应在内统一补充 CORS，并在业务鉴权前结束合法预检。
+/// 这里允许缺少登录；是否必须登录由路由组的 `require_login` 决定。
 pub(super) async fn authorize(
     State(state): State<HttpState>,
     mut request: Request,
@@ -82,76 +87,169 @@ pub(super) async fn authorize(
     if request.method() == Method::OPTIONS {
         return preflight_response(request.headers(), origin.as_deref());
     }
-    let login = request.uri().path() == "/auth/login";
-    let terminal = request.uri().path() == "/user-terminals/socket";
-    // WS 只允许进入有界首帧认证等待，认证通过前不能创建 PTY。
-    if !login && permit.is_none() && !terminal {
-        return with_cors(HttpError::unauthorized().into_response(), origin.as_deref());
-    }
-    if request.uri().path().ends_with("/native-path")
-        && !permit.as_ref().is_some_and(|permit| permit.native)
-    {
-        return with_cors(
-            HttpError::forbidden("该路径仅允许本机原生客户端访问。").into_response(),
-            origin.as_deref(),
-        );
-    }
-    if !terminal
-        && !matches!(
-            request.uri().path(),
-            "/health" | "/capabilities" | "/auth/logout"
-        )
-    {
-        let route = request
-            .extensions()
-            .get::<axum::extract::MatchedPath>()
-            .map_or("", |path| path.as_str());
-        match super::compatibility::admit(
-            request.headers(),
-            request.method(),
-            route,
-            permit.as_ref(),
-        ) {
-            Ok(client) => {
-                request.extensions_mut().insert(client);
-            }
-            Err(error) => {
-                return with_cors(super::compatibility::response(error), origin.as_deref());
-            }
-        }
-    }
-    if !matches!(
-        request.uri().path(),
-        "/auth/login"
-            | "/auth/logout"
-            | "/auth/session"
-            | "/health"
-            | "/capabilities"
-            | "/commands"
-    ) && state.startup.services().is_err()
-    {
-        return with_cors(HttpError::unavailable().into_response(), origin.as_deref());
-    }
-    let streaming_response =
-        request.uri().path() != "/commands" && !request.uri().path().starts_with("/auth/");
     request.extensions_mut().insert(permit.clone());
-    if let Some(permit) = &permit {
-        request.extensions_mut().insert(permit.clone());
-        if !terminal {
-            let body = std::mem::replace(request.body_mut(), Body::empty());
-            *request.body_mut() = guarded_body(body, permit.clone(), false);
+    if let Some(permit) = permit {
+        request.extensions_mut().insert(permit);
+    }
+    with_cors(next.run(request).await, origin.as_deref())
+}
+
+pub(super) async fn require_login(
+    Extension(permit): Extension<Option<AccessPermit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if permit.is_none() {
+        return HttpError::unauthorized().into_response();
+    }
+    next.run(request).await
+}
+
+/// 浏览器 WS 握手也是 Cookie 操作，即使使用 GET、Cookie 已过期，也必须显式同源。
+/// 没有 Cookie 的连接仍可进入有界首帧认证；这里不把握手成功当成已登录。
+pub(super) async fn require_socket_origin(
+    State(state): State<HttpState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !request.headers().contains_key(AUTHORIZATION) {
+        match session_cookie(
+            request.headers(),
+            &cookie_name(state.secure, request.headers()),
+        ) {
+            Ok(Some(_)) => {
+                if let Err(error) = require_same_origin(&state, request.headers()) {
+                    return error.into_response();
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return error.into_response(),
         }
     }
-    // 不取消业务 handler：已被 Runtime 接纳的 Run 不随客户端断线撤销。
-    let mut response = next.run(request).await;
-    if streaming_response
-        && !terminal
-        && let Some(permit) = permit
+    next.run(request).await
+}
+
+/// 同源标签页共用 Cookie；业务请求必须证明页面仍属于当前账号，避免旧页面操作新账号。
+/// Bearer 已经固定身份，无需该提示；登录与身份查询也不能要求尚未取得的上下文。
+pub(super) async fn require_login_context(
+    Extension(permit): Extension<AccessPermit>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !permit.native
+        && !request.headers().contains_key(AUTHORIZATION)
+        && expected_login_context(&request).as_deref() != permit.login_context().as_deref()
     {
-        let body = std::mem::replace(response.body_mut(), Body::empty());
-        *response.body_mut() = guarded_body(body, permit, true);
+        return (
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({"error": {
+                "code": "login_context_changed",
+                "message": "当前登录账号已变化，请刷新页面。"
+            }})),
+        )
+            .into_response();
     }
-    with_cors(response, origin.as_deref())
+    next.run(request).await
+}
+
+/// 个人本机凭据仍代表个人域；企业本机凭据只管理 Host，不能选择任一企业用户域。
+/// WS 首帧认证另有入口，所以这里不承担“必须登录”的职责。
+pub(super) async fn reject_enterprise_bootstrap(
+    State(state): State<HttpState>,
+    Extension(permit): Extension<Option<AccessPermit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.access.center().is_some() && permit.is_some_and(|permit| permit.native) {
+        return HttpError::forbidden("本机管理凭据不能访问企业用户数据。").into_response();
+    }
+    next.run(request).await
+}
+
+/// 复核后把更新的 permit 交给后续处理；Host 管理身份不持有 Center 登录。
+/// 退出不经过此层，确保中心离线或凭据失效时仍能在本机结束任务与登录。
+pub(super) async fn verify_enterprise(
+    State(state): State<HttpState>,
+    Extension(mut permit): Extension<AccessPermit>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if state.access.center().is_some()
+        && !permit.native
+        && let Err(error) = state
+            .access
+            .credentials
+            .verify_enterprise(&mut permit)
+            .await
+    {
+        return super::login::access_error(error);
+    }
+    request.extensions_mut().insert(Some(permit.clone()));
+    request.extensions_mut().insert(permit);
+    next.run(request).await
+}
+
+/// 版本准入通过后才打开用户服务；同一请求的所有资源操作固定使用这一个用户域。
+pub(super) async fn bind_user_services(
+    State(state): State<HttpState>,
+    Extension(permit): Extension<AccessPermit>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    match state.user_services(&permit).await {
+        Ok(services) => {
+            request.extensions_mut().insert(services);
+        }
+        Err(error) => return error.into_response(),
+    }
+    next.run(request).await
+}
+
+pub(super) async fn require_local_proof(
+    State(state): State<HttpState>,
+    Extension(permit): Extension<AccessPermit>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !permit.native && !has_local_proof(&state, &request) {
+        return HttpError::forbidden("该路径仅允许本机原生客户端访问。").into_response();
+    }
+    next.run(request).await
+}
+
+/// 取消正文读取，使未完成上传进入既有清理路径；不丢弃 handler，已接纳的 Run 继续执行。
+pub(super) async fn guard_request_body(
+    Extension(permit): Extension<Option<AccessPermit>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if let Some(permit) = permit {
+        let cancellation = request
+            .extensions()
+            .get::<std::sync::Arc<super::ReadyServices>>()
+            .map(|services| services.cancellation.clone());
+        let body = std::mem::replace(request.body_mut(), Body::empty());
+        *request.body_mut() = guarded_body(body, permit, cancellation, false);
+    }
+    next.run(request).await
+}
+
+/// 下载与 SSE 随访问结束关闭；登录、退出和命令响应不挂此层，保证终态结果可以送达。
+pub(super) async fn guard_response_body(
+    Extension(permit): Extension<Option<AccessPermit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let cancellation = request
+        .extensions()
+        .get::<std::sync::Arc<super::ReadyServices>>()
+        .map(|services| services.cancellation.clone());
+    let mut response = next.run(request).await;
+    if let Some(permit) = permit {
+        let body = std::mem::replace(response.body_mut(), Body::empty());
+        *response.body_mut() = guarded_body(body, permit, cancellation, true);
+    }
+    response
 }
 
 /// Hyper 将 HTTP/2 的 `:authority` 放在 URI 中；统一后再校验，确保鉴权、
@@ -175,6 +273,8 @@ fn normalize_authority(request: &mut Request) -> Result<(), HttpError> {
     Ok(())
 }
 
+/// 验证真实网络来源并解析凭据，供 HTTP 与终端首帧共用。
+/// 返回 None 表示没有有效登录，由具体入口决定拒绝还是允许重新登录／首帧认证。
 pub(super) fn authorize_request(
     state: &HttpState,
     request: &Request,
@@ -242,9 +342,7 @@ pub(super) fn authorize_request(
         None
     };
     if cookie.is_some()
-        && (origin.is_some()
-            || !matches!(*request.method(), Method::GET | Method::HEAD)
-            || request.uri().path() == "/user-terminals/socket")
+        && (origin.is_some() || !matches!(*request.method(), Method::GET | Method::HEAD))
     {
         require_same_origin(state, headers)?;
     }
@@ -289,14 +387,42 @@ fn session_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a s
     Ok(found)
 }
 
-fn guarded_body(body: Body, permit: AccessPermit, graceful_end: bool) -> Body {
+/// 上传被取消必须返回读取错误，不能把半个文件当成正常 EOF；响应流则正常结束。
+/// biased 保证取消与下一块数据同时就绪时，优先停止传输。
+fn guarded_body(
+    body: Body,
+    permit: AccessPermit,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+    graceful_end: bool,
+) -> Body {
     Body::from_stream(async_stream::stream! {
         let mut chunks = body.into_data_stream();
         loop {
             let next = tokio::select! {
                 biased;
-                () = permit.ended() => if graceful_end { None } else { Some(Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "login ended"))) },
-                next = chunks.next() => next.map(|chunk| chunk.map_err(|_| std::io::Error::other("transport body failed"))),
+                () = async {
+                    if let Some(cancel) = &cancellation {
+                        cancel.cancelled().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => if graceful_end {
+                    None
+                } else {
+                    Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied, "user domain ended",
+                    )))
+                },
+                () = permit.ended() => if graceful_end {
+                    None
+                } else {
+                    Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied, "login ended",
+                    )))
+                },
+                next = chunks.next() => next.map(|chunk| {
+                    chunk.map_err(|_| std::io::Error::other("transport body failed"))
+                }),
             };
             match next {
                 Some(chunk) => {
@@ -330,6 +456,8 @@ fn preflight_response(headers: &HeaderMap, origin: Option<&str>) -> Response {
                 ![
                     "authorization",
                     "content-type",
+                    "x-ez-login-context",
+                    "x-ez-host-bootstrap",
                     assistant_protocol::CLIENT_VERSION_HEADER,
                     assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
                 ]
@@ -360,7 +488,7 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         headers.insert(
             ACCESS_CONTROL_ALLOW_HEADERS,
             HeaderValue::from_static(
-                "authorization,content-type,x-ez-client-version,x-ez-min-compatible-version",
+                "authorization,content-type,x-ez-client-version,x-ez-min-compatible-version,x-ez-login-context,x-ez-host-bootstrap",
             ),
         );
     }
@@ -369,6 +497,49 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
 
 fn is_local_request(peer: std::net::SocketAddr, server_name: &str) -> bool {
     peer.ip().is_loopback() && matches!(server_name, "127.0.0.1" | "localhost")
+}
+
+/// 原生路径同时需要用户身份与真实本机管理证明；后者只证明调用位置，不选择用户域。
+fn has_local_proof(state: &HttpState, request: &Request) -> bool {
+    let Some(token) = request
+        .headers()
+        .get("x-ez-host-bootstrap")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let mut proof = Request::new(Body::empty());
+    *proof.headers_mut() = request.headers().clone();
+    let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return false;
+    };
+    proof.headers_mut().insert(AUTHORIZATION, value);
+    if let Some(peer) = request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+    {
+        proof.extensions_mut().insert(*peer);
+    }
+    authorize_request(state, &proof)
+        .is_ok_and(|(_, permit)| permit.is_some_and(|permit| permit.native))
+}
+
+/// fetch 通过头传递账号上下文；浏览器直接加载的 GET 资源可通过 query 传递。
+/// 该值只用于发现旧页面，不是凭据，不能据此选择或切换用户。
+fn expected_login_context(request: &Request) -> Option<String> {
+    if let Some(value) = request.headers().get("x-ez-login-context") {
+        return value.to_str().ok().map(str::to_owned);
+    }
+    if request.method() != Method::GET {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Query {
+        login_context: Option<String>,
+    }
+    axum::extract::Query::<Query>::try_from_uri(request.uri())
+        .ok()
+        .and_then(|query| query.0.login_context)
 }
 
 #[cfg(test)]

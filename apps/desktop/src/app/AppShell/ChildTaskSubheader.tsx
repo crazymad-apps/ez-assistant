@@ -1,4 +1,5 @@
 import { observer } from "mobx-react-lite";
+import { ContextRing } from "../../features/context-panel/ContextPanel/ContextSection";
 import { Icon } from "../../components/Icon";
 import {
   childTaskStatusLabel,
@@ -32,6 +33,7 @@ export const ChildTaskSubheader = observer(function ChildTaskSubheader() {
   }
 
   const total_tokens = item.usage.accumulated?.total_tokens;
+  const context = item.usage.context;
   return (
     <section aria-label="子任务标题栏" className={styles.child_task_header}>
       <button
@@ -49,9 +51,15 @@ export const ChildTaskSubheader = observer(function ChildTaskSubheader() {
           {childTaskStatusLabel(item.task.status)}
         </span>
       </div>
-      {total_tokens !== null && total_tokens !== undefined && (
-        <span className={styles.child_usage}>{formatCompactTokens(total_tokens)}</span>
-      )}
+      <div className={styles.child_usages}>
+        <span className={styles.child_usage} title={context ? `上下文：${context.used_tokens.toLocaleString()} / ${context.window_tokens.toLocaleString()} Token` : "上下文暂不可用"}>
+          <ContextRing basis_points={context?.usage_basis_points ?? 0} />
+          上下文 {context ? `${formatCompactTokens(context.used_tokens)} / ${formatCompactTokens(context.window_tokens)}（${(context.usage_basis_points / 100).toFixed(1)}%）` : "—"}
+        </span>
+        {total_tokens !== null && total_tokens !== undefined && (
+          <span className={styles.child_usage}>累计 {formatCompactTokens(total_tokens)}</span>
+        )}
+      </div>
       {item.can_cancel && (
         <button
           className={styles.child_cancel}

@@ -106,6 +106,7 @@ fn rule_from_protocol(rule: protocol::PermissionRuleDefinition) -> PermissionRul
             }
             protocol::PermissionRuleMatcher::File(matcher) => {
                 PermissionMatcher::File(FilePermissionMatcher {
+                    excluded_paths: Vec::new(),
                     operation: match matcher.operation {
                         protocol::PermissionFileOperationDefinition::Read => {
                             PermissionFileOperation::Read

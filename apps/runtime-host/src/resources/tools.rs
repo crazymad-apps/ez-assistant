@@ -2,7 +2,8 @@
 //!
 //! Host 始终为 Plan/Build 注册同一组工具定义，防止切换变体时改变 Provider 请求中的
 //! tool definitions 并使提示缓存失效。这里的 policy 只表达 Host 掌握的基础设施硬限制；
-//! Plan 边界、三层权限文件和交互审批统一由 `assistant-runtime` 的 Authorizer 决策。
+//! 用户目录限制作为默认权限规则注入；与 Plan 边界、三层权限文件和交互审批一起由
+//! `assistant-runtime` 的 Authorizer 决策。
 
 use std::{
     ffi::OsString,
@@ -42,7 +43,7 @@ pub(super) struct HostRunToolFactory {
 }
 
 struct LocalToolResources {
-    filesystem: Arc<LocalFileSystem>,
+    filesystem: Arc<super::filesystem::UserFileSystem>,
     shell: Arc<LocalShell>,
     read_config: ReadFileToolConfig,
     search_config: SearchFilesToolConfig,
@@ -50,11 +51,21 @@ struct LocalToolResources {
 }
 
 impl HostRunToolFactory {
+    #[cfg(test)]
     pub(super) fn new(runtime_home: &Path) -> Result<Self, ToolResourceError> {
+        Self::with_paths(
+            runtime_home,
+            Arc::new(crate::user_paths::UserPaths::new(runtime_home, Vec::new())),
+        )
+    }
+    pub(super) fn with_paths(
+        runtime_home: &Path,
+        paths: Arc<crate::user_paths::UserPaths>,
+    ) -> Result<Self, ToolResourceError> {
         let sessions_root = AbsolutePath::new(runtime_home.join("data/sessions"))
             .map_err(ToolResourceError::path)?;
         Ok(Self {
-            resources: LocalToolResources::new()?,
+            resources: LocalToolResources::new(paths)?,
             sessions_root,
         })
     }
@@ -95,7 +106,7 @@ impl RunToolFactory for HostRunToolFactory {
 }
 
 impl LocalToolResources {
-    fn new() -> Result<Self, ToolResourceError> {
+    fn new(paths: Arc<crate::user_paths::UserPaths>) -> Result<Self, ToolResourceError> {
         let read_config = ReadFileToolConfig::new(nonzero32(1), nonzero32(200), nonzero32(2_000))
             .map_err(ToolResourceError::configuration)?;
         let search_config = SearchFilesToolConfig::new(
@@ -112,11 +123,14 @@ impl LocalToolResources {
         )
         .map_err(ToolResourceError::configuration)?;
         Ok(Self {
-            filesystem: Arc::new(LocalFileSystem::new(LocalFileSystemConfig {
-                max_text_file_bytes: nonzero64(MAX_TEXT_FILE_BYTES),
-                ripgrep_program: OsString::from("rg"),
-                max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
-            })),
+            filesystem: Arc::new(super::filesystem::UserFileSystem {
+                paths,
+                inner: LocalFileSystem::new(LocalFileSystemConfig {
+                    max_text_file_bytes: nonzero64(MAX_TEXT_FILE_BYTES),
+                    ripgrep_program: OsString::from("rg"),
+                    max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
+                }),
+            }),
             shell: Arc::new(LocalShell::new(LocalShellConfig::new(
                 EnvironmentPolicy::default(),
             ))),
@@ -249,7 +263,8 @@ impl LocalToolResources {
                 }),
                 Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
             ],
-        ))
+        )
+        .with_default_rules(self.filesystem.paths.clone()))
     }
 }
 
@@ -1015,6 +1030,36 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(first.definitions()).expect("first definitions"),
             serde_json::to_vec(second.definitions()).expect("second definitions")
+        );
+    }
+
+    #[tokio::test]
+    async fn user_paths_are_injected_as_rules_instead_of_an_infrastructure_policy() {
+        let root = TempDir::new().unwrap();
+        let own = root.path().join("users/alice");
+        std::fs::create_dir_all(&own).unwrap();
+        let environment = environment(&root, "users/alice");
+        let factory = HostRunToolFactory::with_paths(
+            &own,
+            Arc::new(crate::user_paths::UserPaths::new(&own, Vec::new())),
+        )
+        .unwrap();
+        let bundle = compile_bundle_with_read_image(&factory, &environment, true);
+        let source = bundle.default_rules();
+        let (_, policies) = bundle.into_parts();
+        assert_eq!(
+            policies.len(),
+            3,
+            "only pre-existing resource invariants remain"
+        );
+        let document = source.expect("injected rule source").load().await.unwrap();
+        document.validate().unwrap();
+        assert!(!document.rules.is_empty());
+        assert!(
+            document
+                .rules
+                .iter()
+                .all(|rule| rule.effect == assistant_runtime::PermissionEffect::Deny)
         );
     }
 

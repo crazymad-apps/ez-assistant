@@ -165,7 +165,7 @@ fn formal_host_projects_main_and_child_tool_images_across_restart_and_failures()
     );
     let tool_image_directory = runtime_home
         .path()
-        .join("data/sessions")
+        .join("users/_personal/data/sessions")
         .join(&session_id)
         .join("tool-images");
     let entries = fs::read_dir(&tool_image_directory)

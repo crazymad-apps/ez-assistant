@@ -298,7 +298,7 @@ describe("SessionSidebar grouping", () => {
 function connectedStore(): RootStore {
   const store = new RootStore();
   store.connection.markConnected("instance-1", {
-    min_compatible_version: "0.25.2",
+    mode: "personal", min_compatible_version: "0.25.2",
     runtime_version: "0.25.2",
     max_command_bytes: 64 * 1024,
     max_attachment_bytes: null,

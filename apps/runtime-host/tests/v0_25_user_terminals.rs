@@ -48,9 +48,17 @@ fn control(socket: &mut Socket, value: Value) {
         .unwrap();
 }
 fn open(socket: &mut Socket, token: Option<&str>, source: &Value) -> Value {
+    open_with_context(socket, token, source, None)
+}
+fn open_with_context(
+    socket: &mut Socket,
+    token: Option<&str>,
+    source: &Value,
+    login_context: Option<&str>,
+) -> Value {
     control(
         socket,
-        json!({"type":"open", "client_compatibility":assistant_protocol::ClientCompatibility::current(), "bearer":token, "source":source, "size":{"cols":80,"rows":24}}),
+        json!({"type":"open", "login_context":login_context, "client_compatibility":assistant_protocol::ClientCompatibility::current(), "bearer":token, "source":source, "size":{"cols":80,"rows":24}}),
     );
     let result = notice(socket);
     if result["type"] == "created" {
@@ -226,7 +234,10 @@ fn cookie_and_first_frame_authentication_limits_logout_and_host_shutdown() {
     assert!(rejected["message"].as_str().unwrap().contains("登录"));
     drop(switched);
     let mut web = socket(&host, Some(&cookie));
-    assert_eq!(open(&mut web, None, &source)["type"], "created");
+    assert_eq!(
+        open_with_context(&mut web, None, &source, login["login_context"].as_str())["type"],
+        "created"
+    );
     input(&mut web, "echo $$ > web.pid; sleep 60\n");
     let web_pid = pid(&workspace.path().join("web.pid"));
     client

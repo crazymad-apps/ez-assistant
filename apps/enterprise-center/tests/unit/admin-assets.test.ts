@@ -67,7 +67,6 @@ describe('正式后台资源准入', () => {
     const config = loadConfig({
       CENTER_DATABASE_URL: 'postgresql://unavailable:secret@127.0.0.1:1/not_connected',
       CENTER_PUBLIC_ORIGIN: 'http://127.0.0.1:7320',
-      CENTER_ALLOW_HTTP_LOOPBACK: 'true',
     });
     await expect(startService(config, join(directory, 'missing'))).rejects.toMatchObject({
       code: 'ADMIN_ASSETS_INVALID',
@@ -83,7 +82,6 @@ describe('正式后台资源准入', () => {
         ...process.env,
         CENTER_DATABASE_URL: 'postgresql://unavailable:secret@127.0.0.1:1/not_connected',
         CENTER_PUBLIC_ORIGIN: 'http://127.0.0.1:7320',
-        CENTER_ALLOW_HTTP_LOOPBACK: 'true',
       },
       encoding: 'utf8',
     });

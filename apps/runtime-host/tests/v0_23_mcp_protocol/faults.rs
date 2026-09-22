@@ -61,7 +61,7 @@ fn formal_host_mcp_disconnect_timeout_and_cancel_never_replay() {
             assert!(output.status.success());
             assert_clean(&output.stdout);
             assert_clean(&output.stderr);
-            scan_data(&home.path().join("data"));
+            scan_data(&home.path().join("users/_personal/data"));
             assert_eq!(
                 call_count(&fixture, home.path(), transport),
                 1,

@@ -1,0 +1,1832 @@
+[
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-4.1",
+    "model_id": "gpt-4.1",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1047576
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 32768
+      },
+      "reasoning": "unsupported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "unsupported",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-4.1",
+    "model_id": "gpt-4.1-2025-04-14",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1047576
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 32768
+      },
+      "reasoning": "unsupported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "unsupported",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://learn.chatgpt.com/docs/models",
+    "model_id": "gpt-5.3-codex-spark",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "unknown",
+      "tool_choice": {
+        "auto": "unknown",
+        "named": "unknown",
+        "none": "unknown",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unsupported"
+    },
+    "protocol_parameters": {},
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.5",
+    "model_id": "gpt-5.5",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.5",
+    "model_id": "gpt-5.5-2026-04-23",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+    "model_id": "gpt-5.6",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+    "model_id": "gpt-5.6-luna",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+    "model_id": "gpt-5.6-sol",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    "model_id": "gpt-5.6-terra",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "model_id": "gpt-6-astra",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
+    "checked_on": "2026-09-17",
+    "document": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "model_id": "deepseek-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 384000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "deepseek"
+  },
+  {
+    "checked_on": "2026-09-17",
+    "document": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "model_id": "deepseek-v4-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 384000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "deepseek"
+  },
+  {
+    "checked_on": "2026-09-17",
+    "document": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "model_id": "deepseek-v4-flash-vision-exp",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 384000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "deepseek"
+  },
+  {
+    "checked_on": "2026-09-17",
+    "document": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "model_id": "deepseek-v4-pro",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 384000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "deepseek"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/deepseek-v4-flash",
+    "model_id": "deepseek-v4-flash-0731",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/deepseek-v4-pro",
+    "model_id": "deepseek-v4-pro",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/glm-5-2",
+    "model_id": "glm-5.2",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-6-flash",
+    "model_id": "qwen3.6-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-7-max",
+    "model_id": "qwen3.7-max",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+    "model_id": "qwen3.7-plus",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+    "model_id": "qwen3.8-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max-0902",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max-2026-09-02",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_api"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/deepseek-v4-flash",
+    "model_id": "deepseek-v4-flash-0731",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/deepseek-v4-pro",
+    "model_id": "deepseek-v4-pro",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 393216
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/glm-5-2",
+    "model_id": "glm-5.2",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-6-flash",
+    "model_id": "qwen3.6-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-7-max",
+    "model_id": "qwen3.7-max",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+    "model_id": "qwen3.7-plus",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+    "model_id": "qwen3.8-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max-0902",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+    "model_id": "qwen3.8-max-2026-09-02",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "xhigh",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "known",
+        "value": 991808
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "known",
+        "value": 983616
+      },
+      "reasoning_max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning_mode": "optional",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "dashscope_plan"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files",
+    "model_id": "k3",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files",
+    "model_id": "k3-256k",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 262144
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files",
+    "model_id": "kimi-for-coding",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 262144
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files",
+    "model_id": "kimi-for-coding-highspeed",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 262144
+      },
+      "default_reasoning_effort": null,
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": null,
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+    "model_id": "glm-5.3",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "max",
+      "image_input": "unsupported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "unknown"
+    },
+    "protocol_parameters": {},
+    "provider_type": "zhipu"
+  },
+  {
+    "checked_on": "2026-09-09",
+    "document": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash",
+    "model_id": "glm-5.3-flash",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1000000
+      },
+      "default_reasoning_effort": "max",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 65536
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {},
+    "provider_type": "zhipu"
+  }
+]

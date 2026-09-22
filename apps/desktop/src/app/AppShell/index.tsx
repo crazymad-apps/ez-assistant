@@ -1,3 +1,4 @@
+import { AccountMenu } from "../../features/runtime-access/AccountMenu";
 import { DesktopWindowControls } from "../../features/desktop-lifecycle/DesktopWindowControls";
 import { HostDirectoryDialog } from "../../features/workspaces/HostDirectoryDialog";
 import { observer } from "mobx-react-lite";
@@ -103,7 +104,7 @@ export const AppShell = observer(function AppShell() {
           <Button aria-label="打开 Web 端" iconOnly variant="text" disabled={application_connection.web_pending || store.connection.state !== "connected"} onClick={() => void application_connection.openWeb()}><Icon name="globe" size={17} /></Button>
         </Tooltip>}
         <RuntimeStatus />
-        {application_connection && !application_connection.desktop && <Button onClick={() => void application_connection.signOut()} variant="text">退出登录</Button>}
+        {application_connection && <AccountMenu connection={application_connection} />}
         <DesktopWindowControls />
       </header>
 

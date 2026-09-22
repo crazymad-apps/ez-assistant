@@ -175,7 +175,7 @@ fn run_read_image_case(source_model_key: &str) {
 
     let tool_images = runtime_home
         .path()
-        .join("data/sessions")
+        .join("users/_personal/data/sessions")
         .join(&session_id)
         .join("tool-images");
     assert_eq!(

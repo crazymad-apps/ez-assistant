@@ -1,0 +1,10 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+  min-width: 0;
+}
+.providers {
+  min-width: 0;
+}

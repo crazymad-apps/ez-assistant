@@ -2624,8 +2624,23 @@ fn fork_and_delete_commit_consistently_across_sqlite_and_session_directories() {
 
 #[test]
 fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
+    verify_attachment_fork(false);
+}
+
+#[test]
+fn fork_resolves_verified_pre_upgrade_attachment_references() {
+    verify_attachment_fork(true);
+}
+
+fn verify_attachment_fork(historical: bool) {
     let root = TempDir::new().expect("runtime home");
-    let mut engine = open_engine(&root);
+    let user_home = if historical {
+        root.path().join("users/_personal")
+    } else {
+        root.path().to_owned()
+    };
+    fs::create_dir_all(&user_home).unwrap();
+    let mut engine = StorageEngine::open(&user_home).unwrap();
     let source_id = session_id("s-transfer-attachment-source");
     let forked_id = session_id("s-transfer-attachment-fork");
     let sessions_directory = engine.sessions_directory.clone();
@@ -2650,7 +2665,12 @@ fn fork_clones_attachment_references_without_coupling_source_lifecycle() {
             created_at_ms: 2_000,
         })
         .expect("upload source attachment");
-    let source_readable_path = source_attachment.agent_readable_path.clone();
+    let source_readable_path = if historical {
+        super::resource_reference::historical_attachment_path(&user_home, &source_attachment)
+            .unwrap()
+    } else {
+        source_attachment.agent_readable_path.clone()
+    };
     let conversation = ConversationSnapshot::new(vec![
         ConversationMessage::User(UserMessage {
             origin: Default::default(),
@@ -4167,6 +4187,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
     seed_session_and_run(&mut engine, child_session_id.as_str(), "r-v0142-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: child_session_id.clone(),
             parent_run_id: run_id("r-v0142-child"),
@@ -4224,6 +4245,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE schema_migrations;
              DROP TABLE database_compatibility;
              DROP TABLE agent_shell_settings;
+             ALTER TABLE child_tasks DROP COLUMN context_window_tokens;
              ALTER TABLE sessions DROP COLUMN agent_shell_kind;
              ALTER TABLE sessions DROP COLUMN agent_shell_environment_json;
              ALTER TABLE inputs DROP COLUMN agent_shell_target;
@@ -4258,7 +4280,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
         recovered
             .child_tasks
             .iter()
-            .any(|task| task.child_task_id == child_id)
+            .any(|task| task.child_task_id == child_id && task.context_window_tokens.is_none())
     );
     assert_eq!(
         reopened
@@ -4313,6 +4335,7 @@ fn child_task_body_is_independent_and_round_trips_all_reliable_steps() {
     let child_id = child_task_id("ct-child");
     let created = engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child"),
             parent_run_id: run_id("r-child"),
@@ -4436,6 +4459,7 @@ fn accepted_child_can_fail_before_its_initial_message_is_started() {
     let child_id = child_task_id("ct-child-prestart");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child-prestart"),
             parent_run_id: run_id("r-child-prestart"),
@@ -4491,6 +4515,7 @@ fn child_task_parent_and_read_ownership_reject_cross_session_access() {
 
     let error = engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_task_id("ct-wrong-owner"),
             session_id: session_id("s-other"),
             parent_run_id: run_id("r-owner"),
@@ -4507,6 +4532,7 @@ fn child_task_parent_and_read_ownership_reject_cross_session_access() {
     let child_id = child_task_id("ct-owner");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-owner"),
             parent_run_id: run_id("r-owner"),
@@ -4535,6 +4561,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     let child_id = child_task_id("ct-child-recovery");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child-recovery"),
             parent_run_id: run_id("r-child-recovery"),
@@ -4582,6 +4609,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     let mut reopened = open_engine(&root);
     let recovered = reopened.load_runtime().expect("repair child exchange");
     assert_eq!(recovered.child_tasks[0].message_count, 3);
+    assert_eq!(recovered.child_tasks[0].context_window_tokens, Some(8192));
     let conversation = reopened
         .load_child_conversation(&session_id("s-child-recovery"), &child_id)
         .expect("load repaired child conversation");
@@ -5967,6 +5995,7 @@ fn startup_rebuilds_parent_delegate_result_from_completed_child() {
     let child_id = child_task_id("ct-delegate-complete");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-delegate-complete"),
             parent_run_id: run_id("r-delegate-complete"),
@@ -6051,6 +6080,7 @@ fn startup_interrupts_running_child_before_rebuilding_parent_result() {
     let child_id = child_task_id("ct-delegate-running");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-delegate-running"),
             parent_run_id: run_id("r-delegate-running"),
@@ -7403,6 +7433,7 @@ fn running_child_context_replacement_switches_only_child_generation() {
     let child_id = child_task_id("ct-compact-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-compact-child"),
             parent_run_id: run_id("r-compact-child"),
@@ -7453,9 +7484,51 @@ fn running_child_context_replacement_switches_only_child_generation() {
         replacement
     );
 
+    assert_eq!(tasks[0].context_window_tokens, Some(8192));
+    let second = ConversationSnapshot::new(vec![
+        context_summary("child-summary-2", "second summary"),
+        original.messages[0].clone(),
+    ]);
+    engine
+        .replace_context(ContextReplacement {
+            target: ContextReplacementTarget::ChildTask {
+                session_id: session_id("s-compact-child"),
+                child_task_id: child_id.clone(),
+            },
+            conversation: second.clone(),
+            changed_at_ms: 4_000,
+        })
+        .expect("second child compaction");
+    assert_eq!(engine.load_child_tasks().unwrap()[0].body_generation, 3);
+    assert_eq!(
+        engine.load_child_tasks().unwrap()[0].context_window_tokens,
+        Some(8192)
+    );
+    assert_eq!(
+        engine
+            .load_conversation_raw_window(assistant_runtime::ConversationRawWindowRequest {
+                owner: assistant_protocol::ConversationOwner::ChildTask {
+                    session_id: session_id("s-compact-child"),
+                    child_task_id: child_id.clone()
+                },
+                generation: 2,
+                start: 0,
+                limit: 30,
+            })
+            .expect_err("old generation cannot feed usage")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+    let replacement = ConversationSnapshot::new(vec![
+        replacement.messages[0].clone(),
+        second.messages[0].clone(),
+        original.messages[0].clone(),
+    ]);
+
     drop(engine);
     let mut reopened = open_engine(&root);
-    reopened.load_runtime().expect("recover child context");
+    let recovered = reopened.load_runtime().expect("recover child context");
+    assert_eq!(recovered.child_tasks[0].context_window_tokens, Some(8192));
     assert_eq!(
         reopened
             .load_child_conversation(&session_id("s-compact-child"), &child_id)
@@ -7550,6 +7623,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
     let removed_child_id = child_task_id("ct-rewrite-tail");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: removed_child_id.clone(),
             session_id: session.clone(),
             parent_run_id: run_id("run-two"),
@@ -8418,6 +8492,7 @@ fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_co
     let child_id = child_task_id("ct-recall-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-recall-child"),
             parent_run_id: run_id("r-recall-child"),

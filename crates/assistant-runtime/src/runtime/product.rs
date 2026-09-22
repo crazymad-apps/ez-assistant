@@ -466,14 +466,20 @@ impl AssistantRuntime {
         request: ListConversationPageRequest,
     ) -> RuntimeResult<ListConversationPageResult> {
         let limit = validated_limit(request.limit)?;
+        let owner_session_id = match &request.owner {
+            ConversationOwner::MainSession { session_id }
+            | ConversationOwner::ChildTask { session_id, .. } => session_id,
+        };
+        let session = self.session(owner_session_id).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        // 只保护当前 owner 的本地组合读取，不要求全局事件静止。
+        let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
             let (generation, projection) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
-                    let session = self.session(session_id).await?;
-                    session
-                        .ensure_conversation_loaded(self.store.as_ref())
-                        .await?;
                     let attachments = self
                         .list_attachments(ListAttachmentsRequest {
                             session_id: session_id.clone(),
@@ -528,15 +534,31 @@ impl AssistantRuntime {
                 &window,
                 project_conversation(&window.conversation, &projection)?,
             )?;
-            let end = self.event_sender.sequence();
-            if start == end {
-                return Ok(ListConversationPageResult {
-                    snapshot: ObservedSnapshot {
-                        observed_sequence: end,
-                        value: page,
-                    },
-                });
+            if let ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } = &request.owner
+            {
+                let current = self
+                    .child_tasks
+                    .get(session_id, child_task_id)?
+                    .ok_or_else(|| RuntimeError::ChildTaskNotFound {
+                        session_id: session_id.clone(),
+                        child_task_id: child_task_id.clone(),
+                    })?;
+                if current.body_generation != generation {
+                    if request.cursor.is_none() {
+                        continue;
+                    }
+                    return Err(RuntimeError::SnapshotStale);
+                }
             }
+            return Ok(ListConversationPageResult {
+                snapshot: ObservedSnapshot {
+                    observed_sequence: start,
+                    value: page,
+                },
+            });
         }
         Err(RuntimeError::SnapshotBusy)
     }
@@ -577,9 +599,13 @@ impl AssistantRuntime {
         request: GetConversationPageAroundRunRequest,
     ) -> RuntimeResult<GetConversationPageAroundRunResult> {
         let limit = validated_limit(request.limit)?;
+        let session = self.session(&request.session_id).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let start = self.event_sender.sequence();
-            let session = self.session(&request.session_id).await?;
             session.run_snapshot(&request.run_id)?;
             let attachments = self
                 .list_attachments(ListAttachmentsRequest {
@@ -660,16 +686,13 @@ impl AssistantRuntime {
                     &self.projection_context(&session, &attachments).await?,
                 )?,
             )?;
-            let end = self.event_sender.sequence();
-            if start == end {
-                return Ok(GetConversationPageAroundRunResult {
-                    snapshot: ObservedSnapshot {
-                        observed_sequence: end,
-                        value: page,
-                    },
-                    anchor_message_id,
-                });
-            }
+            return Ok(GetConversationPageAroundRunResult {
+                snapshot: ObservedSnapshot {
+                    observed_sequence: start,
+                    value: page,
+                },
+                anchor_message_id,
+            });
         }
         Err(RuntimeError::SnapshotBusy)
     }
@@ -797,6 +820,16 @@ impl AssistantRuntime {
         request: GetConversationPageAroundMessageRequest,
     ) -> RuntimeResult<GetConversationPageAroundMessageResult> {
         let limit = validated_limit(request.limit)?;
+        let session_id = match &request.owner {
+            ConversationOwner::MainSession { session_id }
+            | ConversationOwner::ChildTask { session_id, .. } => session_id,
+        };
+        let session = self.session(session_id).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
+        let observed_sequence = self.event_sender.sequence();
         let location = self
             .locate_conversation_message(&request.owner, &request.message_id)
             .await?;
@@ -826,7 +859,7 @@ impl AssistantRuntime {
         )?;
         Ok(GetConversationPageAroundMessageResult {
             snapshot: ObservedSnapshot {
-                observed_sequence: self.event_sender.sequence(),
+                observed_sequence,
                 value: page,
             },
             anchor_message_id: request.message_id,
@@ -1112,6 +1145,9 @@ impl AssistantRuntime {
                     },
                 )?;
                 let path = resolve_recorded_path(&environment.working_directory, path);
+                let path = self
+                    .store
+                    .current_recorded_resource_path(&path, environment);
                 let display_name = std::path::Path::new(&path)
                     .file_name()
                     .and_then(std::ffi::OsStr::to_str)
@@ -1265,15 +1301,25 @@ impl AssistantRuntime {
                 control_result_by_message,
             )
         };
-        let attachment_by_path = attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.agent_readable_path.clone(),
-                    attachment.attachment_id.clone(),
-                )
-            })
-            .collect();
+        let attachment_by_path = {
+            let known =
+                self.attachments
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "attachment registry",
+                    })?;
+            attachments
+                .iter()
+                .filter_map(|summary| known.get(&summary.attachment_id))
+                .filter(|a| a.session_id == *session.id())
+                .flat_map(|attachment| {
+                    std::iter::once(attachment.agent_readable_path.clone())
+                        .chain(self.store.historical_attachment_path(attachment))
+                        .map(|path| (path, attachment.attachment_id.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
         let feedback_by_message = self
             .store
             .load_message_feedback(session.id())
@@ -1321,20 +1367,56 @@ impl AssistantRuntime {
         task: crate::StoredChildTask,
         approvals: &[assistant_protocol::ApprovalSnapshot],
     ) -> RuntimeResult<ChildTaskTreeItemSnapshot> {
-        let conversation = self
-            .child_task_conversation_snapshot(&task.session_id, &task.child_task_id)
-            .await?;
-        let snapshot = self.child_snapshot(task).await?;
-        let pending_approval_count = approvals
-            .iter()
-            .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
-            .count();
-        Ok(ChildTaskTreeItemSnapshot {
-            can_cancel: !snapshot.status.is_terminal(),
-            task: snapshot,
-            usage: project_child_usage(&conversation),
-            pending_approval_count: u64::try_from(pending_approval_count).unwrap_or(u64::MAX),
-        })
+        for _ in 0..SNAPSHOT_ATTEMPTS {
+            let current = self
+                .child_tasks
+                .get(&task.session_id, &task.child_task_id)?
+                .ok_or_else(|| RuntimeError::ChildTaskNotFound {
+                    session_id: task.session_id.clone(),
+                    child_task_id: task.child_task_id.clone(),
+                })?;
+            // 当前用量与累计用量需要同一份完整历史；复用带 generation 校验的原始读取端口。
+            let window = match self
+                .store
+                .load_conversation_raw_window(crate::ConversationRawWindowRequest {
+                    owner: ConversationOwner::ChildTask {
+                        session_id: current.session_id.clone(),
+                        child_task_id: current.child_task_id.clone(),
+                    },
+                    generation: current.body_generation,
+                    start: 0,
+                    limit: usize::MAX,
+                })
+                .await
+            {
+                Ok(window) => window,
+                Err(source) if source.kind() == StoreErrorKind::Conflict => continue,
+                Err(source) => {
+                    return Err(RuntimeError::from_store("load child usage history", source));
+                }
+            };
+            let context_window = current.context_window_tokens;
+            let generation = current.body_generation;
+            let snapshot = self.child_snapshot(current).await?;
+            if self
+                .child_tasks
+                .get(&task.session_id, &task.child_task_id)?
+                .is_none_or(|current| current.body_generation != generation)
+            {
+                continue;
+            }
+            let pending_approval_count = approvals
+                .iter()
+                .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
+                .count();
+            return Ok(ChildTaskTreeItemSnapshot {
+                can_cancel: !snapshot.status.is_terminal(),
+                task: snapshot,
+                usage: project_child_usage(&window.conversation, context_window),
+                pending_approval_count: u64::try_from(pending_approval_count).unwrap_or(u64::MAX),
+            });
+        }
+        Err(RuntimeError::SnapshotBusy)
     }
 }
 
@@ -1343,6 +1425,12 @@ impl AssistantRuntime {
         &self,
         model_selection: Option<&assistant_protocol::ModelSelection>,
     ) -> RuntimeResult<(ComposerCapabilitiesSnapshot, Option<u64>)> {
+        if let Err(error) = self.model_factory.ensure_available() {
+            return Ok((
+                unavailable_composer_capabilities(None, Some(error.to_protocol_info())),
+                None,
+            ));
+        }
         let snapshot = self.config_registry.snapshot()?;
         let prepared = match self
             .config_registry
@@ -1351,12 +1439,9 @@ impl AssistantRuntime {
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                let selected = model_selection.cloned().or(self
+                let selected = self
                     .config_registry
-                    .managed_models()?
-                    .settings
-                    .default_model
-                    .clone());
+                    .effective_model_selection(model_selection)?;
                 return Ok((
                     unavailable_composer_capabilities(selected, Some(error.to_protocol_info())),
                     None,
@@ -1534,6 +1619,8 @@ fn project_skill_source(source: crate::SkillSource) -> SkillSourceSnapshot {
         crate::SkillSource::WorkspaceEzAssistant => SkillSourceSnapshot::WorkspaceEzAssistant,
         crate::SkillSource::WorkspaceAgents => SkillSourceSnapshot::WorkspaceAgents,
         crate::SkillSource::UserEzAssistant => SkillSourceSnapshot::UserEzAssistant,
+        crate::SkillSource::LegacyUserEzAssistant => SkillSourceSnapshot::LegacyUserEzAssistant,
+        crate::SkillSource::HostSupplement => SkillSourceSnapshot::HostSupplement,
         crate::SkillSource::UserAgents => SkillSourceSnapshot::UserAgents,
     }
 }
@@ -2306,21 +2393,7 @@ fn project_usage(
         && stored.cached_request_count == stored.request_count)
         .then(|| ratio_basis_points(stored.cached_input_tokens, stored.input_tokens))
         .flatten();
-    let context =
-        projected_context_tokens
-            .zip(context_window)
-            .map(|(used_tokens, window_tokens)| {
-                let basis_points = used_tokens
-                    .saturating_mul(10_000)
-                    .checked_div(window_tokens.max(1))
-                    .unwrap_or_default()
-                    .min(10_000);
-                assistant_protocol::ContextUsageSnapshot {
-                    used_tokens,
-                    window_tokens,
-                    usage_basis_points: u16::try_from(basis_points).unwrap_or(10_000),
-                }
-            });
+    let context = project_context_usage(projected_context_tokens, context_window);
     SessionUsageSnapshot {
         accumulated,
         previous_turn: previous.map(usage_totals),
@@ -2338,13 +2411,37 @@ fn project_usage(
     }
 }
 
-fn project_child_usage(snapshot: &ConversationSnapshot) -> ChildTaskUsageSnapshot {
+fn project_context_usage(
+    used: Option<u64>,
+    window: Option<u64>,
+) -> Option<assistant_protocol::ContextUsageSnapshot> {
+    used.zip(window.filter(|value| *value > 0))
+        .map(|(used_tokens, window_tokens)| {
+            let basis_points = used_tokens.saturating_mul(10_000) / window_tokens;
+            assistant_protocol::ContextUsageSnapshot {
+                used_tokens,
+                window_tokens,
+                usage_basis_points: u16::try_from(basis_points.min(10_000)).unwrap_or(10_000),
+            }
+        })
+}
+
+pub(super) fn project_child_usage(
+    snapshot: &ConversationSnapshot,
+    context_window: Option<u64>,
+) -> ChildTaskUsageSnapshot {
+    // 累计从完整历史求和，窗口只读取最后摘要之后的有效上下文。
+    let effective = crate::execution_context_from_product_history(snapshot);
     let usages = snapshot.messages.iter().flat_map(|message| match message {
         ConversationMessage::Assistant(message) => message.usage.iter().collect::<Vec<_>>(),
         ConversationMessage::ContextSummary(message) => message.usage.iter().collect::<Vec<_>>(),
         _ => Vec::new(),
     });
     ChildTaskUsageSnapshot {
+        context: project_context_usage(
+            agent_context::context_token_usage(&effective).total_tokens(),
+            context_window,
+        ),
         accumulated: sum_usage(usages),
     }
 }

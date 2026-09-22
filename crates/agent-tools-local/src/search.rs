@@ -28,6 +28,16 @@ pub(crate) async fn run_with_stderr_limit(
     max_stderr_bytes: NonZeroU64,
     cancellation: CancellationToken,
 ) -> Result<SearchFilesResult, FileToolError> {
+    run_excluding(program, request, max_stderr_bytes, cancellation, &[]).await
+}
+
+pub(crate) async fn run_excluding(
+    program: &OsStr,
+    request: SearchFilesRequest,
+    max_stderr_bytes: NonZeroU64,
+    cancellation: CancellationToken,
+    exclusions: &[PathBuf],
+) -> Result<SearchFilesResult, FileToolError> {
     if request.query.is_empty() {
         return Err(FileToolError::invalid_input("query must not be empty"));
     }
@@ -35,9 +45,11 @@ pub(crate) async fn run_with_stderr_limit(
         return Err(FileToolError::Cancelled);
     }
     match request.kind {
-        SearchKind::ByName => search_names(program, request, max_stderr_bytes, cancellation).await,
+        SearchKind::ByName => {
+            search_names(program, request, max_stderr_bytes, cancellation, exclusions).await
+        }
         SearchKind::ByContent => {
-            search_content(program, request, max_stderr_bytes, cancellation).await
+            search_content(program, request, max_stderr_bytes, cancellation, exclusions).await
         }
     }
 }
@@ -47,6 +59,7 @@ async fn search_names(
     request: SearchFilesRequest,
     max_stderr_bytes: NonZeroU64,
     cancellation: CancellationToken,
+    exclusions: &[PathBuf],
 ) -> Result<SearchFilesResult, FileToolError> {
     let RunningRipgrep {
         mut child,
@@ -62,6 +75,8 @@ async fn search_names(
             request.path.as_path().as_os_str().to_owned(),
         ],
         max_stderr_bytes,
+        &request.path,
+        exclusions,
     )?;
     let mut matches = Vec::new();
     let mut total_bytes = 0_u64;
@@ -137,6 +152,7 @@ async fn search_content(
     request: SearchFilesRequest,
     max_stderr_bytes: NonZeroU64,
     cancellation: CancellationToken,
+    exclusions: &[PathBuf],
 ) -> Result<SearchFilesResult, FileToolError> {
     let RunningRipgrep {
         mut child,
@@ -153,6 +169,8 @@ async fn search_content(
             request.path.as_path().as_os_str().to_owned(),
         ],
         max_stderr_bytes,
+        &request.path,
+        exclusions,
     )?;
     let mut matches = Vec::new();
     let mut total_bytes = 0_u64;
@@ -282,8 +300,35 @@ fn spawn_rg(
     program: &OsStr,
     args: impl IntoIterator<Item = OsString>,
     max_stderr_bytes: NonZeroU64,
+    root: &AbsolutePath,
+    exclusions: &[PathBuf],
 ) -> Result<RunningRipgrep, FileToolError> {
     let mut command = Command::new(program);
+    let mut args: Vec<_> = args.into_iter().collect();
+    if !exclusions.is_empty() {
+        // 排除项由宿主提供；仅实现 rg 遍历机制，不解释账号或应用目录。
+        // 用相对搜索起点匹配锚定 glob，避免绝对参数导致排除规则不生效。
+        command.current_dir(root.as_path());
+        *args.last_mut().expect("search arguments include a root") = OsString::from(".");
+        for path in exclusions {
+            let relative = path
+                .strip_prefix(root.as_path())
+                .map_err(|_| FileToolError::invalid_input("search exclusion is outside root"))?;
+            let text = relative
+                .to_str()
+                .ok_or_else(|| FileToolError::invalid_input("search exclusion is not UTF-8"))?;
+            let mut glob = String::from("!/");
+            for ch in text.chars() {
+                #[cfg(windows)]
+                let ch = if ch == '\\' { '/' } else { ch };
+                if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
+                    glob.push('\\');
+                }
+                glob.push(ch);
+            }
+            command.arg("--glob").arg(glob);
+        }
+    }
     command
         .args(args)
         .stdin(Stdio::null())

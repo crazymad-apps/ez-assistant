@@ -188,7 +188,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
       await expect(dialog.getByLabel("上下文窗口（Token）", { exact: true })).toHaveValue(context);
       await expect(dialog.getByLabel("运行输出上限（Token）", { exact: true })).toHaveValue(output);
       if (model === "deepseek-v4-pro") await expect(dialog.getByLabel("low 线上值", { exact: true })).toHaveValue("");
-      if (model === "glm-5.2") await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
+      if (model === "glm-5.2") await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveValue("xhigh");
       await dialog.getByRole("button", { name: "返回", exact: true }).click();
     }
     await dialog.getByRole("button", { name: "配置模型 qwen3.8-max", exact: true }).click();
@@ -196,7 +196,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     expect(paths.some(path => path === "/compatible-mode/v1/models")).toBe(true);
     await dialog.getByLabel("上下文窗口（Token）", { exact: true }).fill("1000001");
     // 直接保存厂商预填能力与档位，无需用户逐项补齐才能运行。
-    await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
+    await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveValue("xhigh");
     await dialog.getByRole("button", { name: "保存固定配置", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "重置配置", exact: true })).toBeEnabled();
     await expect(dialog.getByText(/^来源：/)).toHaveCount(0);
@@ -215,11 +215,11 @@ test("model settings apply provider rules, field templates and wire effort mappi
     const retained = dialog.getByRole("button", { name: "配置模型 qwen3.8-max", exact: true });
     await expect(retained).toContainText("已自定义");
     await retained.click();
-    await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
+    await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveValue("xhigh");
     const reasoning_section = dialog.getByRole("button", { name: "思考设置", exact: true });
     const advanced_section = dialog.getByRole("button", { name: "高级能力", exact: true });
     await reasoning_section.click();
-    await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveCount(0);
     for (const header of [reasoning_section, advanced_section]) {
       await expect(header).toHaveCSS("padding-left", "0px");
       await expect(header).toHaveCSS("border-top-width", "0px");
@@ -235,7 +235,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await advanced_section.press("Space");
     await expect(dialog.getByRole("button", { name: "工具选择 auto", exact: true })).toHaveCount(0);
     await reasoning_section.click();
-    await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
+    await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveValue("xhigh");
     const default_effort = dialog.getByRole("button", { name: "默认思考强度", exact: true });
     const max_effort = dialog.getByLabel("max 线上值", { exact: true });
     await default_effort.scrollIntoViewIfNeeded();
@@ -247,8 +247,8 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await expect(field_label).toHaveCSS("font-size", await max_effort.locator("..").evaluate(element => getComputedStyle(element).fontSize));
     await expect(field_label).toHaveCSS("font-weight", "600");
     await default_effort.click();
-    await page.getByRole("option", { name: "x_high", exact: true }).click();
-    await expect(default_effort).toContainText("x_high");
+    await page.getByRole("option", { name: "xhigh", exact: true }).click();
+    await expect(default_effort).toContainText("xhigh");
     await dialog.screenshot({ path: test.info().outputPath("model-effort-fields.png") });
     await page.setViewportSize({ width: 390, height: 844 });
     await dialog.screenshot({ path: test.info().outputPath("model-config-390.png") });
@@ -257,7 +257,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await dialog.getByRole("button", { name: "重置配置", exact: true }).click();
     await page.getByRole("dialog", { name: "重置固定配置？", exact: true }).getByRole("button", { name: "重置配置", exact: true }).click();
     await expect(dialog.getByLabel("上下文窗口（Token）", { exact: true })).toHaveValue("1000000");
-    await expect(dialog.getByLabel("x_high 线上值", { exact: true })).toHaveValue("xhigh");
+    await expect(dialog.getByLabel("xhigh 线上值", { exact: true })).toHaveValue("xhigh");
     await expect(dialog.getByRole("button", { name: "重置配置", exact: true })).toBeDisabled();
     await page.setViewportSize({ width: 1280, height: 900 });
     await dialog.getByRole("button", { name: "返回", exact: true }).click();
@@ -363,7 +363,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await dialog.getByRole("button", { name: /管理服务商 DeepSeek 模板验证/ }).click();
     for (const model of ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"]) {
       await dialog.getByRole("button", { name: `配置模型 ${model}`, exact: true }).click();
-      await expect(dialog.getByLabel("上下文窗口（Token）", { exact: true })).toHaveValue(model.endsWith("vision-exp") ? "1048576" : "1000000");
+      await expect(dialog.getByLabel("上下文窗口（Token）", { exact: true })).toHaveValue("1000000");
       await expect(dialog.getByLabel("运行输出上限（Token）", { exact: true })).toHaveValue("384000");
       await expect(dialog.locator("form label small, form span small")).toHaveCount(0);
       await expect(dialog.getByText(/^来源：/)).toHaveCount(0);

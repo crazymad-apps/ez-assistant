@@ -209,7 +209,7 @@ pub struct StoredConversationWindow {
 
 /// Runtime 内部以权威 JSONL 原始消息序号读取的有限窗口。
 ///
-/// 该端口只供 Conversation Recall 对签名引用进行二次定位；原始序号不进入产品协议。
+/// 该端口供 Conversation Recall 定位及子任务用量的同代历史读取；原始序号不进入产品协议。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationRawWindowRequest {
     pub owner: ConversationOwner,
@@ -218,7 +218,7 @@ pub struct ConversationRawWindowRequest {
     pub limit: usize,
 }
 
-/// Store 返回的原始消息窗口；调用方必须继续按 Recall 收录规则过滤可见正文。
+/// Store 返回的原始消息窗口；Recall 调用方继续按收录规则过滤可见正文。
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredConversationRawWindow {
     pub generation: u64,

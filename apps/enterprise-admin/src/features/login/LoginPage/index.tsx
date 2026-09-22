@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Alert, Button, Card, Form, Input } from 'antd';
+import { useEffect, useState } from 'react';
+import { App, Button, Card, Form, Input } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
@@ -9,9 +9,13 @@ type LoginPageProps = Readonly<{
 }>;
 
 export function LoginPage(props: LoginPageProps) {
+  const { message } = App.useApp();
   const [form] = Form.useForm<{ username: string; password: string }>();
-  const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (props.notice) void message.info({ key: 'login-feedback', content: props.notice });
+    return () => message.destroy('login-feedback');
+  }, [message, props.notice]);
   return (
     <main className={styles.page}>
       <Card variant="borderless" className={styles.card} aria-label="管理员登录">
@@ -19,8 +23,6 @@ export function LoginPage(props: LoginPageProps) {
           <span className={styles.brand_icon}>EZ</span>
           <h1>ez-assistant 企业中心</h1>
         </div>
-        {props.notice && <Alert title={props.notice} type="info" showIcon className={styles.alert} />}
-        {error && <Alert title={error} type="error" showIcon className={styles.alert} />}
         <Form
           form={form}
           layout="vertical"
@@ -29,10 +31,10 @@ export function LoginPage(props: LoginPageProps) {
           onFinish={async (values) => {
             if (pending) return;
             setPending(true);
-            setError(undefined);
+            message.destroy('login-feedback');
             try {
               const result = await props.onLogin(values.username, values.password);
-              if (result) setError(result);
+              if (result) void message.error({ key: 'login-feedback', content: result });
             } finally {
               form.resetFields(['password']);
               setPending(false);

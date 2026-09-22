@@ -180,7 +180,7 @@
             }
           }
         },
-        "summary": "验证原密码并修改本人密码，撤销本人全部 Token；不是管理重置",
+        "summary": "验证原密码并修改本人密码，保留已有 Token/key；不是管理重置",
         "tags": [
           "identity"
         ]
@@ -407,7 +407,7 @@
             }
           }
         },
-        "summary": "管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；撤销目标全部 Token",
+        "summary": "管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；保留目标已有 Token/key",
         "tags": [
           "users"
         ]
@@ -527,6 +527,1039 @@
           "audit"
         ]
       }
+    },
+    "/api/model-providers": {
+      "get": {
+        "operationId": "listModelProviders",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderSummary"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      },
+      "post": {
+        "operationId": "createModelProvider",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveProvider"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSummary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-providers/{id}": {
+      "get": {
+        "operationId": "getModelProvider",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSummary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "operationId": "updateModelProvider",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveProvider"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSummary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      },
+      "delete": {
+        "operationId": "deleteModelProvider",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderUsage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-providers/{id}/usage": {
+      "get": {
+        "operationId": "getModelProviderUsage",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderUsage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-providers/{id}/catalog": {
+      "get": {
+        "operationId": "getModelCatalog",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-providers/{id}/refresh": {
+      "post": {
+        "operationId": "refreshModelCatalog",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-providers/{id}/fixed-configs": {
+      "get": {
+        "operationId": "listFixedModelConfigurations",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixedConfigurationPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-configuration/query": {
+      "post": {
+        "operationId": "queryModelConfiguration",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConfigurationQuery"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConfiguration"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-configuration": {
+      "put": {
+        "operationId": "saveModelConfiguration",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveModelConfiguration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConfiguration"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-configuration/reset": {
+      "post": {
+        "operationId": "resetModelConfiguration",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelSelection"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-settings": {
+      "get": {
+        "operationId": "getModelSettings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "operationId": "saveModelSettings",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveModelSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-templates": {
+      "get": {
+        "operationId": "getModelTemplateStatus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/model-templates/reload": {
+      "post": {
+        "operationId": "reloadModelTemplates",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/runtime/model-configuration": {
+      "get": {
+        "operationId": "getRuntimeModelConfiguration",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeModelConfiguration"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数、配置冲突或服务失败；不返回凭据与上游正文",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/llm-calls": {
+      "get": {
+        "operationId": "listLlmCalls",
+        "parameters": [
+          {
+            "required": false,
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "provider_instance_id",
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "model_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "outcome",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
+    "/api/llm-calls/{id}": {
+      "get": {
+        "operationId": "getLlmCall",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallDetails"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
+    "/api/llm-calls/{id}/snapshot": {
+      "get": {
+        "operationId": "getLlmSnapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "side",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "enum": [
+                "request",
+                "response"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotContent"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
+    "/api/llm-recording-settings": {
+      "get": {
+        "operationId": "getLlmRecordingSettings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      },
+      "put": {
+        "operationId": "saveLlmRecordingSettings",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordingSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
+    "/api/model-configuration/test": {
+      "post": {
+        "operationId": "testModelConfiguration",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelTestResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
     }
   },
   "info": {
@@ -550,6 +1583,13 @@
       "CenterInfo": {
         "type": "object",
         "properties": {
+          "capabilities": {
+            "description": "已实现能力；代理就绪后才声明 llm_proxy",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "software_version": {
             "type": "string",
             "description": "Center 软件版本，与 Runtime 独立发布",
@@ -569,6 +1609,7 @@
           }
         },
         "required": [
+          "capabilities",
           "software_version",
           "protocol_version",
           "min_protocol_version"
@@ -890,6 +1931,22 @@
           "new_password"
         ]
       },
+      "ModelSelection": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "model_id"
+        ]
+      },
       "AuditUserFields": {
         "type": "object",
         "properties": {
@@ -911,6 +1968,50 @@
       "AuditDetails": {
         "type": "object",
         "properties": {
+          "call_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "request",
+              "response"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "content_retention_days": {
+            "type": "number"
+          },
+          "index_retention_days": {
+            "type": "number"
+          },
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "model_count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "default_model": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              }
+            ]
+          },
           "before": {
             "$ref": "#/components/schemas/AuditUserFields"
           },
@@ -1013,6 +2114,908 @@
           "total",
           "limit",
           "offset"
+        ]
+      },
+      "ProviderConnection": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "provider_type": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "deepseek",
+              "dashscope_api",
+              "dashscope_plan",
+              "moonshot",
+              "zhipu",
+              "vllm",
+              "local"
+            ]
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "protocol_preference": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "responses",
+              "chat_completions"
+            ]
+          },
+          "models_path": {
+            "type": "string"
+          },
+          "discovery_format": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "vllm",
+              "moonshot",
+              "dashscope_native"
+            ]
+          }
+        },
+        "required": [
+          "display_name",
+          "provider_type",
+          "endpoint",
+          "protocol_preference",
+          "models_path",
+          "discovery_format"
+        ]
+      },
+      "ProviderSummary": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "connection": {
+            "$ref": "#/components/schemas/ProviderConnection"
+          },
+          "has_api_key": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "connection",
+          "has_api_key"
+        ]
+      },
+      "CredentialChange": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "unchanged",
+              "replace",
+              "clear"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "SaveProvider": {
+        "type": "object",
+        "properties": {
+          "connection": {
+            "$ref": "#/components/schemas/ProviderConnection"
+          },
+          "credential": {
+            "$ref": "#/components/schemas/CredentialChange"
+          }
+        },
+        "required": [
+          "connection",
+          "credential"
+        ]
+      },
+      "ProviderUsage": {
+        "type": "object",
+        "properties": {
+          "fixed_config_count": {
+            "type": "number"
+          },
+          "default_model": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fixed_config_count",
+          "default_model"
+        ]
+      },
+      "ModelConfigurationSummary": {
+        "type": "object",
+        "properties": {
+          "uses_template": {
+            "type": "boolean"
+          },
+          "requires_configuration": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "uses_template",
+          "requires_configuration"
+        ]
+      },
+      "TokenLimit": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "known",
+              "invalid"
+            ]
+          },
+          "value": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "ToolChoice": {
+        "type": "object",
+        "properties": {
+          "auto": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "none": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "required": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "named": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          }
+        },
+        "required": [
+          "auto",
+          "none",
+          "required",
+          "named"
+        ]
+      },
+      "ModelParameters": {
+        "type": "object",
+        "properties": {
+          "context_window_tokens": {
+            "$ref": "#/components/schemas/TokenLimit"
+          },
+          "max_input_tokens": {
+            "$ref": "#/components/schemas/TokenLimit"
+          },
+          "max_output_tokens": {
+            "$ref": "#/components/schemas/TokenLimit"
+          },
+          "reasoning_max_input_tokens": {
+            "$ref": "#/components/schemas/TokenLimit"
+          },
+          "reasoning_max_output_tokens": {
+            "$ref": "#/components/schemas/TokenLimit"
+          },
+          "streaming": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "tool_choice": {
+            "$ref": "#/components/schemas/ToolChoice"
+          },
+          "tool_image_projection": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "unsupported",
+              "native_tool_result",
+              "follow_up_user_message"
+            ]
+          },
+          "image_input": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "tool_calls": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "reasoning": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "reasoning_mode": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "unsupported",
+              "optional",
+              "always"
+            ]
+          },
+          "reasoning_efforts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "default_reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "context_window_tokens",
+          "max_input_tokens",
+          "max_output_tokens",
+          "reasoning_max_input_tokens",
+          "reasoning_max_output_tokens",
+          "streaming",
+          "tool_choice",
+          "tool_image_projection",
+          "image_input",
+          "tool_calls",
+          "reasoning",
+          "reasoning_mode",
+          "reasoning_efforts",
+          "default_reasoning_effort"
+        ]
+      },
+      "CatalogModel": {
+        "type": "object",
+        "properties": {
+          "configuration": {
+            "$ref": "#/components/schemas/ModelConfigurationSummary"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ModelParameters"
+          }
+        },
+        "required": [
+          "model_id",
+          "display_name",
+          "metadata"
+        ]
+      },
+      "CatalogSnapshot": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogModel"
+            }
+          },
+          "refreshed_at_ms": {
+            "type": "number",
+            "nullable": true
+          },
+          "connection_changed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "models",
+          "refreshed_at_ms",
+          "connection_changed"
+        ]
+      },
+      "ModelConfiguration": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "online",
+              "manual"
+            ],
+            "default": "online"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/ModelParameters"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "online",
+              "template",
+              "unconfigured"
+            ]
+          },
+          "field_sources": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "updated_at_ms": {
+            "type": "number",
+            "nullable": true
+          },
+          "template_document": {
+            "type": "string",
+            "nullable": true
+          },
+          "template_checked_on": {
+            "type": "string",
+            "nullable": true
+          },
+          "requires_configuration": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "model_id",
+          "origin",
+          "parameters",
+          "source",
+          "field_sources",
+          "updated_at_ms",
+          "template_document",
+          "template_checked_on",
+          "requires_configuration"
+        ]
+      },
+      "FixedConfigurationPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelConfiguration"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ]
+      },
+      "ModelConfigurationQuery": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "online",
+              "manual"
+            ],
+            "default": "online"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "model_id",
+          "origin"
+        ]
+      },
+      "SaveModelConfiguration": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "online",
+              "manual"
+            ],
+            "default": "online"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/ModelParameters"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "model_id",
+          "origin",
+          "parameters"
+        ]
+      },
+      "ModelSettings": {
+        "type": "object",
+        "properties": {
+          "default_model": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "configuration": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelConfiguration"
+              }
+            ]
+          }
+        },
+        "required": [
+          "default_model",
+          "state",
+          "reason",
+          "configuration"
+        ]
+      },
+      "SaveModelSettings": {
+        "type": "object",
+        "properties": {
+          "default_model": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              }
+            ]
+          }
+        },
+        "required": [
+          "default_model"
+        ]
+      },
+      "TemplateStatus": {
+        "type": "object",
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "count": {
+            "type": "number"
+          },
+          "loaded_at_ms": {
+            "type": "number",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "available",
+          "count",
+          "loaded_at_ms",
+          "error"
+        ]
+      },
+      "RuntimeModelConfiguration": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "unavailable"
+            ]
+          },
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "provider_type": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "deepseek",
+              "dashscope_api",
+              "dashscope_plan",
+              "moonshot",
+              "zhipu",
+              "vllm",
+              "local"
+            ]
+          },
+          "provider_display_name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "open_ai_responses",
+              "open_ai_chat_completions"
+            ]
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/ModelParameters"
+          }
+        },
+        "required": [
+          "state",
+          "center_id"
+        ]
+      },
+      "CallSnapshot": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "pending",
+              "complete",
+              "partial",
+              "failed",
+              "expired",
+              "missing"
+            ]
+          },
+          "bytes": {
+            "type": "number",
+            "nullable": true
+          },
+          "sha256": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "state",
+          "bytes",
+          "sha256",
+          "reason"
+        ]
+      },
+      "CallDetails": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
+            "type": "number",
+            "nullable": true
+          },
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider_instance_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "model_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "proxy",
+              "admin_test"
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "open_ai_responses",
+              "open_ai_chat_completions"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time"
+          },
+          "http_status": {
+            "type": "number",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "forwarded",
+              "rejected",
+              "upstream_error",
+              "interrupted",
+              "unknown"
+            ]
+          },
+          "request": {
+            "$ref": "#/components/schemas/CallSnapshot"
+          },
+          "response": {
+            "$ref": "#/components/schemas/CallSnapshot"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "username",
+          "provider_instance_id",
+          "provider_name",
+          "model_id",
+          "kind",
+          "protocol",
+          "started_at",
+          "ended_at",
+          "http_status",
+          "reason",
+          "outcome",
+          "request",
+          "response"
+        ]
+      },
+      "CallPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CallDetails"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "SnapshotContent": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "pending",
+              "complete",
+              "partial",
+              "failed",
+              "expired",
+              "missing"
+            ]
+          },
+          "bytes": {
+            "type": "number",
+            "nullable": true
+          },
+          "sha256": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "text": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "state",
+          "bytes",
+          "sha256",
+          "reason",
+          "text"
+        ]
+      },
+      "RecordingSettings": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "content_retention_days": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 3650
+          },
+          "index_retention_days": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 3650
+          }
+        },
+        "required": [
+          "enabled",
+          "content_retention_days",
+          "index_retention_days"
+        ]
+      },
+      "TestModel": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "model_id"
+        ]
+      },
+      "ModelTestResult": {
+        "type": "object",
+        "properties": {
+          "call_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "http_status": {
+            "type": "number",
+            "nullable": true
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "call_id",
+          "http_status",
+          "connected",
+          "reason"
         ]
       }
     }

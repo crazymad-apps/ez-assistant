@@ -25,6 +25,21 @@ const MAX_TTS_REQUESTS: usize = 2;
 const MAX_ASR_PCM_BYTES: usize = 60 * 16_000 * 2;
 const MAX_TTS_TEXT_CHARS: usize = 120;
 
+/// 既有 Host 语音额度；各用户 Provider 独立，准入仍共用原来的总量。
+#[derive(Clone)]
+pub(crate) struct SpeechSlots {
+    asr: Arc<Semaphore>,
+    tts: Arc<Semaphore>,
+}
+impl Default for SpeechSlots {
+    fn default() -> Self {
+        Self {
+            asr: Arc::new(Semaphore::new(MAX_ASR_REQUESTS)),
+            tts: Arc::new(Semaphore::new(MAX_TTS_REQUESTS)),
+        }
+    }
+}
+
 /// Host 语音能力的长期 actor，串行接收配置与请求并拥有所有请求子任务。
 ///
 /// 关闭时会取消并回收仍在执行的 Provider 请求；ASR/TTS 状态通过 watch 投影给 Gateway。
@@ -140,7 +155,14 @@ impl Drop for SpeechService {
 }
 
 impl SpeechService {
+    #[cfg(test)]
     pub(crate) fn new(source: Arc<dyn RuntimeConfigSource>) -> (Self, SpeechServiceHandle) {
+        Self::with_slots(source, &SpeechSlots::default())
+    }
+    pub(crate) fn with_slots(
+        source: Arc<dyn RuntimeConfigSource>,
+        slots: &SpeechSlots,
+    ) -> (Self, SpeechServiceHandle) {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (status_tx, status_rx) = watch::channel(DeviceSpeechServicesSnapshot::default());
         (
@@ -152,8 +174,8 @@ impl SpeechService {
             SpeechServiceHandle {
                 commands: command_tx,
                 status: status_rx,
-                asr_slots: Arc::new(Semaphore::new(MAX_ASR_REQUESTS)),
-                tts_slots: Arc::new(Semaphore::new(MAX_TTS_REQUESTS)),
+                asr_slots: slots.asr.clone(),
+                tts_slots: slots.tts.clone(),
             },
         )
     }

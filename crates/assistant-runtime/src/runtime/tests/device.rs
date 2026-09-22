@@ -37,7 +37,10 @@ impl ModelService for DeviceSourceGatedModel {
         let message = match call {
             0 => assistant_text("controller-device-final", "controller accepted"),
             1 => assistant_text("target-device-final", "target completed"),
-            _ => assistant_text("controller-report-device-final", "report returned"),
+            call => assistant_text(
+                &format!("controller-report-device-final-{call}"),
+                "report returned",
+            ),
         };
         let events = message_events(&message);
         Box::pin(async move {

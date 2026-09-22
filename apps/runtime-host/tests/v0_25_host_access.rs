@@ -192,7 +192,7 @@ fn two_hosts_isolate_tokens_and_passwords_and_restrict_native_bootstrap() {
         StatusCode::OK
     );
     assert_eq!(status(&http, &b)["listener_state"], "closed");
-    let document = std::fs::read_to_string(directory_a.path().join("config.toml")).unwrap();
+    let document = std::fs::read_to_string(directory_a.path().join("host.toml")).unwrap();
     assert!(document.contains("$argon2id$v=19$m=19456,t=2,p=1$"));
     assert!(!document.contains("changed password"));
 }
@@ -233,10 +233,13 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
     assert!(set_cookie.contains("HttpOnly; SameSite=Strict; Path=/"));
     assert!(!set_cookie.contains("Secure"));
     let cookie = set_cookie.split(';').next().unwrap();
-    assert!(browser.json::<Value>().unwrap()["token"].is_null());
+    let identity = browser.json::<Value>().unwrap();
+    assert!(identity["token"].is_null());
+    let context = identity["login_context"].as_str().unwrap();
     let mut events = http
         .get(format!("{external}/events"))
         .header("Cookie", cookie)
+        .header("x-ez-login-context", context)
         .send()
         .unwrap();
     assert_eq!(events.status(), StatusCode::OK);
@@ -245,6 +248,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
     assert_eq!(
         http.post(format!("{external}/auth/logout"))
             .header("Cookie", cookie)
+            .header("x-ez-login-context", context)
             .send()
             .unwrap()
             .status(),
@@ -254,6 +258,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
         http.get(format!("{external}/health"))
             .bearer_auth(&desktop)
             .header("Cookie", cookie)
+            .header("x-ez-login-context", context)
             .send()
             .unwrap()
             .status(),
@@ -262,6 +267,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
     assert_eq!(
         http.post(format!("{external}/auth/logout"))
             .header("Cookie", cookie)
+            .header("x-ez-login-context", context)
             .header("Origin", &external)
             .send()
             .unwrap()
@@ -278,6 +284,7 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
     assert_eq!(
         http.get(format!("{external}/health"))
             .header("Cookie", cookie)
+            .header("x-ez-login-context", context)
             .send()
             .unwrap()
             .status(),
@@ -289,8 +296,8 @@ fn web_cookie_quick_login_revocation_and_listener_close_have_separate_lifecycles
             .send()
             .unwrap()
             .status(),
-        StatusCode::OK
-    );
+        StatusCode::UNAUTHORIZED
+    ); // C03：明确退出结束同一用户在本 Host 的全部普通登录。
     configuration["remote_enabled"] = json!(false);
     assert_eq!(
         configure(&http, &host, configuration).status(),
@@ -484,7 +491,7 @@ fn stdin_initialization_holds_instance_lock_and_password_changes_invalidate_old_
             .unwrap()
     );
     let token = login(&http, host.base_url(), " stdin password ");
-    let before = std::fs::read(directory.path().join("config.toml")).unwrap();
+    let before = std::fs::read(directory.path().join("host.toml")).unwrap();
     let second = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"))
         .args(["serve", "--password-stdin", "--runtime-home"])
         .arg(directory.path())
@@ -492,7 +499,7 @@ fn stdin_initialization_holds_instance_lock_and_password_changes_invalidate_old_
         .unwrap();
     assert!(!second.status.success());
     assert_eq!(
-        std::fs::read(directory.path().join("config.toml")).unwrap(),
+        std::fs::read(directory.path().join("host.toml")).unwrap(),
         before
     );
     drop(host);
@@ -545,8 +552,19 @@ fn browser_logins_on_two_host_ports_do_not_replace_or_logout_each_other() {
             StatusCode::OK
         );
     }
+    let identity: Value = http
+        .get(format!("{}/auth/session", a.base_url()))
+        .header("Cookie", &combined)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
     let logout = http
         .post(format!("{}/auth/logout", a.base_url()))
+        .header(
+            "x-ez-login-context",
+            identity["login_context"].as_str().unwrap(),
+        )
         .header("Origin", a.base_url())
         .header("Cookie", &combined)
         .send()
@@ -740,4 +758,33 @@ fn bearer_access_is_origin_independent_while_cookie_access_stays_same_origin() {
         .json(&json!({"request_id":"no-origin-privilege", "command":{"scope":"runtime", "payload":{"type":"shutdown_runtime", "payload":{}}}}))
         .send().unwrap();
     assert_eq!(shutdown.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn personal_user_cannot_change_host_identity_and_native_changes_wait_for_restart() {
+    let directory = support::test_directory();
+    let host = HostProcess::start(directory.path());
+    let http = client();
+    password(&http, &host, "fixture-password");
+    let user = login(&http, host.base_url(), "fixture-password");
+    let before = status(&http, &host);
+    let payload = json!({"type":"configure","payload":{"expected_revision":before["revision"],"configuration":before["configuration"],"mode":"enterprise","center_url":"http://127.0.0.1:7320"}});
+    let denied = command(&http, host.base_url(), &user, payload.clone());
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        denied.json::<Value>().unwrap()["error"]["code"],
+        "operation_not_allowed"
+    );
+    let saved = command(&http, host.base_url(), host.access_token(), payload);
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved = saved.json::<Value>().unwrap()["result"]["payload"].clone();
+    assert_eq!(saved["mode"], "enterprise");
+    assert_eq!(saved["restart_required"], true);
+    let capabilities = http
+        .get(format!("{}/capabilities", host.base_url()))
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap();
+    assert_eq!(capabilities["mode"], "personal");
 }

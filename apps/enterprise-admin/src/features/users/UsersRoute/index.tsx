@@ -28,9 +28,11 @@ export const UsersRoute = observer(function UsersRoute() {
     dialogTrigger.current = null;
     if (trigger?.isConnected) trigger.focus();
   }, [editor, passwordTarget]);
+
   function rememberDialogTrigger() {
     dialogTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   }
+
   return (
     <>
       <UsersPage
@@ -87,7 +89,7 @@ export const UsersRoute = observer(function UsersRoute() {
             const error = await adminStore.resetPassword(user, password);
             if (error) return error;
             setPasswordTarget(undefined);
-            // 重置自己密码已撤销身份，页面随即卸载，不再刷新。
+            // 请求期间身份若已切换，不向新身份提交页面反馈。
             if (adminStore.user) {
               void message.success(`已重置 ${user.username} 的密码`);
               data.onRecover();

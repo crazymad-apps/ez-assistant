@@ -113,7 +113,7 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
     );
     let tool_image_directory = runtime_home
         .path()
-        .join("data/sessions")
+        .join("users/_personal/data/sessions")
         .join(&session_id)
         .join("tool-images");
     assert_eq!(
@@ -127,7 +127,7 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
         &fs::read(
             runtime_home
                 .path()
-                .join("data/sessions")
+                .join("users/_personal/data/sessions")
                 .join(&session_id)
                 .join("private/permissions.json"),
         )

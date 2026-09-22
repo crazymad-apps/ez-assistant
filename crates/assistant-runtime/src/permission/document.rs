@@ -93,6 +93,11 @@ impl PermissionDocument {
 
     pub fn render(&self) -> Result<Vec<u8>, PermissionDocumentError> {
         self.validate()?;
+        if self.rules.iter().any(|rule| {
+            matches!(&rule.matcher, PermissionMatcher::File(matcher) if !matcher.excluded_paths.is_empty())
+        }) {
+            return Err(invalid_rule("injected subtree exceptions cannot be persisted"));
+        }
         let mut encoded = serde_json::to_vec_pretty(self).map_err(|_| {
             PermissionDocumentError::new(
                 PermissionDiagnosticCode::InvalidDocument,
@@ -223,13 +228,18 @@ pub struct FilePermissionMatcher {
     pub operation: PermissionFileOperation,
     pub path: String,
     pub path_match: PathMatch,
+    /// 宿主默认规则的子树例外；不进入可编辑文档或产品协议。
+    #[serde(skip)]
+    pub excluded_paths: Vec<String>,
 }
 
 impl FilePermissionMatcher {
     fn validate(&self) -> Result<(), PermissionDocumentError> {
-        AbsolutePath::new(&self.path)
-            .map(|_| ())
-            .map_err(|_| invalid_rule("file matcher path must be an absolute UTF-8 path"))
+        for path in std::iter::once(&self.path).chain(self.excluded_paths.iter()) {
+            AbsolutePath::new(path)
+                .map_err(|_| invalid_rule("file matcher path must be an absolute UTF-8 path"))?;
+        }
+        Ok(())
     }
 }
 
@@ -325,6 +335,7 @@ mod tests {
             effect: PermissionEffect::Allow,
             variants: vec![AgentVariant::Build],
             matcher: PermissionMatcher::File(FilePermissionMatcher {
+                excluded_paths: Vec::new(),
                 operation: PermissionFileOperation::Write,
                 path: if cfg!(windows) {
                     "C:/tmp/output.txt"

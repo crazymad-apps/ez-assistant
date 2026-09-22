@@ -204,6 +204,7 @@ async fn begin_title_generation(
             .map_err(|source| RuntimeError::from_store("disable automatic title", source))?;
         session.lock_state()?.automatic_title_pending = false;
     }
+    context.model_factory.ensure_available()?;
     let config = context.config_registry.snapshot()?;
     let prepared = super::model::resolve_session_model(
         &context.config_registry,

@@ -72,7 +72,9 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
     drop(first);
     assert!(first_host.wait().status.success());
 
-    let database = runtime_home.path().join("data/runtime.sqlite3");
+    let database = runtime_home
+        .path()
+        .join("users/_personal/data/runtime.sqlite3");
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open temporary acceptance database read-only");
     let stored_modes: (String, String) = connection
@@ -101,7 +103,7 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
         }]
     });
     fs::write(
-        runtime_home.path().join("permissions.json"),
+        runtime_home.path().join("users/_personal/permissions.json"),
         serde_json::to_vec_pretty(&valid_global).expect("serialize valid permissions"),
     )
     .expect("write valid global permissions");
@@ -109,7 +111,7 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
     assert_eq!(applied["applied"], true);
 
     fs::write(
-        runtime_home.path().join("permissions.json"),
+        runtime_home.path().join("users/_personal/permissions.json"),
         b"{ invalid strict json",
     )
     .expect("write invalid global permissions");
@@ -124,7 +126,7 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
     );
 
     fs::write(
-        runtime_home.path().join("permissions.json"),
+        runtime_home.path().join("users/_personal/permissions.json"),
         serde_json::to_vec_pretty(&valid_global).expect("serialize restored permissions"),
     )
     .expect("restore valid global permissions");
@@ -350,7 +352,10 @@ fn default_session_permissions_apply_immediately_in_the_formal_host() {
         .as_str()
         .expect("session id")
         .to_owned();
-    let session_directory = runtime_home.path().join("data/sessions").join(&session_id);
+    let session_directory = runtime_home
+        .path()
+        .join("users/_personal/data/sessions")
+        .join(&session_id);
     let permission_document: Value = serde_json::from_slice(
         &fs::read(session_directory.join("private/permissions.json"))
             .expect("read Session permissions"),
@@ -468,7 +473,7 @@ fn pending_approval_is_queryable_but_is_not_restored_after_host_restart() {
     fs::write(
         runtime_home
             .path()
-            .join("data/sessions")
+            .join("users/_personal/data/sessions")
             .join(&session_id)
             .join("private/permissions.json"),
         b"{\"schema_version\":1,\"rules\":[]}",

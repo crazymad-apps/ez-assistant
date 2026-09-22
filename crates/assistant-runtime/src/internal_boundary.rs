@@ -19,6 +19,7 @@ use crate::{
 pub(crate) enum InternalBoundarySource {
     AgentVariant,
     ShellEnvironment,
+    RuntimeDirectories,
     ShellSwitchResult,
     ShellSwitchPrevious,
     InheritedShellSwitchResult,
@@ -46,6 +47,7 @@ impl InternalBoundarySource {
         match self {
             Self::AgentVariant => "agent_variant",
             Self::ShellEnvironment => "shell_environment",
+            Self::RuntimeDirectories => "runtime_directories",
             Self::ShellSwitchResult => "shell_switch_result",
             Self::ShellSwitchPrevious => "shell_switch_previous",
             Self::InheritedShellSwitchResult => "inherited_shell_switch_result",

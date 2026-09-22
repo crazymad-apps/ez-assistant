@@ -53,6 +53,16 @@ pub enum HostListenerState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct HostAccessStatus {
+    /// 已保存的身份配置；当前进程仍使用启动时冻结的配置。
+    #[serde(default)]
+    #[ts(optional)]
+    pub mode: Option<HostMode>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub center_url: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub center_id: Option<String>,
     pub revision: Option<String>,
     pub password_configured: bool,
     pub configuration: HostAccessConfiguration,
@@ -75,6 +85,15 @@ pub enum HostAccessCommand {
     Configure {
         expected_revision: Option<String>,
         configuration: HostAccessConfiguration,
+        #[serde(default)]
+        #[ts(optional)]
+        mode: Option<HostMode>,
+        #[serde(default)]
+        #[ts(optional)]
+        center_url: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        clear_center_binding: Option<bool>,
     },
 }
 
@@ -83,6 +102,12 @@ pub enum HostAccessCommand {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostLoginRequest {
+    Enterprise {
+        username: String,
+        #[ts(type = "string")]
+        password: SecretValue,
+        native: bool,
+    },
     Password {
         #[ts(type = "string")]
         password: SecretValue,
@@ -103,4 +128,53 @@ pub struct HostLoginResult {
     pub token: Option<SecretValue>,
     pub expires_at_ms: u64,
     pub instance_id: String,
+    pub mode: HostMode,
+    pub kind: HostIdentityKind,
+    pub identity: Option<HostUserIdentity>,
+    /// 当前 Host 登录的非秘密标识，用于发现同源 Cookie 被其他页面替换。
+    pub login_context: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum HostMode {
+    #[default]
+    Personal,
+    Enterprise,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum HostIdentityKind {
+    Bootstrap,
+    User,
+}
+
+/// Host 核实后的本人身份，不包含企业后端凭据。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostUserIdentity {
+    pub center_id: String,
+    pub user_id: i32,
+    pub username: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HostPasswordRequest {
+    #[ts(type = "string")]
+    pub old_password: SecretValue,
+    #[ts(type = "string")]
+    pub new_password: SecretValue,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostLogoutResult {
+    pub local_ended: bool,
+    pub center_revocation_confirmed: bool,
 }

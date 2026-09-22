@@ -20,11 +20,23 @@ const MAX_SYSTEM_CONTEXT_BYTES: usize = 256 * 1024;
 
 pub(super) struct HostSessionEnvironmentFactory {
     sessions_directory: PathBuf,
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
 }
 
 impl HostSessionEnvironmentFactory {
+    #[cfg(test)]
     pub(super) fn new(runtime_home: &Path) -> Self {
+        Self::with_paths(
+            runtime_home,
+            std::sync::Arc::new(crate::user_paths::UserPaths::new(runtime_home, Vec::new())),
+        )
+    }
+    pub(super) fn with_paths(
+        runtime_home: &Path,
+        paths: std::sync::Arc<crate::user_paths::UserPaths>,
+    ) -> Self {
         Self {
+            paths,
             // 与 Store 使用同样的原生路径组件，避免 Windows Fork 校验中的分隔符差异。
             sessions_directory: runtime_home.join("data").join("sessions"),
         }
@@ -91,6 +103,12 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
                 .collect::<Vec<_>>();
             parts.push(render_workspace_context(workspace.label, &roots));
             for (root_order, root) in roots.iter().enumerate() {
+                self.paths
+                    .resolve(Path::new(root), false)
+                    .map_err(SessionEnvironmentFactoryError::with_source)?;
+                self.paths
+                    .resolve(&Path::new(root).join(AGENTS_FILE), false)
+                    .map_err(SessionEnvironmentFactoryError::with_source)?;
                 if let Some(instructions) = read_workspace_instructions(root)? {
                     parts.push(render_workspace_instructions(
                         root_order,
@@ -100,7 +118,10 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
                 }
             }
         }
-        parts.push(render_directory_prompt(&environment));
+        parts.push(render_directory_prompt(
+            &environment,
+            &self.paths.user_root,
+        )?);
         ensure_context_limit(&parts)?;
         Ok(PreparedSessionEnvironment {
             system_prompt: SystemPromptSnapshot::new(parts),
@@ -138,7 +159,10 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         if parts.pop().is_none() {
             return Err(SessionEnvironmentFactoryError::new());
         }
-        parts.push(render_directory_prompt(&environment));
+        parts.push(render_directory_prompt(
+            &environment,
+            &self.paths.user_root,
+        )?);
         ensure_context_limit(&parts)?;
         Ok(PreparedSessionEnvironment {
             system_prompt: SystemPromptSnapshot::new(parts),
@@ -224,9 +248,22 @@ fn path_text(path: &Path) -> Result<String, SessionEnvironmentFactoryError> {
         .ok_or_else(SessionEnvironmentFactoryError::new)
 }
 
-fn render_directory_prompt(environment: &SessionExecutionEnvironment) -> String {
+fn render_directory_prompt(
+    environment: &SessionExecutionEnvironment,
+    user_root: &Path,
+) -> Result<String, SessionEnvironmentFactoryError> {
+    // 直接使用本用户服务装配时固定的根目录；不从工作区、OS Home 或源会话提示词猜测。
     let mut lines = vec![
         "<runtime_directories>".to_owned(),
+        format!(
+            "  <user_data_directory>{}</user_data_directory>",
+            escape_xml(&path_text(user_root)?)
+        ),
+        format!(
+            "  <user_skills_directory>{}</user_skills_directory>",
+            escape_xml(&path_text(&user_root.join("skills"))?)
+        ),
+        "  <user_directory_semantics>user_data_directory is the current EZ Assistant user's private data root, not the operating-system home or a workspace. When creating or installing skills, prefer user_skills_directory, with each skill at &lt;skill-name&gt;/SKILL.md. If needed, create the skill directory using the normal file tools. These paths describe locations and do not grant permission; follow the existing tool permission rules.</user_directory_semantics>".to_owned(),
         format!(
             "  <working_directory>{}</working_directory>",
             escape_xml(&environment.working_directory)
@@ -261,7 +298,7 @@ fn render_directory_prompt(environment: &SessionExecutionEnvironment) -> String 
         "  <local_resource_presentation>When presenting an existing local regular file that the user may open, prefer a Markdown link with a valid absolute file URI, for example [report](file:///absolute/path/report.md). Use Markdown image syntax for an existing local image. Percent-encode spaces and reserved characters in path segments. Only link a target after confirming it exists and is a regular file. Do not link directories, guessed paths, or unavailable files.</local_resource_presentation>".to_owned(),
         "</runtime_directories>".to_owned(),
     ]);
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn escape_xml(value: &str) -> String {
@@ -286,6 +323,60 @@ mod tests {
         MemoryContextSnapshot, PersonaSnapshot, PinnedMemoryCreatedBy, StoredPinnedMemory,
         WorkspaceEnvironmentSource,
     };
+
+    #[test]
+    fn personal_and_enterprise_prompts_use_the_current_user_root() {
+        let test_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+        fs::create_dir_all(&test_root).expect("test directory");
+        let root = tempfile::Builder::new()
+            .prefix("user-directory-prompt-")
+            .tempdir_in(test_root)
+            .expect("isolated runtime home");
+        for user in ["_personal", "f27d8da0-4c20-43f8-9177-176e9eb870a0_1"] {
+            let user_root = root.path().join("host&data/users").join(user);
+            let factory = HostSessionEnvironmentFactory::new(&user_root);
+            let source = factory
+                .create_environment(SessionEnvironmentFactoryRequest {
+                    session_id: &SessionId::new("source").expect("session id"),
+                    workspace: None,
+                    memory_context: &MemoryContextSnapshot::default(),
+                })
+                .expect("user environment");
+            let prompt = source.system_prompt.parts().last().expect("directories");
+            let user_tag = format!(
+                "<user_data_directory>{}</user_data_directory>",
+                escape_xml(user_root.to_str().expect("user path"))
+            );
+            let skills_tag = format!(
+                "<user_skills_directory>{}</user_skills_directory>",
+                escape_xml(user_root.join("skills").to_str().expect("skills path"))
+            );
+            assert!(prompt.contains(&user_tag));
+            assert!(prompt.contains(&skills_tag));
+            assert!(prompt.contains("host&amp;data"));
+            assert_ne!(
+                source.environment.working_directory,
+                user_root.to_string_lossy()
+            );
+
+            // 旧会话即使尚未记录用户目录，分叉仍从当前用户装配重建目录，不依赖父提示词猜路径。
+            let mut old_parts = source.system_prompt.parts().to_vec();
+            *old_parts.last_mut().expect("directory part") =
+                "<runtime_directories>legacy session directories</runtime_directories>".to_owned();
+            let fork = factory
+                .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
+                    session_id: &SessionId::new("fork").expect("fork id"),
+                    source_system_prompt: &SystemPromptSnapshot::new(old_parts),
+                    source_environment: &source.environment,
+                })
+                .expect("fork environment");
+            let prompt = fork.system_prompt.parts().last().expect("fork directories");
+            assert_eq!(prompt.matches(&user_tag).count(), 1);
+            assert_eq!(prompt.matches(&skills_tag).count(), 1);
+            assert!(prompt.contains("fork"));
+            assert!(!prompt.contains("legacy session directories"));
+        }
+    }
 
     fn workspace_source<'a>(
         workspace_id: &'a WorkspaceId,

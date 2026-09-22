@@ -292,11 +292,16 @@ export class RuntimeLifecycleCoordinator {
       if (!this.#isActiveGeneration(generation)) {
         return;
       }
-      const client = new RuntimeClient(bootstrap, () => {
+      // Cookie 可能被另一标签页替换；新身份必须由应用入口重建整棵 Store。
+      if (this.#client && (this.#client.login_context ?? null) !== (bootstrap.login_context ?? null)) {
+        throw new RuntimeClientError("login_context_changed", "登录账号已变化，正在重新确认身份。");
+      }
+      const client = new RuntimeClient(bootstrap, (code) => {
         if (this.#client !== client) return;
         runInAction(() => {
-          this.dependencies.connection.markDisconnected("登录已失效，请重新登录。", "authentication_required");
+          this.dependencies.connection.markDisconnected("登录状态已变化，请重新确认身份。", code);
           this.dependencies.projection.resetForInstance();
+          this.dependencies.navigation.clearConversationLocations();
           this.dependencies.live_execution.clear();
         });
       });
@@ -305,14 +310,22 @@ export class RuntimeLifecycleCoordinator {
         && this.dependencies.connection.instance_id !== client.instance_id
       ) {
         this.dependencies.projection.resetForInstance();
+        this.dependencies.navigation.clearConversationLocations();
         this.dependencies.live_execution.clear();
       }
       this.#event_abort?.abort();
       this.#client?.dispose();
       this.#client = client;
-      await client.waitUntilReady((health) => {
-        if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.connection.markStartup(health);
-      });
+      try {
+        await client.waitUntilReady((health) => {
+          if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.connection.markStartup(health);
+        });
+      } catch (error) {
+        const failure = normalizeFailure(error);
+        if (["authentication_required", "login_context_changed", "component_mismatch"].includes(failure.code)) throw error;
+        // 初始化失败只由用户显式重试，不能让通用断线重连反复执行初始化。
+        throw new RuntimeClientError("runtime_startup_failed", failure.message);
+      }
       if (!this.#isActiveGeneration(generation) || this.#client !== client) { client.dispose(); return; }
       const event_abort = new AbortController();
       this.#event_abort = event_abort;
@@ -430,6 +443,7 @@ export class RuntimeLifecycleCoordinator {
       );
     }
     if (event.type === "session_deleted") {
+      this.dependencies.navigation.clearConversationLocations(event.session_id);
       if (this.dependencies.navigation.selected_session_id === event.session_id) {
         this.dependencies.navigation.selectSession(null, false);
       }
@@ -508,7 +522,7 @@ export class RuntimeLifecycleCoordinator {
       this.#disposed
       || this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
       || this.dependencies.connection.state === "component_mismatch"
-      || this.dependencies.connection.last_error_code === "authentication_required"
+      || ["authentication_required", "login_context_changed", "runtime_initialization_failed", "storage_unavailable"].includes(this.dependencies.connection.last_error_code ?? "")
       || this.dependencies.connection.last_error_code === "runtime_startup_failed"
     ) {
       return;

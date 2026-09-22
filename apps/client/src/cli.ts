@@ -56,7 +56,7 @@ for (const [name, description] of Object.entries(descriptions)) {
     }
     if (!target || target.health.status !== "ready") throw new ClientError("not_ready", "Host 尚未就绪，无法打开 Web；请先 start 或查询 status。");
     const access = await accessCommand(target.discovery, { type: "get_status" });
-    if (!access.password_configured) throw new ClientError("password_required", "请先通过 config 设置访问密码，再打开 Web 登录页。");
+    if (target.capabilities.mode !== "enterprise" && !access.password_configured) throw new ClientError("password_required", "请先通过 config 设置访问密码，再打开 Web 登录页。");
     line(`Web 登录地址  ${target.discovery.address}（仅此机器本机）`);
     if (!access.configuration.remote_enabled) line("非本地访问关闭；其他设备访问需在 config 中配置。");
     line(await openBrowser(target.discovery.address) ? "已请求浏览器打开" : "未能请求浏览器打开，请手动访问上述地址。");
@@ -73,6 +73,8 @@ catch (error) {
 
 async function showAccess(target: import("./host/discovery.js").Discovery): Promise<void> {
   const access = await accessCommand(target, { type: "get_status" });
+  line(`保存模式  ${access.mode === "enterprise" ? "企业" : "个人"}`);
+  if (access.center_url) line(`企业中心  ${access.center_url} · ${access.center_id ?? "首次登录后绑定"}`);
   line(`访问范围  ${access.configuration.remote_enabled ? "允许非本地访问" : "仅本机"}`);
   if (access.restart_required) line(`待重启设置  ${access.configuration.scheme.toUpperCase()} 端口 ${access.configuration.port}`);
 }

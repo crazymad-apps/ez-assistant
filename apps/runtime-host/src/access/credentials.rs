@@ -16,7 +16,10 @@ use sha2::{Digest, Sha256};
 use tokio::{sync::Semaphore, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::AccessError;
+use super::{
+    AccessError,
+    enterprise::{UserKey, UserState},
+};
 
 const LOGIN_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_SESSIONS: usize = 64;
@@ -27,7 +30,9 @@ pub(crate) struct LoginSession {
     pub(crate) expires_at_ms: u64,
     compatibility: ClientCompatibility,
     deadline: Instant,
-    cancelled: CancellationToken,
+    pub(super) cancelled: CancellationToken,
+    pub(super) user_key: Option<UserKey>,
+    changes: tokio::sync::watch::Sender<()>,
 }
 
 impl LoginSession {
@@ -48,9 +53,20 @@ pub(crate) struct AccessPermit {
     pub(crate) native: bool,
     session: Option<LoginSession>,
     listener: CancellationToken,
+    pub(super) enterprise_access: Option<(CancellationToken, Arc<()>)>,
 }
 
 impl AccessPermit {
+    pub(crate) fn user_key(&self) -> Option<&UserKey> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.user_key.as_ref())
+    }
+    pub(crate) fn login_context(&self) -> Option<String> {
+        self.login_id()
+            .map(|id| URL_SAFE_NO_PAD.encode(Sha256::digest(id)))
+    }
+
     pub(crate) fn compatibility(&self) -> Option<&ClientCompatibility> {
         self.session.as_ref().map(|session| &session.compatibility)
     }
@@ -75,6 +91,7 @@ impl AccessPermit {
             native,
             session,
             listener,
+            enterprise_access: None,
         }
     }
 
@@ -86,6 +103,13 @@ impl AccessPermit {
                 .is_some_and(|session| !session.valid())
         {
             return Err(AccessError::Unauthorized);
+        }
+        if self
+            .enterprise_access
+            .as_ref()
+            .is_some_and(|(channel, _)| channel.is_cancelled())
+        {
+            return Err(super::enterprise::CenterError::Unavailable.into());
         }
         Ok(())
     }
@@ -100,34 +124,110 @@ impl AccessPermit {
         tokio::select! {
             () = self.listener.cancelled() => {},
             () = session_end => {},
+            () = async { match &self.enterprise_access { Some((channel, _)) => channel.cancelled().await, None => std::future::pending().await } } => {},
         }
     }
 
     pub(crate) fn logout(&self) {
         if let Some(session) = &self.session {
             session.cancelled.cancel();
+            session.changes.send_replace(());
         }
     }
 }
 
-struct CredentialState {
+pub(super) struct CredentialState {
+    pub(super) changes: tokio::sync::watch::Sender<()>,
+    pub(super) personal: CancellationToken,
     password_hash: Option<String>,
-    sessions: HashMap<[u8; 32], LoginSession>,
+    pub(super) sessions: HashMap<[u8; 32], LoginSession>,
+    pub(super) users: HashMap<UserKey, UserState>,
     attempts: f64,
     refilled: Instant,
 }
 
 pub(crate) struct Credentials {
-    state: Mutex<CredentialState>,
+    pub(super) state: Mutex<CredentialState>,
     hashing: Arc<Semaphore>,
 }
 
 impl Credentials {
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self, token: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.sessions.get_mut(&digest(token)).unwrap().deadline = Instant::now();
+        state.changes.send_replace(());
+    }
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.state
+            .lock()
+            .expect("credential state poisoned")
+            .changes
+            .subscribe()
+    }
+
+    pub(crate) fn login_deadline(&self, key: Option<&UserKey>) -> Option<Instant> {
+        self.state
+            .lock()
+            .expect("credential state poisoned")
+            .sessions
+            .values()
+            .filter(|session| session.user_key.as_ref() == key && session.valid())
+            .map(|session| session.deadline)
+            .min()
+    }
+
+    pub(crate) fn next_login_deadline(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .expect("credential state poisoned")
+            .sessions
+            .values()
+            .filter(|session| session.valid())
+            .map(|session| session.deadline)
+            .min()
+    }
+
+    pub(crate) fn enterprise_users(&self) -> Vec<UserKey> {
+        self.state
+            .lock()
+            .expect("credential state poisoned")
+            .users
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn end_personal_login(&self) {
+        let mut state = self.state.lock().expect("credential state poisoned");
+        state.personal.cancel();
+        state.sessions.retain(|_, session| {
+            if session.user_key.is_none() {
+                session.cancelled.cancel();
+                false
+            } else {
+                true
+            }
+        });
+        state.changes.send_replace(());
+    }
+
+    pub(crate) fn personal_transport(&self) -> CancellationToken {
+        let mut state = self.state.lock().expect("credential state poisoned");
+        if state.personal.is_cancelled() {
+            state.personal = CancellationToken::new();
+        }
+        state.personal.clone()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(CredentialState {
+                changes: tokio::sync::watch::channel(()).0,
+                personal: CancellationToken::new(),
                 password_hash: None,
                 sessions: HashMap::new(),
+                users: HashMap::new(),
                 attempts: 5.0,
                 refilled: Instant::now(),
             }),
@@ -138,10 +238,14 @@ impl Credentials {
     pub(crate) fn replace_password(&self, password_hash: Option<String>) {
         let mut state = self.state.lock().expect("credential state poisoned");
         if state.password_hash != password_hash {
-            for session in state.sessions.values() {
-                session.cancelled.cancel();
-            }
-            state.sessions.clear();
+            state.sessions.retain(|_, session| {
+                if session.user_key.is_none() {
+                    session.cancelled.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
             state.password_hash = password_hash;
         }
     }
@@ -209,7 +313,7 @@ impl Credentials {
         if !valid || state.password_hash.as_ref() != Some(&expected) {
             return Err(AccessError::Unauthorized);
         }
-        issue(&mut state, compatibility)
+        issue(&mut state, compatibility, None)
     }
 
     pub(crate) fn issue(
@@ -219,7 +323,7 @@ impl Credentials {
     ) -> Result<(SecretValue, LoginSession), AccessError> {
         let mut state = self.state.lock().expect("credential state poisoned");
         permit.check()?;
-        issue(&mut state, compatibility)
+        issue(&mut state, compatibility, permit.user_key().cloned())
     }
 
     /// 快捷登录交换为当前页面版本的独立会话，不改原 token 的不可变声明。
@@ -237,7 +341,11 @@ impl Credentials {
         {
             return Err(AccessError::Unauthorized);
         }
-        issue(&mut state, compatibility)
+        let key = state
+            .sessions
+            .get(&digest(token))
+            .and_then(|session| session.user_key.clone());
+        issue(&mut state, compatibility, key)
     }
 
     pub(crate) fn authenticate(&self, token: &str) -> Option<LoginSession> {
@@ -253,9 +361,10 @@ impl Credentials {
     }
 }
 
-fn issue(
+pub(super) fn issue(
     state: &mut CredentialState,
     compatibility: ClientCompatibility,
+    user_key: Option<UserKey>,
 ) -> Result<(SecretValue, LoginSession), AccessError> {
     if !compatibility.is_valid() {
         return Err(AccessError::Invalid("软件版本声明无效。"));
@@ -273,12 +382,15 @@ fn issue(
         .as_millis();
     let session = LoginSession {
         id: digest(&token),
+        user_key,
         compatibility,
         expires_at_ms: (now_ms + LOGIN_LIFETIME.as_millis()) as u64,
         deadline: Instant::now() + LOGIN_LIFETIME,
         cancelled: CancellationToken::new(),
+        changes: state.changes.clone(),
     };
     state.sessions.insert(digest(&token), session.clone());
+    state.changes.send_replace(());
     Ok((SecretValue::new(token), session))
 }
 

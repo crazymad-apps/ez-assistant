@@ -1,0 +1,7 @@
+.page {
+  overflow: auto;
+  min-width: 0;
+}
+.page > * {
+  max-width: 760px;
+}

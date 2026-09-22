@@ -12,22 +12,22 @@ use rusqlite::{
     backup::{Backup, StepResult},
     types::ValueRef,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{MigrationError, Result};
 
-#[derive(Debug, Eq, PartialEq, Serialize)]
-struct TableEvidence {
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct TableEvidence {
     rows: u64,
     /// 对全部原始列进行有序、带 SQLite 类型和长度的摘要，含主键、模型与文件引用字段。
     sha256: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize)]
-struct DatabaseEvidence {
-    schema_sha256: String,
-    tables: BTreeMap<String, TableEvidence>,
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct DatabaseEvidence {
+    pub(super) schema_sha256: String,
+    pub(super) tables: BTreeMap<String, TableEvidence>,
 }
 
 /// 调用者持有源库读快照和进程独占锁。返回目录前重新只读连接备份并精确核验所有普通表。
@@ -129,7 +129,7 @@ pub(super) fn check_integrity(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn evidence(connection: &Connection) -> Result<DatabaseEvidence> {
+pub(super) fn evidence(connection: &Connection) -> Result<DatabaseEvidence> {
     let schema = fingerprint(
         connection,
         "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name, tbl_name, sql",

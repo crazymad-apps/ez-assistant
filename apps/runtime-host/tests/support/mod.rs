@@ -1198,7 +1198,11 @@ impl HostProcess {
 
     fn start_inner(runtime_home: &Path, password: Option<&str>, http: Option<&HttpClient>) -> Self {
         // 产品默认固定 7240；每个隔离夹具显式配置自己的空闲端口，避免并行用例争用。
-        let path = runtime_home.join("config.toml");
+        let path = runtime_home.join(if runtime_home.join("host.toml").exists() {
+            "host.toml"
+        } else {
+            "config.toml"
+        });
         let mut document = fs::read_to_string(&path)
             .unwrap_or_else(|_| "schema_version = 1\n".into())
             .parse::<toml_edit::DocumentMut>()

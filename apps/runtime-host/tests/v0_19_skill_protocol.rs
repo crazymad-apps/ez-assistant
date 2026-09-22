@@ -161,7 +161,9 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
     assert!(second_host.wait().status.success());
 
     let connection = Connection::open_with_flags(
-        runtime_home.path().join("data/runtime.sqlite3"),
+        runtime_home
+            .path()
+            .join("users/_personal/data/runtime.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("open database read-only");
@@ -261,7 +263,9 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
     assert!(second_host.wait().status.success());
 
     let connection = Connection::open_with_flags(
-        runtime_home.path().join("data/runtime.sqlite3"),
+        runtime_home
+            .path()
+            .join("users/_personal/data/runtime.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("open database read-only");

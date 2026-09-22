@@ -24,7 +24,7 @@ export class TerminalSocket {
   #timer: ReturnType<typeof setTimeout>;
 
   constructor(address: string, bearer: string, source: TerminalSource, size: TerminalSize,
-    receive: (event: TerminalEvent) => void, signal: AbortSignal, shell: ShellKind | null = null) {
+    receive: (event: TerminalEvent) => void, signal: AbortSignal, shell: ShellKind | null = null, login_context: string | null = null) {
     const url = new URL("/user-terminals/socket", address);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.created = new Promise((resolve, reject) => { this.#resolveCreated = resolve; this.#rejectCreated = reject; });
@@ -36,7 +36,7 @@ export class TerminalSocket {
     this.#timer = setTimeout(() => { this.#rejectCreated(new Error("终端连接超时。")); this.disconnect(); }, 15_000);
     this.#socket.onopen = () => {
       if (this.#closing) { this.disconnect(); return; }
-      this.#send({ type: "open", client_compatibility: currentCompatibility(), bearer: bearer || null, source, size, shell });
+      this.#send({ type: "open", client_compatibility: currentCompatibility(), bearer: bearer || null, login_context, source, size, shell });
     };
     this.#socket.onmessage = ({ data }: MessageEvent<unknown>) => {
       if (data instanceof ArrayBuffer) {

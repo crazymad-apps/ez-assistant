@@ -129,3 +129,8 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 cargo test -p agent-openai-compatible
 cargo clippy -p agent-openai-compatible --all-targets --all-features -- -D warnings
 ```
+
+## v0.27.0 C04 M2 Transport 注入
+
+- Chat/Responses 均支持同时注入 Transport 与明确模型能力，保持既有编码、解码及路由规则；普通个人调用继续使用原默认 Transport。
+- `TransportError::Rejected(ModelError)` 传递宿主已判定的请求拒绝，直接交上层，不进入 Adapter 自动重试；Adapter 不识别企业中心错误码或身份。

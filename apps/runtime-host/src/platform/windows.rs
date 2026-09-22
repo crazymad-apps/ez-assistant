@@ -148,3 +148,12 @@ pub(crate) fn verify_replacement_contents(path: &Path, expected: &[u8]) -> io::R
         ))
     }
 }
+/// Windows 既有托管文件使用普通副本；未知 reparse point 不作为可升级的数据源。
+pub(crate) fn copy_layout_link(
+    _target: &std::path::Path,
+    _link: &std::path::Path,
+) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "layout upgrade does not follow Windows reparse points",
+    ))
+}

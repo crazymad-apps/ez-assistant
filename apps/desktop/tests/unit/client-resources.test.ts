@@ -33,7 +33,7 @@ function runtime(origin = "http://host.test:7240") {
     instance_id: "host-a",
     started_runtime: false,
     capabilities: {
-      min_compatible_version: "0.25.2",
+      mode: "personal", min_compatible_version: "0.25.2",
       runtime_version: "0.25.2",
       max_command_bytes: 65536,
       max_attachment_bytes: null,
@@ -165,7 +165,7 @@ it("closes a pending browser chooser on disposal and resolves Host references wi
   expect(() => hostFilePath("file://another-host/file")).toThrow();
 });
 
-it("persists Web view descriptions without terminal, browser, local-file handles or file contents", async () => {
+it("persists only anonymous Web layout without user resource descriptions", async () => {
   localStorage.setItem("ez-assistant:view", JSON.stringify({
     default_approval_mode: "auto",
     last_model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
@@ -221,8 +221,7 @@ it("persists Web view descriptions without terminal, browser, local-file handles
     resource_workspace: snapshot,
   });
   const saved = await loadDesktopPreferences();
-  expect(saved.resource_workspace?.groups[0].tabs).toHaveLength(2);
-  expect(saved.resource_workspace?.groups[0].active_index).toBe(1);
+  expect(saved.resource_workspace).toBeNull();
   expect(viewingSnapshot(snapshot, true)?.groups[0].tabs).toHaveLength(4);
   const raw = localStorage.getItem("ez-assistant:view")!;
   expect(raw).not.toContain("client.txt");

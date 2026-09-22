@@ -187,11 +187,11 @@ impl AssistantRuntime {
             })?
             .values()
             .filter(|attachment| attachment.session_id == request.session_id)
-            .map(|attachment| {
-                (
-                    attachment.agent_readable_path.clone(),
-                    attachment.attachment_id.clone(),
-                )
+            .flat_map(|attachment| {
+                std::iter::once(attachment.agent_readable_path.clone())
+                    .chain(self.store.historical_attachment_path(attachment))
+                    .map(|path| (path, attachment.attachment_id.clone()))
+                    .collect::<Vec<_>>()
             })
             .collect::<BTreeMap<_, _>>();
         let mut used_attachment_ids = BTreeSet::new();
@@ -931,6 +931,7 @@ impl AssistantRuntime {
         &self,
         request: SetSessionModelRequest,
     ) -> RuntimeResult<SetSessionModelResult> {
+        self.ensure_model_editable()?;
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let snapshot = self.config_registry.snapshot()?;
@@ -1234,6 +1235,7 @@ impl AssistantRuntime {
             &config,
             &self.config_registry,
             RunCompilationResources {
+                attachments: self.attachments.clone(),
                 shell: None,
                 skill_catalog: self.current_skill_catalog(&session).await?,
                 model_factory: self.model_factory.as_ref(),

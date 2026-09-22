@@ -40,31 +40,40 @@ pub(crate) async fn serve(
             _ => Err(failure("终端连接认证超时或已断开。")),
         },
     };
-    let (permit, source, size, shell, client_compatibility) =
-        match open.and_then(|message| match message {
+    let (permit, source, size, shell, client_compatibility) = match async {
+        match open? {
             Control::Open {
                 client_compatibility,
                 bearer,
+                login_context,
                 source,
                 size,
                 shell,
-            } => terminals::authenticate(&auth, bearer.as_ref().map(|token| token.expose()))
-                .map(|permit| (permit, source, size, shell, client_compatibility))
-                .map_err(|_| failure("登录已失效，请重新登录。")),
+            } => terminals::authenticate(
+                &auth,
+                bearer.as_ref().map(|token| token.expose()),
+                login_context.as_deref(),
+            )
+            .await
+            .map(|permit| (permit, source, size, shell, client_compatibility))
+            .map_err(|_| failure("登录已失效，请重新登录。")),
             _ => Err(failure("终端连接必须先认证并选择启动目录。")),
-        }) {
-            Ok(open) => open,
-            Err(error) => {
-                let _ = notice(
-                    &mut socket,
-                    Notice::Error {
-                        message: error.message,
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-        };
+        }
+    }
+    .await
+    {
+        Ok(open) => open,
+        Err(error) => {
+            let _ = notice(
+                &mut socket,
+                Notice::Error {
+                    message: error.message,
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
     // 普通 Cookie 的历史声明不能替代当前页面首帧；认证和兼容通过前不解析目录、不创建 PTY。
     if let Err(error) =
         terminals::validate_compatibility(&auth.headers, client_compatibility.as_ref())
@@ -72,6 +81,19 @@ pub(crate) async fn serve(
         let _ = notice(&mut socket, Notice::CompatibilityError { error }).await;
         return Ok(());
     }
+    let services = match terminals::services(&auth, &permit).await {
+        Ok(services) => services,
+        Err(_) => {
+            let _ = notice(
+                &mut socket,
+                Notice::Error {
+                    message: "用户服务暂不可用。".into(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
     let (events, mut output) = mpsc::channel(2);
     let shell = shell.or(if cfg!(windows) {
         Some(assistant_protocol::ShellKind::WindowsPowershell51)
@@ -88,7 +110,7 @@ pub(crate) async fn serve(
         let (origin, directory) = tokio::select! { biased;
             () = owner.shutdown.cancelled() => return Err(failure("Host 正在关闭。")),
             () = permit.ended() => return Err(failure("登录已失效。")),
-            directory = timeout(Duration::from_secs(10), terminals::directory(&auth.state, &source)) =>
+            directory = timeout(Duration::from_secs(10), terminals::directory(&services, &permit, &source)) =>
                 directory.map_err(|_| failure("终端启动目录解析超时。"))??,
         };
         let directory_name = directory
@@ -96,7 +118,7 @@ pub(crate) async fn serve(
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".into());
         let (id, process, cancelled) = owner
-            .create(origin, directory, (size, shell), &permit, events)
+            .create(origin, directory, (size, shell), &permit, services.cancellation.clone(), events)
             .await?;
         Ok::<_, TerminalError>((id, directory_name, process, cancelled))
     }
@@ -135,6 +157,7 @@ pub(crate) async fn serve(
         loop {
             tokio::select! { biased;
                 () = cancelled.cancelled() => return Ok(()),
+                () = services.cancellation.cancelled() => return Ok(()),
                 () = permit.ended() => return Err(failure("登录或访问权限已失效。")),
                 // 截止时间独立于 10 秒 Ping tick，避免末次响应稍晚于 tick 时多保活一轮。
                 () = tokio::time::sleep_until(last_seen + IDLE_TIMEOUT) => return Err(failure("终端连接已超时。")),

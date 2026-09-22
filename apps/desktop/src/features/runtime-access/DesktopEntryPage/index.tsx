@@ -8,7 +8,7 @@ type DesktopEntryPageProps = {
 
 export function DesktopEntryPage({ connection }: DesktopEntryPageProps) {
   return (
-    <RuntimeEntryLayout description="选择一个 Runtime，继续你的工作。">
+    <RuntimeEntryLayout>
       <RuntimeConnectionForm connection={connection} />
     </RuntimeEntryLayout>
   );

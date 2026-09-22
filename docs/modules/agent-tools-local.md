@@ -116,3 +116,7 @@ cargo clippy -p agent-tools-local --all-targets --all-features -- -D warnings
 - `rg` 默认测试使用脚本化假程序，真实系统 `rg` 用例标记 ignored。
 - Shell 测试只运行无破坏的受控命令；等待使用有界 timeout/poll，不留下临时后台进程。
 - 平台行为使用 `#[cfg(unix)]` / `#[cfg(windows)]` 分开验证。
+
+## v0.27.0 C03 M3 搜索遍历排除
+
+`LocalFileSystem::search_excluding` 是具体本地 Adapter 的窄扩展：宿主传入搜索根内的排除路径，Adapter 转换为按根锚定且转义的 rg glob，在遍历前排除。普通 FileSystemTool SPI 不变，Adapter 不解释 Host 用户或业务目录；保护规则与授权仍归 Host 装配层。

@@ -78,6 +78,7 @@ impl PermissionFileStore for LocalRuntimeStore {
 
 /// Host 本地 RuntimeStore；所有阻塞 I/O 均由其拥有的命名线程执行。
 pub(crate) struct LocalRuntimeStore {
+    user_home: PathBuf,
     sender: mpsc::Sender<Command>,
     send_gate: AsyncMutex<()>,
     worker: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -103,6 +104,7 @@ impl LocalRuntimeStore {
         }
         let (sender, receiver) = mpsc::channel(capacity);
         let (ready_sender, ready_receiver) = oneshot::channel();
+        let user_home = runtime_home.to_owned();
         let runtime_home = PathBuf::from(runtime_home);
         let worker = thread::Builder::new()
             .name(WORKER_NAME.to_owned())
@@ -117,6 +119,7 @@ impl LocalRuntimeStore {
 
         match ready_receiver.await {
             Ok(Ok(())) => Ok(Self {
+                user_home,
                 sender,
                 send_gate: AsyncMutex::new(()),
                 worker: Arc::new(Mutex::new(Some(worker))),
@@ -193,6 +196,21 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn current_recorded_resource_path(
+        &self,
+        path: &str,
+        environment: &assistant_runtime::SessionExecutionEnvironment,
+    ) -> String {
+        super::super::resource_reference::current_recorded_resource_path(
+            &self.user_home,
+            path,
+            environment,
+        )
+    }
+    fn historical_attachment_path(&self, attachment: &StoredAttachment) -> Option<String> {
+        super::super::resource_reference::historical_attachment_path(&self.user_home, attachment)
+    }
+
     fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
         Box::pin(async move {
             self.request(|reply| Command::LoadDefaultAgentShell { reply })

@@ -58,13 +58,10 @@ pub(super) struct NativeResourcePath {
 
 pub(super) async fn list_session_resource_files(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<ListSessionResourceFilesRequest>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -96,6 +93,7 @@ pub(super) async fn list_session_resource_files(
         request.include_hidden,
         request.include_generated,
         Some(permit),
+        Some(services.paths.clone()),
     )
     .await
     {
@@ -106,13 +104,10 @@ pub(super) async fn list_session_resource_files(
 
 pub(super) async fn preview_session_resource_file(
     State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath(session_id): RoutePath<String>,
     Json(request): Json<PreviewSessionResourceFileRequest>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -135,6 +130,7 @@ pub(super) async fn preview_session_resource_file(
     };
     match host::read(move || {
         let _permit = permit;
+        let path = services.paths.resolve(&path, false).map_err(files::error)?;
         files::preview(&path)
     })
     .await
@@ -145,14 +141,10 @@ pub(super) async fn preview_session_resource_file(
 }
 
 pub(super) async fn resolve_session_resource_native_path(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath(session_id): RoutePath<String>,
     Json(locator): Json<SessionResourceLocator>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -167,6 +159,10 @@ pub(super) async fn resolve_session_resource_native_path(
     };
     let (_, path) = match resolve_session_resource_path(&root, &locator).await {
         Ok(value) => value,
+        Err(error) => return resource_error(error),
+    };
+    let path = match checked_path(services.paths.clone(), path).await {
+        Ok(path) => path,
         Err(error) => return resource_error(error),
     };
     let display_name = path
@@ -249,13 +245,20 @@ async fn read_directory_entries(
     include_hidden: bool,
     include_generated: bool,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    paths: Option<std::sync::Arc<crate::user_paths::UserPaths>>,
 ) -> Result<ListSessionResourceFilesResult, RuntimeErrorInfo> {
     let root = canonical_root.to_owned();
     let directory = directory.to_owned();
     let parent = parent.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        files::list(&directory, Some(&root), include_hidden, include_generated)
+        files::list_guarded(
+            &directory,
+            Some(&root),
+            include_hidden,
+            include_generated,
+            paths.as_deref(),
+        )
     })
     .await
     .map_err(|_| resource_unavailable())??;
@@ -318,14 +321,10 @@ fn resource_unavailable() -> RuntimeErrorInfo {
 }
 
 pub(super) async fn preview_attachment(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, attachment_id)): RoutePath<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -351,8 +350,17 @@ pub(super) async fn preview_attachment(
             "attachment is unavailable",
         ));
     }
+    let path = match checked_path(
+        services.paths.clone(),
+        attachment.agent_readable_path.into(),
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => return resource_error(error),
+    };
     preview_path(
-        Path::new(&attachment.agent_readable_path),
+        &path,
         &attachment.original_name,
         attachment.media_type.as_deref(),
         headers,
@@ -362,13 +370,9 @@ pub(super) async fn preview_attachment(
 
 /// 返回与原 Blob 相邻的固定 JPEG 缩略图；缺失时从原图按需恢复。
 pub(super) async fn thumbnail_attachment(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, attachment_id)): RoutePath<(String, String)>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -394,7 +398,15 @@ pub(super) async fn thumbnail_attachment(
             "attachment is unavailable",
         ));
     }
-    let source = std::path::PathBuf::from(attachment.agent_readable_path);
+    let source = match checked_path(
+        services.paths.clone(),
+        attachment.agent_readable_path.into(),
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => return resource_error(error),
+    };
     let generated = tokio::task::spawn_blocking(move || crate::image::ensure_thumbnail(&source));
     let path = match generated.await {
         Ok(Ok(path)) => path,
@@ -432,7 +444,7 @@ pub(super) async fn thumbnail_attachment(
 }
 
 pub(super) async fn preview_tool_file(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, message_id, resource_ref_id)): RoutePath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
@@ -441,11 +453,11 @@ pub(super) async fn preview_tool_file(
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
-    preview_tool_resource(state, owner, message_id, resource_ref_id, headers).await
+    preview_tool_resource(services, owner, message_id, resource_ref_id, headers).await
 }
 
 pub(super) async fn preview_child_tool_file(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, child_task_id, message_id, resource_ref_id)): RoutePath<(
         String,
         String,
@@ -459,20 +471,16 @@ pub(super) async fn preview_child_tool_file(
     else {
         return resource_error(invalid_request("tool resource identity is invalid"));
     };
-    preview_tool_resource(state, owner, message_id, resource_ref_id, headers).await
+    preview_tool_resource(services, owner, message_id, resource_ref_id, headers).await
 }
 
 async fn preview_tool_resource(
-    state: HttpState,
+    services: std::sync::Arc<super::ReadyServices>,
     owner: ConversationOwner,
     message_id: MessageId,
     resource_ref_id: ResourceRefId,
     headers: HeaderMap,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let resource = match services
         .runtime
         .resolve_tool_file_resource(&owner, &message_id, &resource_ref_id)
@@ -481,6 +489,9 @@ async fn preview_tool_resource(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
+    if let Err(error) = checked_path(services.paths.clone(), resource.path.clone().into()).await {
+        return resource_error(error);
+    }
     if resource.origin == ToolFileResourceOrigin::SessionToolImage {
         let Some(reference) = resource.tool_image else {
             return resource_error(invalid_request("tool image reference is invalid"));
@@ -529,13 +540,9 @@ async fn preview_tool_resource(
 }
 
 pub(super) async fn resolve_tool_file_native_path(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, message_id, resource_ref_id)): RoutePath<(String, String, String)>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let Some((owner, message_id, resource_ref_id)) =
         main_tool_resource_request(&session_id, &message_id, &resource_ref_id)
     else {
@@ -549,11 +556,11 @@ pub(super) async fn resolve_tool_file_native_path(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
-    resolve_tool_native_path(resource).await
+    resolve_tool_native_path(resource, services.paths.clone()).await
 }
 
 pub(super) async fn resolve_child_tool_file_native_path(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath((session_id, child_task_id, message_id, resource_ref_id)): RoutePath<(
         String,
         String,
@@ -561,10 +568,6 @@ pub(super) async fn resolve_child_tool_file_native_path(
         String,
     )>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let Some((owner, message_id, resource_ref_id)) =
         child_tool_resource_request(&session_id, &child_task_id, &message_id, &resource_ref_id)
     else {
@@ -578,11 +581,12 @@ pub(super) async fn resolve_child_tool_file_native_path(
         Ok(value) => value,
         Err(error) => return resource_error(error.to_protocol_info()),
     };
-    resolve_tool_native_path(resource).await
+    resolve_tool_native_path(resource, services.paths.clone()).await
 }
 
 async fn resolve_tool_native_path(
     resource: assistant_runtime::ResolvedToolFileResource,
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
 ) -> Response {
     if resource.origin == ToolFileResourceOrigin::SessionToolImage {
         return resource_error(RuntimeErrorInfo::new(
@@ -590,7 +594,11 @@ async fn resolve_tool_native_path(
             "session tool images do not expose native paths",
         ));
     }
-    let resolved_path = match resolve_regular_file(Path::new(&resource.path)).await {
+    let allowed = match checked_path(paths, resource.path.clone().into()).await {
+        Ok(path) => path,
+        Err(error) => return resource_error(error),
+    };
+    let resolved_path = match resolve_regular_file(&allowed).await {
         Ok(value) => value,
         Err(error) => return resource_error(error),
     };
@@ -763,13 +771,9 @@ async fn resolve_regular_file(path: &Path) -> Result<std::path::PathBuf, Runtime
 }
 
 pub(super) async fn export_session_markdown(
-    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<super::ReadyServices>>,
     RoutePath(session_id): RoutePath<String>,
 ) -> Response {
-    let services = match state.startup.services() {
-        Ok(services) => services,
-        Err(error) => return resource_error(error.to_protocol_info()),
-    };
     let session_id = match SessionId::new(session_id) {
         Ok(value) => value,
         Err(_) => return resource_error(invalid_request("session id is invalid")),
@@ -855,6 +859,13 @@ fn resource_error(error: RuntimeErrorInfo) -> Response {
 
 fn invalid_request(message: &'static str) -> RuntimeErrorInfo {
     RuntimeErrorInfo::new(RuntimeErrorCode::InvalidRequest, message)
+}
+
+async fn checked_path(
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
+    path: PathBuf,
+) -> Result<PathBuf, RuntimeErrorInfo> {
+    host::read(move || paths.resolve(&path, false).map_err(files::error)).await
 }
 
 #[cfg(test)]
@@ -948,6 +959,7 @@ mod tests {
             &locator,
             false,
             false,
+            None,
             None,
         )
         .await
@@ -1048,10 +1060,17 @@ mod tests {
             root: SessionResourceRoot::WorkspacePrimary,
             relative_path: String::new(),
         };
-        let result =
-            read_directory_entries(&canonical_root, &canonical_root, &locator, true, true, None)
-                .await
-                .expect("directory listing");
+        let result = read_directory_entries(
+            &canonical_root,
+            &canonical_root,
+            &locator,
+            true,
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("directory listing");
 
         assert_eq!(result.entries.len(), MAX_DIRECTORY_ENTRIES);
         assert!(result.truncated);

@@ -50,7 +50,8 @@ fn chat_without_a_key_fails_fast_without_leaking_provider_values() {
     let output = Command::new(env!("CARGO_BIN_EXE_runtime-harness"))
         .arg("chat")
         .current_dir(std::env::temp_dir())
-        .env_remove("DEEPSEEK_API_KEY")
+        // An empty override prevents dotenv from restoring a repository key when TMPDIR is local.
+        .env("DEEPSEEK_API_KEY", "")
         .env("DEEPSEEK_BASE_URL", "http://provider-secret.invalid")
         .env("DEEPSEEK_MODEL", "model-secret")
         .output()

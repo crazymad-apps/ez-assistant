@@ -1,5 +1,5 @@
-import { observer } from "mobx-react-lite";
-import { useEffect, useRef, useState } from "react";
+import { observer } from 'mobx-react-lite';
+import { useEffect, useRef, useState } from 'react';
 import type {
   ApprovalDecision,
   GoalStateSnapshot,
@@ -9,40 +9,38 @@ import type {
   SessionViewSnapshot,
   SkillSummarySnapshot,
   SubmitInputMode,
-} from "@ez-assistant/protocol";
-import { Button } from "../../../components/Button";
-import { Icon } from "../../../components/Icon";
-import { PresenceBoundary } from "../../../components/Presence";
-import { useInputMethodGuard } from "../../../components/InputMethodGuard";
-import { Tooltip } from "../../../components/Tooltip";
-import type { NewSessionDraftKey } from "../../../stores/NewSessionDraftStore";
-import { useRootStore } from "../../../stores/RootStoreContext";
-import { effectiveContextUsage } from "../../../stores/contextUsage";
-import { ApprovalWorkspace, isAllowDecision } from "./ApprovalWorkspace";
-import { ComposerNotice } from "./ComposerNotice";
-import { AttachmentDetailDialog } from "./AttachmentDetailDialog";
-import { QuoteDetailDialog } from "../../conversation/QuoteDetailDialog";
-import {
-  formatCompact,
-  SLASH_COMMANDS,
-  type SlashCommandItem,
-} from "./composerOptions";
-import { ExecutionSettingsPopover } from "./ExecutionSettingsPopover";
-import { GoalStatusRow } from "./GoalStatusRow";
-import { ModelSettingsPopover } from "./ModelSettingsPopover";
-import { useDraftModelEfforts } from "./useDraftModelEfforts";
-import { OutputHostingMenu } from "./OutputHostingMenu";
-import { QueueDrawer } from "./QueueDrawer";
-import { queuePresentation } from "./queuePresentation";
-import { parseSessionCommand } from "./sessionCommand";
-import { SlashCommandHelp, SlashCommandMenu } from "./SlashCommandMenu";
-import { SkillPicker } from "./SkillPicker";
-import { McpServerPicker } from "./McpServerPicker";
-import { TodoSummary } from "./TodoSummary";
-import { type ComposerAttachment, useComposerAttachments } from "./useComposerAttachments";
-import styles from "./index.module.scss";
+} from '@ez-assistant/protocol';
+import { Button } from '../../../components/Button';
+import { Icon } from '../../../components/Icon';
+import { PresenceBoundary } from '../../../components/Presence';
+import { useInputMethodGuard } from '../../../components/InputMethodGuard';
+import { Tooltip } from '../../../components/Tooltip';
+import type { NewSessionDraftKey } from '../../../stores/NewSessionDraftStore';
+import { useRootStore } from '../../../stores/RootStoreContext';
+import { effectiveContextUsage } from '../../../stores/contextUsage';
+import { ApprovalWorkspace, isAllowDecision } from './ApprovalWorkspace';
+import { ComposerNotice } from './ComposerNotice';
+import { AttachmentDetailDialog } from './AttachmentDetailDialog';
+import { QuoteDetailDialog } from '../../conversation/QuoteDetailDialog';
+import { formatCompact, SLASH_COMMANDS, type SlashCommandItem } from './composerOptions';
+import { ExecutionSettingsPopover } from './ExecutionSettingsPopover';
+import { GoalStatusRow } from './GoalStatusRow';
+import { ModelSettingsPopover } from './ModelSettingsPopover';
+import { useDraftModelEfforts } from './useDraftModelEfforts';
+import { OutputHostingMenu } from './OutputHostingMenu';
+import { QueueDrawer } from './QueueDrawer';
+import { queuePresentation } from './queuePresentation';
+import { parseSessionCommand } from './sessionCommand';
+import { SlashCommandHelp, SlashCommandMenu } from './SlashCommandMenu';
+import { SkillPicker } from './SkillPicker';
+import { McpServerPicker } from './McpServerPicker';
+import { TodoSummary } from './TodoSummary';
+import { type ComposerAttachment, useComposerAttachments } from './useComposerAttachments';
+import styles from './index.module.scss';
 
-export const ComposerDock = observer(function ComposerDock({ read_only = false }: Readonly<{
+export const ComposerDock = observer(function ComposerDock({
+  read_only = false,
+}: Readonly<{
   read_only?: boolean;
 }>) {
   const store = useRootStore();
@@ -53,7 +51,9 @@ export const ComposerDock = observer(function ComposerDock({ read_only = false }
   return <SessionComposerDock read_only={read_only} />;
 });
 
-const SessionComposerDock = observer(function SessionComposerDock({ read_only = false }: Readonly<{
+const SessionComposerDock = observer(function SessionComposerDock({
+  read_only = false,
+}: Readonly<{
   read_only?: boolean;
 }>) {
   const store = useRootStore();
@@ -61,16 +61,18 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   const session_id = store.navigation.selected_session_id;
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const session = session_view?.session;
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState('');
   const [goal_armed, setGoalArmed] = useState(false);
   const [selected_skill, setSelectedSkill] = useState<SkillSummarySnapshot | null>(null);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
   const [selected_mcp, setSelectedMcp] = useState<McpSelectionTagSnapshot | null>(null);
   const [mcp_picker_open, setMcpPickerOpen] = useState(false);
-  const [active_overlay, setActiveOverlay] = useState<"todo" | "execution" | "model" | null>(null);
-  const [initial_settings_category, setInitialSettingsCategory] = useState<"variant" | "approval" | "model" | "effort" | null>(null);
+  const [active_overlay, setActiveOverlay] = useState<'todo' | 'execution' | 'model' | null>(null);
+  const [initial_settings_category, setInitialSettingsCategory] = useState<
+    'variant' | 'approval' | 'model' | 'effort' | null
+  >(null);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
-  const [expanded_drawer, setExpandedDrawer] = useState<"goal" | "queue" | null>("queue");
+  const [expanded_drawer, setExpandedDrawer] = useState<'goal' | 'queue' | null>('queue');
   const [approval_minimized, setApprovalMinimized] = useState(false);
   const [approval_decision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
   const [show_help, setShowHelp] = useState(false);
@@ -91,11 +93,21 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   });
   const quotes = store.composer_quotes.get(session_id);
 
-
-  const slash_query = draft.startsWith("/") && !draft.includes("\n") ? draft.toLocaleLowerCase() : null;
-  const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
-    .filter((item) => item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)))
-    .map((item) => ({ ...item, disabled_reason: slashDisabledReason(item.name, session_view, application?.capabilities.session_commands ?? false) }));
+  const slash_query = draft.startsWith('/') && !draft.includes('\n') ? draft.toLocaleLowerCase() : null;
+  const slash_items: readonly SlashCommandItem[] =
+    slash_query === null
+      ? []
+      : SLASH_COMMANDS.filter(
+          (item) =>
+            item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)),
+        ).map((item) => ({
+          ...item,
+          disabled_reason: slashDisabledReason(
+            item.name,
+            session_view,
+            application?.capabilities.session_commands ?? false,
+          ),
+        }));
 
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
@@ -107,7 +119,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     setGoalArmed(false);
     setSelectedSkill(null);
     setSkillPickerOpen(false);
-    setExpandedDrawer("queue");
+    setExpandedDrawer('queue');
     setActiveOverlay(null);
     setShowHelp(false);
   }, [session_id]);
@@ -119,10 +131,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
 
   useEffect(() => {
     const count = session_view?.approvals.items.length ?? 0;
-    if (
-      count > 0
-      && (previous_approval_count.current === 0 || previous_approval_session_id.current !== session_id)
-    ) {
+    if (count > 0 && (previous_approval_count.current === 0 || previous_approval_session_id.current !== session_id)) {
       setApprovalMinimized(false);
     }
     previous_approval_count.current = count;
@@ -156,16 +165,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     return null;
   }
 
-  const is_archived = session.lifecycle === "archived";
+  const is_archived = session.lifecycle === 'archived';
   const is_idle_for_model = !session.active_run_id && session_view.queue.items.length === 0;
   const selected_model = session_view.composer_capabilities.selected_model ?? null;
   const model_error = session_view.composer_capabilities.model_error;
   const model_required = selected_model === null || Boolean(model_error);
-  const is_control_command = parseSessionCommand(draft).type !== "not_command";
+  const is_control_command = parseSessionCommand(draft).type !== 'not_command';
   const queue_presentation = queuePresentation(session_view.queue, session.active_run_id);
-  const manual_compaction = session.active_compaction?.trigger.type === "manual"
-    ? session.active_compaction
-    : null;
+  const manual_compaction = session.active_compaction?.trigger.type === 'manual' ? session.active_compaction : null;
   const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
   const live_run = store.live_execution.runForSession(session.session_id);
   const context_usage = effectiveContextUsage(
@@ -176,57 +183,59 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   );
 
   async function submitCompaction() {
-    if (draft.trim() !== "/compact") {
+    if (draft.trim() !== '/compact') {
       return;
     }
-    setDraft("");
+    setDraft('');
     if (attachment_flow.attachments.length > 0 || quotes.length > 0 || goal_armed || selected_skill || selected_mcp) {
-      store.showInteractionError("/compact 必须单独使用，请先移除附件、引用和标签。");
+      store.showInteractionError('/compact 必须单独使用，请先移除附件、引用和标签。');
       return;
     }
     if (
-      session!.active_run_id
-      || session!.queued_input_count > 0
-      || session!.pending_approval_count > 0
-      || session!.active_child_count > 0
-      || session!.active_compaction
-      || compaction_command_pending
-      || store.pending_session_action
+      session!.active_run_id ||
+      session!.queued_input_count > 0 ||
+      session!.pending_approval_count > 0 ||
+      session!.active_child_count > 0 ||
+      session!.active_compaction ||
+      compaction_command_pending ||
+      store.pending_session_action
     ) {
-      store.showInteractionError("当前会话正忙，暂时不能压缩上下文。");
+      store.showInteractionError('当前会话正忙，暂时不能压缩上下文。');
       return;
     }
-    await store.compactSession(
-      session!.session_id,
-      session_view!.conversation_generation,
-    );
+    await store.compactSession(session!.session_id, session_view!.conversation_generation);
   }
 
   async function submitDraft(value = draft) {
     const owner = input_owner.current;
     const control = parseSessionCommand(value);
-    if (control.type === "invalid") {
+    if (control.type === 'invalid') {
       store.showInteractionError(control.message);
       return;
     }
-    if (control.type === "command") {
+    if (control.type === 'command') {
       if (attachment_flow.attachments.length > 0 || quotes.length > 0 || selected_skill || goal_armed || selected_mcp) {
-        store.showInteractionError("刷新指令不能同时携带附件、引用或标签，请先移除这些内容");
+        store.showInteractionError('刷新指令不能同时携带附件、引用或标签，请先移除这些内容');
         return;
       }
-      if (await store.submitSessionCommand(session!.session_id, control.command)) setDraft("");
+      if (await store.submitSessionCommand(session!.session_id, control.command)) setDraft('');
       return;
     }
-    if (value.trim() === "/compact") {
+    if (value.trim() === '/compact') {
       await submitCompaction();
       return;
     }
-    if (value.trim() === "/title") {
-      setDraft("");
+    if (value.trim() === '/title') {
+      setDraft('');
       await store.generateSessionTitle(session!.session_id);
       return;
     }
-    if ((!value.trim() && attachment_flow.attachments.length === 0 && quotes.length === 0) || model_required || store.composer_pending || attachment_flow.pending) {
+    if (
+      (!value.trim() && attachment_flow.attachments.length === 0 && quotes.length === 0) ||
+      model_required ||
+      store.composer_pending ||
+      attachment_flow.pending
+    ) {
       return;
     }
     if (slash_query) {
@@ -242,11 +251,17 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     }
     const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
     const submitted = await store.submitInput(
-      session!.session_id, value, session!.current_variant, attachment_ids, mode,
-      selected_skill?.name ?? null, quotes, selected_mcp?.server_key ?? null,
+      session!.session_id,
+      value,
+      session!.current_variant,
+      attachment_ids,
+      mode,
+      selected_skill?.name ?? null,
+      quotes,
+      selected_mcp?.server_key ?? null,
     );
     if (submitted && owner === input_owner.current) {
-      setDraft("");
+      setDraft('');
       setGoalArmed(false);
       setSelectedSkill(null);
       setSelectedMcp(null);
@@ -256,7 +271,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   }
 
   function handleSlashCommand(command: SlashCommandItem) {
-    if (command.name === "/mcp refresh" || command.name === "/skill refresh") {
+    if (command.name === '/mcp refresh' || command.name === '/skill refresh') {
       if (command.disabled_reason) {
         store.showInteractionError(command.disabled_reason);
       } else {
@@ -266,63 +281,63 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       }
       return;
     }
-    if (command.name === "/compact") {
-      if (draft.trim() === "/compact") {
+    if (command.name === '/compact') {
+      if (draft.trim() === '/compact') {
         void submitCompaction();
       } else {
-        setDraft("/compact");
+        setDraft('/compact');
         requestAnimationFrame(() => textarea_ref.current?.focus());
       }
       return;
     }
-    if (command.name === "/title") {
+    if (command.name === '/title') {
       if (command.disabled_reason) {
-        setDraft("");
+        setDraft('');
         store.showInteractionError(command.disabled_reason);
-      } else if (draft.trim() === "/title") {
-        setDraft("");
+      } else if (draft.trim() === '/title') {
+        setDraft('');
         void store.generateSessionTitle(session!.session_id);
       } else {
-        setDraft("/title");
+        setDraft('/title');
         requestAnimationFrame(() => textarea_ref.current?.focus());
       }
       return;
     }
     if (command.disabled_reason) {
-      setDraft("");
+      setDraft('');
       store.showInteractionError(command.disabled_reason);
       requestAnimationFrame(() => textarea_ref.current?.focus());
       return;
     }
-    if (command.name === "/goal") {
-      setDraft("");
+    if (command.name === '/goal') {
+      setDraft('');
       setGoalArmed(true);
       requestAnimationFrame(() => textarea_ref.current?.focus());
       return;
     }
-    if (command.name === "/skill") {
-      setDraft("");
+    if (command.name === '/skill') {
+      setDraft('');
       setSkillPickerOpen(true);
       return;
     }
-    if (command.name === "/mcp") {
-      setDraft("");
+    if (command.name === '/mcp') {
+      setDraft('');
       setSkillPickerOpen(false);
       setMcpPickerOpen(true);
       return;
     }
     if (command.picker) {
-      setDraft("");
+      setDraft('');
       setInitialSettingsCategory(command.picker);
-      setActiveOverlay(command.picker === "model" ? "model" : "execution");
+      setActiveOverlay(command.picker === 'model' ? 'model' : 'execution');
       return;
     }
-    if (command.name === "/new") {
-      setDraft("");
+    if (command.name === '/new') {
+      setDraft('');
       store.openNewSessionDraft(session!.workspace_id);
       return;
     }
-    setDraft("");
+    setDraft('');
     setShowHelp(true);
   }
 
@@ -330,20 +345,22 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     if (input_method.shouldIgnoreKeyDown(event)) {
       return;
     }
-    if (slash_items.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    if (slash_items.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault();
-      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
       const next = nextEnabledSlashIndex(slash_items, slash_active_index, direction);
       setSlashActiveIndex(next);
-      slash_ref.current?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
+      slash_ref.current
+        ?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
       return;
     }
-    if (event.key === "Escape" && slash_query !== null) {
+    if (event.key === 'Escape' && slash_query !== null) {
       event.preventDefault();
       setDraft(draft.slice(1));
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
       if (selected_command) {
@@ -354,7 +371,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
         (item) => item.name === event.currentTarget.value.trim().toLocaleLowerCase(),
       );
       const exact = exact_command
-        ? { ...exact_command, disabled_reason: slashDisabledReason(exact_command.name, session_view, application?.capabilities.session_commands ?? false) }
+        ? {
+            ...exact_command,
+            disabled_reason: slashDisabledReason(
+              exact_command.name,
+              session_view,
+              application?.capabilities.session_commands ?? false,
+            ),
+          }
         : undefined;
       if (exact) {
         handleSlashCommand(exact);
@@ -366,7 +390,7 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
 
   function handleDraftChange(value: string) {
     setDraft(value);
-    if (value.startsWith("/") && !value.includes("\n")) {
+    if (value.startsWith('/') && !value.includes('\n')) {
       setActiveOverlay(null);
       setShowHelp(false);
     }
@@ -375,24 +399,29 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   const goal = session_view.goal;
   const compaction_cancels_from_primary = Boolean(manual_compaction?.cancellable);
   const has_composer_content = Boolean(draft.trim() || attachment_flow.attachments.length || quotes.length);
-  const goal_stops_from_primary = !compaction_cancels_from_primary && !has_composer_content && goal?.state === "running";
-  const run_interrupts_from_primary = !has_composer_content && !goal_stops_from_primary && Boolean(session.active_run_id);
-  const primary_action_available = compaction_cancels_from_primary || has_composer_content || goal_stops_from_primary || run_interrupts_from_primary;
-  const primary_action = resolvePrimaryAction(compaction_cancels_from_primary, goal_stops_from_primary, run_interrupts_from_primary);
+  const goal_stops_from_primary =
+    !compaction_cancels_from_primary && !has_composer_content && goal?.state === 'running';
+  const run_interrupts_from_primary =
+    !has_composer_content && !goal_stops_from_primary && Boolean(session.active_run_id);
+  const primary_action_available =
+    compaction_cancels_from_primary || has_composer_content || goal_stops_from_primary || run_interrupts_from_primary;
+  const primary_action = resolvePrimaryAction(
+    compaction_cancels_from_primary,
+    goal_stops_from_primary,
+    run_interrupts_from_primary,
+  );
   const primary_label = primaryActionLabel(primary_action);
-  const execution_initial_category = active_overlay === "execution"
-    && (initial_settings_category === "variant" || initial_settings_category === "approval")
-    ? initial_settings_category
-    : null;
-  const model_initial_category = active_overlay === "model"
-    && (initial_settings_category === "model" || initial_settings_category === "effort")
-    ? initial_settings_category
-    : null;
+  const execution_initial_category =
+    active_overlay === 'execution' &&
+    (initial_settings_category === 'variant' || initial_settings_category === 'approval')
+      ? initial_settings_category
+      : null;
+  const model_initial_category =
+    active_overlay === 'model' && (initial_settings_category === 'model' || initial_settings_category === 'effort')
+      ? initial_settings_category
+      : null;
 
-  function updateActiveOverlay(
-    overlay: Exclude<typeof active_overlay, null>,
-    open: boolean,
-  ) {
+  function updateActiveOverlay(overlay: Exclude<typeof active_overlay, null>, open: boolean) {
     setActiveOverlay((current) => {
       if (open) return overlay;
       return current === overlay ? null : current;
@@ -403,34 +432,44 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
     <div className={styles.dock}>
       {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
         <TodoSummary
-          on_open_change={(open) => updateActiveOverlay("todo", open)}
-          open={active_overlay === "todo"}
+          on_open_change={(open) => updateActiveOverlay('todo', open)}
+          open={active_overlay === 'todo'}
           running={Boolean(session.active_run_id)}
           work_plan={session_view.work_plan}
         />
       )}
       {model_error && (
-        <ComposerNotice tone="error" action={{ label: "配置模型", onClick: () => store.settings.open("models") }}>
-          {model_error.message}
+        <ComposerNotice
+          tone="error"
+          action={{
+            label: application?.model_settings.management?.read_only ? '查看模型' : '配置模型',
+            onClick: () => store.settings.open('models'),
+          }}
+        >
+          {model_error.code === 'configuration_unavailable'
+            ? '模型配置尚未就绪，请查看模型设置。'
+            : model_error.message}
         </ComposerNotice>
       )}
       {store.interaction_error && (
-        <ComposerNotice tone="error" dismiss={{ label: "关闭错误提示", onClick: () => store.clearInteractionError() }}>
+        <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
           {store.interaction_error}
         </ComposerNotice>
       )}
       {store.session_notice?.session_id === session.session_id && (
         <ComposerNotice
           tone={store.session_notice.tone}
-          action={store.session_notice.action === "retry_title"
-            ? { label: "重试", onClick: () => void store.generateSessionTitle(session.session_id) }
-            : undefined}
-          dismiss={{ label: "关闭状态提示", onClick: () => store.clearSessionNotice(session.session_id) }}
+          action={
+            store.session_notice.action === 'retry_title'
+              ? { label: '重试', onClick: () => void store.generateSessionTitle(session.session_id) }
+              : undefined
+          }
+          dismiss={{ label: '关闭状态提示', onClick: () => store.clearSessionNotice(session.session_id) }}
         >
           {store.session_notice.message}
         </ComposerNotice>
       )}
-      {!read_only && session_view.title_generation?.trigger === "manual" && (
+      {!read_only && session_view.title_generation?.trigger === 'manual' && (
         <div className={styles.compaction_status} role="status">
           <span className={styles.loading_ring} />
           <strong>正在生成标题</strong>
@@ -440,10 +479,10 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
         <GoalStatusRow
           goal={goal}
           on_clear={() => store.clearGoal(session.session_id, goal.goal_id, goal.generation)}
-          on_open_change={(open) => setExpandedDrawer(open ? "goal" : null)}
+          on_open_change={(open) => setExpandedDrawer(open ? 'goal' : null)}
           on_resume={() => store.resumeGoal(session.session_id, goal.goal_id, goal.generation)}
           on_stop={() => store.stopGoal(session.session_id, goal.goal_id, goal.generation)}
-          open={expanded_drawer === "goal"}
+          open={expanded_drawer === 'goal'}
           pending={store.composer_pending || is_archived}
         />
       )}
@@ -458,8 +497,8 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       {!read_only && queue_presentation.visible && (
         <QueueDrawer
           goal={goal}
-          open={expanded_drawer === "queue"}
-          on_open_change={(open) => setExpandedDrawer(open ? "queue" : null)}
+          open={expanded_drawer === 'queue'}
+          on_open_change={(open) => setExpandedDrawer(open ? 'queue' : null)}
           queue={session_view.queue}
           presentation={queue_presentation}
           session_id={session.session_id}
@@ -474,9 +513,12 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       {approval && !approval_minimized ? (
         <ApprovalWorkspace
           approval={approval}
-          child_title={approval.child_task_id
-            ? session_view.child_tasks.find((item) => item.task.child_task_id === approval.child_task_id)?.task.title ?? null
-            : null}
+          child_title={
+            approval.child_task_id
+              ? (session_view.child_tasks.find((item) => item.task.child_task_id === approval.child_task_id)?.task
+                  .title ?? null)
+              : null
+          }
           decision={approval_decision}
           on_decision_change={setApprovalDecision}
           on_minimize={() => setApprovalMinimized(true)}
@@ -486,16 +528,29 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
       ) : read_only ? null : is_archived ? (
         <div className={styles.archived_notice}>
           <span>此会话已归档，只能查看历史内容。</span>
-          <button disabled={store.composer_pending} onClick={() => void store.restoreSession(session.session_id)} type="button">恢复会话</button>
+          <button
+            disabled={store.composer_pending}
+            onClick={() => void store.restoreSession(session.session_id)}
+            type="button"
+          >
+            恢复会话
+          </button>
         </div>
       ) : (
         <section className={styles.composer}>
           {session.proxy && (
             <div className={styles.proxy_takeover_hint}>当前由主控代理；发送消息后将由你接管并退出代理。</div>
           )}
-          <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
+          <SlashCommandMenu
+            active_index={slash_active_index}
+            items={slash_items}
+            menu_ref={slash_ref}
+            on_select={handleSlashCommand}
+            open={slash_items.length > 0}
+          />
           <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
-            {skill_picker_open && <SkillPicker
+          {skill_picker_open && (
+            <SkillPicker
               key={session.session_id}
               workspace_id={session.workspace_id}
               on_close={() => {
@@ -507,13 +562,26 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
                 setSkillPickerOpen(false);
                 requestAnimationFrame(() => textarea_ref.current?.focus());
               }}
-            />}
-          {mcp_picker_open && <McpServerPicker
-            key={`${session.session_id}:${session.current_variant}`}
-            on_close={() => { setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
-            on_select={(server) => { setSelectedMcp(server); setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
-            request={{ context: { type: "session", payload: { session_id: session.session_id } }, variant: session.current_variant }}
-          />}
+            />
+          )}
+          {mcp_picker_open && (
+            <McpServerPicker
+              key={`${session.session_id}:${session.current_variant}`}
+              on_close={() => {
+                setMcpPickerOpen(false);
+                requestAnimationFrame(() => textarea_ref.current?.focus());
+              }}
+              on_select={(server) => {
+                setSelectedMcp(server);
+                setMcpPickerOpen(false);
+                requestAnimationFrame(() => textarea_ref.current?.focus());
+              }}
+              request={{
+                context: { type: 'session', payload: { session_id: session.session_id } },
+                variant: session.current_variant,
+              }}
+            />
+          )}
           <ComposerAttachmentContext
             attachments={attachment_flow.attachments}
             on_quote_locate={(quote) => store.locateTextQuoteSource(session.session_id, quote)}
@@ -526,36 +594,64 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
           />
           {(goal_armed || selected_skill || selected_mcp) && (
             <div className={styles.draft_tags}>
-              {goal_armed && <span>
-                目标
-                <button aria-label="取消目标标记" onClick={() => setGoalArmed(false)} type="button"><Icon name="x" size={12} /></button>
-              </span>}
-              {selected_skill && <span title={selected_skill.name}>
-                {selected_skill.name}
-                <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => setSelectedSkill(null)} type="button"><Icon name="x" size={12} /></button>
-              </span>}
-              {selected_mcp && <span title={selected_mcp.server_key}>
-                MCP · {selected_mcp.display_name}
-                <button aria-label={`移除 MCP ${selected_mcp.display_name}`} onClick={() => setSelectedMcp(null)} type="button"><Icon name="x" size={12} /></button>
-              </span>}
+              {goal_armed && (
+                <span>
+                  目标
+                  <button aria-label="取消目标标记" onClick={() => setGoalArmed(false)} type="button">
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              )}
+              {selected_skill && (
+                <span title={selected_skill.name}>
+                  {selected_skill.name}
+                  <button
+                    aria-label={`移除技能 ${selected_skill.name}`}
+                    onClick={() => setSelectedSkill(null)}
+                    type="button"
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              )}
+              {selected_mcp && (
+                <span title={selected_mcp.server_key}>
+                  MCP · {selected_mcp.display_name}
+                  <button
+                    aria-label={`移除 MCP ${selected_mcp.display_name}`}
+                    onClick={() => setSelectedMcp(null)}
+                    type="button"
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              )}
             </div>
           )}
           <textarea
             aria-label="输入消息"
-            disabled={store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
+            disabled={
+              store.connection.state !== 'connected' ||
+              store.composer_pending ||
+              attachment_flow.pending ||
+              Boolean(manual_compaction) ||
+              compaction_command_pending
+            }
             onChange={(event) => handleDraftChange(event.target.value)}
             onCompositionEnd={input_method.onCompositionEnd}
             onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleTextareaKeyDown}
             onKeyUp={input_method.onKeyUp}
             onPaste={(event) => handleComposerPaste(event, draft, setDraft, attachment_flow.pasteImages)}
-            placeholder={model_required
-              ? "选择模型后开始对话，或输入 / 使用控制指令"
-              : manual_compaction || compaction_command_pending
-                ? "正在压缩上下文…"
-              : goal?.state === "paused"
-                ? "输入新指导并恢复目标…"
-                : "输入消息…  / 使用指令"}
+            placeholder={
+              model_required
+                ? '选择模型后开始对话，或输入 / 使用控制指令'
+                : manual_compaction || compaction_command_pending
+                  ? '正在压缩上下文…'
+                  : goal?.state === 'paused'
+                    ? '输入新指导并恢复目标…'
+                    : '输入消息…  / 使用指令'
+            }
             ref={textarea_ref}
             rows={2}
             value={draft}
@@ -564,7 +660,12 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
             <Tooltip content="添加附件">
               <Button
                 aria-label="添加附件"
-                disabled={store.composer_pending || attachment_flow.pending || Boolean(manual_compaction) || compaction_command_pending}
+                disabled={
+                  store.composer_pending ||
+                  attachment_flow.pending ||
+                  Boolean(manual_compaction) ||
+                  compaction_command_pending
+                }
                 iconOnly
                 onClick={() => void attachment_flow.choose()}
                 variant="outlined"
@@ -580,14 +681,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
               on_open_change={(open) => {
                 setShowHelp(false);
                 if (open) setInitialSettingsCategory(null);
-                updateActiveOverlay("execution", open);
+                updateActiveOverlay('execution', open);
               }}
               on_variant_change={(variant) => store.setSessionVariant(session.session_id, variant)}
-              open={active_overlay === "execution"}
+              open={active_overlay === 'execution'}
               trigger_class_name={styles.execution_selector}
               variant={session.current_variant}
             />
-            {session.role === "controller" && <OutputHostingMenu session={session} />}
+            {session.role === 'controller' && <OutputHostingMenu session={session} />}
             <span className={styles.action_spacer} />
             <ContextUsageRing context={context_usage} />
             <ModelSettingsPopover
@@ -595,31 +696,31 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
-              model_display_name={selected_model
-                ? modelDisplayName(application, selected_model)
-                : "选择模型"}
+              model_display_name={selected_model ? modelDisplayName(application, selected_model) : '选择模型'}
               selection={session.model_selection}
               providers={application?.providers ?? []}
-              model_switch_disabled_reason={is_idle_for_model ? undefined : "存在活动运行或排队输入时不能切换模型"}
+              model_switch_disabled_reason={is_idle_for_model ? undefined : '存在活动运行或排队输入时不能切换模型'}
               on_effort_change={(effort) => store.setSessionReasoningEffort(session.session_id, effort)}
               on_model_change={(selection) => store.setSessionModel(session.session_id, selection)}
               on_open_change={(open) => {
                 setShowHelp(false);
                 if (open) setInitialSettingsCategory(null);
-                updateActiveOverlay("model", open);
+                updateActiveOverlay('model', open);
               }}
-              open={active_overlay === "model"}
+              open={active_overlay === 'model'}
               trigger_class_name={styles.model_selector}
             />
             <button
-              aria-label={has_composer_content && !compaction_cancels_from_primary ? "发送消息" : primary_label}
+              aria-label={has_composer_content && !compaction_cancels_from_primary ? '发送消息' : primary_label}
               className={styles.send_button}
               data-action={primary_action}
-              disabled={(store.composer_pending && !compaction_cancels_from_primary)
-                || attachment_flow.pending
-                || !primary_action_available
-                || store.pending_compaction_cancel_session_id === session.session_id
-                || (has_composer_content && model_required && !is_control_command && !compaction_cancels_from_primary)}
+              disabled={
+                (store.composer_pending && !compaction_cancels_from_primary) ||
+                attachment_flow.pending ||
+                !primary_action_available ||
+                store.pending_compaction_cancel_session_id === session.session_id ||
+                (has_composer_content && model_required && !is_control_command && !compaction_cancels_from_primary)
+              }
               onClick={() => {
                 if (compaction_cancels_from_primary && manual_compaction) {
                   void store.cancelSessionCompaction(session.session_id, manual_compaction.compaction_id);
@@ -633,7 +734,14 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
               }}
               type="button"
             >
-              <Icon name={compaction_cancels_from_primary || goal_stops_from_primary || run_interrupts_from_primary ? "stop" : "arrow-down"} size={16} />
+              <Icon
+                name={
+                  compaction_cancels_from_primary || goal_stops_from_primary || run_interrupts_from_primary
+                    ? 'stop'
+                    : 'arrow-down'
+                }
+                size={16}
+              />
             </button>
           </footer>
         </section>
@@ -642,7 +750,9 @@ const SessionComposerDock = observer(function SessionComposerDock({ read_only = 
   );
 });
 
-const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draft_key }: Readonly<{
+const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
+  draft_key,
+}: Readonly<{
   draft_key: NewSessionDraftKey;
 }>) {
   const store = useRootStore();
@@ -650,7 +760,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   const draft = store.new_session_drafts.get(draft_key);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
   const [mcp_picker_open, setMcpPickerOpen] = useState(false);
-  const [active_overlay, setActiveOverlay] = useState<"execution" | "model" | null>(null);
+  const [active_overlay, setActiveOverlay] = useState<'execution' | 'model' | null>(null);
   const [show_help, setShowHelp] = useState(false);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
   const textarea_ref = useRef<HTMLTextAreaElement>(null);
@@ -664,12 +774,14 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
     owner_key: draft_key,
   });
   const selected_skill = draft?.selected_skill_name ? { name: draft.selected_skill_name } : null;
-  const slash_query = draft?.text.startsWith("/") && !draft.text.includes("\n")
-    ? draft.text.toLocaleLowerCase()
-    : null;
-  const slash_items: readonly SlashCommandItem[] = slash_query === null ? [] : SLASH_COMMANDS
-    .filter((item) => item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)))
-    .map((item) => ({ ...item, disabled_reason: draftSlashDisabledReason(item.name) }));
+  const slash_query = draft?.text.startsWith('/') && !draft.text.includes('\n') ? draft.text.toLocaleLowerCase() : null;
+  const slash_items: readonly SlashCommandItem[] =
+    slash_query === null
+      ? []
+      : SLASH_COMMANDS.filter(
+          (item) =>
+            item.name.includes(slash_query) || item.description.toLocaleLowerCase().includes(slash_query.slice(1)),
+        ).map((item) => ({ ...item, disabled_reason: draftSlashDisabledReason(item.name) }));
 
   useEffect(() => {
     const first_enabled = slash_items.findIndex((item) => !item.disabled_reason);
@@ -684,46 +796,52 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   useEffect(() => {
     setMcpPickerOpen(false);
   }, [draft_key, draft?.variant]);
-  useEffect(() => () => {
-    // 未提交草稿离开 owner 时清理 MCP；结果未知的物化请求必须保留原幂等键和冻结载荷。
-    const leaving = store.new_session_drafts.get(draft_key);
-    if (leaving?.selected_mcp && !leaving.materialization_attempt) store.new_session_drafts.updateSelectedMcp(draft_key, null);
-  }, [draft_key, store]);
+  useEffect(
+    () => () => {
+      // 未提交草稿离开 owner 时清理 MCP；结果未知的物化请求必须保留原幂等键和冻结载荷。
+      const leaving = store.new_session_drafts.get(draft_key);
+      if (leaving?.selected_mcp && !leaving.materialization_attempt)
+        store.new_session_drafts.updateSelectedMcp(draft_key, null);
+    },
+    [draft_key, store],
+  );
   useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
 
-  const draft_model = draft?.model_selection ?? application?.model_settings.default_model ?? null;
-  const effort_options = useDraftModelEfforts(draft_model, active_overlay === "model");
+  const draft_model = application?.model_settings.management?.read_only
+    ? (application?.model_settings.default_model ?? null)
+    : (draft?.model_selection ?? application?.model_settings.default_model ?? null);
+  const effort_options = useDraftModelEfforts(draft_model, active_overlay === 'model');
 
   if (!draft) return null;
   const current_draft = draft;
   const model_required = draft_model === null;
   const can_send = Boolean(draft.text.trim() || draft.attachments.length || draft.quotes.length);
 
-  function updateOverlay(overlay: "execution" | "model", open: boolean) {
-    setActiveOverlay((current) => open ? overlay : current === overlay ? null : current);
+  function updateOverlay(overlay: 'execution' | 'model', open: boolean) {
+    setActiveOverlay((current) => (open ? overlay : current === overlay ? null : current));
   }
 
   function handleSlashCommand(command: SlashCommandItem) {
     if (command.disabled_reason) {
-      store.new_session_drafts.updateText(draft_key, "");
+      store.new_session_drafts.updateText(draft_key, '');
       store.showInteractionError(command.disabled_reason);
       return;
     }
-    store.new_session_drafts.updateText(draft_key, "");
-    if (command.name === "/goal") {
+    store.new_session_drafts.updateText(draft_key, '');
+    if (command.name === '/goal') {
       store.new_session_drafts.updateGoalArmed(draft_key, true);
-    } else if (command.name === "/skill") {
+    } else if (command.name === '/skill') {
       setSkillPickerOpen(true);
       return;
-    } else if (command.name === "/mcp") {
+    } else if (command.name === '/mcp') {
       setSkillPickerOpen(false);
       setMcpPickerOpen(true);
       return;
-    } else if (command.name === "/model") {
-      setActiveOverlay("model");
-    } else if (command.name === "/mode" || command.name === "/approval") {
-      setActiveOverlay("execution");
-    } else if (command.name === "/new") {
+    } else if (command.name === '/model') {
+      setActiveOverlay('model');
+    } else if (command.name === '/mode' || command.name === '/approval') {
+      setActiveOverlay('execution');
+    } else if (command.name === '/new') {
       store.openNewSessionDraft(current_draft.workspace_id);
     } else {
       setShowHelp(true);
@@ -733,20 +851,22 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (input_method.shouldIgnoreKeyDown(event)) return;
-    if (slash_items.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    if (slash_items.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault();
-      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
       const next = nextEnabledSlashIndex(slash_items, slash_active_index, direction);
       setSlashActiveIndex(next);
-      slash_ref.current?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
+      slash_ref.current
+        ?.querySelector<HTMLElement>(`[data-slash-index="${next}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
       return;
     }
-    if (event.key === "Escape" && slash_query !== null) {
+    if (event.key === 'Escape' && slash_query !== null) {
       event.preventDefault();
       store.new_session_drafts.updateText(draft_key, current_draft.text.slice(1));
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
       if (selected_command) {
@@ -766,9 +886,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
 
   function submitNewDraft() {
     const command = slash_items.find((item) => item.name === current_draft.text.trim().toLocaleLowerCase());
-    if (command) { handleSlashCommand(command); return; }
-    if (parseSessionCommand(current_draft.text).type !== "not_command") {
-      store.showInteractionError("发送第一条消息后，可在会话中使用刷新指令");
+    if (command) {
+      handleSlashCommand(command);
+      return;
+    }
+    if (parseSessionCommand(current_draft.text).type !== 'not_command') {
+      store.showInteractionError('发送第一条消息后，可在会话中使用刷新指令');
       return;
     }
     void store.materializeNewSessionDraft(draft_key);
@@ -777,29 +900,52 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   return (
     <div className={styles.dock}>
       {store.interaction_error && (
-        <ComposerNotice tone="error" dismiss={{ label: "关闭错误提示", onClick: () => store.clearInteractionError() }}>
+        <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
           {store.interaction_error}
         </ComposerNotice>
       )}
       <section className={styles.composer}>
-        <SlashCommandMenu active_index={slash_active_index} items={slash_items} menu_ref={slash_ref} on_select={handleSlashCommand} open={slash_items.length > 0} />
+        <SlashCommandMenu
+          active_index={slash_active_index}
+          items={slash_items}
+          menu_ref={slash_ref}
+          on_select={handleSlashCommand}
+          open={slash_items.length > 0}
+        />
         <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
-          {skill_picker_open && <SkillPicker
+        {skill_picker_open && (
+          <SkillPicker
             key={draft_key}
             workspace_id={draft.workspace_id}
-            on_close={() => { setSkillPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
+            on_close={() => {
+              setSkillPickerOpen(false);
+              requestAnimationFrame(() => textarea_ref.current?.focus());
+            }}
             on_select={(skill) => {
               store.new_session_drafts.updateSelectedSkill(draft_key, skill.name);
               setSkillPickerOpen(false);
               requestAnimationFrame(() => textarea_ref.current?.focus());
             }}
-          />}
-        {mcp_picker_open && <McpServerPicker
-          key={`${draft_key}:${draft.variant}`}
-          on_close={() => { setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
-          on_select={(server) => { store.new_session_drafts.updateSelectedMcp(draft_key, server); setMcpPickerOpen(false); requestAnimationFrame(() => textarea_ref.current?.focus()); }}
-          request={{ context: { type: "new_session", payload: { workspace_id: draft.workspace_id ?? undefined } }, variant: draft.variant }}
-        />}
+          />
+        )}
+        {mcp_picker_open && (
+          <McpServerPicker
+            key={`${draft_key}:${draft.variant}`}
+            on_close={() => {
+              setMcpPickerOpen(false);
+              requestAnimationFrame(() => textarea_ref.current?.focus());
+            }}
+            on_select={(server) => {
+              store.new_session_drafts.updateSelectedMcp(draft_key, server);
+              setMcpPickerOpen(false);
+              requestAnimationFrame(() => textarea_ref.current?.focus());
+            }}
+            request={{
+              context: { type: 'new_session', payload: { workspace_id: draft.workspace_id ?? undefined } },
+              variant: draft.variant,
+            }}
+          />
+        )}
         <ComposerAttachmentContext
           attachments={attachment_flow.attachments}
           on_remove={attachment_flow.remove}
@@ -809,42 +955,79 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
         />
         {(draft.goal_armed || selected_skill || draft.selected_mcp) && (
           <div className={styles.draft_tags}>
-            {draft.goal_armed && <span>
-              目标
-              <button aria-label="取消目标标记" onClick={() => store.new_session_drafts.updateGoalArmed(draft_key, false)} type="button"><Icon name="x" size={12} /></button>
-            </span>}
-            {selected_skill && <span title={selected_skill.name}>
-              {selected_skill.name}
-              <button aria-label={`移除技能 ${selected_skill.name}`} onClick={() => store.new_session_drafts.updateSelectedSkill(draft_key, null)} type="button"><Icon name="x" size={12} /></button>
-            </span>}
-            {draft.selected_mcp && <span title={draft.selected_mcp.server_key}>
-              MCP · {draft.selected_mcp.display_name}
-              <button aria-label={`移除 MCP ${draft.selected_mcp.display_name}`} onClick={() => store.new_session_drafts.updateSelectedMcp(draft_key, null)} type="button"><Icon name="x" size={12} /></button>
-            </span>}
+            {draft.goal_armed && (
+              <span>
+                目标
+                <button
+                  aria-label="取消目标标记"
+                  onClick={() => store.new_session_drafts.updateGoalArmed(draft_key, false)}
+                  type="button"
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              </span>
+            )}
+            {selected_skill && (
+              <span title={selected_skill.name}>
+                {selected_skill.name}
+                <button
+                  aria-label={`移除技能 ${selected_skill.name}`}
+                  onClick={() => store.new_session_drafts.updateSelectedSkill(draft_key, null)}
+                  type="button"
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              </span>
+            )}
+            {draft.selected_mcp && (
+              <span title={draft.selected_mcp.server_key}>
+                MCP · {draft.selected_mcp.display_name}
+                <button
+                  aria-label={`移除 MCP ${draft.selected_mcp.display_name}`}
+                  onClick={() => store.new_session_drafts.updateSelectedMcp(draft_key, null)}
+                  type="button"
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              </span>
+            )}
           </div>
         )}
         <textarea
           aria-label="输入消息"
-          disabled={model_required || store.connection.state !== "connected" || store.composer_pending || attachment_flow.pending}
+          disabled={
+            model_required ||
+            store.connection.state !== 'connected' ||
+            store.composer_pending ||
+            attachment_flow.pending
+          }
           onChange={(event) => store.new_session_drafts.updateText(draft_key, event.target.value)}
           onCompositionEnd={input_method.onCompositionEnd}
           onCompositionStart={input_method.onCompositionStart}
           onKeyDown={handleKeyDown}
           onKeyUp={input_method.onKeyUp}
-          onPaste={(event) => handleComposerPaste(
-            event,
-            draft.text,
-            (value) => store.new_session_drafts.updateText(draft_key, value),
-            attachment_flow.pasteImages,
-          )}
-          placeholder={model_required ? "请先选择一个可用模型" : "输入消息…  / 使用指令"}
+          onPaste={(event) =>
+            handleComposerPaste(
+              event,
+              draft.text,
+              (value) => store.new_session_drafts.updateText(draft_key, value),
+              attachment_flow.pasteImages,
+            )
+          }
+          placeholder={model_required ? '请先选择一个可用模型' : '输入消息…  / 使用指令'}
           ref={textarea_ref}
           rows={2}
           value={draft.text}
         />
         <footer className={styles.composer_actions}>
           <Tooltip content="添加附件">
-            <Button aria-label="添加附件" disabled={store.composer_pending || attachment_flow.pending} iconOnly onClick={() => void attachment_flow.choose()} variant="outlined">
+            <Button
+              aria-label="添加附件"
+              disabled={store.composer_pending || attachment_flow.pending}
+              iconOnly
+              onClick={() => void attachment_flow.choose()}
+              variant="outlined"
+            >
               <Icon name="plus" size={17} />
             </Button>
           </Tooltip>
@@ -856,12 +1039,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
               store.setNewSessionDraftApprovalMode(draft_key, mode);
               return Promise.resolve(true);
             }}
-            on_open_change={(open) => updateOverlay("execution", open)}
+            on_open_change={(open) => updateOverlay('execution', open)}
             on_variant_change={(variant) => {
               store.new_session_drafts.updateVariant(draft_key, variant);
               return Promise.resolve(true);
             }}
-            open={active_overlay === "execution"}
+            open={active_overlay === 'execution'}
             trigger_class_name={styles.execution_selector}
             variant={draft.variant}
           />
@@ -871,7 +1054,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
             effort={draft.reasoning_effort}
             effort_options={effort_options}
             initial_category={null}
-            model_display_name={draft_model ? modelDisplayName(application, draft_model) : "选择模型"}
+            model_display_name={draft_model ? modelDisplayName(application, draft_model) : '选择模型'}
             selection={draft.model_selection}
             providers={application?.providers ?? []}
             on_effort_change={(effort) => {
@@ -882,8 +1065,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
               store.setNewSessionDraftModel(draft_key, selection);
               return Promise.resolve(true);
             }}
-            on_open_change={(open) => updateOverlay("model", open)}
-            open={active_overlay === "model"}
+            on_open_change={(open) => updateOverlay('model', open)}
+            open={active_overlay === 'model'}
             trigger_class_name={styles.model_selector}
           />
           <button
@@ -902,18 +1085,22 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({ draf
   );
 });
 
-function ContextUsageRing({ context }: Readonly<{
-  context: SessionViewSnapshot["usage"]["context"];
+function ContextUsageRing({
+  context,
+}: Readonly<{
+  context: SessionViewSnapshot['usage']['context'];
 }>) {
   const degrees = context ? Math.min(360, Math.max(0, context.usage_basis_points * 0.036)) : 0;
-  const label = context ? `${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%` : "暂无用量数据";
+  const label = context
+    ? `${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%`
+    : '暂无用量数据';
   return (
     <Tooltip content={label}>
       <span
         aria-label={`上下文用量：${label}`}
         className={styles.context_ring}
         role="img"
-        style={{ "--context-degrees": `${degrees}deg` } as React.CSSProperties}
+        style={{ '--context-degrees': `${degrees}deg` } as React.CSSProperties}
         tabIndex={0}
       />
     </Tooltip>
@@ -921,34 +1108,38 @@ function ContextUsageRing({ context }: Readonly<{
 }
 
 function compactionStatusLabel(
-  trigger: NonNullable<SessionViewSnapshot["session"]["active_compaction"]>["trigger"],
+  trigger: NonNullable<SessionViewSnapshot['session']['active_compaction']>['trigger'],
 ): string {
-  if (trigger.type === "manual") {
-    return "正在压缩上下文";
+  if (trigger.type === 'manual') {
+    return '正在压缩上下文';
   }
-  return trigger.reason === "provider_overflow"
-    ? "模型报告上下文不足，正在自动压缩"
-    : "上下文达到阈值，正在自动压缩";
+  return trigger.reason === 'provider_overflow' ? '模型报告上下文不足，正在自动压缩' : '上下文达到阈值，正在自动压缩';
 }
 
-function ComposerAttachmentContext(props: Readonly<{
-  attachments: readonly ComposerAttachment[];
-  on_remove: (attachment: ComposerAttachment) => void;
-  paste_pending: boolean;
-  session_id: SessionId | null;
-  owner_key: string;
-  quotes?: readonly QuotedTextSnapshot[];
-  on_quote_remove?: (quote: QuotedTextSnapshot) => void;
-  on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
-}>) {
+function ComposerAttachmentContext(
+  props: Readonly<{
+    attachments: readonly ComposerAttachment[];
+    on_remove: (attachment: ComposerAttachment) => void;
+    paste_pending: boolean;
+    session_id: SessionId | null;
+    owner_key: string;
+    quotes?: readonly QuotedTextSnapshot[];
+    on_quote_remove?: (quote: QuotedTextSnapshot) => void;
+    on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
+  }>,
+) {
   const [detail, setDetail] = useState<ComposerAttachment | null>(null);
   const [quote_detail, setQuoteDetail] = useState<QuotedTextSnapshot | null>(null);
   const [order, setOrder] = useState<readonly string[]>([]);
   const previous_owner_key = useRef(props.owner_key);
   const quotes = props.quotes ?? [];
   const context_items = [
-    ...props.attachments.map((attachment) => ({ key: `attachment:${attachment.selection_id}`, type: "attachment" as const, attachment })),
-    ...quotes.map((quote) => ({ key: `quote:${quote.quote_id}`, type: "quote" as const, quote })),
+    ...props.attachments.map((attachment) => ({
+      key: `attachment:${attachment.selection_id}`,
+      type: 'attachment' as const,
+      attachment,
+    })),
+    ...quotes.map((quote) => ({ key: `quote:${quote.quote_id}`, type: 'quote' as const, quote })),
   ];
   useEffect(() => {
     const available = new Set(context_items.map((item) => item.key));
@@ -971,79 +1162,80 @@ function ComposerAttachmentContext(props: Readonly<{
           {order.flatMap((key) => {
             const item = by_key.get(key);
             if (!item) return [];
-            if (item.type === "quote") return [(
-              <div data-state="selected" key={item.key} title={item.quote.exact}>
+            if (item.type === 'quote')
+              return [
+                <div data-state="selected" key={item.key} title={item.quote.exact}>
+                  <button
+                    aria-label={`查看引用 ${item.quote.exact}`}
+                    className={styles.attachment_body}
+                    onClick={() => setQuoteDetail(item.quote)}
+                    type="button"
+                  >
+                    <Icon name="quote" size={14} />
+                    <span>{item.quote.exact}</span>
+                    <small>{item.quote.source_label}</small>
+                  </button>
+                  <button
+                    aria-label={`移除引用 ${item.quote.exact}`}
+                    className={styles.attachment_remove}
+                    onClick={() => {
+                      if (quote_detail?.quote_id === item.quote.quote_id) setQuoteDetail(null);
+                      props.on_quote_remove?.(item.quote);
+                    }}
+                    type="button"
+                  >
+                    <Icon name="x" size={13} />
+                  </button>
+                </div>,
+              ];
+            const attachment = item.attachment;
+            return [
+              <div data-state={attachment.state} key={item.key} title={attachment.error ?? attachment.original_name}>
                 <button
-                  aria-label={`查看引用 ${item.quote.exact}`}
+                  aria-label={`查看附件 ${attachment.original_name}`}
                   className={styles.attachment_body}
-                  onClick={() => setQuoteDetail(item.quote)}
+                  onClick={() => setDetail(attachment)}
                   type="button"
                 >
-                  <Icon name="quote" size={14} />
-                  <span>{item.quote.exact}</span>
-                  <small>{item.quote.source_label}</small>
+                  <Icon name="paperclip" size={14} />
+                  <span>{attachment.original_name}</span>
+                  <small>{attachmentStateLabel(attachment)}</small>
                 </button>
                 <button
-                  aria-label={`移除引用 ${item.quote.exact}`}
+                  aria-label={`移除附件 ${attachment.original_name}`}
                   className={styles.attachment_remove}
+                  title={attachment.state === 'uploading' ? '取消上传' : '移除附件'}
                   onClick={() => {
-                    if (quote_detail?.quote_id === item.quote.quote_id) setQuoteDetail(null);
-                    props.on_quote_remove?.(item.quote);
+                    if (detail?.selection_id === attachment.selection_id) setDetail(null);
+                    props.on_remove(attachment);
                   }}
                   type="button"
                 >
                   <Icon name="x" size={13} />
                 </button>
-              </div>
-            )];
-            const attachment = item.attachment;
-            return [(
-            <div data-state={attachment.state} key={item.key} title={attachment.error ?? attachment.original_name}>
-              <button
-                aria-label={`查看附件 ${attachment.original_name}`}
-                className={styles.attachment_body}
-                onClick={() => setDetail(attachment)}
-                type="button"
-              >
-                <Icon name="paperclip" size={14} />
-                <span>{attachment.original_name}</span>
-                <small>{attachmentStateLabel(attachment)}</small>
-              </button>
-              <button
-                aria-label={`移除附件 ${attachment.original_name}`}
-                className={styles.attachment_remove}
-                title={attachment.state === "uploading" ? "取消上传" : "移除附件"}
-                onClick={() => {
-                  if (detail?.selection_id === attachment.selection_id) setDetail(null);
-                  props.on_remove(attachment);
-                }}
-                type="button"
-              >
-                <Icon name="x" size={13} />
-              </button>
-            </div>
-            )];
+              </div>,
+            ];
           })}
-          {props.paste_pending && <div className={styles.attachment_pending} role="status">正在添加图片…</div>}
+          {props.paste_pending && (
+            <div className={styles.attachment_pending} role="status">
+              正在添加图片…
+            </div>
+          )}
         </div>
       )}
       <PresenceBoundary present={detail !== null}>
-      {detail && (
-        <AttachmentDetailDialog
-          attachment={detail}
-          on_close={() => setDetail(null)}
-          session_id={props.session_id}
-        />
-      )}
+        {detail && (
+          <AttachmentDetailDialog attachment={detail} on_close={() => setDetail(null)} session_id={props.session_id} />
+        )}
       </PresenceBoundary>
       <PresenceBoundary present={quote_detail !== null}>
-      {quote_detail && (
-        <QuoteDetailDialog
-          on_close={() => setQuoteDetail(null)}
-          on_locate={() => props.on_quote_locate?.(quote_detail) ?? Promise.resolve(false)}
-          quote={quote_detail}
-        />
-      )}
+        {quote_detail && (
+          <QuoteDetailDialog
+            on_close={() => setQuoteDetail(null)}
+            on_locate={() => props.on_quote_locate?.(quote_detail) ?? Promise.resolve(false)}
+            quote={quote_detail}
+          />
+        )}
       </PresenceBoundary>
     </>
   );
@@ -1056,13 +1248,13 @@ function handleComposerPaste(
   paste_images: (files: readonly File[]) => Promise<boolean>,
 ) {
   const images = Array.from(event.clipboardData.items)
-    .filter((item) => item.kind === "file" && item.type.toLocaleLowerCase().startsWith("image/"))
+    .filter((item) => item.kind === 'file' && item.type.toLocaleLowerCase().startsWith('image/'))
     .map((item) => item.getAsFile())
     .filter((file): file is File => file !== null);
   if (images.length === 0) return;
 
   event.preventDefault();
-  const pasted_text = event.clipboardData.getData("text/plain");
+  const pasted_text = event.clipboardData.getData('text/plain');
   if (pasted_text) {
     const target = event.currentTarget;
     const start = target.selectionStart ?? current_value.length;
@@ -1080,26 +1272,29 @@ function handleComposerPaste(
 
 function resizeTextarea(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
-  textarea.style.height = "auto";
+  textarea.style.height = 'auto';
   const line_height = 23;
   textarea.style.height = `${Math.min(line_height * 8, Math.max(line_height * 2, textarea.scrollHeight))}px`;
 }
 
-function modelDisplayName(application: ReturnType<typeof useRootStore>["projection"]["application"], selection: import("@ez-assistant/protocol").ModelSelection): string {
+function modelDisplayName(
+  application: ReturnType<typeof useRootStore>['projection']['application'],
+  selection: import('@ez-assistant/protocol').ModelSelection,
+): string {
   const provider = application?.providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
-  return `${provider?.connection.display_name ?? "服务商已删除"} / ${selection.model_id}`;
+  return `${provider?.connection.display_name ?? '服务商已删除'} / ${selection.model_id}`;
 }
 
 function attachmentStateLabel(attachment: ComposerAttachment): string {
   switch (attachment.state) {
-    case "selected":
+    case 'selected':
       return formatBytes(attachment.size_bytes);
-    case "uploading":
-      return "上传中";
-    case "uploaded":
-      return "已上传";
-    case "failed":
-      return "重试发送";
+    case 'uploading':
+      return '上传中';
+    case 'uploaded':
+      return '已上传';
+    case 'failed':
+      return '重试发送';
   }
 }
 
@@ -1118,35 +1313,34 @@ function slashDisabledReason(
   view: SessionViewSnapshot | undefined,
   session_commands_available: boolean,
 ): string | null {
-  if (command_name === "/mcp refresh" || command_name === "/skill refresh") {
-    if (!session_commands_available) return "当前 Runtime 不支持会话控制指令";
+  if (command_name === '/mcp refresh' || command_name === '/skill refresh') {
+    if (!session_commands_available) return '当前 Runtime 不支持会话控制指令';
     return null;
   }
-  if (command_name === "/title" && view?.session.role === "controller") return "主控标题固定";
-  if (command_name !== "/goal") return null;
-  if (view?.goal) return "当前会话已有目标，请先继续或退出现有目标";
+  if (command_name === '/title' && view?.session.role === 'controller') return '主控标题固定';
+  if (command_name !== '/goal') return null;
+  if (view?.goal) return '当前会话已有目标，请先继续或退出现有目标';
   return null;
 }
 
 function draftSlashDisabledReason(command_name: string): string | null {
-  if (command_name === "/compact" || command_name === "/title" || command_name === "/mcp refresh" || command_name === "/skill refresh") return "发送第一条消息后可用";
+  if (
+    command_name === '/compact' ||
+    command_name === '/title' ||
+    command_name === '/mcp refresh' ||
+    command_name === '/skill refresh'
+  )
+    return '发送第一条消息后可用';
   return null;
 }
 
-function resolveSubmitMode(
-  goal_armed: boolean,
-  goal_state: GoalStateSnapshot | undefined,
-): SubmitInputMode {
-  if (goal_armed) return "start_goal";
-  if (goal_state === "paused") return "resume_goal";
-  return "normal";
+function resolveSubmitMode(goal_armed: boolean, goal_state: GoalStateSnapshot | undefined): SubmitInputMode {
+  if (goal_armed) return 'start_goal';
+  if (goal_state === 'paused') return 'resume_goal';
+  return 'normal';
 }
 
-function nextEnabledSlashIndex(
-  items: readonly SlashCommandItem[],
-  current: number,
-  direction: 1 | -1,
-): number {
+function nextEnabledSlashIndex(items: readonly SlashCommandItem[], current: number, direction: 1 | -1): number {
   let next = current;
   for (let checked = 0; checked < items.length; checked += 1) {
     next = (next + direction + items.length) % items.length;
@@ -1155,22 +1349,20 @@ function nextEnabledSlashIndex(
   return current;
 }
 
-function primaryActionLabel(action: "send" | "stop-goal" | "interrupt" | "cancel-compaction"): string {
-  if (action === "cancel-compaction") return "终止压缩";
-  if (action === "stop-goal") return "停止目标";
-  if (action === "interrupt") return "中断当前轮次";
-  return "发送消息";
+function primaryActionLabel(action: 'send' | 'stop-goal' | 'interrupt' | 'cancel-compaction'): string {
+  if (action === 'cancel-compaction') return '终止压缩';
+  if (action === 'stop-goal') return '停止目标';
+  if (action === 'interrupt') return '中断当前轮次';
+  return '发送消息';
 }
-
-
 
 function resolvePrimaryAction(
   cancel_compaction: boolean,
   stop_goal: boolean,
   interrupt_run: boolean,
-): "send" | "stop-goal" | "interrupt" | "cancel-compaction" {
-  if (cancel_compaction) return "cancel-compaction";
-  if (stop_goal) return "stop-goal";
-  if (interrupt_run) return "interrupt";
-  return "send";
+): 'send' | 'stop-goal' | 'interrupt' | 'cancel-compaction' {
+  if (cancel_compaction) return 'cancel-compaction';
+  if (stop_goal) return 'stop-goal';
+  if (interrupt_run) return 'interrupt';
+  return 'send';
 }
